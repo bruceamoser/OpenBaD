@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "protobuf>=5.0",
     "paho-mqtt>=2.0",
+    "transitions>=0.9",
 ]
 
 [project.optional-dependencies]
