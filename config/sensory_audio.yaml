@@ -1,0 +1,20 @@
+audio:
+  capture:
+    sample_rate: 16000
+    channels: 1
+    sample_format: "s16le"
+    chunk_duration_ms: 100
+    device: ""
+    passive: true
+  asr:
+    vosk_model_path: ""
+    whisper_model: "base"
+    default_engine: "vosk"
+  wake_word:
+    phrases:
+      - "hey agent"
+    threshold: 0.5
+  tts:
+    engine: "piper"
+    model_path: ""
+    output_device: ""
