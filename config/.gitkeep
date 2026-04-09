@@ -1,0 +1,3 @@
+# config/
+# OpenBaD configuration files live here.
+# See threshold_policies.yaml (Issue #11) for telemetry thresholds.
