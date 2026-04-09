@@ -20,9 +20,7 @@ from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CONFIG = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "config"
-    / "threshold_policies.yaml"
+    Path(__file__).resolve().parent.parent.parent.parent / "config" / "threshold_policies.yaml"
 )
 
 # Proto severity enum values
