@@ -1,0 +1,24 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// Published on: agent/cognitive/escalation
+message EscalationRequest {
+  Header header = 1;
+  string event_topic = 2;           // Topic of the original event.
+  bytes  event_payload = 3;         // Original event payload.
+  string reason = 4;                // Why the reflex arc couldn't handle it.
+  Priority priority = 5;
+  string reflex_id = 6;             // Which reflex escalated.
+}
+
+// Published on: agent/cognitive/result
+message CognitiveResult {
+  Header header = 1;
+  string correlation_id = 2;        // Links back to the escalation request.
+  string decision = 3;              // Human-readable summary.
+  bytes  action_payload = 4;        // Structured action for downstream consumers.
+  string model_used = 5;            // "slm" / "llm" / model identifier.
+  uint64 tokens_consumed = 6;
+}

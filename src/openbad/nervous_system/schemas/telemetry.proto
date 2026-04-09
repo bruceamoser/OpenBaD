@@ -1,0 +1,44 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// Published on: agent/telemetry/cpu
+message CpuTelemetry {
+  Header header = 1;
+  double usage_percent = 2;          // 0.0–100.0
+  double system_percent = 3;         // Kernel-space CPU%.
+  double user_percent = 4;           // User-space CPU%.
+  uint32 core_count = 5;
+  double load_avg_1m = 6;
+}
+
+// Published on: agent/telemetry/memory
+message MemoryTelemetry {
+  Header header = 1;
+  double usage_percent = 2;          // 0.0–100.0
+  uint64 used_bytes = 3;
+  uint64 total_bytes = 4;
+  uint64 available_bytes = 5;
+  double swap_percent = 6;
+}
+
+// Published on: agent/telemetry/disk
+message DiskTelemetry {
+  Header header = 1;
+  double usage_percent = 2;
+  uint64 read_bytes = 3;             // Cumulative since boot.
+  uint64 write_bytes = 4;
+  double io_latency_ms = 5;          // Average I/O latency (ms).
+  uint64 free_bytes = 6;
+}
+
+// Published on: agent/telemetry/tokens
+message TokenTelemetry {
+  Header header = 1;
+  uint64 tokens_used = 2;            // Total tokens consumed this period.
+  uint64 budget_ceiling = 3;         // Configured budget cap.
+  double budget_remaining_pct = 4;   // 0.0–100.0
+  double cost_per_action_avg = 5;    // Rolling average $/action.
+  string model_tier = 6;             // "slm" or "llm".
+}

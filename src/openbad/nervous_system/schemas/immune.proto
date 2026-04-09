@@ -1,0 +1,23 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// Published on: agent/immune/alert
+message ImmuneAlert {
+  Header header = 1;
+  Severity severity = 2;
+  string threat_type = 3;           // e.g. "prompt-injection", "data-exfiltration".
+  string source_id = 4;             // Identifier of the flagged component.
+  string detail = 5;                // Human-readable description.
+  bytes  evidence = 6;              // Optional supporting data.
+}
+
+// Published on: agent/immune/quarantine
+message QuarantineEvent {
+  Header header = 1;
+  string source_id = 2;             // Component that was quarantined.
+  string reason = 3;
+  string action_taken = 4;          // e.g. "topic-publish-revoked", "tool-isolated".
+  double quarantine_until_unix = 5; // When to auto-release (0 = indefinite).
+}
