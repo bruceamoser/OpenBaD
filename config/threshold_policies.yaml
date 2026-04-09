@@ -20,3 +20,8 @@ thresholds:
   thermal_celsius:
     warning: 80
     critical: 95
+
+# Sensory dispatcher settings (not metric thresholds)
+sensory:
+  vision_change_rate_max: 30       # Max visual attention events per minute
+  audio_noise_floor: 0.3           # Min transcription confidence to route
