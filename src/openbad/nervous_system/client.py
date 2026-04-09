@@ -16,6 +16,8 @@ from typing import Any, TypeVar
 import paho.mqtt.client as mqtt
 from google.protobuf.message import DecodeError, Message
 
+from openbad.nervous_system.qos import qos_for, should_retain
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=Message)
@@ -133,10 +135,18 @@ class NervousSystemClient:
         self,
         topic: str,
         message: Message,
-        qos: int = 0,
-        retain: bool = False,
+        qos: int | None = None,
+        retain: bool | None = None,
     ) -> None:
-        """Serialize a protobuf message and publish to *topic*."""
+        """Serialize a protobuf message and publish to *topic*.
+
+        If *qos* or *retain* are not specified, the values are determined
+        automatically from the topic-based QoS/retention policies.
+        """
+        if qos is None:
+            qos = qos_for(topic)
+        if retain is None:
+            retain = should_retain(topic)
         payload = message.SerializeToString()
         info = self._mqtt.publish(topic, payload, qos=qos, retain=retain)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
@@ -147,12 +157,15 @@ class NervousSystemClient:
         topic: str,
         message_type: type[T],
         callback: Callable[[str, T], Any],
-        qos: int = 0,
+        qos: int | None = None,
     ) -> None:
         """Subscribe to *topic* with typed deserialization.
 
         *callback* receives ``(topic, parsed_message)``.
+        If *qos* is not specified, uses the topic-based QoS policy.
         """
+        if qos is None:
+            qos = qos_for(topic)
         if topic not in self._subscriptions:
             self._subscriptions[topic] = []
             self._mqtt.subscribe(topic, qos=qos)
