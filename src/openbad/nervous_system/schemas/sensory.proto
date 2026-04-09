@@ -1,0 +1,107 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// -----------------------------------------------------------------------
+// Vision messages
+// -----------------------------------------------------------------------
+
+// Frame format for captured screen data.
+enum FrameFormat {
+  FRAME_FORMAT_UNSPECIFIED = 0;
+  RAW_RGB = 1;
+  JPEG = 2;
+  PNG = 3;
+}
+
+// Published on: agent/sensory/vision/{source_id}
+message VisionFrame {
+  Header header = 1;
+  string source_id = 2;             // Window/capture source identifier.
+  string window_title = 3;          // Title of the captured window.
+  uint32 width = 4;                 // Frame width in pixels.
+  uint32 height = 5;                // Frame height in pixels.
+  FrameFormat format = 6;           // Encoding of frame_data.
+  bytes  frame_data = 7;            // Raw or compressed frame bytes.
+  double fps = 8;                   // Capture rate at time of frame.
+}
+
+// Structured screen parse result (from AT-SPI2, CDP, or OCR).
+// Published on: agent/sensory/vision/{source_id}/parsed
+message ParsedScreen {
+  Header header = 1;
+  string source_id = 2;
+  ParseMethod method = 3;           // How the screen was parsed.
+  string tree_json = 4;             // JSON-serialised widget/DOM tree.
+  uint32 node_count = 5;            // Number of nodes in the tree.
+  double extraction_ms = 6;         // Time taken to extract (ms).
+}
+
+// Method used to parse the screen.
+enum ParseMethod {
+  PARSE_METHOD_UNSPECIFIED = 0;
+  AT_SPI2 = 1;
+  CDP_DOM = 2;
+  OCR = 3;
+}
+
+// Visual attention trigger event.
+// Published on: agent/reflex/attention/trigger
+message AttentionTrigger {
+  Header header = 1;
+  string source_id = 2;
+  double ssim_delta = 3;            // Change magnitude (0.0–1.0).
+  string region_description = 4;    // Human-readable description of changed region.
+  uint32 changed_pixels = 5;        // Approximate count of changed pixels.
+}
+
+// -----------------------------------------------------------------------
+// Audio messages
+// -----------------------------------------------------------------------
+
+// Published on: agent/sensory/audio/{source_id}
+message TranscriptionEvent {
+  Header header = 1;
+  string source_id = 2;             // Audio source identifier.
+  string text = 3;                  // Transcribed text.
+  double confidence = 4;            // 0.0–1.0 confidence score.
+  string speaker_id = 5;            // Speaker identifier (empty if unknown).
+  bool   is_final = 6;              // True if this is a final (non-partial) result.
+  string engine = 7;                // "vosk" or "whisper".
+  double latency_ms = 8;            // Processing latency in milliseconds.
+}
+
+// Published on event bus on wake-word detection.
+message WakeWordEvent {
+  Header header = 1;
+  string keyword = 2;               // Detected wake word/phrase.
+  double score = 3;                 // Detection confidence (0.0–1.0).
+  double buffer_seconds = 4;        // Audio buffer available for Whisper handoff.
+}
+
+// TTS priority levels.
+enum TTSPriority {
+  TTS_PRIORITY_UNSPECIFIED = 0;
+  TTS_LOW = 1;                      // Skip if busy.
+  TTS_NORMAL = 2;                   // Queue.
+  TTS_URGENT = 3;                   // Interrupt current speech.
+}
+
+// Request speech synthesis.
+message TTSRequest {
+  Header header = 1;
+  string text = 2;                  // Text to synthesise.
+  string voice_model = 3;           // Piper voice model name.
+  TTSPriority priority = 4;
+  string ssml = 5;                  // Optional SSML markup (overrides text).
+}
+
+// Published on: agent/sensory/audio/tts/complete
+message TTSComplete {
+  Header header = 1;
+  string request_id = 2;            // Correlation with original TTSRequest.
+  double duration_ms = 3;           // Duration of synthesised audio.
+  bool   success = 4;
+  string error = 5;                 // Non-empty on failure.
+}

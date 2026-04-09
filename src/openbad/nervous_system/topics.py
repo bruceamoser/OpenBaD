@@ -42,10 +42,17 @@ REFLEX_ALL = "agent/reflex/#"
 # Sensory inputs
 # ---------------------------------------------------------------------------
 SENSORY_VISION = "agent/sensory/vision/{source_id}"
+SENSORY_VISION_PARSED = "agent/sensory/vision/{source_id}/parsed"
 SENSORY_AUDIO = "agent/sensory/audio/{source_id}"
+SENSORY_AUDIO_TTS_COMPLETE = "agent/sensory/audio/tts/complete"
+SENSORY_ATTENTION_TRIGGER = "agent/reflex/attention/trigger"
 
 # Wildcard: all sensory data
 SENSORY_ALL = "agent/sensory/#"
+# Wildcard: all vision data
+SENSORY_VISION_ALL = "agent/sensory/vision/#"
+# Wildcard: all audio data
+SENSORY_AUDIO_ALL = "agent/sensory/audio/#"
 
 # ---------------------------------------------------------------------------
 # Cognitive (System 2 escalation interface)
@@ -123,12 +130,15 @@ STATIC_TOPICS: tuple[str, ...] = (
     ENDOCRINE_ENDORPHIN,
     MEMORY_STM_WRITE,
     MEMORY_LTM_CONSOLIDATE,
+    SENSORY_AUDIO_TTS_COMPLETE,
+    SENSORY_ATTENTION_TRIGGER,
 )
 
 TEMPLATE_TOPICS: tuple[str, ...] = (
     REFLEX_TRIGGER,
     REFLEX_RESULT,
     SENSORY_VISION,
+    SENSORY_VISION_PARSED,
     SENSORY_AUDIO,
     ENDOCRINE,
     SLEEP,
@@ -139,6 +149,8 @@ WILDCARD_TOPICS: tuple[str, ...] = (
     TELEMETRY_ALL,
     REFLEX_ALL,
     SENSORY_ALL,
+    SENSORY_VISION_ALL,
+    SENSORY_AUDIO_ALL,
     ENDOCRINE_ALL,
     MEMORY_ALL,
     SLEEP_ALL,
