@@ -1,0 +1,30 @@
+# Default model routing configuration for OpenBaD
+
+cortisol_threshold: 0.8
+budget_limit: 0  # 0 = unlimited
+health_ttl_s: 60
+
+chains:
+  critical:
+    - provider: anthropic
+      model: claude-sonnet-4-20250514
+    - provider: openai
+      model: gpt-4o
+    - provider: ollama
+      model: llama3.2
+
+  high:
+    - provider: openai
+      model: gpt-4o-mini
+    - provider: ollama
+      model: llama3.2
+
+  medium:
+    - provider: ollama
+      model: llama3.2
+    - provider: openai
+      model: gpt-4o-mini
+
+  low:
+    - provider: ollama
+      model: llama3.2
