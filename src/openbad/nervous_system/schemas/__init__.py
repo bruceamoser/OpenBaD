@@ -10,6 +10,7 @@ from openbad.nervous_system.schemas.telemetry_pb2 import (
     CpuTelemetry,
     DiskTelemetry,
     MemoryTelemetry,
+    NetworkTelemetry,
     TokenTelemetry,
 )
 
@@ -23,6 +24,7 @@ __all__ = [
     "ImmuneAlert",
     "LtmConsolidate",
     "MemoryTelemetry",
+    "NetworkTelemetry",
     "Priority",
     "QuarantineEvent",
     "ReflexResult",

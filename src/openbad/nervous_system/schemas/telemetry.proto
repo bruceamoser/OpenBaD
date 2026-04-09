@@ -42,3 +42,12 @@ message TokenTelemetry {
   double cost_per_action_avg = 5;    // Rolling average $/action.
   string model_tier = 6;             // "slm" or "llm".
 }
+
+// Published on: agent/telemetry/network
+message NetworkTelemetry {
+  Header header = 1;
+  uint64 bytes_sent = 2;             // Cumulative bytes sent since boot.
+  uint64 bytes_recv = 3;             // Cumulative bytes received since boot.
+  uint64 packets_sent = 4;
+  uint64 packets_recv = 5;
+}
