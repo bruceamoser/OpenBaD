@@ -22,6 +22,7 @@ from __future__ import annotations
 TELEMETRY_CPU = "agent/telemetry/cpu"
 TELEMETRY_MEMORY = "agent/telemetry/memory"
 TELEMETRY_DISK = "agent/telemetry/disk"
+TELEMETRY_NETWORK = "agent/telemetry/network"
 TELEMETRY_TOKENS = "agent/telemetry/tokens"
 
 # Wildcard: subscribe to all telemetry
@@ -110,6 +111,7 @@ STATIC_TOPICS: tuple[str, ...] = (
     TELEMETRY_CPU,
     TELEMETRY_MEMORY,
     TELEMETRY_DISK,
+    TELEMETRY_NETWORK,
     TELEMETRY_TOKENS,
     REFLEX_STATE,
     COGNITIVE_ESCALATION,
