@@ -1,0 +1,262 @@
+"""Tests for openbad.reflex_arc.fsm — FSM engine with agent operational states."""
+
+from __future__ import annotations
+
+import threading
+from unittest.mock import MagicMock
+
+import pytest
+
+from openbad.nervous_system.schemas.common_pb2 import Header
+from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
+from openbad.nervous_system.schemas.immune_pb2 import ImmuneAlert
+from openbad.reflex_arc.fsm import STATES, TOPIC_TRIGGER_MAP, AgentFSM
+
+
+@pytest.fixture
+def fsm():
+    return AgentFSM()
+
+
+@pytest.fixture
+def client_mock():
+    return MagicMock()
+
+
+@pytest.fixture
+def fsm_with_client(client_mock):
+    return AgentFSM(client=client_mock)
+
+
+# ── States & initial state ────────────────────────────────────────
+
+
+class TestStates:
+    def test_all_states_defined(self):
+        assert STATES == ["IDLE", "ACTIVE", "THROTTLED", "SLEEP", "EMERGENCY"]
+
+    def test_initial_state_idle(self, fsm: AgentFSM):
+        assert fsm.state == "IDLE"
+
+
+# ── Valid transitions ─────────────────────────────────────────────
+
+
+class TestValidTransitions:
+    def test_idle_to_active(self, fsm: AgentFSM):
+        assert fsm.fire("activate")
+        assert fsm.state == "ACTIVE"
+
+    def test_active_to_idle(self, fsm: AgentFSM):
+        fsm.fire("activate")
+        assert fsm.fire("deactivate")
+        assert fsm.state == "IDLE"
+
+    def test_active_to_throttled(self, fsm: AgentFSM):
+        fsm.fire("activate")
+        assert fsm.fire("throttle")
+        assert fsm.state == "THROTTLED"
+
+    def test_idle_to_throttled(self, fsm: AgentFSM):
+        assert fsm.fire("throttle")
+        assert fsm.state == "THROTTLED"
+
+    def test_throttled_to_idle(self, fsm: AgentFSM):
+        fsm.fire("throttle")
+        assert fsm.fire("recover_throttle")
+        assert fsm.state == "IDLE"
+
+    def test_active_to_sleep(self, fsm: AgentFSM):
+        fsm.fire("activate")
+        assert fsm.fire("sleep")
+        assert fsm.state == "SLEEP"
+
+    def test_idle_to_sleep(self, fsm: AgentFSM):
+        assert fsm.fire("sleep")
+        assert fsm.state == "SLEEP"
+
+    def test_sleep_to_idle(self, fsm: AgentFSM):
+        fsm.fire("sleep")
+        assert fsm.fire("wake")
+        assert fsm.state == "IDLE"
+
+    def test_emergency_from_any(self, fsm: AgentFSM):
+        """Emergency transition works from every state."""
+        for setup_triggers, _expected_source in [
+            ([], "IDLE"),
+            (["activate"], "ACTIVE"),
+            (["throttle"], "THROTTLED"),
+            (["sleep"], "SLEEP"),
+        ]:
+            fresh = AgentFSM()
+            for t in setup_triggers:
+                fresh.fire(t)
+            assert fresh.fire("emergency")
+            assert fresh.state == "EMERGENCY"
+
+    def test_emergency_to_idle(self, fsm: AgentFSM):
+        fsm.fire("emergency")
+        assert fsm.fire("recover_emergency")
+        assert fsm.state == "IDLE"
+
+
+# ── Invalid transitions ───────────────────────────────────────────
+
+
+class TestInvalidTransitions:
+    def test_deactivate_from_idle(self, fsm: AgentFSM):
+        assert not fsm.fire("deactivate")
+        assert fsm.state == "IDLE"
+
+    def test_wake_from_idle(self, fsm: AgentFSM):
+        assert not fsm.fire("wake")
+        assert fsm.state == "IDLE"
+
+    def test_recover_throttle_from_idle(self, fsm: AgentFSM):
+        assert not fsm.fire("recover_throttle")
+        assert fsm.state == "IDLE"
+
+    def test_activate_from_throttled(self, fsm: AgentFSM):
+        fsm.fire("throttle")
+        assert not fsm.fire("activate")
+        assert fsm.state == "THROTTLED"
+
+    def test_nonexistent_trigger(self, fsm: AgentFSM):
+        assert not fsm.fire("fly_to_moon")
+        assert fsm.state == "IDLE"
+
+
+# ── Event bus publishing ──────────────────────────────────────────
+
+
+class TestPublishing:
+    def test_publishes_on_transition(self, fsm_with_client: AgentFSM, client_mock):
+        fsm_with_client.fire("activate")
+        client_mock.publish.assert_called_once()
+        topic, payload = client_mock.publish.call_args[0]
+        assert topic == "agent/reflex/state"
+        # Deserialize and verify
+        from openbad.nervous_system.schemas.reflex_pb2 import ReflexState
+
+        msg = ReflexState()
+        msg.ParseFromString(payload)
+        assert msg.previous_state == "IDLE"
+        assert msg.current_state == "ACTIVE"
+        assert msg.trigger_event == "activate"
+
+    def test_no_publish_on_invalid_transition(self, fsm_with_client: AgentFSM, client_mock):
+        fsm_with_client.fire("deactivate")
+        client_mock.publish.assert_not_called()
+
+
+# ── handle_event integration ──────────────────────────────────────
+
+
+def _cortisol_critical() -> bytes:
+    return EndocrineEvent(
+        header=Header(timestamp_unix=1.0),
+        hormone="cortisol",
+        severity=3,  # CRITICAL
+    ).SerializeToString()
+
+
+def _cortisol_warning() -> bytes:
+    return EndocrineEvent(
+        header=Header(timestamp_unix=1.0),
+        hormone="cortisol",
+        severity=2,  # WARNING
+    ).SerializeToString()
+
+
+def _immune_critical() -> bytes:
+    return ImmuneAlert(
+        header=Header(timestamp_unix=1.0),
+        severity=3,
+        threat_type="prompt-injection",
+    ).SerializeToString()
+
+
+def _immune_info() -> bytes:
+    return ImmuneAlert(
+        header=Header(timestamp_unix=1.0),
+        severity=1,
+        threat_type="benign",
+    ).SerializeToString()
+
+
+class TestHandleEvent:
+    def test_cortisol_critical_throttles(self, fsm: AgentFSM):
+        assert fsm.handle_event("agent/endocrine/cortisol", _cortisol_critical())
+        assert fsm.state == "THROTTLED"
+
+    def test_cortisol_warning_no_transition(self, fsm: AgentFSM):
+        assert not fsm.handle_event("agent/endocrine/cortisol", _cortisol_warning())
+        assert fsm.state == "IDLE"
+
+    def test_adrenaline_triggers_emergency(self, fsm: AgentFSM):
+        payload = EndocrineEvent(
+            header=Header(timestamp_unix=1.0),
+            hormone="adrenaline",
+        ).SerializeToString()
+        assert fsm.handle_event("agent/endocrine/adrenaline", payload)
+        assert fsm.state == "EMERGENCY"
+
+    def test_endorphin_triggers_sleep(self, fsm: AgentFSM):
+        payload = EndocrineEvent(
+            header=Header(timestamp_unix=1.0),
+            hormone="endorphin",
+        ).SerializeToString()
+        assert fsm.handle_event("agent/endocrine/endorphin", payload)
+        assert fsm.state == "SLEEP"
+
+    def test_immune_critical_triggers_emergency(self, fsm: AgentFSM):
+        assert fsm.handle_event("agent/immune/alert", _immune_critical())
+        assert fsm.state == "EMERGENCY"
+
+    def test_immune_info_no_transition(self, fsm: AgentFSM):
+        assert not fsm.handle_event("agent/immune/alert", _immune_info())
+        assert fsm.state == "IDLE"
+
+    def test_unknown_topic_ignored(self, fsm: AgentFSM):
+        assert not fsm.handle_event("agent/telemetry/cpu", b"")
+        assert fsm.state == "IDLE"
+
+
+# ── subscribe_triggers ────────────────────────────────────────────
+
+
+class TestSubscribeTriggers:
+    def test_subscribes_all_trigger_topics(self, fsm_with_client: AgentFSM, client_mock):
+        fsm_with_client.subscribe_triggers()
+        subscribed_topics = {c.args[0] for c in client_mock.subscribe.call_args_list}
+        assert subscribed_topics == set(TOPIC_TRIGGER_MAP)
+
+    def test_no_subscribe_without_client(self, fsm: AgentFSM):
+        # Should not raise
+        fsm.subscribe_triggers()
+
+
+# ── Concurrent transitions (atomicity) ────────────────────────────
+
+
+class TestConcurrency:
+    def test_atomic_transitions_under_contention(self):
+        """Fire many triggers concurrently — FSM must remain consistent."""
+        fsm = AgentFSM()
+        errors: list[str] = []
+        barrier = threading.Barrier(10)
+
+        def fire(trigger_name: str) -> None:
+            barrier.wait()
+            fsm.fire(trigger_name)
+            if fsm.state not in STATES:
+                errors.append(f"Invalid state: {fsm.state}")
+
+        threads = [threading.Thread(target=fire, args=("emergency",)) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert fsm.state == "EMERGENCY"
