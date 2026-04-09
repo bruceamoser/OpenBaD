@@ -59,6 +59,13 @@ SENSORY_AUDIO_ALL = "agent/sensory/audio/#"
 # ---------------------------------------------------------------------------
 COGNITIVE_ESCALATION = "agent/cognitive/escalation"
 COGNITIVE_RESULT = "agent/cognitive/result"
+COGNITIVE_REQUEST = "agent/cognitive/request"
+COGNITIVE_RESPONSE = "agent/cognitive/response"
+COGNITIVE_HEALTH = "agent/cognitive/health"
+COGNITIVE_CONTEXT = "agent/cognitive/context"
+
+# Wildcard: all cognitive traffic
+COGNITIVE_ALL = "agent/cognitive/#"
 
 # ---------------------------------------------------------------------------
 # Immune system
