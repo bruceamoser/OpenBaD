@@ -1,0 +1,17 @@
+# Vision capture configuration — Phase 2
+# See src/openbad/sensory/vision/config.py for field descriptions.
+
+vision:
+  fps_idle: 1.0
+  fps_active: 5.0
+  output_format: jpeg       # raw_rgb | jpeg | png
+  jpeg_quality: 85
+  match_source_resolution: true
+  max_width: 1920
+  max_height: 1080
+  portal_backend: ""         # wlr | gnome | "" (auto-detect)
+
+  attention:
+    ssim_threshold: 0.05     # Minimum SSIM delta to forward a frame
+    cooldown_ms: 500         # Min interval between attention triggers (ms)
+    roi_enabled: false       # Enable region-of-interest tracking
