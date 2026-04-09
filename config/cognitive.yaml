@@ -1,0 +1,31 @@
+# Cognitive engine configuration
+cognitive:
+  default_provider: ollama
+  enabled: true
+
+  providers:
+    - name: ollama
+      base_url: "http://localhost:11434"
+      model: "llama3.2"
+      timeout_ms: 30000
+      enabled: true
+
+    - name: openai
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4o-mini"
+      api_key_env: "OPENAI_API_KEY"
+      timeout_ms: 30000
+      enabled: false
+
+  context_budget:
+    slm_max_tokens: 8192
+    llm_max_tokens: 32768
+    reserved_system_tokens: 512
+
+  reasoning:
+    default_max_tokens: 2048
+    default_temperature: 0.7
+    critical_timeout_ms: 30000
+    high_timeout_ms: 15000
+    medium_timeout_ms: 10000
+    low_timeout_ms: 5000

@@ -22,3 +22,34 @@ message CognitiveResult {
   string model_used = 5;            // "slm" / "llm" / model identifier.
   uint64 tokens_consumed = 6;
 }
+
+// Published on: agent/cognitive/request
+message ReasoningRequest {
+  Header header = 1;
+  string prompt = 2;                // The reasoning prompt.
+  uint32 context_tokens = 3;        // Number of context tokens available.
+  Priority priority = 4;            // Reasoning priority level.
+  string preferred_provider = 5;    // Preferred provider (e.g. "ollama", "openai").
+  uint32 max_tokens = 6;            // Maximum response tokens.
+}
+
+// Published on: agent/cognitive/response
+message ReasoningResponse {
+  Header header = 1;
+  string content = 2;               // Generated reasoning content.
+  string model_used = 3;            // Model identifier used.
+  string provider = 4;              // Provider name.
+  uint32 tokens_used = 5;           // Actual tokens consumed.
+  double latency_ms = 6;            // Inference latency in milliseconds.
+  string reasoning_trace = 7;       // Optional chain-of-thought trace.
+}
+
+// Published on: agent/cognitive/health
+message ModelHealthStatus {
+  Header header = 1;
+  string provider = 2;              // Provider name.
+  string model_id = 3;              // Model identifier.
+  bool   available = 4;             // Whether the model is reachable.
+  double latency_p50 = 5;           // Median latency in milliseconds.
+  double latency_p99 = 6;           // 99th percentile latency.
+}
