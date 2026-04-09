@@ -1,0 +1,22 @@
+# Threshold policies for telemetry metrics.
+# Each key is a metric identifier; "warning" and "critical" are the upper bounds.
+
+thresholds:
+  cpu_percent:
+    warning: 75
+    critical: 90
+  memory_percent:
+    warning: 80
+    critical: 95
+  disk_io_latency_ms:
+    warning: 50
+    critical: 200
+  token_budget_remaining_pct:
+    warning: 20
+    critical: 5
+  gpu_vram_percent:
+    warning: 85
+    critical: 95
+  thermal_celsius:
+    warning: 80
+    critical: 95
