@@ -1,0 +1,11 @@
+active_inference:
+  plugin_dir: "src/openbad/plugins/observations"
+  surprise_threshold: 0.6
+  daily_token_budget: 5000
+  cooldown_seconds: 300
+  max_concurrent: 1
+  suppressed_in_states:
+    - THROTTLED
+    - EMERGENCY
+  world_model_history_size: 20
+  ema_alpha: 0.1
