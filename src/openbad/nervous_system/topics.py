@@ -63,8 +63,14 @@ COGNITIVE_RESULT = "agent/cognitive/result"
 # ---------------------------------------------------------------------------
 # Immune system
 # ---------------------------------------------------------------------------
+IMMUNE_SCAN = "agent/immune/scan"
+IMMUNE_THREAT = "agent/immune/threat"
 IMMUNE_ALERT = "agent/immune/alert"
 IMMUNE_QUARANTINE = "agent/immune/quarantine"
+IMMUNE_CLEARED = "agent/immune/cleared"
+
+# Wildcard: all immune events
+IMMUNE_ALL = "agent/immune/+"
 
 # ---------------------------------------------------------------------------
 # Endocrine (hormone channels)
@@ -123,8 +129,11 @@ STATIC_TOPICS: tuple[str, ...] = (
     REFLEX_STATE,
     COGNITIVE_ESCALATION,
     COGNITIVE_RESULT,
+    IMMUNE_SCAN,
+    IMMUNE_THREAT,
     IMMUNE_ALERT,
     IMMUNE_QUARANTINE,
+    IMMUNE_CLEARED,
     ENDOCRINE_CORTISOL,
     ENDOCRINE_ADRENALINE,
     ENDOCRINE_ENDORPHIN,
@@ -151,6 +160,7 @@ WILDCARD_TOPICS: tuple[str, ...] = (
     SENSORY_ALL,
     SENSORY_VISION_ALL,
     SENSORY_AUDIO_ALL,
+    IMMUNE_ALL,
     ENDOCRINE_ALL,
     MEMORY_ALL,
     SLEEP_ALL,

@@ -3,6 +3,39 @@ package openbad;
 
 import "common.proto";
 
+// Threat type classification for immune detections.
+enum ThreatType {
+  THREAT_TYPE_UNSPECIFIED = 0;
+  PROMPT_INJECTION = 1;
+  INSTRUCTION_OVERRIDE = 2;
+  DATA_EXFILTRATION = 3;
+  SSRF_ATTEMPT = 4;
+  SCHEMA_VIOLATION = 5;
+  PRIVILEGE_ESCALATION = 6;
+  ENCODED_PAYLOAD = 7;
+  DELIMITER_ESCAPE = 8;
+}
+
+// Result of scanning a single payload through the immune pipeline.
+// Published on: agent/immune/scan
+message ScanResult {
+  Header header = 1;
+  string payload_hash = 2;          // SHA-256 hash of the scanned payload.
+  bool   is_threat = 3;             // True if any detector flagged the payload.
+  repeated ThreatDetection detections = 4;  // Individual threat detections.
+  double scan_latency_ms = 5;       // Total scan time in milliseconds.
+  string source_topic = 6;          // MQTT topic the payload arrived on.
+}
+
+// Individual threat detection from a specific detector.
+message ThreatDetection {
+  string detector = 1;              // e.g. "rules_engine", "anomaly_detector", "model_classifier".
+  ThreatType threat_type = 2;
+  double confidence = 3;            // 0.0–1.0 confidence score.
+  string rule_name = 4;             // Name of the matched rule (if rules engine).
+  string detail = 5;                // Human-readable description.
+}
+
 // Published on: agent/immune/alert
 message ImmuneAlert {
   Header header = 1;

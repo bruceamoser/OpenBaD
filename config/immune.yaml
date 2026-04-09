@@ -1,0 +1,21 @@
+# Immune system configuration — Phase 3
+# See src/openbad/immune_system/config.py for field descriptions.
+
+immune:
+  enabled: true
+  scan_timeout_ms: 100
+
+  rules:
+    rules_path: "config/immune_rules.yaml"
+    max_scan_ms: 50
+
+  classifier:
+    base_url: "http://localhost:11434"
+    model: "llama3.2"
+    timeout_ms: 500
+    confidence_threshold: 0.7
+
+  quarantine:
+    quarantine_dir: "quarantine"
+    encryption_key_env: "OPENBAD_QUARANTINE_KEY"
+    max_payload_bytes: 10485760   # 10 MB

@@ -25,15 +25,21 @@ _sym_db = _symbol_database.Default()
 from . import common_pb2 as common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cimmune.proto\x12\x07openbad\x1a\x0c\x63ommon.proto\"\x9d\x01\n\x0bImmuneAlert\x12\x1f\n\x06header\x18\x01 \x01(\x0b\x32\x0f.openbad.Header\x12#\n\x08severity\x18\x02 \x01(\x0e\x32\x11.openbad.Severity\x12\x13\n\x0bthreat_type\x18\x03 \x01(\t\x12\x11\n\tsource_id\x18\x04 \x01(\t\x12\x0e\n\x06\x64\x65tail\x18\x05 \x01(\t\x12\x10\n\x08\x65vidence\x18\x06 \x01(\x0c\"\x8a\x01\n\x0fQuarantineEvent\x12\x1f\n\x06header\x18\x01 \x01(\x0b\x32\x0f.openbad.Header\x12\x11\n\tsource_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x14\n\x0c\x61\x63tion_taken\x18\x04 \x01(\t\x12\x1d\n\x15quarantine_until_unix\x18\x05 \x01(\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cimmune.proto\x12\x07openbad\x1a\x0c\x63ommon.proto\"\xb3\x01\n\nScanResult\x12\x1f\n\x06header\x18\x01 \x01(\x0b\x32\x0f.openbad.Header\x12\x14\n\x0cpayload_hash\x18\x02 \x01(\t\x12\x11\n\tis_threat\x18\x03 \x01(\x08\x12,\n\ndetections\x18\x04 \x03(\x0b\x32\x18.openbad.ThreatDetection\x12\x17\n\x0fscan_latency_ms\x18\x05 \x01(\x01\x12\x14\n\x0csource_topic\x18\x06 \x01(\t\"\x84\x01\n\x0fThreatDetection\x12\x10\n\x08\x64\x65tector\x18\x01 \x01(\t\x12(\n\x0bthreat_type\x18\x02 \x01(\x0e\x32\x13.openbad.ThreatType\x12\x12\n\nconfidence\x18\x03 \x01(\x01\x12\x11\n\trule_name\x18\x04 \x01(\t\x12\x0e\n\x06\x64\x65tail\x18\x05 \x01(\t\"\x9d\x01\n\x0bImmuneAlert\x12\x1f\n\x06header\x18\x01 \x01(\x0b\x32\x0f.openbad.Header\x12#\n\x08severity\x18\x02 \x01(\x0e\x32\x11.openbad.Severity\x12\x13\n\x0bthreat_type\x18\x03 \x01(\t\x12\x11\n\tsource_id\x18\x04 \x01(\t\x12\x0e\n\x06\x64\x65tail\x18\x05 \x01(\t\x12\x10\n\x08\x65vidence\x18\x06 \x01(\x0c\"\x8a\x01\n\x0fQuarantineEvent\x12\x1f\n\x06header\x18\x01 \x01(\x0b\x32\x0f.openbad.Header\x12\x11\n\tsource_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\x12\x14\n\x0c\x61\x63tion_taken\x18\x04 \x01(\t\x12\x1d\n\x15quarantine_until_unix\x18\x05 \x01(\x01*\xdd\x01\n\nThreatType\x12\x1b\n\x17THREAT_TYPE_UNSPECIFIED\x10\x00\x12\x14\n\x10PROMPT_INJECTION\x10\x01\x12\x18\n\x14INSTRUCTION_OVERRIDE\x10\x02\x12\x15\n\x11\x44\x41TA_EXFILTRATION\x10\x03\x12\x10\n\x0cSSRF_ATTEMPT\x10\x04\x12\x14\n\x10SCHEMA_VIOLATION\x10\x05\x12\x18\n\x14PRIVILEGE_ESCALATION\x10\x06\x12\x13\n\x0f\x45NCODED_PAYLOAD\x10\x07\x12\x14\n\x10\x44\x45LIMITER_ESCAPE\x10\x08\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'immune_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_IMMUNEALERT']._serialized_start=40
-  _globals['_IMMUNEALERT']._serialized_end=197
-  _globals['_QUARANTINEEVENT']._serialized_start=200
-  _globals['_QUARANTINEEVENT']._serialized_end=338
+  _globals['_THREATTYPE']._serialized_start=658
+  _globals['_THREATTYPE']._serialized_end=879
+  _globals['_SCANRESULT']._serialized_start=40
+  _globals['_SCANRESULT']._serialized_end=219
+  _globals['_THREATDETECTION']._serialized_start=222
+  _globals['_THREATDETECTION']._serialized_end=354
+  _globals['_IMMUNEALERT']._serialized_start=357
+  _globals['_IMMUNEALERT']._serialized_end=514
+  _globals['_QUARANTINEEVENT']._serialized_start=517
+  _globals['_QUARANTINEEVENT']._serialized_end=655
 # @@protoc_insertion_point(module_scope)
