@@ -1,0 +1,27 @@
+# Action → permission tier mappings
+permissions:
+  READ:
+    - file.read
+    - config.read
+    - telemetry.query
+    - session.validate
+    - status.check
+  WRITE:
+    - file.write
+    - db.insert
+    - db.update
+    - db.delete
+    - cache.set
+    - log.write
+  PUBLISH:
+    - mqtt.publish
+    - api.call
+    - webhook.send
+    - notification.push
+  SYSTEM:
+    - systemd.restart
+    - systemd.stop
+    - ebpf.load
+    - ebpf.unload
+    - config.write
+    - identity.elevate
