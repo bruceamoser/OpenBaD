@@ -1,0 +1,14 @@
+# Identity module defaults
+identity:
+  # Hex-encoded HMAC secret key (override via OPENBAD_IDENTITY_SECRET env var)
+  # Leave empty to auto-generate an ephemeral key (dev/test only)
+  secret_hex: ""
+
+  # Session marker rotation interval in seconds (default: 1 hour)
+  rotation_interval: 3600
+
+  # Default session TTL in seconds (default: 8 hours)
+  default_ttl: 28800
+
+  # Path prefix for persisted marker files
+  marker_path: "data/markers"
