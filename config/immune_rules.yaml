@@ -1,0 +1,62 @@
+# Default rules for the immune system regex rules engine.
+# Each rule must have: name, pattern (Python regex), severity, and description.
+rules:
+  - name: instruction_override
+    pattern: "(?i)ignore\\s+(all\\s+)?(previous|prior|above|earlier)\\s+(instructions?|prompts?|rules?|context)"
+    severity: critical
+    description: "Attempt to override system instructions"
+
+  - name: instruction_disregard
+    pattern: "(?i)disregard\\s+(all\\s+)?(previous|prior|above|earlier)\\s+(instructions?|prompts?|rules?)"
+    severity: critical
+    description: "Attempt to disregard prior instructions"
+
+  - name: instruction_forget
+    pattern: "(?i)forget\\s+(all\\s+)?(previous|prior|above|earlier)\\s+(instructions?|prompts?|rules?|context)"
+    severity: critical
+    description: "Attempt to forget system instructions"
+
+  - name: roleplay_you_are_now
+    pattern: "(?i)you\\s+are\\s+now\\s+(a|an|the|my)\\s+\\w+"
+    severity: high
+    description: "Role-play manipulation via identity reassignment"
+
+  - name: roleplay_act_as
+    pattern: "(?i)(pretend|act|behave)\\s+(like|as\\s+if|as)\\s+(you\\s+are|a|an)"
+    severity: high
+    description: "Role-play manipulation via behaviour override"
+
+  - name: roleplay_developer_mode
+    pattern: "(?i)(enter|enable|activate|switch\\s+to)\\s+(developer|debug|admin|god|sudo|unrestricted|jailbreak)\\s+mode"
+    severity: critical
+    description: "Attempt to activate privileged mode"
+
+  - name: base64_instruction
+    pattern: "(?i)(decode|base64|b64)\\s*(this|the\\s+following|:)\\s*[A-Za-z0-9+/=]{20,}"
+    severity: high
+    description: "Possible base64-encoded instruction payload"
+
+  - name: hex_encoded_payload
+    pattern: "(?i)(hex|decode)\\s*(this|the\\s+following|:)\\s*(?:[0-9a-fA-F]{2}\\s*){10,}"
+    severity: medium
+    description: "Possible hex-encoded payload"
+
+  - name: delimiter_markdown_escape
+    pattern: "```\\s*(system|assistant|user)\\s*\\n"
+    severity: high
+    description: "Markdown code-fence boundary confusion"
+
+  - name: delimiter_xml_injection
+    pattern: "<\\s*/?\\s*(system|instruction|prompt|message)\\s*>"
+    severity: high
+    description: "XML tag injection used as delimiter escape"
+
+  - name: delimiter_json_injection
+    pattern: "\"\\s*role\\s*\"\\s*:\\s*\"\\s*(system|assistant)\\s*\""
+    severity: high
+    description: "JSON role-field injection simulating conversation turn"
+
+  - name: exfil_fetch_url
+    pattern: "(?i)(fetch|get|request|curl|wget|load)\\s+(https?://\\S+)"
+    severity: medium
+    description: "Attempt to fetch external URL (possible data exfiltration)"
