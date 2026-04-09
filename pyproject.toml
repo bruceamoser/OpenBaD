@@ -16,6 +16,7 @@ dependencies = [
     "protobuf>=5.0",
     "paho-mqtt>=2.0",
     "transitions>=0.9",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
