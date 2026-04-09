@@ -1,0 +1,21 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// Published on: agent/memory/stm/write
+message StmWrite {
+  Header header = 1;
+  string key = 2;                    // Identifier for the memory entry.
+  bytes  value = 3;                  // Serialised content to store.
+  double ttl_seconds = 4;           // Time-to-live (0 = no expiry).
+  string context = 5;               // Optional context tag (task ID, etc.).
+}
+
+// Published on: agent/memory/ltm/consolidate
+message LtmConsolidate {
+  Header header = 1;
+  repeated string stm_keys = 2;     // STM entries to consolidate.
+  string strategy = 3;              // e.g. "summarise", "compress", "archive".
+  string destination = 4;           // Storage target identifier.
+}

@@ -33,8 +33,7 @@ htmlcov/
 # Ruff
 .ruff_cache/
 
-# Protobuf generated files
-*_pb2.py
+# Protobuf generated files (gRPC stubs only — _pb2.py are committed)
 *_pb2.pyi
 *_pb2_grpc.py
 

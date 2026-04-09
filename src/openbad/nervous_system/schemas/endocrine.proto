@@ -1,0 +1,15 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// Published on: agent/endocrine/{hormone}
+message EndocrineEvent {
+  Header header = 1;
+  string hormone = 2;               // e.g. "cortisol", "adrenaline", "endorphin".
+  double level = 3;                  // Normalised intensity 0.0–1.0.
+  Severity severity = 4;
+  string metric_name = 5;           // The metric that triggered this hormone.
+  double metric_value = 6;          // Current value of the triggering metric.
+  string recommended_action = 7;    // Suggested response for consumers.
+}

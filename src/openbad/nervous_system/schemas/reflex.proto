@@ -1,0 +1,31 @@
+syntax = "proto3";
+package openbad;
+
+import "common.proto";
+
+// Published on: agent/reflex/{reflex_id}/trigger
+message ReflexTrigger {
+  Header header = 1;
+  string reflex_id = 2;             // Identifier of the reflex handler.
+  string event_topic = 3;           // Original topic that triggered the reflex.
+  bytes  event_payload = 4;         // Raw payload of the triggering event.
+  Severity severity = 5;
+}
+
+// Published on: agent/reflex/{reflex_id}/result
+message ReflexResult {
+  Header header = 1;
+  string reflex_id = 2;
+  bool   handled = 3;               // True if the reflex fully handled the event.
+  string action_taken = 4;          // Human-readable summary of what was done.
+  bool   escalated = 5;             // True if forwarded to cognitive/escalation.
+  string error = 6;                 // Non-empty if the handler failed.
+}
+
+// Published on: agent/reflex/state
+message ReflexState {
+  Header header = 1;
+  string previous_state = 2;        // FSM state before transition.
+  string current_state = 3;         // FSM state after transition.
+  string trigger_event = 4;         // Event that caused the transition.
+}

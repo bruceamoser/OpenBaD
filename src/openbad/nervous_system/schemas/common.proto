@@ -1,0 +1,29 @@
+syntax = "proto3";
+package openbad;
+
+// Shared types used across all OpenBaD message schemas.
+
+// Severity levels mirroring syslog conventions.
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  INFO = 1;
+  WARNING = 2;
+  CRITICAL = 3;
+}
+
+// Priority levels for cognitive escalation.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  LOW = 1;
+  MEDIUM = 2;
+  HIGH = 3;
+  PRIORITY_CRITICAL = 4;
+}
+
+// Common header attached to every event.
+message Header {
+  double timestamp_unix = 1;   // Seconds since epoch (float64 precision).
+  string source_module = 2;    // Originating module, e.g. "interoception".
+  string correlation_id = 3;   // Optional trace/correlation ID.
+  uint32 schema_version = 4;   // Schema version for forward-compat.
+}
