@@ -41,6 +41,8 @@
 ### 7. Move to Next Issue
 - Pull latest `main`.
 - Pick the next issue by priority and dependency order.
+- **Continue working through issues automatically** — do not stop to ask for permission between issues.
+- Only pause if you encounter a design decision, ambiguity, or question that requires human input.
 - Repeat from step 2.
 
 ---

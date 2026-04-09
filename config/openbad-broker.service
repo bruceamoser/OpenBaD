@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenBaD MQTT Broker (NanoMQ)
+Documentation=https://nanomq.io/docs/latest/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nanomq start --conf /etc/openbad/broker.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+WatchdogSec=30s
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/nanomq /var/lib/nanomq
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
