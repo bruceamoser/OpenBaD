@@ -67,9 +67,37 @@ def version() -> None:
 
 
 @main.command()
-def setup() -> None:
+@click.option(
+    "--config-dir",
+    default=None,
+    type=click.Path(),
+    help="Configuration directory (default: ~/.config/openbad/).",
+)
+@click.option("--host", default="localhost", help="MQTT broker host.")
+@click.option("--port", default=1883, type=int, help="MQTT broker port.")
+@click.option("--non-interactive", is_flag=True, help="Accept all defaults.")
+@click.option("--check", "check_only", is_flag=True, help="Validate existing setup.")
+def setup(
+    config_dir: str | None,
+    host: str,
+    port: int,
+    non_interactive: bool,
+    check_only: bool,
+) -> None:
     """Interactive first-run setup wizard."""
-    click.echo("Setup wizard not yet implemented. See issue #178.")
+    from pathlib import Path
+
+    from openbad.setup import DEFAULT_CONFIG_DIR, run_wizard
+
+    path = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
+    ok = run_wizard(
+        config_dir=path,
+        mqtt_host=host,
+        mqtt_port=port,
+        non_interactive=non_interactive,
+        check_only=check_only,
+    )
+    sys.exit(0 if ok else 1)
 
 
 @main.command()
