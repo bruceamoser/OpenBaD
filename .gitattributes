@@ -1,0 +1,13 @@
+# Enforce LF for scripts and Unix text assets
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Keep web/text files normalized
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.html text eol=lf
