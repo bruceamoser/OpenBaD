@@ -5,7 +5,7 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.reactive import reactive
-from textual.widgets import Static
+from textual.widgets import Input, RichLog, Static
 
 # ── Hormone constants ────────────────────────────────────────────────
 
@@ -211,3 +211,46 @@ class InferencePanel(Static):
                 f"  latency:{self.last_latency_ms:.1f}ms",
             ]
         )
+
+
+class EventLogPanel(Static):
+    """Scrollable event log for incoming MQTT activity and user commands."""
+
+    DEFAULT_CSS = """
+    EventLogPanel {
+        height: 14;
+        border: solid $accent;
+        padding: 1;
+    }
+    #event-log-title {
+        height: 1;
+    }
+    #event-log-view {
+        height: 1fr;
+        border: solid $surface;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("[b]Event Log[/b]", id="event-log-title")
+        yield RichLog(highlight=True, wrap=True, id="event-log-view")
+
+    def write(self, line: str) -> None:
+        log = self.query_one("#event-log-view", RichLog)
+        log.write(line)
+
+    def clear(self) -> None:
+        log = self.query_one("#event-log-view", RichLog)
+        log.clear()
+
+
+class CommandBar(Input):
+    """Bottom command input for slash-like operator commands."""
+
+    DEFAULT_CSS = """
+    CommandBar {
+        dock: bottom;
+        height: 3;
+        border: solid $primary;
+    }
+    """
