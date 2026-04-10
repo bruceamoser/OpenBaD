@@ -14,12 +14,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from openbad.cognitive.config import CognitiveSystem
+from openbad.cognitive.event_loop import CognitiveEventLoop, CognitiveRequest
+from openbad.cognitive.model_router import Priority
 from openbad.memory.forgetting import prune_store
 
 if TYPE_CHECKING:
+    from openbad.memory.base import MemoryEntry
     from openbad.memory.controller import MemoryController
-    from openbad.memory.sleep.rem import RapidEyeMovement
-    from openbad.memory.sleep.sws import SlowWaveSleep
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +77,10 @@ class SleepReport:
     started_at: float = 0.0
     finished_at: float = 0.0
     phase_durations: dict[str, float] = field(default_factory=dict)
-    constraints_extracted: int = 0
-    skills_created: int = 0
+    entries_consolidated: int = 0
     entries_pruned: int = 0
+    skipped: bool = False
+    error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,26 +88,29 @@ class SleepReport:
             "finished_at": self.finished_at,
             "duration_seconds": self.finished_at - self.started_at,
             "phase_durations": self.phase_durations,
-            "constraints_extracted": self.constraints_extracted,
-            "skills_created": self.skills_created,
+            "entries_consolidated": self.entries_consolidated,
             "entries_pruned": self.entries_pruned,
+            "skipped": self.skipped,
+            "error": self.error,
         }
 
 
 class SleepOrchestrator:
-    """Orchestrates SWS → REM → pruning sleep consolidation cycles."""
+    """Orchestrates sleep consolidation through the cognitive event loop."""
 
     def __init__(
         self,
-        sws: SlowWaveSleep,
-        rem: RapidEyeMovement,
-        pruner: MemoryPruner,
+        memory_controller: MemoryController,
+        cognitive_event_loop: CognitiveEventLoop,
+        pruner: MemoryPruner | None = None,
+        fsm: Any = None,
         idle_threshold_seconds: float = 300.0,
         publish_fn: Callable[[str, bytes], None] | None = None,
     ) -> None:
-        self._sws = sws
-        self._rem = rem
+        self._memory_controller = memory_controller
+        self._event_loop = cognitive_event_loop
         self._pruner = pruner
+        self._fsm = fsm
         self._idle_threshold = idle_threshold_seconds
         self._publish_fn = publish_fn
         self._phase = SleepPhase.AWAKE
@@ -126,41 +132,49 @@ class SleepOrchestrator:
     # Run a single sleep cycle
     # ------------------------------------------------------------------ #
 
-    def run_cycle(self) -> SleepReport:
-        """Execute SWS → REM → pruning in sequence."""
+    async def run_cycle(self) -> SleepReport:
+        """Execute summarization → extraction/scoring → pruning in sequence."""
         report = SleepReport(started_at=time.time())
+        self._enter_sleep_state()
 
-        # SWS phase
-        self._set_phase(SleepPhase.SWS)
-        t0 = time.time()
-        report.constraints_extracted = self._sws.run()
-        report.phase_durations[SleepPhase.SWS.value] = time.time() - t0
+        entries = self._memory_controller.stm.query("")
 
-        # REM phase
-        self._set_phase(SleepPhase.REM)
-        t0 = time.time()
-        report.skills_created = self._rem.run()
-        report.phase_durations[SleepPhase.REM.value] = time.time() - t0
+        try:
+            # SWS phase: summarize pending STM entries.
+            self._set_phase(SleepPhase.SWS)
+            t0 = time.time()
+            summaries = await self._summarize_entries(entries)
+            report.phase_durations[SleepPhase.SWS.value] = time.time() - t0
 
-        # Pruning phase
-        self._set_phase(SleepPhase.PRUNING)
-        t0 = time.time()
-        report.entries_pruned = self._pruner.run()
-        report.phase_durations[SleepPhase.PRUNING.value] = time.time() - t0
+            # REM phase: extract tags, score importance, and write LTM.
+            self._set_phase(SleepPhase.REM)
+            t0 = time.time()
+            report.entries_consolidated = await self._write_ltm(entries, summaries)
+            report.phase_durations[SleepPhase.REM.value] = time.time() - t0
 
-        # Complete
-        report.finished_at = time.time()
-        self._set_phase(SleepPhase.COMPLETE)
+            # Pruning phase.
+            self._set_phase(SleepPhase.PRUNING)
+            t0 = time.time()
+            report.entries_pruned = self._pruner.run() if self._pruner else 0
+            report.phase_durations[SleepPhase.PRUNING.value] = time.time() - t0
 
-        logger.info(
-            "Sleep cycle complete: %d constraints, %d skills, %d pruned",
-            report.constraints_extracted,
-            report.skills_created,
-            report.entries_pruned,
-        )
+            report.finished_at = time.time()
+            self._set_phase(SleepPhase.COMPLETE)
 
-        # Return to awake
-        self._set_phase(SleepPhase.AWAKE)
+            logger.info(
+                "Sleep cycle complete: %d consolidated, %d pruned",
+                report.entries_consolidated,
+                report.entries_pruned,
+            )
+        except Exception as exc:
+            report.finished_at = time.time()
+            report.skipped = True
+            report.error = str(exc)
+            logger.warning("Sleep cycle skipped: %s", exc)
+        finally:
+            self._set_phase(SleepPhase.AWAKE)
+            self._wake_sleep_state()
+
         return report
 
     # ------------------------------------------------------------------ #
@@ -184,7 +198,7 @@ class SleepOrchestrator:
                 last = get_last_activity()
                 if self.is_idle(last):
                     logger.info("Agent idle — starting sleep cycle")
-                    self.run_cycle()
+                    await self.run_cycle()
         except asyncio.CancelledError:
             logger.info("Sleep orchestrator background task cancelled")
 
@@ -205,3 +219,112 @@ class SleepOrchestrator:
                 "agent/memory/sleep/phase",
                 phase.value.encode(),
             )
+
+    def _enter_sleep_state(self) -> None:
+        if self._fsm is not None and getattr(self._fsm, "state", None) != "SLEEP":
+            self._fsm.fire("sleep")
+
+    def _wake_sleep_state(self) -> None:
+        if self._fsm is not None and getattr(self._fsm, "state", None) == "SLEEP":
+            self._fsm.fire("wake")
+
+    async def _summarize_entries(
+        self,
+        entries: list[MemoryEntry],
+    ) -> dict[str, str]:
+        summaries: dict[str, str] = {}
+        for entry in entries:
+            response = await self._request_sleep_pass(
+                entry=entry,
+                stage="summarize",
+                prompt=(
+                    "Summarize this memory entry for long-term recall in 1-2 "
+                    "sentences."
+                ),
+                context=str(entry.value),
+            )
+            summaries[entry.key] = response.answer.strip()
+        return summaries
+
+    async def _write_ltm(
+        self,
+        entries: list[MemoryEntry],
+        summaries: dict[str, str],
+    ) -> int:
+        consolidated = 0
+        for entry in entries:
+            summary = summaries.get(entry.key, "").strip()
+            if not summary:
+                continue
+            tags_response = await self._request_sleep_pass(
+                entry=entry,
+                stage="extract",
+                prompt=(
+                    "Extract up to 5 short retrieval tags for this summary. Return "
+                    "a comma-separated list only."
+                ),
+                context=summary,
+            )
+            score_response = await self._request_sleep_pass(
+                entry=entry,
+                stage="score",
+                prompt=(
+                    "Score the long-term importance of this summary from 0.0 to 1.0. "
+                    "Return only the numeric score."
+                ),
+                context=summary,
+            )
+            tags = _parse_tags(tags_response.answer)
+            importance = _parse_importance(score_response.answer)
+            self._memory_controller.write_semantic(
+                f"sleep/{entry.key}",
+                summary,
+                context="sleep_consolidation",
+                metadata={
+                    "source_stm_key": entry.key,
+                    "source_entry_id": entry.entry_id,
+                    "importance": importance,
+                    "tags": tags,
+                },
+            )
+            self._memory_controller.stm.delete(entry.key)
+            consolidated += 1
+        return consolidated
+
+    async def _request_sleep_pass(
+        self,
+        *,
+        entry: MemoryEntry,
+        stage: str,
+        prompt: str,
+        context: str,
+    ) -> Any:
+        response = await self._event_loop.handle_request(
+            CognitiveRequest(
+                request_id=f"sleep-{stage}-{entry.entry_id}",
+                prompt=prompt,
+                context=context,
+                system=CognitiveSystem.SLEEP,
+                priority=Priority.LOW,
+            )
+        )
+        if response.error:
+            raise RuntimeError(response.error)
+        return response
+
+
+def _parse_tags(raw: str) -> list[str]:
+    tags: list[str] = []
+    for chunk in raw.replace("\n", ",").split(","):
+        tag = chunk.strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags[:5]
+
+
+def _parse_importance(raw: str) -> float:
+    try:
+        score = float(raw.strip())
+    except ValueError:
+        return 0.5
+    return max(0.0, min(1.0, score))

@@ -10,9 +10,25 @@ import asyncio
 import contextlib
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openbad.cognitive.config import CognitiveSystem
+from openbad.cognitive.context_manager import (
+    CompressedContext,
+    CompressionStrategy,
+    ContextBudget,
+    ContextWindowManager,
+)
+from openbad.cognitive.event_loop import CognitiveEventLoop
+from openbad.cognitive.model_router import FallbackChain, ModelRouter, RouteStep
+from openbad.cognitive.providers.base import (
+    CompletionResult,
+    HealthStatus,
+    ProviderAdapter,
+)
+from openbad.cognitive.providers.registry import ProviderRegistry
 from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.memory.config import MemoryConfig
 from openbad.memory.controller import MemoryController
@@ -22,8 +38,6 @@ from openbad.memory.sleep.orchestrator import (
     MemoryPruner,
     SleepOrchestrator,
 )
-from openbad.memory.sleep.rem import RapidEyeMovement
-from openbad.memory.sleep.sws import SlowWaveSleep
 from openbad.memory.stm import ShortTermMemory
 
 integration = pytest.mark.integration
@@ -31,6 +45,79 @@ integration = pytest.mark.integration
 
 def _mc(tmp_path: Path, **kwargs: object) -> MemoryController:
     return MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path, **kwargs))
+
+
+def _sleep_event_loop() -> CognitiveEventLoop:
+    registry = ProviderRegistry()
+    adapter = AsyncMock(spec=ProviderAdapter)
+    adapter.complete = AsyncMock(
+        side_effect=[
+            CompletionResult(
+                content="failure summary",
+                model_id="bonsai-8b",
+                provider="ollama",
+                tokens_used=10,
+            ),
+            CompletionResult(
+                content="ops, error",
+                model_id="bonsai-8b",
+                provider="ollama",
+                tokens_used=10,
+            ),
+            CompletionResult(
+                content="0.9",
+                model_id="bonsai-8b",
+                provider="ollama",
+                tokens_used=5,
+            ),
+            CompletionResult(
+                content="success summary",
+                model_id="bonsai-8b",
+                provider="ollama",
+                tokens_used=10,
+            ),
+            CompletionResult(
+                content="ops, build",
+                model_id="bonsai-8b",
+                provider="ollama",
+                tokens_used=10,
+            ),
+            CompletionResult(
+                content="0.7",
+                model_id="bonsai-8b",
+                provider="ollama",
+                tokens_used=5,
+            ),
+        ]
+    )
+    adapter.health_check = AsyncMock(
+        return_value=HealthStatus(provider="ollama", available=True, latency_ms=5)
+    )
+    registry.register("ollama", adapter)
+    router = ModelRouter(
+        registry=registry,
+        system_assignments={CognitiveSystem.SLEEP: RouteStep("ollama", "bonsai-8b")},
+        default_fallback_chain=FallbackChain(steps=(RouteStep("ollama", "bonsai-8b"),)),
+    )
+    ctx = MagicMock(spec=ContextWindowManager)
+    ctx.allocate = MagicMock(
+        return_value=ContextBudget(
+            max_tokens=8192,
+            system_tokens=1000,
+            context_tokens=4000,
+            response_tokens=2000,
+        )
+    )
+    ctx.compress = MagicMock(
+        return_value=CompressedContext(
+            text="compressed",
+            original_tokens=10,
+            compressed_tokens=10,
+            strategy=CompressionStrategy.TRUNCATE,
+        )
+    )
+    ctx.track_usage = MagicMock()
+    return CognitiveEventLoop(model_router=router, context_manager=ctx, strategies={})
 
 
 # ------------------------------------------------------------------ #
@@ -185,7 +272,7 @@ class TestProceduralLifecycle:
 
 @integration
 class TestFullSleepCycle:
-    def test_sleep_consolidates_all(self, tmp_path: Path) -> None:
+    async def test_sleep_consolidates_all(self, tmp_path: Path) -> None:
         mc = _mc(tmp_path)
 
         # Populate STM with failures
@@ -214,21 +301,19 @@ class TestFullSleepCycle:
             created_at=time.time() - 100000 * 3600,
         ))
 
-        sws = SlowWaveSleep(mc)
-        rem = RapidEyeMovement(mc)
         pruner = MemoryPruner(memory_controller=mc)
-        orch = SleepOrchestrator(sws=sws, rem=rem, pruner=pruner)
+        orch = SleepOrchestrator(
+            memory_controller=mc,
+            cognitive_event_loop=_sleep_event_loop(),
+            pruner=pruner,
+        )
 
-        report = orch.run_cycle()
+        report = await orch.run_cycle()
 
-        # Verify constraints in episodic
-        assert report.constraints_extracted >= 2
-        constraints = mc.episodic.query("sws/")
-        assert len(constraints) >= 2
-
-        # Verify skills in procedural
-        assert report.skills_created >= 1
-        assert mc.procedural.size() >= 1
+        # Verify semantic consolidation entries
+        assert report.entries_consolidated >= 2
+        consolidated = mc.semantic.query("sleep/")
+        assert len(consolidated) >= 2
 
         # Verify pruned entries
         assert report.entries_pruned >= 1
@@ -325,12 +410,12 @@ class TestIdleAutoSleep:
             metadata={"status": "error"},
         ))
 
-        sws = SlowWaveSleep(mc)
-        rem = RapidEyeMovement(mc)
         pruner = MemoryPruner(memory_controller=mc)
         phases: list[str] = []
         orch = SleepOrchestrator(
-            sws=sws, rem=rem, pruner=pruner,
+            memory_controller=mc,
+            cognitive_event_loop=_sleep_event_loop(),
+            pruner=pruner,
             idle_threshold_seconds=0.01,
             publish_fn=lambda t, p: phases.append(p.decode()),
         )
