@@ -384,7 +384,7 @@ textarea {
 
 .chat-composer textarea,
 .provider-fields input,
-.wiring-toolbar select {
+.providers-toolbar select {
   width: 100%;
   border: 1px solid var(--stroke);
   border-radius: 16px;
@@ -429,11 +429,11 @@ textarea {
   font-size: 0.84rem;
 }
 
-.wiring-controls-card {
+.providers-controls-card {
   grid-column: span 4;
 }
 
-.wiring-providers-card {
+.providers-providers-card {
   grid-column: span 8;
   min-width: 0;
 }
@@ -443,7 +443,7 @@ textarea {
   background: linear-gradient(135deg, rgba(255, 184, 77, 0.1), rgba(119, 225, 212, 0.08));
 }
 
-.wiring-toolbar {
+.providers-toolbar {
   display: grid;
   gap: 0.7rem;
 }
@@ -661,8 +661,8 @@ textarea {
   #view-health .section-card:nth-child(3),
   .event-card,
   .wizard-card,
-  .wiring-controls-card,
-  .wiring-providers-card {
+  .providers-controls-card,
+  .providers-providers-card {
     grid-column: 1 / -1;
   }
 }

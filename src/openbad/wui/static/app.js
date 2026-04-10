@@ -34,10 +34,10 @@ const els = {
     lastLatency: document.getElementById('i-last-latency'),
   },
   log: document.getElementById('event-log'),
-  wiring: {
-    configPath: document.getElementById('wiring-config-path'),
-    status: document.getElementById('wiring-status'),
-    enabled: document.getElementById('wiring-enabled'),
+  providers: {
+    configPath: document.getElementById('providers-config-path'),
+    status: document.getElementById('providers-status'),
+    enabled: document.getElementById('providers-enabled'),
     defaultProvider: document.getElementById('default-provider'),
     providerList: document.getElementById('provider-list'),
     addProvider: document.getElementById('add-provider'),
@@ -74,8 +74,8 @@ const viewMeta = {
     title: 'Chat',
     subtitle: 'Operator conversation surface for the next integration step.',
   },
-  wiring: {
-    title: 'Wiring',
+  providers: {
+    title: 'Providers',
     subtitle: 'Verified providers and model access for the runtime.',
   },
   models: {
@@ -144,8 +144,8 @@ function setView(name) {
   els.viewTitle.textContent = viewMeta[name].title;
   els.viewSubtitle.textContent = viewMeta[name].subtitle;
 
-  if (name === 'wiring') {
-    loadWiringConfig();
+  if (name === 'providers') {
+    loadProvidersConfig();
   }
 }
 
@@ -355,24 +355,24 @@ function connectEventStream() {
 }
 
 function renderDefaultProviderOptions(selected) {
-  els.wiring.defaultProvider.innerHTML = '';
+  els.providers.defaultProvider.innerHTML = '';
   if (providerDrafts.length === 0) {
     const option = document.createElement('option');
     option.value = '';
     option.textContent = 'No providers configured';
     option.selected = true;
-    els.wiring.defaultProvider.append(option);
-    els.wiring.defaultProvider.disabled = true;
+    els.providers.defaultProvider.append(option);
+    els.providers.defaultProvider.disabled = true;
     return;
   }
 
-  els.wiring.defaultProvider.disabled = false;
+  els.providers.defaultProvider.disabled = false;
   for (const provider of providerDrafts) {
     const option = document.createElement('option');
     option.value = provider.name;
     option.textContent = providerLabel(provider);
     option.selected = provider.name === selected;
-    els.wiring.defaultProvider.append(option);
+    els.providers.defaultProvider.append(option);
   }
 }
 
@@ -400,7 +400,7 @@ function providerSummaryCard(provider, index) {
 
 function renderProviderList() {
   if (providerDrafts.length === 0) {
-    els.wiring.providerList.innerHTML = `
+    els.providers.providerList.innerHTML = `
       <div class="empty-state">
         <strong>No providers configured</strong>
         <p>Use Add provider to walk through GitHub Copilot or a local OpenAI-compatible llama endpoint.</p>
@@ -409,7 +409,7 @@ function renderProviderList() {
     return;
   }
 
-  els.wiring.providerList.innerHTML = providerDrafts
+  els.providers.providerList.innerHTML = providerDrafts
     .map((provider, index) => providerSummaryCard(provider, index))
     .join('');
 }
@@ -420,32 +420,32 @@ function openWizard(editIndex = null) {
   wizardState.verifiedProvider = null;
   wizardState.verifiedModels = [];
   wizardState.copilotFlow = null;
-  els.wiring.save.disabled = true;
-  els.wiring.modelSelect.disabled = true;
-  els.wiring.modelSelect.innerHTML = '<option value="">Verify provider first</option>';
-  els.wiring.wizard.classList.remove('hidden');
-  els.wiring.copilotAuthPanel.classList.add('hidden');
-  els.wiring.copilotUserCode.textContent = '----';
-  els.wiring.copilotCompleteAuth.disabled = true;
-  els.wiring.copilotOpenGitHub.disabled = true;
-  els.wiring.copilotCopyCode.disabled = true;
-  els.wiring.copilotAuthMessage.textContent = 'No active Copilot authorization yet.';
+  els.providers.save.disabled = true;
+  els.providers.modelSelect.disabled = true;
+  els.providers.modelSelect.innerHTML = '<option value="">Verify provider first</option>';
+  els.providers.wizard.classList.remove('hidden');
+  els.providers.copilotAuthPanel.classList.add('hidden');
+  els.providers.copilotUserCode.textContent = '----';
+  els.providers.copilotCompleteAuth.disabled = true;
+  els.providers.copilotOpenGitHub.disabled = true;
+  els.providers.copilotCopyCode.disabled = true;
+  els.providers.copilotAuthMessage.textContent = 'No active Copilot authorization yet.';
 
   if (editIndex === null) {
-    els.wiring.wizardTitle.textContent = 'Add Provider';
-    els.wiring.wizardType.value = 'github-copilot';
-    els.wiring.baseUrl.value = 'http://127.0.0.1:11434';
-    els.wiring.apiKeyEnv.value = '';
-    els.wiring.timeoutMs.value = '30000';
-    els.wiring.wizardStatus.textContent = 'Choose a provider type to begin the setup walkthrough.';
+    els.providers.wizardTitle.textContent = 'Add Provider';
+    els.providers.wizardType.value = 'github-copilot';
+    els.providers.baseUrl.value = 'http://127.0.0.1:11434';
+    els.providers.apiKeyEnv.value = '';
+    els.providers.timeoutMs.value = '30000';
+    els.providers.wizardStatus.textContent = 'Choose a provider type to begin the setup walkthrough.';
   } else {
     const provider = providerDrafts[editIndex];
-    els.wiring.wizardTitle.textContent = `Configure ${providerLabel(provider)}`;
-    els.wiring.wizardType.value = providerTypeFromDraft(provider);
-    els.wiring.baseUrl.value = provider.base_url || 'http://127.0.0.1:11434';
-    els.wiring.apiKeyEnv.value = provider.api_key_env || '';
-    els.wiring.timeoutMs.value = String(provider.timeout_ms || 30000);
-    els.wiring.wizardStatus.textContent = 'Verify the provider again before saving updated settings.';
+    els.providers.wizardTitle.textContent = `Configure ${providerLabel(provider)}`;
+    els.providers.wizardType.value = providerTypeFromDraft(provider);
+    els.providers.baseUrl.value = provider.base_url || 'http://127.0.0.1:11434';
+    els.providers.apiKeyEnv.value = provider.api_key_env || '';
+    els.providers.timeoutMs.value = String(provider.timeout_ms || 30000);
+    els.providers.wizardStatus.textContent = 'Verify the provider again before saving updated settings.';
   }
 
   applyWizardType();
@@ -457,46 +457,46 @@ function closeWizard() {
   wizardState.verifiedProvider = null;
   wizardState.verifiedModels = [];
   wizardState.copilotFlow = null;
-  els.wiring.wizard.classList.add('hidden');
+  els.providers.wizard.classList.add('hidden');
 }
 
 function applyWizardType() {
-  const type = els.wiring.wizardType.value;
+  const type = els.providers.wizardType.value;
   const local = type === 'local-openai';
-  els.wiring.localFields.classList.toggle('hidden', !local);
-  els.wiring.copilotFields.classList.toggle('hidden', local);
-  els.wiring.verify.classList.toggle('hidden', !local);
+  els.providers.localFields.classList.toggle('hidden', !local);
+  els.providers.copilotFields.classList.toggle('hidden', local);
+  els.providers.verify.classList.toggle('hidden', !local);
 }
 
-async function loadWiringConfig() {
-  els.wiring.status.textContent = 'Loading provider wiring...';
+async function loadProvidersConfig() {
+  els.providers.status.textContent = 'Loading providers...';
   try {
-    const response = await fetch('/api/wiring/providers');
+    const response = await fetch('/api/providers');
     if (!response.ok) {
       throw new Error(`load failed (${response.status})`);
     }
     const data = await response.json();
     providerDrafts = Array.isArray(data.providers) ? data.providers : [];
-    els.wiring.configPath.textContent = data.config_path || 'config path unavailable';
-    els.wiring.enabled.checked = Boolean(data.enabled);
+    els.providers.configPath.textContent = data.config_path || 'config path unavailable';
+    els.providers.enabled.checked = Boolean(data.enabled);
     renderDefaultProviderOptions(data.default_provider || providerDrafts[0]?.name || '');
     renderProviderList();
-    els.wiring.status.textContent = providerDrafts.length > 0
-      ? 'Provider wiring loaded.'
+    els.providers.status.textContent = providerDrafts.length > 0
+      ? 'Providers loaded.'
       : 'No providers configured yet.';
   } catch (error) {
-    els.wiring.status.textContent = `Unable to load provider wiring: ${error.message}`;
+    els.providers.status.textContent = `Unable to load providers: ${error.message}`;
   }
 }
 
-async function persistWiringConfig(statusMessage) {
+async function persistProvidersConfig(statusMessage) {
   const payload = {
-    enabled: els.wiring.enabled.checked,
-    default_provider: els.wiring.defaultProvider.value || '',
+    enabled: els.providers.enabled.checked,
+    default_provider: els.providers.defaultProvider.value || '',
     providers: providerDrafts,
   };
 
-  const response = await fetch('/api/wiring/providers', {
+  const response = await fetch('/api/providers', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -509,36 +509,36 @@ async function persistWiringConfig(statusMessage) {
   providerDrafts = Array.isArray(data.providers) ? data.providers : providerDrafts;
   renderDefaultProviderOptions(data.default_provider || providerDrafts[0]?.name || '');
   if (data.default_provider) {
-    els.wiring.defaultProvider.value = data.default_provider;
+    els.providers.defaultProvider.value = data.default_provider;
   }
   renderProviderList();
-  els.wiring.configPath.textContent = data.config_path || els.wiring.configPath.textContent;
-  els.wiring.status.textContent = statusMessage;
+  els.providers.configPath.textContent = data.config_path || els.providers.configPath.textContent;
+  els.providers.status.textContent = statusMessage;
 }
 
 function verificationPayload() {
   const payload = {
-    provider_type: els.wiring.wizardType.value,
-    timeout_ms: Number(els.wiring.timeoutMs.value || 30000),
+    provider_type: els.providers.wizardType.value,
+    timeout_ms: Number(els.providers.timeoutMs.value || 30000),
   };
 
   if (payload.provider_type === 'local-openai') {
-    payload.base_url = els.wiring.baseUrl.value.trim();
-    payload.api_key_env = els.wiring.apiKeyEnv.value.trim();
+    payload.base_url = els.providers.baseUrl.value.trim();
+    payload.api_key_env = els.providers.apiKeyEnv.value.trim();
   }
 
   return payload;
 }
 
 function populateModelChoices(models, preferredModel = '') {
-  els.wiring.modelSelect.innerHTML = '';
+  els.providers.modelSelect.innerHTML = '';
   const options = models.length > 0 ? models : [preferredModel].filter(Boolean);
   if (options.length === 0) {
     const option = document.createElement('option');
     option.value = '';
     option.textContent = 'No models returned';
-    els.wiring.modelSelect.append(option);
-    els.wiring.modelSelect.disabled = true;
+    els.providers.modelSelect.append(option);
+    els.providers.modelSelect.disabled = true;
     return;
   }
 
@@ -547,20 +547,20 @@ function populateModelChoices(models, preferredModel = '') {
     option.value = model;
     option.textContent = model;
     option.selected = model === preferredModel || (!preferredModel && model === options[0]);
-    els.wiring.modelSelect.append(option);
+    els.providers.modelSelect.append(option);
   }
-  els.wiring.modelSelect.disabled = false;
+  els.providers.modelSelect.disabled = false;
 }
 
 async function verifyWizardProvider() {
-  if (els.wiring.wizardType.value === 'github-copilot') {
-    els.wiring.wizardStatus.textContent = 'Use the Copilot sign-in flow below.';
+  if (els.providers.wizardType.value === 'github-copilot') {
+    els.providers.wizardStatus.textContent = 'Use the Copilot sign-in flow below.';
     return;
   }
-  els.wiring.wizardStatus.textContent = 'Verifying provider access...';
-  els.wiring.save.disabled = true;
+  els.providers.wizardStatus.textContent = 'Verifying provider access...';
+  els.providers.save.disabled = true;
   try {
-    const response = await fetch('/api/wiring/providers/verify', {
+    const response = await fetch('/api/providers/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(verificationPayload()),
@@ -572,54 +572,54 @@ async function verifyWizardProvider() {
     wizardState.verifiedProvider = data.provider;
     wizardState.verifiedModels = Array.isArray(data.models) ? data.models : [];
     populateModelChoices(wizardState.verifiedModels, data.provider.model || '');
-    els.wiring.save.disabled = !data.available;
-    els.wiring.wizardStatus.textContent = data.message;
+    els.providers.save.disabled = !data.available;
+    els.providers.wizardStatus.textContent = data.message;
   } catch (error) {
     wizardState.verifiedProvider = null;
     wizardState.verifiedModels = [];
     populateModelChoices([], '');
-    els.wiring.save.disabled = true;
-    els.wiring.wizardStatus.textContent = `Unable to verify provider: ${error.message}`;
+    els.providers.save.disabled = true;
+    els.providers.wizardStatus.textContent = `Unable to verify provider: ${error.message}`;
   }
 }
 
 async function startCopilotAuthorization() {
-  els.wiring.copilotAuthMessage.textContent = 'Requesting GitHub verification code...';
-  els.wiring.copilotStartAuth.disabled = true;
+  els.providers.copilotAuthMessage.textContent = 'Requesting GitHub verification code...';
+  els.providers.copilotStartAuth.disabled = true;
   try {
-    const response = await fetch('/api/wiring/providers/copilot/device-code', {
+    const response = await fetch('/api/providers/copilot/device-code', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ timeout_ms: Number(els.wiring.timeoutMs.value || 30000) }),
+      body: JSON.stringify({ timeout_ms: Number(els.providers.timeoutMs.value || 30000) }),
     });
     if (!response.ok) {
       throw new Error(`sign-in start failed (${response.status})`);
     }
     const data = await response.json();
     wizardState.copilotFlow = data;
-    els.wiring.copilotAuthPanel.classList.remove('hidden');
-    els.wiring.copilotUserCode.textContent = data.user_code || '----';
-    els.wiring.copilotAuthMessage.textContent = data.message;
-    els.wiring.copilotCompleteAuth.disabled = false;
-    els.wiring.copilotOpenGitHub.disabled = false;
-    els.wiring.copilotCopyCode.disabled = false;
-    els.wiring.wizardStatus.textContent = 'Step 2: open GitHub, enter the code, then return here.';
+    els.providers.copilotAuthPanel.classList.remove('hidden');
+    els.providers.copilotUserCode.textContent = data.user_code || '----';
+    els.providers.copilotAuthMessage.textContent = data.message;
+    els.providers.copilotCompleteAuth.disabled = false;
+    els.providers.copilotOpenGitHub.disabled = false;
+    els.providers.copilotCopyCode.disabled = false;
+    els.providers.wizardStatus.textContent = 'Step 2: open GitHub, enter the code, then return here.';
   } catch (error) {
-    els.wiring.copilotAuthMessage.textContent = `Unable to start Copilot sign-in: ${error.message}`;
+    els.providers.copilotAuthMessage.textContent = `Unable to start Copilot sign-in: ${error.message}`;
   } finally {
-    els.wiring.copilotStartAuth.disabled = false;
+    els.providers.copilotStartAuth.disabled = false;
   }
 }
 
 async function completeCopilotAuthorization() {
   if (!wizardState.copilotFlow) {
-    els.wiring.copilotAuthMessage.textContent = 'Start GitHub sign-in first.';
+    els.providers.copilotAuthMessage.textContent = 'Start GitHub sign-in first.';
     return;
   }
 
-  els.wiring.copilotAuthMessage.textContent = 'Checking GitHub authorization state...';
+  els.providers.copilotAuthMessage.textContent = 'Checking GitHub authorization state...';
   try {
-    const response = await fetch('/api/wiring/providers/copilot/complete', {
+    const response = await fetch('/api/providers/copilot/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ flow_id: wizardState.copilotFlow.flow_id }),
@@ -629,20 +629,20 @@ async function completeCopilotAuthorization() {
       throw new Error(data.message || `authorization check failed (${response.status})`);
     }
     if (data.pending) {
-      els.wiring.copilotAuthMessage.textContent = data.message;
+      els.providers.copilotAuthMessage.textContent = data.message;
       return;
     }
 
     wizardState.verifiedProvider = data.provider;
     wizardState.verifiedModels = Array.isArray(data.models) ? data.models : [];
     populateModelChoices(wizardState.verifiedModels, data.provider.model || '');
-    els.wiring.save.disabled = !data.authorized;
-    els.wiring.copilotAuthMessage.textContent = data.message;
-    els.wiring.wizardStatus.textContent = data.authorized
+    els.providers.save.disabled = !data.authorized;
+    els.providers.copilotAuthMessage.textContent = data.message;
+    els.providers.wizardStatus.textContent = data.authorized
       ? 'Copilot verified. Select a model and save the provider.'
       : data.message;
   } catch (error) {
-    els.wiring.copilotAuthMessage.textContent = `Unable to complete Copilot sign-in: ${error.message}`;
+    els.providers.copilotAuthMessage.textContent = `Unable to complete Copilot sign-in: ${error.message}`;
   }
 }
 
@@ -652,9 +652,9 @@ async function copyCopilotCode() {
   }
   try {
     await navigator.clipboard.writeText(wizardState.copilotFlow.user_code);
-    els.wiring.copilotAuthMessage.textContent = 'Verification code copied to clipboard.';
+    els.providers.copilotAuthMessage.textContent = 'Verification code copied to clipboard.';
   } catch {
-    els.wiring.copilotAuthMessage.textContent = 'Clipboard copy failed. Copy the code manually.';
+    els.providers.copilotAuthMessage.textContent = 'Clipboard copy failed. Copy the code manually.';
   }
 }
 
@@ -669,13 +669,13 @@ function openCopilotVerification() {
 async function saveWizardProvider(event) {
   event.preventDefault();
   if (!wizardState.verifiedProvider) {
-    els.wiring.wizardStatus.textContent = 'Verify the provider before saving it.';
+    els.providers.wizardStatus.textContent = 'Verify the provider before saving it.';
     return;
   }
 
   const provider = {
     ...wizardState.verifiedProvider,
-    model: els.wiring.modelSelect.value || wizardState.verifiedProvider.model,
+    model: els.providers.modelSelect.value || wizardState.verifiedProvider.model,
     enabled: true,
   };
 
@@ -685,39 +685,39 @@ async function saveWizardProvider(event) {
     providerDrafts[wizardState.editIndex] = provider;
   }
 
-  if (!els.wiring.defaultProvider.value) {
-    els.wiring.defaultProvider.value = provider.name;
+  if (!els.providers.defaultProvider.value) {
+    els.providers.defaultProvider.value = provider.name;
   }
 
-  if (wizardState.editIndex !== null && els.wiring.defaultProvider.value === '') {
-    els.wiring.defaultProvider.value = provider.name;
+  if (wizardState.editIndex !== null && els.providers.defaultProvider.value === '') {
+    els.providers.defaultProvider.value = provider.name;
   }
 
-  renderDefaultProviderOptions(els.wiring.defaultProvider.value || provider.name);
-  if (!els.wiring.defaultProvider.value) {
-    els.wiring.defaultProvider.value = provider.name;
+  renderDefaultProviderOptions(els.providers.defaultProvider.value || provider.name);
+  if (!els.providers.defaultProvider.value) {
+    els.providers.defaultProvider.value = provider.name;
   }
 
   try {
-    await persistWiringConfig(`${providerLabel(provider)} saved.`);
+    await persistProvidersConfig(`${providerLabel(provider)} saved.`);
     logLine(`[${new Date().toISOString()}] provider saved: ${providerLabel(provider)}`);
     closeWizard();
   } catch (error) {
-    els.wiring.wizardStatus.textContent = `Unable to save provider: ${error.message}`;
+    els.providers.wizardStatus.textContent = `Unable to save provider: ${error.message}`;
   }
 }
 
 async function removeProvider(index) {
   const [removed] = providerDrafts.splice(index, 1);
-  const currentDefault = els.wiring.defaultProvider.value;
+  const currentDefault = els.providers.defaultProvider.value;
   if (currentDefault === removed.name) {
     renderDefaultProviderOptions(providerDrafts[0]?.name || '');
   }
 
   try {
-    await persistWiringConfig(`${providerLabel(removed)} removed.`);
+    await persistProvidersConfig(`${providerLabel(removed)} removed.`);
   } catch (error) {
-    els.wiring.status.textContent = `Unable to remove provider: ${error.message}`;
+    els.providers.status.textContent = `Unable to remove provider: ${error.message}`;
   }
 }
 
@@ -726,41 +726,41 @@ function bindEvents() {
     link.addEventListener('click', () => setView(link.dataset.viewTarget));
   }
 
-  els.wiring.addProvider.addEventListener('click', () => openWizard(null));
-  els.wiring.closeWizard.addEventListener('click', closeWizard);
-  els.wiring.wizardType.addEventListener('change', () => {
+  els.providers.addProvider.addEventListener('click', () => openWizard(null));
+  els.providers.closeWizard.addEventListener('click', closeWizard);
+  els.providers.wizardType.addEventListener('change', () => {
     wizardState.verifiedProvider = null;
     wizardState.copilotFlow = null;
     applyWizardType();
-    els.wiring.save.disabled = true;
+    els.providers.save.disabled = true;
     populateModelChoices([], '');
-    els.wiring.copilotAuthPanel.classList.add('hidden');
-    els.wiring.copilotCompleteAuth.disabled = true;
-    els.wiring.copilotOpenGitHub.disabled = true;
-    els.wiring.copilotCopyCode.disabled = true;
+    els.providers.copilotAuthPanel.classList.add('hidden');
+    els.providers.copilotCompleteAuth.disabled = true;
+    els.providers.copilotOpenGitHub.disabled = true;
+    els.providers.copilotCopyCode.disabled = true;
   });
-  els.wiring.verify.addEventListener('click', verifyWizardProvider);
-  els.wiring.copilotStartAuth.addEventListener('click', startCopilotAuthorization);
-  els.wiring.copilotCompleteAuth.addEventListener('click', completeCopilotAuthorization);
-  els.wiring.copilotCopyCode.addEventListener('click', copyCopilotCode);
-  els.wiring.copilotOpenGitHub.addEventListener('click', openCopilotVerification);
-  els.wiring.wizardForm.addEventListener('submit', saveWizardProvider);
-  els.wiring.enabled.addEventListener('change', async () => {
+  els.providers.verify.addEventListener('click', verifyWizardProvider);
+  els.providers.copilotStartAuth.addEventListener('click', startCopilotAuthorization);
+  els.providers.copilotCompleteAuth.addEventListener('click', completeCopilotAuthorization);
+  els.providers.copilotCopyCode.addEventListener('click', copyCopilotCode);
+  els.providers.copilotOpenGitHub.addEventListener('click', openCopilotVerification);
+  els.providers.wizardForm.addEventListener('submit', saveWizardProvider);
+  els.providers.enabled.addEventListener('change', async () => {
     try {
-      await persistWiringConfig('Cognitive engine setting updated.');
+      await persistProvidersConfig('Cognitive engine setting updated.');
     } catch (error) {
-      els.wiring.status.textContent = `Unable to update wiring: ${error.message}`;
+      els.providers.status.textContent = `Unable to update providers: ${error.message}`;
     }
   });
-  els.wiring.defaultProvider.addEventListener('change', async () => {
+  els.providers.defaultProvider.addEventListener('change', async () => {
     try {
-      await persistWiringConfig('Default provider updated.');
+      await persistProvidersConfig('Default provider updated.');
     } catch (error) {
-      els.wiring.status.textContent = `Unable to update default provider: ${error.message}`;
+      els.providers.status.textContent = `Unable to update default provider: ${error.message}`;
     }
   });
 
-  els.wiring.providerList.addEventListener('click', (event) => {
+  els.providers.providerList.addEventListener('click', (event) => {
     const configure = event.target.closest('[data-configure-provider]');
     if (configure) {
       openWizard(Number(configure.dataset.configureProvider));

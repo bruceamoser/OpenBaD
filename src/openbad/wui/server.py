@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 from uuid import uuid4
 
-from aiohttp import web
 import yaml
+from aiohttp import web
 
 from openbad.cognitive.config import CognitiveConfig, ProviderConfig, load_cognitive_config
 from openbad.cognitive.providers.github_copilot import CopilotAuthError, GitHubCopilotProvider
@@ -76,7 +76,7 @@ def _serialize_cognitive_config(config: CognitiveConfig, path: Path) -> dict[str
     }
 
 
-def _read_wiring_config() -> tuple[Path, CognitiveConfig]:
+def _read_providers_config() -> tuple[Path, CognitiveConfig]:
     path = _resolve_cognitive_config_path()
     return path, load_cognitive_config(path)
 
@@ -123,7 +123,7 @@ def _coerce_timeout_ms(value: object, default: int = 30_000) -> int:
         raise web.HTTPBadRequest(text="timeout_ms must be an integer") from exc
 
 
-def _save_wiring_config(path: Path, payload: dict[str, object]) -> None:
+def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
     providers_payload = payload.get("providers", [])
     if not isinstance(providers_payload, list):
         raise web.HTTPBadRequest(text="providers must be a list")
@@ -162,23 +162,25 @@ def _save_wiring_config(path: Path, payload: dict[str, object]) -> None:
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
 
-async def _get_wiring_providers(_request: web.Request) -> web.Response:
-    path, config = _read_wiring_config()
+async def _get_providers(_request: web.Request) -> web.Response:
+    path, config = _read_providers_config()
     return web.json_response(_serialize_cognitive_config(config, path))
 
 
-async def _put_wiring_providers(request: web.Request) -> web.Response:
+async def _put_providers(request: web.Request) -> web.Response:
     payload = await request.json()
     if not isinstance(payload, dict):
         raise web.HTTPBadRequest(text="request body must be an object")
 
     path = _resolve_cognitive_config_path()
-    _save_wiring_config(path, payload)
+    _save_providers_config(path, payload)
     config = load_cognitive_config(path)
 
     bridge = request.app.get("bridge")
     if bridge is not None:
-        bridge._configured_provider_count = sum(1 for provider in config.providers if provider.enabled)
+        bridge._configured_provider_count = sum(
+            1 for provider in config.providers if provider.enabled
+        )
 
     return web.json_response(_serialize_cognitive_config(config, path))
 
@@ -253,7 +255,7 @@ async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]
     }
 
 
-async def _post_wiring_verify(request: web.Request) -> web.Response:
+async def _post_providers_verify(request: web.Request) -> web.Response:
     payload = await request.json()
     if not isinstance(payload, dict):
         raise web.HTTPBadRequest(text="request body must be an object")
@@ -261,7 +263,11 @@ async def _post_wiring_verify(request: web.Request) -> web.Response:
     provider = _wizard_provider_payload(payload)
     result = await _verify_wizard_provider(provider)
 
-    message = "Provider verified successfully." if bool(result["available"]) else "Provider verification failed. Confirm credentials, endpoint, and model access."
+    message = (
+        "Provider verified successfully."
+        if bool(result["available"])
+        else "Provider verification failed. Confirm credentials, endpoint, and model access."
+    )
     provider_type = str(payload.get("provider_type", "")).strip()
 
     return web.json_response(
@@ -275,6 +281,17 @@ async def _post_wiring_verify(request: web.Request) -> web.Response:
             "provider": result["provider"],
         }
     )
+
+
+def _legacy_providers_redirect_location(request: web.Request) -> str:
+    location = request.path.replace("/api/wiring/providers", "/api/providers", 1)
+    if request.query_string:
+        return f"{location}?{request.query_string}"
+    return location
+
+
+async def _redirect_legacy_wiring_providers(request: web.Request) -> web.StreamResponse:
+    raise web.HTTPMovedPermanently(location=_legacy_providers_redirect_location(request))
 
 
 def _cleanup_copilot_flows(app: web.Application) -> None:
@@ -349,7 +366,10 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
             {
                 "authorized": False,
                 "pending": True,
-                "message": "Authorization is still pending. Finish the GitHub step, then check again.",
+                "message": (
+                    "Authorization is still pending. Finish the GitHub step, "
+                    "then check again."
+                ),
             }
         )
     if state == "slow_down":
@@ -362,11 +382,12 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
             }
         )
     if state != "authorized":
+        error_message = result.get("error_description", result.get("error", "unknown error"))
         return web.json_response(
             {
                 "authorized": False,
                 "pending": False,
-                "message": f"GitHub authorization failed: {result.get('error_description', result.get('error', 'unknown error'))}",
+                "message": f"GitHub authorization failed: {error_message}",
             },
             status=400,
         )
@@ -386,7 +407,11 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
         {
             "authorized": bool(verified["available"]),
             "pending": False,
-            "message": "Copilot authorization complete." if bool(verified["available"]) else "Copilot token stored, but provider verification failed.",
+            "message": (
+                "Copilot authorization complete."
+                if bool(verified["available"])
+                else "Copilot token stored, but provider verification failed."
+            ),
             "provider": verified["provider"],
             "models": verified["models"],
             "latency_ms": verified["latency_ms"],
@@ -415,11 +440,21 @@ def create_app(
         return web.FileResponse(STATIC_DIR / "index.html")
 
     app.router.add_get("/", index)
-    app.router.add_get("/api/wiring/providers", _get_wiring_providers)
-    app.router.add_post("/api/wiring/providers/copilot/device-code", _post_copilot_device_code)
-    app.router.add_post("/api/wiring/providers/copilot/complete", _post_copilot_complete)
-    app.router.add_post("/api/wiring/providers/verify", _post_wiring_verify)
-    app.router.add_put("/api/wiring/providers", _put_wiring_providers)
+    app.router.add_get("/api/providers", _get_providers)
+    app.router.add_post("/api/providers/copilot/device-code", _post_copilot_device_code)
+    app.router.add_post("/api/providers/copilot/complete", _post_copilot_complete)
+    app.router.add_post("/api/providers/verify", _post_providers_verify)
+    app.router.add_put("/api/providers", _put_providers)
+    # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
+    app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
+    app.router.add_post(
+        "/api/wiring/providers/copilot/device-code", _redirect_legacy_wiring_providers
+    )
+    app.router.add_post(
+        "/api/wiring/providers/copilot/complete", _redirect_legacy_wiring_providers
+    )
+    app.router.add_post("/api/wiring/providers/verify", _redirect_legacy_wiring_providers)
+    app.router.add_put("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_static("/static", STATIC_DIR)
     return app
 

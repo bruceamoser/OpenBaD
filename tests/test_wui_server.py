@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
-import yaml
 from unittest.mock import AsyncMock, patch
 
-from openbad.wui.server import STATIC_DIR, create_app
+import pytest
+import yaml
+
 from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
+from openbad.wui.server import STATIC_DIR, create_app
 
 
 def test_static_assets_exist():
@@ -25,7 +26,7 @@ async def test_index_route(aiohttp_client):
     html = await resp.text()
     assert "OpenBaD Control Surface" in html
     assert "/static/app.js" in html
-    assert "Provider Wiring" in html
+    assert "Providers" in html
 
 
 @pytest.mark.asyncio
@@ -67,7 +68,7 @@ def test_create_app_attaches_bridge():
 
 
 @pytest.mark.asyncio
-async def test_get_wiring_providers_route(aiohttp_client, tmp_path, monkeypatch):
+async def test_get_providers_route(aiohttp_client, tmp_path, monkeypatch):
     config_dir = tmp_path / "openbad"
     config_dir.mkdir()
     config_path = config_dir / "cognitive.yaml"
@@ -88,7 +89,7 @@ cognitive:
 
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
-    resp = await client.get("/api/wiring/providers")
+    resp = await client.get("/api/providers")
 
     assert resp.status == 200
     data = await resp.json()
@@ -98,7 +99,7 @@ cognitive:
 
 
 @pytest.mark.asyncio
-async def test_put_wiring_providers_route(aiohttp_client, tmp_path, monkeypatch):
+async def test_put_providers_route(aiohttp_client, tmp_path, monkeypatch):
     config_dir = tmp_path / "openbad"
     config_dir.mkdir()
     monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
@@ -120,7 +121,7 @@ async def test_put_wiring_providers_route(aiohttp_client, tmp_path, monkeypatch)
         ],
     }
 
-    resp = await client.put("/api/wiring/providers", json=payload)
+    resp = await client.put("/api/providers", json=payload)
 
     assert resp.status == 200
     data = await resp.json()
@@ -138,12 +139,19 @@ async def test_verify_copilot_provider_route(aiohttp_client):
     with patch("openbad.wui.server.GitHubCopilotProvider") as provider_cls:
         provider = provider_cls.return_value
         provider.health_check = AsyncMock(
-            return_value=type("Status", (), {"available": True, "latency_ms": 12.0, "models_available": 4})()
+            return_value=type(
+                "Status",
+                (),
+                {"available": True, "latency_ms": 12.0, "models_available": 4},
+            )()
         )
         provider.list_models = AsyncMock(
-            return_value=[type("Model", (), {"model_id": "gpt-4o"})(), type("Model", (), {"model_id": "claude-sonnet-4-20250514"})()]
+            return_value=[
+                type("Model", (), {"model_id": "gpt-4o"})(),
+                type("Model", (), {"model_id": "claude-sonnet-4-20250514"})(),
+            ]
         )
-        resp = await client.post("/api/wiring/providers/verify", json={"provider_type": "github-copilot"})
+        resp = await client.post("/api/providers/verify", json={"provider_type": "github-copilot"})
 
     assert resp.status == 200
     data = await resp.json()
@@ -172,7 +180,7 @@ async def test_start_copilot_device_flow_route(aiohttp_client):
                 },
             )()
         )
-        resp = await client.post("/api/wiring/providers/copilot/device-code", json={"timeout_ms": 30000})
+        resp = await client.post("/api/providers/copilot/device-code", json={"timeout_ms": 30000})
 
     assert resp.status == 200
     data = await resp.json()
@@ -195,14 +203,23 @@ async def test_complete_copilot_device_flow_route(aiohttp_client):
 
     with patch("openbad.wui.server.GitHubCopilotProvider") as provider_cls:
         provider = provider_cls.return_value
-        provider.poll_for_token_once = AsyncMock(return_value={"state": "authorized", "access_token": "token"})
+        provider.poll_for_token_once = AsyncMock(
+            return_value={"state": "authorized", "access_token": "token"}
+        )
         provider.health_check = AsyncMock(
-            return_value=type("Status", (), {"available": True, "latency_ms": 12.0, "models_available": 2})()
+            return_value=type(
+                "Status",
+                (),
+                {"available": True, "latency_ms": 12.0, "models_available": 2},
+            )()
         )
         provider.list_models = AsyncMock(
-            return_value=[type("Model", (), {"model_id": "gpt-4o"})(), type("Model", (), {"model_id": "claude-sonnet-4-20250514"})()]
+            return_value=[
+                type("Model", (), {"model_id": "gpt-4o"})(),
+                type("Model", (), {"model_id": "claude-sonnet-4-20250514"})(),
+            ]
         )
-        resp = await client.post("/api/wiring/providers/copilot/complete", json={"flow_id": "flow-1"})
+        resp = await client.post("/api/providers/copilot/complete", json={"flow_id": "flow-1"})
 
     assert resp.status == 200
     data = await resp.json()
@@ -219,13 +236,17 @@ async def test_verify_local_provider_route(aiohttp_client):
     with patch("openbad.wui.server.custom_provider") as provider_factory:
         provider = provider_factory.return_value
         provider.health_check = AsyncMock(
-            return_value=type("Status", (), {"available": True, "latency_ms": 7.5, "models_available": 1})()
+            return_value=type(
+                "Status",
+                (),
+                {"available": True, "latency_ms": 7.5, "models_available": 1},
+            )()
         )
         provider.list_models = AsyncMock(
             return_value=[type("Model", (), {"model_id": "bonsai-8b"})()]
         )
         resp = await client.post(
-            "/api/wiring/providers/verify",
+            "/api/providers/verify",
             json={
                 "provider_type": "local-openai",
                 "base_url": "http://127.0.0.1:11434",
@@ -239,6 +260,52 @@ async def test_verify_local_provider_route(aiohttp_client):
     assert data["available"] is True
     assert data["provider"]["name"] == "custom"
     assert data["models"] == ["bonsai-8b"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "payload", "location"),
+    [
+        ("get", "/api/wiring/providers", None, "/api/providers"),
+        (
+            "put",
+            "/api/wiring/providers",
+            {"enabled": True, "default_provider": "", "providers": []},
+            "/api/providers",
+        ),
+        (
+            "post",
+            "/api/wiring/providers/verify",
+            {"provider_type": "github-copilot"},
+            "/api/providers/verify",
+        ),
+        (
+            "post",
+            "/api/wiring/providers/copilot/device-code",
+            {"timeout_ms": 30000},
+            "/api/providers/copilot/device-code",
+        ),
+        (
+            "post",
+            "/api/wiring/providers/copilot/complete",
+            {"flow_id": "flow-1"},
+            "/api/providers/copilot/complete",
+        ),
+    ],
+)
+async def test_legacy_wiring_routes_redirect(aiohttp_client, method, path, payload, location):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    request = getattr(client, method)
+    kwargs = {"allow_redirects": False}
+    if payload is not None:
+        kwargs["json"] = payload
+
+    resp = await request(path, **kwargs)
+
+    assert resp.status == 301
+    assert resp.headers["Location"] == location
 
 
 @pytest.mark.asyncio
