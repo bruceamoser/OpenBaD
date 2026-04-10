@@ -20,7 +20,11 @@ dependencies = [
     "aiohttp>=3.9",
     "cryptography>=42.0",
     "bcrypt>=4.0",
+    "click>=8.1",
 ]
+
+[project.scripts]
+openbad = "openbad.cli:main"
 
 [project.optional-dependencies]
 dev = [
