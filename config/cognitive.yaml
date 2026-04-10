@@ -2,6 +2,33 @@ cognitive:
   enabled: true
   default_provider: ""
   providers: []
+  # Assigned provider/model per cognitive system.
+  systems:
+    chat:
+      provider: ollama
+      model: llama3.2
+    reasoning:
+      provider: anthropic
+      model: claude-sonnet-4-20250514
+    reactions:
+      provider: ollama
+      model: llama3.2
+    sleep:
+      provider: ollama
+      model: llama3.2
+  # Shared fallback chain used when the assigned system provider is unavailable.
+  default_fallback_chain:
+    - provider: ollama
+      model: llama3.2
+    - provider: openai
+      model: gpt-4o-mini
+  fallback_cortisol:
+    release_per_step: 0.1
+    escalation_after: 5
+  # Intrinsic systems do not route through external model assignments:
+  # - Instincts / FSM
+  # - Memory (Valkey + Chroma)
+  # - Immune / Interceptor
   context_budget:
     slm_max_tokens: 8192
     llm_max_tokens: 32768
