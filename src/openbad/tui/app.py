@@ -12,8 +12,19 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static
 
+from openbad.nervous_system import topics
+from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus, ReasoningResponse
+from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
+from openbad.nervous_system.schemas.reflex_pb2 import ReflexState
+from openbad.nervous_system.schemas.telemetry_pb2 import (
+    CpuTelemetry,
+    DiskTelemetry,
+    MemoryTelemetry,
+    NetworkTelemetry,
+    TokenTelemetry,
+)
 from openbad.tui.mqtt_feed import MqttConnected, MqttDisconnected, MqttFeed, MqttPayload
-from openbad.tui.panels import FSMPanel, HormonePanel
+from openbad.tui.panels import FSMPanel, HormonePanel, InferencePanel, VitalsPanel
 
 # ── Placeholder panels (replaced by #181-#183) ──────────────────────
 
@@ -123,8 +134,8 @@ class OpenBaDApp(App):
                     yield HormonePanel(id="hormone-panel")
                     yield FSMPanel(id="fsm-panel")
                 with Horizontal(id="bottom-panels"):
-                    yield PlaceholderPanel("[dim]Inference (issue #182)[/dim]")
-                    yield PlaceholderPanel("[dim]Vitals (issue #182)[/dim]")
+                    yield InferencePanel(id="inference-panel")
+                    yield VitalsPanel(id="vitals-panel")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -135,10 +146,15 @@ class OpenBaDApp(App):
         """Subscribe to hormone and FSM state topics."""
         if not self.feed.is_connected:
             return
-        # Wildcard subscription for all endocrine hormones
-        self.feed.subscribe("agent/endocrine/+")
-        # FSM state changes
-        self.feed.subscribe("agent/reflex/state")
+        self.feed.subscribe(topics.ENDOCRINE_ALL, EndocrineEvent)
+        self.feed.subscribe(topics.REFLEX_STATE, ReflexState)
+        self.feed.subscribe(topics.TELEMETRY_CPU, CpuTelemetry)
+        self.feed.subscribe(topics.TELEMETRY_MEMORY, MemoryTelemetry)
+        self.feed.subscribe(topics.TELEMETRY_DISK, DiskTelemetry)
+        self.feed.subscribe(topics.TELEMETRY_NETWORK, NetworkTelemetry)
+        self.feed.subscribe(topics.TELEMETRY_TOKENS, TokenTelemetry)
+        self.feed.subscribe(topics.COGNITIVE_HEALTH, ModelHealthStatus)
+        self.feed.subscribe(topics.COGNITIVE_RESPONSE, ReasoningResponse)
 
     async def on_unmount(self) -> None:
         await self.feed.disconnect()
@@ -166,10 +182,10 @@ class OpenBaDApp(App):
             except Exception:  # noqa: BLE001, S110
                 pass
 
-        elif topic == "agent/reflex/state":
+        elif topic == topics.REFLEX_STATE:
             try:
                 fsm = self.query_one("#fsm-panel", FSMPanel)
-                state = str(getattr(payload, "state", payload))
+                state = str(getattr(payload, "current_state", payload))
                 fsm.state = state
                 # Also update the status bar
                 status = self.query_one(StatusPanel)
@@ -178,6 +194,43 @@ class OpenBaDApp(App):
                 )
             except Exception:  # noqa: BLE001, S110
                 pass
+
+        elif topic == topics.TELEMETRY_CPU:
+            panel = self.query_one("#vitals-panel", VitalsPanel)
+            panel.cpu_usage = float(payload.usage_percent)
+
+        elif topic == topics.TELEMETRY_MEMORY:
+            panel = self.query_one("#vitals-panel", VitalsPanel)
+            panel.mem_usage = float(payload.usage_percent)
+
+        elif topic == topics.TELEMETRY_DISK:
+            panel = self.query_one("#vitals-panel", VitalsPanel)
+            panel.disk_usage = float(payload.usage_percent)
+
+        elif topic == topics.TELEMETRY_NETWORK:
+            panel = self.query_one("#vitals-panel", VitalsPanel)
+            panel.net_sent = float(payload.bytes_sent)
+            panel.net_recv = float(payload.bytes_recv)
+
+        elif topic == topics.TELEMETRY_TOKENS:
+            panel = self.query_one("#vitals-panel", VitalsPanel)
+            panel.tokens_used = int(payload.tokens_used)
+            panel.token_remaining = float(payload.budget_remaining_pct)
+            panel.model_tier = str(payload.model_tier)
+
+        elif topic == topics.COGNITIVE_HEALTH:
+            panel = self.query_one("#inference-panel", InferencePanel)
+            panel.provider = str(payload.provider)
+            panel.model_id = str(payload.model_id)
+            panel.available = bool(payload.available)
+            panel.latency_p50 = float(payload.latency_p50)
+            panel.latency_p99 = float(payload.latency_p99)
+
+        elif topic == topics.COGNITIVE_RESPONSE:
+            panel = self.query_one("#inference-panel", InferencePanel)
+            panel.last_model_used = str(payload.model_used)
+            panel.last_tokens = int(payload.tokens_used)
+            panel.last_latency_ms = float(payload.latency_ms)
 
     def action_reconnect(self) -> None:
         """Reconnect to the MQTT broker."""

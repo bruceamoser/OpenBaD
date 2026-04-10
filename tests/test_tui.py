@@ -78,7 +78,7 @@ class TestMqttFeed:
     def test_subscribe_without_connect(self):
         feed = MqttFeed()
         # Should not raise, just warn
-        feed.subscribe("agent/telemetry/cpu")
+        feed.subscribe("agent/telemetry/cpu", MagicMock)
 
     @pytest.mark.asyncio
     async def test_subscribe_with_proto(self):

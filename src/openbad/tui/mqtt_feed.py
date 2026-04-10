@@ -87,24 +87,16 @@ class MqttFeed:
 
     # ── subscriptions ────────────────────────────────────────────
 
-    def subscribe(self, topic: str, proto_type: type | None = None) -> None:
-        """Subscribe to *topic* and post ``MqttPayload`` messages to the app.
-
-        If *proto_type* is ``None`` the raw payload bytes are forwarded.
-        """
+    def subscribe(self, topic: str, proto_type: type) -> None:
+        """Subscribe to *topic* and post decoded payloads to the app."""
         if self._client is None:
             log.warning("subscribe() called before connect()")
             return
 
         def _on_message(topic_str: str, msg: Any) -> None:  # noqa: ANN401
-            payload = msg if proto_type is not None else msg
-            self._post(MqttPayload(topic=topic_str, payload=payload))
+            self._post(MqttPayload(topic=topic_str, payload=msg))
 
-        if proto_type is not None:
-            self._client.subscribe(topic, proto_type, _on_message)
-        else:
-            # Raw subscribe — use low-level paho callback if available
-            self._client.subscribe(topic, None, _on_message)
+        self._client.subscribe(topic, proto_type, _on_message)
 
     # ── helpers ──────────────────────────────────────────────────
 
