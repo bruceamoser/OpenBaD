@@ -212,11 +212,11 @@ class DiskNetworkMonitor:
                 net_msg = network_to_proto(net_snap)
                 self._client.publish(
                     "agent/telemetry/disk",
-                    disk_msg.SerializeToString(),
+                    disk_msg,
                 )
                 self._client.publish(
                     "agent/telemetry/network",
-                    net_msg.SerializeToString(),
+                    net_msg,
                 )
             except Exception:
                 logger.exception("Disk/network telemetry error")

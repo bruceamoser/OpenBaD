@@ -17,6 +17,8 @@ import time
 from transitions import Machine, MachineError  # type: ignore[import-untyped]
 
 from openbad.nervous_system.schemas.common_pb2 import Header
+from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
+from openbad.nervous_system.schemas.immune_pb2 import ImmuneAlert
 from openbad.nervous_system.schemas.reflex_pb2 import ReflexState
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,13 @@ TOPIC_TRIGGER_MAP: dict[str, str] = {
     "agent/endocrine/adrenaline": "emergency",
     "agent/endocrine/endorphin": "sleep",
     "agent/immune/alert": "emergency",
+}
+
+TOPIC_MESSAGE_MAP: dict[str, type[EndocrineEvent | ImmuneAlert]] = {
+    "agent/endocrine/cortisol": EndocrineEvent,
+    "agent/endocrine/adrenaline": EndocrineEvent,
+    "agent/endocrine/endorphin": EndocrineEvent,
+    "agent/immune/alert": ImmuneAlert,
 }
 
 
@@ -103,7 +112,19 @@ class AgentFSM:
                 current_state=self.state,
                 trigger_event=trigger_str,
             )
-            self._client.publish("agent/reflex/state", msg.SerializeToString())
+            self._client.publish("agent/reflex/state", msg)
+
+    def publish_current_state(self, trigger_event: str = "bootstrap") -> None:
+        """Publish the current state without requiring a transition."""
+        if self._client is None:
+            return
+        msg = ReflexState(
+            header=Header(timestamp_unix=time.time()),
+            previous_state=self.state,
+            current_state=self.state,
+            trigger_event=trigger_event,
+        )
+        self._client.publish("agent/reflex/state", msg)
 
     # ------------------------------------------------------------------
     # Thread-safe trigger dispatch
@@ -133,7 +154,7 @@ class AgentFSM:
     # Event-bus integration
     # ------------------------------------------------------------------
 
-    def handle_event(self, topic: str, payload: bytes) -> bool:
+    def handle_event(self, topic: str, payload: bytes | EndocrineEvent | ImmuneAlert) -> bool:
         """Route an event-bus message to the correct FSM trigger.
 
         For ``agent/endocrine/cortisol`` the trigger fires only when
@@ -146,6 +167,9 @@ class AgentFSM:
         if trigger_name is None:
             return False
 
+        if topic.startswith("agent/endocrine/") and self._extract_level(payload) <= 0.0:
+            return False
+
         # Severity gating for cortisol and immune/alert
         if topic in ("agent/endocrine/cortisol", "agent/immune/alert"):
             severity = self._extract_severity(topic, payload)
@@ -155,10 +179,10 @@ class AgentFSM:
         return self.fire(trigger_name)
 
     @staticmethod
-    def _extract_severity(topic: str, payload: bytes) -> int:
+    def _extract_severity(topic: str, payload: bytes | EndocrineEvent | ImmuneAlert) -> int:
         """Extract the severity int from the protobuf payload."""
-        from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
-        from openbad.nervous_system.schemas.immune_pb2 import ImmuneAlert
+        if hasattr(payload, "severity"):
+            return int(payload.severity)
 
         try:
             if topic.startswith("agent/endocrine/"):
@@ -173,9 +197,21 @@ class AgentFSM:
             logger.exception("FSM: failed to parse severity from %s", topic)
         return 0
 
+    @staticmethod
+    def _extract_level(payload: bytes | EndocrineEvent | ImmuneAlert) -> float:
+        if hasattr(payload, "level"):
+            return float(payload.level)
+
+        try:
+            msg = EndocrineEvent()
+            msg.ParseFromString(payload)
+            return float(msg.level)
+        except Exception:
+            return 0.0
+
     def subscribe_triggers(self) -> None:
         """Subscribe to all trigger topics via the MQTT client."""
         if self._client is None:
             return
         for topic in TOPIC_TRIGGER_MAP:
-            self._client.subscribe(topic, self.handle_event)
+            self._client.subscribe(topic, TOPIC_MESSAGE_MAP[topic], self.handle_event)

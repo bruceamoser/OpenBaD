@@ -6,9 +6,16 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 
 from openbad.endocrine.controller import EndocrineController
+from openbad.interoception.disk_network import DiskNetworkMonitor
+from openbad.interoception.monitor import TelemetryMonitor
 from openbad.nervous_system.client import NervousSystemClient
+from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus
+from openbad.nervous_system.schemas.common_pb2 import Header
+from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
+from openbad.nervous_system.schemas.telemetry_pb2 import TokenTelemetry
 from openbad.reflex_arc.fsm import AgentFSM
 
 logger = logging.getLogger(__name__)
@@ -31,6 +38,8 @@ class Daemon:
         self._client: NervousSystemClient | None = None
         self._fsm: AgentFSM | None = None
         self._endocrine: EndocrineController | None = None
+        self._telemetry: TelemetryMonitor | None = None
+        self._disk_network: DiskNetworkMonitor | None = None
         self._stop_event: asyncio.Event | None = None
 
     # -- public --------------------------------------------------------- #
@@ -64,9 +73,20 @@ class Daemon:
 
         # 2. Finite state machine
         self._fsm = AgentFSM(client=self._client)
+        self._fsm.subscribe_triggers()
 
         # 3. Endocrine controller
         self._endocrine = EndocrineController()
+
+        # 4. Interoception publishers for vitals panels and dashboards
+        self._telemetry = TelemetryMonitor(self._client)
+        self._telemetry.start()
+        self._disk_network = DiskNetworkMonitor(self._client)
+        self._disk_network.start()
+
+        # Seed UI consumers with an initial state snapshot.
+        self._fsm.publish_current_state()
+        self._publish_bootstrap_snapshots()
 
         logger.info("All subsystems initialised")
 
@@ -75,7 +95,7 @@ class Daemon:
             await self.stop()
             return
 
-        # 4. Signal handlers (Unix only; no-op on Windows)
+        # 5. Signal handlers (Unix only; no-op on Windows)
         self._install_signal_handlers()
 
         self._running = True
@@ -93,6 +113,14 @@ class Daemon:
         self._running = False
 
         # Reverse-order teardown
+        if self._disk_network is not None:
+            self._disk_network.stop()
+            self._disk_network = None
+
+        if self._telemetry is not None:
+            self._telemetry.stop()
+            self._telemetry = None
+
         self._endocrine = None
         self._fsm = None
 
@@ -120,3 +148,44 @@ class Daemon:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self.request_stop)
+
+    def _publish_bootstrap_snapshots(self) -> None:
+        """Publish one-time retained snapshots for stateful dashboard panels."""
+        if self._client is None or self._endocrine is None:
+            return
+
+        now = time.time()
+        endocrine_state = self._endocrine.get_state()
+        for hormone, level in endocrine_state.to_dict().items():
+            self._client.publish(
+                f"agent/endocrine/{hormone}",
+                EndocrineEvent(
+                    header=Header(timestamp_unix=now, source_module="openbad.daemon"),
+                    hormone=hormone,
+                    level=level,
+                ),
+            )
+
+        self._client.publish(
+            "agent/telemetry/tokens",
+            TokenTelemetry(
+                header=Header(timestamp_unix=now, source_module="openbad.daemon"),
+                tokens_used=0,
+                budget_ceiling=0,
+                budget_remaining_pct=100.0,
+                cost_per_action_avg=0.0,
+                model_tier="idle",
+            ),
+        )
+
+        self._client.publish(
+            "agent/cognitive/health",
+            ModelHealthStatus(
+                header=Header(timestamp_unix=now, source_module="openbad.daemon"),
+                provider="inactive",
+                model_id="none",
+                available=False,
+                latency_p50=0.0,
+                latency_p99=0.0,
+            ),
+        )

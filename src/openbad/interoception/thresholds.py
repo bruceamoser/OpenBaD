@@ -168,7 +168,7 @@ def publish_breaches(
     count = 0
     for breach in breaches:
         msg = breach_to_proto(breach)
-        client.publish("agent/endocrine/cortisol", msg.SerializeToString())  # type: ignore[union-attr]
+        client.publish("agent/endocrine/cortisol", msg)  # type: ignore[union-attr]
         logger.info(
             "Cortisol event: %s=%.2f (severity=%d)",
             breach.metric,

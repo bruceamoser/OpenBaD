@@ -37,6 +37,10 @@ const els = {
   },
 };
 
+let activeSocket = null;
+let reconnectTimer = null;
+let activeEventSource = null;
+
 function pulseOrgan(name) {
   const node = els.anatomy[name] || els.anatomy.nervous;
   if (!node) {
@@ -66,6 +70,16 @@ function logLine(text) {
   }
 }
 
+window.addEventListener('error', (event) => {
+  const message = event.message || 'unknown browser error';
+  logLine(`browser error: ${message}`);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
+  logLine(`browser rejection: ${reason}`);
+});
+
 function setOnline(online) {
   els.status.textContent = online ? 'online' : 'offline';
   els.status.classList.toggle('online', online);
@@ -75,8 +89,9 @@ function setOnline(online) {
 function updateFromEvent(topic, payload) {
   if (topic.startsWith('agent/endocrine/')) {
     const hormone = topic.split('/').pop();
-    if (els.hormones[hormone] && typeof payload.level === 'number') {
-      els.hormones[hormone].textContent = payload.level.toFixed(2);
+    if (els.hormones[hormone]) {
+      const level = Number(payload.level ?? 0);
+      els.hormones[hormone].textContent = level.toFixed(2);
     }
     return;
   }
@@ -110,9 +125,14 @@ function updateFromEvent(topic, payload) {
   }
 
   if (topic === 'agent/cognitive/health') {
-    els.inference.provider.textContent = payload.provider || '--';
+    const configuredProviders = Number(payload.configured_provider_count ?? 0);
+    els.inference.provider.textContent = `${configuredProviders}`;
     els.inference.model.textContent = payload.model_id || '--';
-    els.inference.health.textContent = payload.available ? 'up' : 'down';
+    if (payload.provider === 'inactive' || payload.model_id === 'none') {
+      els.inference.health.textContent = 'inactive';
+    } else {
+      els.inference.health.textContent = payload.available ? 'up' : 'down';
+    }
     els.inference.p50.textContent = `${Number(payload.latency_p50 || 0).toFixed(1)}ms`;
     els.inference.p99.textContent = `${Number(payload.latency_p99 || 0).toFixed(1)}ms`;
     return;
@@ -124,38 +144,93 @@ function updateFromEvent(topic, payload) {
   }
 }
 
-function connect() {
+function handleEventMessage(raw) {
+  try {
+    const msg = JSON.parse(raw);
+    if (msg.type === 'hello') {
+      logLine(`[${msg.ts}] ${msg.message}`);
+      return;
+    }
+    if (msg.type === 'event') {
+      const topic = msg.topic || 'unknown/topic';
+      pulseOrgan(mapTopicToOrgan(topic));
+      updateFromEvent(topic, msg.payload || {});
+      logLine(`[${msg.ts}] ${topic}`);
+    }
+  } catch {
+    logLine('malformed transport payload received');
+  }
+}
+
+function connectWebSocket() {
+  if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+    return;
+  }
+  if (activeSocket && activeSocket.readyState === WebSocket.CONNECTING) {
+    return;
+  }
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
+  activeSocket = ws;
 
   ws.addEventListener('open', () => {
     setOnline(true);
     logLine('socket connected');
   });
 
-  ws.addEventListener('close', () => {
+  ws.addEventListener('error', () => {
+    logLine('socket error');
+  });
+
+  ws.addEventListener('close', (event) => {
     setOnline(false);
-    logLine('socket disconnected; retrying...');
-    setTimeout(connect, 1000);
+    if (activeSocket === ws) {
+      activeSocket = null;
+    }
+    const reason = event.reason ? ` reason=${event.reason}` : '';
+    logLine(`socket disconnected; code=${event.code}${reason}; retrying...`);
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, 1000);
   });
 
   ws.addEventListener('message', (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'hello') {
-        logLine(`[${msg.ts}] ${msg.message}`);
-        return;
-      }
-      if (msg.type === 'event') {
-        const topic = msg.topic || 'unknown/topic';
-        pulseOrgan(mapTopicToOrgan(topic));
-        updateFromEvent(topic, msg.payload || {});
-        logLine(`[${msg.ts}] ${topic}`);
-      }
-    } catch {
-      logLine('malformed socket payload received');
-    }
+    handleEventMessage(ev.data);
   });
 }
 
-connect();
+function connectEventStream() {
+  if (!window.EventSource) {
+    connectWebSocket();
+    return;
+  }
+  if (activeEventSource) {
+    return;
+  }
+
+  const source = new EventSource('/events');
+  activeEventSource = source;
+
+  source.addEventListener('open', () => {
+    setOnline(true);
+    logLine('event stream connected');
+  });
+
+  source.addEventListener('error', () => {
+    setOnline(false);
+    const state = source.readyState;
+    logLine(`event stream disconnected; state=${state}; retrying...`);
+  });
+
+  source.onmessage = (event) => {
+    handleEventMessage(event.data);
+  };
+}
+
+connectEventStream();

@@ -31,6 +31,10 @@ class TestOpenbadServiceFile:
     def test_after_broker(self):
         assert "openbad-broker.service" in self.content
 
+    def test_broker_is_optional(self):
+        assert "Wants=openbad-broker.service" in self.content
+        assert "Requires=openbad-broker.service" not in self.content
+
     def test_exec_start(self):
         match = re.search(r"ExecStart=.*openbad run", self.content)
         assert match is not None
@@ -45,6 +49,36 @@ class TestOpenbadServiceFile:
 
     def test_user_set(self):
         assert "User=openbad" in self.content
+
+    def test_wanted_by(self):
+        assert "WantedBy=multi-user.target" in self.content
+
+
+class TestOpenbadWuiServiceFile:
+    """Validate config/openbad-wui.service syntax."""
+
+    def setup_method(self):
+        self.path = CONFIG_DIR / "openbad-wui.service"
+        self.content = self.path.read_text()
+
+    def test_file_exists(self):
+        assert self.path.exists()
+
+    def test_has_all_sections(self):
+        for section in ("[Unit]", "[Service]", "[Install]"):
+            assert section in self.content
+
+    def test_requires_daemon(self):
+        assert "After=openbad.service" in self.content
+        assert "Requires=openbad.service" in self.content
+
+    def test_exec_start(self):
+        assert "openbad wui" in self.content
+
+    def test_security_hardening(self):
+        assert "NoNewPrivileges=true" in self.content
+        assert "ProtectSystem=strict" in self.content
+        assert "PrivateTmp=true" in self.content
 
     def test_wanted_by(self):
         assert "WantedBy=multi-user.target" in self.content
@@ -88,12 +122,43 @@ class TestInstallScript:
         assert "require_root" in self.content
         assert "EUID" in self.content
 
+    def test_has_usage_and_arg_parsing(self):
+        assert "usage()" in self.content
+        assert "parse_args" in self.content
+        assert "--bootstrap" in self.content
+        assert "--configure-wsl-systemd" in self.content
+        assert "--skip-services" in self.content
+        assert "--uninstall" in self.content
+
+    def test_bootstrap_support_present(self):
+        assert "bootstrap_os" in self.content
+        assert "install_prereqs_apt" in self.content
+        assert "python3-venv" in self.content
+
+    def test_systemd_detection_present(self):
+        assert "has_systemd" in self.content
+        assert "ensure_systemd_ready" in self.content
+        assert "systemd is required for full install" in self.content
+
+    def test_wsl_detection_present(self):
+        assert "is_wsl" in self.content
+        assert "WSL environment detected" in self.content
+        assert "configure_wsl_systemd" in self.content
+
+    def test_broker_fallback_support_present(self):
+        assert "select_broker_impl" in self.content
+        assert "install_broker_unit" in self.content
+        assert "mosquitto" in self.content
+
     def test_creates_user(self):
         assert "useradd" in self.content
         assert "openbad" in self.content
 
     def test_installs_package(self):
-        assert "pip" in self.content
+        assert "VENV_DIR" in self.content
+        assert "python3 -m venv" in self.content
+        assert "bin/python\" -m pip install" in self.content
+        assert "OPENBAD_BIN" in self.content
 
     def test_copies_configs(self):
         assert "CONFIG_DIR" in self.content
@@ -101,6 +166,7 @@ class TestInstallScript:
     def test_installs_systemd_units(self):
         assert "systemctl daemon-reload" in self.content
         assert "systemctl enable" in self.content
+        assert "openbad-wui.service" in self.content
 
     def test_has_uninstall(self):
         assert "--uninstall" in self.content

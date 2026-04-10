@@ -202,8 +202,8 @@ class TelemetryMonitor:
                 mem_snap = self._memory_collector()
                 cpu_msg = cpu_to_proto(cpu_snap)
                 mem_msg = memory_to_proto(mem_snap)
-                self._client.publish("agent/telemetry/cpu", cpu_msg.SerializeToString())
-                self._client.publish("agent/telemetry/memory", mem_msg.SerializeToString())
+                self._client.publish("agent/telemetry/cpu", cpu_msg)
+                self._client.publish("agent/telemetry/memory", mem_msg)
             except Exception:
                 logger.exception("Telemetry collection error")
             self._stop.wait(self._interval)

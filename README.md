@@ -31,3 +31,41 @@ Phase 1 (Nervous System, Interoception, Reflexes)
   │     └── Phase 4 (Memory) ────────── requires cognitive traces
   └── Phase 5 (Endocrine) ──────────── modulates all phases
 ```
+
+## Install and Setup (Linux/WSL)
+
+Use the installer as root:
+
+```bash
+sudo ./scripts/install.sh --bootstrap --configure-wsl-systemd
+```
+
+Notes:
+
+- `--bootstrap` installs Linux prerequisites (Ubuntu/Debian apt path) and broker deps.
+- Full install requires `systemd` (Linux + WSL).
+- In WSL, `--configure-wsl-systemd` writes `/etc/wsl.conf` and prompts for WSL restart.
+- Use `--skip-services` only for development mode.
+
+Validate setup/config:
+
+```bash
+openbad setup --check
+```
+
+Control the installed stack with:
+
+```bash
+openbad start
+openbad stop
+openbad restart
+openbad health
+openbad tui
+openbad version
+```
+
+Notes:
+
+- `openbad start` starts the broker, daemon, and web UI services and returns immediately.
+- `openbad health` reports systemd service state, MQTT reachability, and the WUI health endpoint.
+- `openbad tui` attaches a terminal UI to the running MQTT-backed stack.

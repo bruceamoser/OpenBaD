@@ -1,25 +1,21 @@
 [Unit]
-Description=OpenBaD Agent Daemon
+Description=OpenBaD Web UI
 Documentation=https://github.com/bruceamoser/OpenBaD
-After=openbad-broker.service network-online.target
+After=openbad.service network-online.target
 Wants=network-online.target
-Wants=openbad-broker.service
+Requires=openbad.service
 
 [Service]
 Type=simple
 User=openbad
 Group=openbad
-ExecStart=/usr/local/bin/openbad run --host localhost --port 1883
-ExecStop=/bin/kill -TERM $MAINPID
+ExecStart=/usr/local/bin/openbad wui --host 127.0.0.1 --port 9200 --mqtt-host localhost --mqtt-port 1883
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=30s
 
-# Environment
 Environment=OPENBAD_CONFIG_DIR=/etc/openbad
 WorkingDirectory=/var/lib/openbad
 
-# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -29,9 +25,8 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 
-# Resource limits
 LimitNOFILE=65536
-MemoryMax=512M
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target

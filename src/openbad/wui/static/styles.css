@@ -100,6 +100,37 @@ html, body {
 .row span { color: var(--muted); }
 .mono strong { font-family: "IBM Plex Mono", monospace; font-size: 0.92rem; }
 
+.hormone-row {
+  align-items: flex-start;
+  padding: 0.18rem 0;
+}
+
+.label-block {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.label-title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.label-note {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.hormone-row strong {
+  flex: 0 0 auto;
+  min-width: 3.4rem;
+  text-align: right;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.96rem;
+}
+
 .log {
   margin-top: 0.9rem;
   background: var(--card);

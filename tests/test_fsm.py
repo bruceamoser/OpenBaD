@@ -135,14 +135,9 @@ class TestPublishing:
         client_mock.publish.assert_called_once()
         topic, payload = client_mock.publish.call_args[0]
         assert topic == "agent/reflex/state"
-        # Deserialize and verify
-        from openbad.nervous_system.schemas.reflex_pb2 import ReflexState
-
-        msg = ReflexState()
-        msg.ParseFromString(payload)
-        assert msg.previous_state == "IDLE"
-        assert msg.current_state == "ACTIVE"
-        assert msg.trigger_event == "activate"
+        assert payload.previous_state == "IDLE"
+        assert payload.current_state == "ACTIVE"
+        assert payload.trigger_event == "activate"
 
     def test_no_publish_on_invalid_transition(self, fsm_with_client: AgentFSM, client_mock):
         fsm_with_client.fire("deactivate")
@@ -156,6 +151,7 @@ def _cortisol_critical() -> bytes:
     return EndocrineEvent(
         header=Header(timestamp_unix=1.0),
         hormone="cortisol",
+        level=1.0,
         severity=3,  # CRITICAL
     ).SerializeToString()
 
@@ -164,6 +160,7 @@ def _cortisol_warning() -> bytes:
     return EndocrineEvent(
         header=Header(timestamp_unix=1.0),
         hormone="cortisol",
+        level=1.0,
         severity=2,  # WARNING
     ).SerializeToString()
 
@@ -185,6 +182,24 @@ def _immune_info() -> bytes:
 
 
 class TestHandleEvent:
+    def test_zero_adrenaline_snapshot_does_not_trigger_emergency(self, fsm: AgentFSM):
+        payload = EndocrineEvent(
+            header=Header(timestamp_unix=1.0),
+            hormone="adrenaline",
+            level=0.0,
+        ).SerializeToString()
+        assert not fsm.handle_event("agent/endocrine/adrenaline", payload)
+        assert fsm.state == "IDLE"
+
+    def test_zero_endorphin_snapshot_does_not_trigger_sleep(self, fsm: AgentFSM):
+        payload = EndocrineEvent(
+            header=Header(timestamp_unix=1.0),
+            hormone="endorphin",
+            level=0.0,
+        ).SerializeToString()
+        assert not fsm.handle_event("agent/endocrine/endorphin", payload)
+        assert fsm.state == "IDLE"
+
     def test_cortisol_critical_throttles(self, fsm: AgentFSM):
         assert fsm.handle_event("agent/endocrine/cortisol", _cortisol_critical())
         assert fsm.state == "THROTTLED"
@@ -197,6 +212,7 @@ class TestHandleEvent:
         payload = EndocrineEvent(
             header=Header(timestamp_unix=1.0),
             hormone="adrenaline",
+            level=1.0,
         ).SerializeToString()
         assert fsm.handle_event("agent/endocrine/adrenaline", payload)
         assert fsm.state == "EMERGENCY"
@@ -205,6 +221,7 @@ class TestHandleEvent:
         payload = EndocrineEvent(
             header=Header(timestamp_unix=1.0),
             hormone="endorphin",
+            level=1.0,
         ).SerializeToString()
         assert fsm.handle_event("agent/endocrine/endorphin", payload)
         assert fsm.state == "SLEEP"
@@ -230,6 +247,10 @@ class TestSubscribeTriggers:
         fsm_with_client.subscribe_triggers()
         subscribed_topics = {c.args[0] for c in client_mock.subscribe.call_args_list}
         assert subscribed_topics == set(TOPIC_TRIGGER_MAP)
+        assert all(
+            c.args[2] == fsm_with_client.handle_event
+            for c in client_mock.subscribe.call_args_list
+        )
 
     def test_no_subscribe_without_client(self, fsm: AgentFSM):
         # Should not raise
