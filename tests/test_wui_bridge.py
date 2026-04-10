@@ -15,6 +15,7 @@ from openbad.wui.bridge import (
     _payload_to_jsonable,
 )
 
+
 class TestPayloadSerialization:
     def test_plain_payload_fallback(self):
         assert _payload_to_jsonable(123) == "123"
@@ -62,9 +63,25 @@ class TestConfigLoading:
         unhealthy.health_check.return_value.available = False
 
         providers = [
-            ProviderConfig(name="ollama", base_url="http://localhost:11434", model="llama3.2", enabled=True),
-            ProviderConfig(name="openai", base_url="https://api.openai.com/v1", model="gpt-4o-mini", api_key_env="OPENAI_API_KEY", enabled=True),
-            ProviderConfig(name="anthropic", base_url="https://api.anthropic.com", model="claude-sonnet-4-20250514", enabled=False),
+            ProviderConfig(
+                name="ollama",
+                base_url="http://localhost:11434",
+                model="llama3.2",
+                enabled=True,
+            ),
+            ProviderConfig(
+                name="openai",
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                api_key_env="OPENAI_API_KEY",
+                enabled=True,
+            ),
+            ProviderConfig(
+                name="anthropic",
+                base_url="https://api.anthropic.com",
+                model="claude-sonnet-4-20250514",
+                enabled=False,
+            ),
         ]
 
         with patch(
@@ -93,7 +110,10 @@ class TestBridgeLifecycle:
         mock_client = MagicMock()
         with patch("openbad.wui.bridge.NervousSystemClient") as cls:
             cls.get_instance.return_value = mock_client
-            with patch("openbad.wui.bridge._count_operational_providers", AsyncMock(return_value=0)):
+            with patch(
+                "openbad.wui.bridge._count_operational_providers",
+                AsyncMock(return_value=0),
+            ):
                 await bridge._on_startup(app)
 
         mock_client.connect.assert_called_once()
