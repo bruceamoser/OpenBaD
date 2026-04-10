@@ -88,6 +88,26 @@ class TestInstallScript:
         assert "require_root" in self.content
         assert "EUID" in self.content
 
+    def test_has_usage_and_arg_parsing(self):
+        assert "usage()" in self.content
+        assert "parse_args" in self.content
+        assert "--bootstrap" in self.content
+        assert "--skip-services" in self.content
+        assert "--uninstall" in self.content
+
+    def test_bootstrap_support_present(self):
+        assert "bootstrap_os" in self.content
+        assert "install_prereqs_apt" in self.content
+        assert "python3-venv" in self.content
+
+    def test_systemd_detection_present(self):
+        assert "has_systemd" in self.content
+        assert "systemd not detected" in self.content
+
+    def test_wsl_detection_present(self):
+        assert "is_wsl" in self.content
+        assert "WSL environment detected" in self.content
+
     def test_creates_user(self):
         assert "useradd" in self.content
         assert "openbad" in self.content

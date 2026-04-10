@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OpenBaD installation script
-# Usage: sudo ./install.sh [--uninstall]
+# Usage: sudo ./install.sh [--bootstrap] [--skip-services] [--uninstall]
 set -euo pipefail
 
 OPENBAD_USER="openbad"
@@ -13,6 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_SRC="$PROJECT_ROOT/config"
 
+DO_BOOTSTRAP=false
+SKIP_SERVICES=false
+DO_UNINSTALL=false
+
 # Colours (if terminal supports them)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -23,10 +27,93 @@ info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+usage() {
+    cat <<'EOF'
+OpenBaD installer
+
+Usage:
+  sudo ./install.sh [--bootstrap] [--skip-services]
+  sudo ./install.sh --uninstall
+
+Options:
+  --bootstrap      Install Linux prerequisites (Ubuntu/Debian apt path)
+  --skip-services  Do not install/enable/start systemd units
+  --uninstall      Remove OpenBaD package + units
+  --help           Show this help
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --bootstrap)
+                DO_BOOTSTRAP=true
+                ;;
+            --skip-services)
+                SKIP_SERVICES=true
+                ;;
+            --uninstall)
+                DO_UNINSTALL=true
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
 require_root() {
     if [[ $EUID -ne 0 ]]; then
         error "This script must be run as root (sudo)."
         exit 1
+    fi
+}
+
+is_linux() {
+    [[ "$(uname -s)" == "Linux" ]]
+}
+
+is_wsl() {
+    if [[ -f /proc/version ]] && grep -qi "microsoft" /proc/version; then
+        return 0
+    fi
+    return 1
+}
+
+has_systemd() {
+    [[ -d /run/systemd/system ]] && command -v systemctl &>/dev/null
+}
+
+install_prereqs_apt() {
+    info "Bootstrapping OS dependencies with apt..."
+    apt-get update
+    apt-get install -y ca-certificates curl python3 python3-pip python3-venv
+
+    # Some distros split venv by Python minor version.
+    if ! python3 -m venv --help &>/dev/null; then
+        py_minor="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+        apt-get install -y "python${py_minor}-venv"
+    fi
+}
+
+bootstrap_os() {
+    if ! is_linux; then
+        error "Bootstrap is supported on Linux only."
+        exit 1
+    fi
+
+    if command -v apt-get &>/dev/null; then
+        install_prereqs_apt
+    else
+        warn "No supported package manager detected for bootstrap."
+        warn "Install manually: python3, python3-pip, python3-venv"
     fi
 }
 
@@ -48,7 +135,10 @@ create_user() {
 # ------------------------------------------------------------------
 install_package() {
     info "Installing openbad Python package..."
-    if command -v pip3 &>/dev/null; then
+    if command -v python3 &>/dev/null; then
+        python3 -m pip install --upgrade pip
+        python3 -m pip install --upgrade "$PROJECT_ROOT"
+    elif command -v pip3 &>/dev/null; then
         pip3 install --upgrade "$PROJECT_ROOT"
     elif command -v pip &>/dev/null; then
         pip install --upgrade "$PROJECT_ROOT"
@@ -96,6 +186,16 @@ create_dirs() {
 # Install systemd units
 # ------------------------------------------------------------------
 install_units() {
+    if [[ "$SKIP_SERVICES" == "true" ]]; then
+        warn "Skipping service installation (--skip-services set)."
+        return
+    fi
+    if ! has_systemd; then
+        warn "systemd not detected; skipping unit install."
+        warn "Tip: on WSL enable systemd in /etc/wsl.conf then restart WSL."
+        return
+    fi
+
     info "Installing systemd units..."
     for unit in openbad-broker.service openbad.service; do
         src="$CONFIG_SRC/$unit"
@@ -117,6 +217,15 @@ install_units() {
 # Start services
 # ------------------------------------------------------------------
 start_services() {
+    if [[ "$SKIP_SERVICES" == "true" ]]; then
+        warn "Skipping service start (--skip-services set)."
+        return
+    fi
+    if ! has_systemd; then
+        warn "systemd not detected; skipping service start."
+        return
+    fi
+
     info "Starting services..."
     systemctl start openbad-broker.service
     systemctl start openbad.service
@@ -127,19 +236,29 @@ start_services() {
 # Uninstall
 # ------------------------------------------------------------------
 uninstall() {
-    info "Stopping services..."
-    systemctl stop openbad.service 2>/dev/null || true
-    systemctl stop openbad-broker.service 2>/dev/null || true
-    systemctl disable openbad.service 2>/dev/null || true
-    systemctl disable openbad-broker.service 2>/dev/null || true
+    if has_systemd; then
+        info "Stopping services..."
+        systemctl stop openbad.service 2>/dev/null || true
+        systemctl stop openbad-broker.service 2>/dev/null || true
+        systemctl disable openbad.service 2>/dev/null || true
+        systemctl disable openbad-broker.service 2>/dev/null || true
+    else
+        warn "systemd not detected; skipping service stop/disable."
+    fi
 
     info "Removing systemd units..."
     rm -f "$SYSTEMD_DIR/openbad.service"
     rm -f "$SYSTEMD_DIR/openbad-broker.service"
-    systemctl daemon-reload
+    if has_systemd; then
+        systemctl daemon-reload
+    fi
 
     info "Removing Python package..."
-    pip3 uninstall -y openbad 2>/dev/null || true
+    if command -v python3 &>/dev/null; then
+        python3 -m pip uninstall -y openbad 2>/dev/null || true
+    else
+        pip3 uninstall -y openbad 2>/dev/null || true
+    fi
 
     warn "Config ($CONFIG_DIR) and data ($DATA_DIR) directories preserved."
     warn "To fully remove: rm -rf $CONFIG_DIR $DATA_DIR $LOG_DIR"
@@ -151,11 +270,25 @@ uninstall() {
 # Main
 # ------------------------------------------------------------------
 main() {
+    parse_args "$@"
     require_root
 
-    if [[ "${1:-}" == "--uninstall" ]]; then
+    if [[ "$DO_UNINSTALL" == "true" ]]; then
         uninstall
         exit 0
+    fi
+
+    if ! is_linux; then
+        error "OpenBaD installer currently supports Linux/WSL hosts only."
+        exit 1
+    fi
+
+    if is_wsl; then
+        info "WSL environment detected."
+    fi
+
+    if [[ "$DO_BOOTSTRAP" == "true" ]]; then
+        bootstrap_os
     fi
 
     info "=== OpenBaD Installation ==="

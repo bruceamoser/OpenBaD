@@ -31,3 +31,23 @@ Phase 1 (Nervous System, Interoception, Reflexes)
   │     └── Phase 4 (Memory) ────────── requires cognitive traces
   └── Phase 5 (Endocrine) ──────────── modulates all phases
 ```
+
+## Install and Setup (Linux/WSL)
+
+Use the installer as root:
+
+```bash
+sudo ./scripts/install.sh --bootstrap
+```
+
+Notes:
+
+- `--bootstrap` installs Linux prerequisites (Ubuntu/Debian apt path).
+- On systems without systemd (some WSL setups), services are skipped automatically.
+- You can force no service operations with `--skip-services`.
+
+Validate setup/config:
+
+```bash
+openbad setup --check
+```
