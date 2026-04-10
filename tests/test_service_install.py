@@ -31,6 +31,10 @@ class TestOpenbadServiceFile:
     def test_after_broker(self):
         assert "openbad-broker.service" in self.content
 
+    def test_broker_is_optional(self):
+        assert "Wants=openbad-broker.service" in self.content
+        assert "Requires=openbad-broker.service" not in self.content
+
     def test_exec_start(self):
         match = re.search(r"ExecStart=.*openbad run", self.content)
         assert match is not None
@@ -45,6 +49,36 @@ class TestOpenbadServiceFile:
 
     def test_user_set(self):
         assert "User=openbad" in self.content
+
+    def test_wanted_by(self):
+        assert "WantedBy=multi-user.target" in self.content
+
+
+class TestOpenbadWuiServiceFile:
+    """Validate config/openbad-wui.service syntax."""
+
+    def setup_method(self):
+        self.path = CONFIG_DIR / "openbad-wui.service"
+        self.content = self.path.read_text()
+
+    def test_file_exists(self):
+        assert self.path.exists()
+
+    def test_has_all_sections(self):
+        for section in ("[Unit]", "[Service]", "[Install]"):
+            assert section in self.content
+
+    def test_requires_daemon(self):
+        assert "After=openbad.service" in self.content
+        assert "Requires=openbad.service" in self.content
+
+    def test_exec_start(self):
+        assert "openbad wui" in self.content
+
+    def test_security_hardening(self):
+        assert "NoNewPrivileges=true" in self.content
+        assert "ProtectSystem=strict" in self.content
+        assert "PrivateTmp=true" in self.content
 
     def test_wanted_by(self):
         assert "WantedBy=multi-user.target" in self.content
@@ -132,6 +166,7 @@ class TestInstallScript:
     def test_installs_systemd_units(self):
         assert "systemctl daemon-reload" in self.content
         assert "systemctl enable" in self.content
+        assert "openbad-wui.service" in self.content
 
     def test_has_uninstall(self):
         assert "--uninstall" in self.content

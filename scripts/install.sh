@@ -327,10 +327,18 @@ install_units() {
         warn "  openbad.service not found in $CONFIG_SRC"
     fi
 
+    if [ -f "$CONFIG_SRC/openbad-wui.service" ]; then
+        cp "$CONFIG_SRC/openbad-wui.service" "$SYSTEMD_DIR/openbad-wui.service"
+        info "  Installed openbad-wui.service"
+    else
+        warn "  openbad-wui.service not found in $CONFIG_SRC"
+    fi
+
     systemctl daemon-reload
     info "Enabling services..."
     systemctl enable openbad-broker.service
     systemctl enable openbad.service
+    systemctl enable openbad-wui.service
 }
 
 # ------------------------------------------------------------------
@@ -346,6 +354,7 @@ start_services() {
     info "Starting services..."
     systemctl start openbad-broker.service
     systemctl start openbad.service
+    systemctl start openbad-wui.service
     info "Services started. Check status with: systemctl status openbad"
 }
 
@@ -355,8 +364,10 @@ start_services() {
 uninstall() {
     if has_systemd; then
         info "Stopping services..."
+        systemctl stop openbad-wui.service 2>/dev/null || true
         systemctl stop openbad.service 2>/dev/null || true
         systemctl stop openbad-broker.service 2>/dev/null || true
+        systemctl disable openbad-wui.service 2>/dev/null || true
         systemctl disable openbad.service 2>/dev/null || true
         systemctl disable openbad-broker.service 2>/dev/null || true
     else
@@ -364,6 +375,7 @@ uninstall() {
     fi
 
     info "Removing systemd units..."
+    rm -f "$SYSTEMD_DIR/openbad-wui.service"
     rm -f "$SYSTEMD_DIR/openbad.service"
     rm -f "$SYSTEMD_DIR/openbad-broker.service"
     if has_systemd; then

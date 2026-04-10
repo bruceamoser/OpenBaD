@@ -11,6 +11,7 @@ dist/
 
 # Virtual environments
 .venv/
+.venv-wsl/
 venv/
 env/
 

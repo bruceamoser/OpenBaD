@@ -66,6 +66,8 @@ _DEFAULT_QOS = 1
 _RETAIN_RULES: list[re.Pattern[str]] = [
     re.compile(r"^agent/reflex/state$"),
     re.compile(r"^agent/telemetry/"),
+    re.compile(r"^agent/endocrine/"),
+    re.compile(r"^agent/cognitive/health$"),
 ]
 
 

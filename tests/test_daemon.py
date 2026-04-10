@@ -121,3 +121,24 @@ class TestDaemonSubsystems:
         assert state.dopamine == 0.0
         await d.stop()
         await task
+
+    async def test_start_publishes_initial_dashboard_topics(self, mock_client):
+        d = Daemon()
+        task = asyncio.create_task(d.start())
+        await asyncio.sleep(0.1)
+
+        published_topics = [call.args[0] for call in mock_client.publish.call_args_list]
+        assert "agent/reflex/state" in published_topics
+        assert "agent/endocrine/dopamine" in published_topics
+        assert "agent/endocrine/adrenaline" in published_topics
+        assert "agent/endocrine/cortisol" in published_topics
+        assert "agent/endocrine/endorphin" in published_topics
+        assert "agent/telemetry/cpu" in published_topics
+        assert "agent/telemetry/memory" in published_topics
+        assert "agent/telemetry/disk" in published_topics
+        assert "agent/telemetry/network" in published_topics
+        assert "agent/telemetry/tokens" in published_topics
+        assert "agent/cognitive/health" in published_topics
+
+        await d.stop()
+        await task

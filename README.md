@@ -52,3 +52,20 @@ Validate setup/config:
 ```bash
 openbad setup --check
 ```
+
+Control the installed stack with:
+
+```bash
+openbad start
+openbad stop
+openbad restart
+openbad health
+openbad tui
+openbad version
+```
+
+Notes:
+
+- `openbad start` starts the broker, daemon, and web UI services and returns immediately.
+- `openbad health` reports systemd service state, MQTT reachability, and the WUI health endpoint.
+- `openbad tui` attaches a terminal UI to the running MQTT-backed stack.

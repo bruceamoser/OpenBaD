@@ -80,10 +80,13 @@ class TestShouldRetain:
         "topic",
         [
             "agent/reflex/state",
+            "agent/endocrine/dopamine",
+            "agent/endocrine/cortisol",
             "agent/telemetry/cpu",
             "agent/telemetry/memory",
             "agent/telemetry/disk",
             "agent/telemetry/tokens",
+            "agent/cognitive/health",
         ],
     )
     def test_state_topics_are_retained(self, topic: str):
@@ -94,8 +97,8 @@ class TestShouldRetain:
         [
             "agent/reflex/thermal/trigger",
             "agent/cognitive/escalation",
+            "agent/cognitive/response",
             "agent/immune/alert",
-            "agent/endocrine/cortisol",
             "agent/memory/stm/write",
             "agent/proprioception/tool-a/heartbeat",
         ],

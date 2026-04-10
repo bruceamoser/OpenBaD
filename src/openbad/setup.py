@@ -32,7 +32,11 @@ CONFIG_FILES = [
     "threshold_policies.yaml",
 ]
 
-SYSTEMD_UNITS = ["openbad-broker.service", "openbad.service"]
+SYSTEMD_UNITS = [
+    "openbad-broker.service",
+    "openbad.service",
+    "openbad-wui.service",
+]
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "openbad"
 

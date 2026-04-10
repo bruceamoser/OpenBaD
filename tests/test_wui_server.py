@@ -43,6 +43,18 @@ async def test_ws_health_route(aiohttp_client):
     data = await resp.json()
     assert "ok" in data
     assert "clients" in data
+    assert "websocket_clients" in data
+    assert "event_stream_clients" in data
+
+
+@pytest.mark.asyncio
+async def test_event_stream_route(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/events")
+    assert resp.status == 200
+    first_line = await resp.content.readline()
+    assert first_line.startswith(b"data: ")
 
 
 def test_create_app_attaches_bridge():
