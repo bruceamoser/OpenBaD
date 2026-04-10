@@ -123,15 +123,29 @@ class SemanticMemory(MemoryStore):
         self,
         query_text: str,
         top_k: int = 5,
+        tags: list[str] | None = None,
+        tag_boost: float = 0.1,
     ) -> list[tuple[MemoryEntry, float]]:
         """Find entries most similar to query_text.
+
+        When *tags* are provided, entries whose ``metadata["tags"]`` overlap
+        with the query tags receive a bonus of *tag_boost* per matching tag
+        (capped so the final score never exceeds 1.0).
 
         Returns list of (entry, similarity_score) sorted by descending score.
         """
         query_vec = self._embed_fn(query_text)
+        tag_set = set(t.lower() for t in tags) if tags else set()
         scored: list[tuple[str, float]] = []
         for key, vec in self._vectors.items():
             sim = cosine_similarity(query_vec, vec)
+            if tag_set:
+                entry_tags = {
+                    t.lower()
+                    for t in self._entries[key].metadata.get("tags", [])
+                }
+                overlap = len(tag_set & entry_tags)
+                sim = min(1.0, sim + overlap * tag_boost)
             if sim >= self._similarity_threshold:
                 scored.append((key, sim))
         scored.sort(key=lambda x: x[1], reverse=True)
