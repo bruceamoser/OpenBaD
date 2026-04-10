@@ -27,12 +27,16 @@ dependencies = [
 openbad = "openbad.cli:main"
 
 [project.optional-dependencies]
+tui = [
+    "textual>=0.80",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-aiohttp>=1.0",
     "ruff>=0.8",
     "grpcio-tools>=1.60",
+    "textual-dev>=1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
