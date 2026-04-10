@@ -1,0 +1,1 @@
+"""OpenBaD Terminal UI package."""

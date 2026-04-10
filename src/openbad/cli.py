@@ -101,9 +101,17 @@ def setup(
 
 
 @main.command()
-def tui() -> None:
+@click.option("--host", default="localhost", help="MQTT broker host.")
+@click.option("--port", default=1883, type=int, help="MQTT broker port.")
+def tui(host: str, port: int) -> None:
     """Launch the terminal UI."""
-    click.echo("TUI not yet implemented. See issue #180.")
+    try:
+        from openbad.tui.app import OpenBaDApp
+    except ImportError:
+        click.echo("TUI requires the 'tui' extra: pip install openbad[tui]", err=True)
+        sys.exit(1)
+    app = OpenBaDApp(mqtt_host=host, mqtt_port=port)
+    app.run()
 
 
 def _configure_logging(verbose: bool) -> None:
