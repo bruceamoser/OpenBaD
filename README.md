@@ -37,14 +37,15 @@ Phase 1 (Nervous System, Interoception, Reflexes)
 Use the installer as root:
 
 ```bash
-sudo ./scripts/install.sh --bootstrap
+sudo ./scripts/install.sh --bootstrap --configure-wsl-systemd
 ```
 
 Notes:
 
-- `--bootstrap` installs Linux prerequisites (Ubuntu/Debian apt path).
-- On systems without systemd (some WSL setups), services are skipped automatically.
-- You can force no service operations with `--skip-services`.
+- `--bootstrap` installs Linux prerequisites (Ubuntu/Debian apt path) and broker deps.
+- Full install requires `systemd` (Linux + WSL).
+- In WSL, `--configure-wsl-systemd` writes `/etc/wsl.conf` and prompts for WSL restart.
+- Use `--skip-services` only for development mode.
 
 Validate setup/config:
 

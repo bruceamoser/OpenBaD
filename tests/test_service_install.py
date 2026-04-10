@@ -92,6 +92,7 @@ class TestInstallScript:
         assert "usage()" in self.content
         assert "parse_args" in self.content
         assert "--bootstrap" in self.content
+        assert "--configure-wsl-systemd" in self.content
         assert "--skip-services" in self.content
         assert "--uninstall" in self.content
 
@@ -102,11 +103,18 @@ class TestInstallScript:
 
     def test_systemd_detection_present(self):
         assert "has_systemd" in self.content
-        assert "systemd not detected" in self.content
+        assert "ensure_systemd_ready" in self.content
+        assert "systemd is required for full install" in self.content
 
     def test_wsl_detection_present(self):
         assert "is_wsl" in self.content
         assert "WSL environment detected" in self.content
+        assert "configure_wsl_systemd" in self.content
+
+    def test_broker_fallback_support_present(self):
+        assert "select_broker_impl" in self.content
+        assert "install_broker_unit" in self.content
+        assert "mosquitto" in self.content
 
     def test_creates_user(self):
         assert "useradd" in self.content

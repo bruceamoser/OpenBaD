@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OpenBaD installation script
-# Usage: sudo ./install.sh [--bootstrap] [--skip-services] [--uninstall]
+# Usage: sudo ./install.sh [--bootstrap] [--configure-wsl-systemd] [--skip-services] [--uninstall]
 set -euo pipefail
 
 OPENBAD_USER="openbad"
@@ -16,6 +16,8 @@ CONFIG_SRC="$PROJECT_ROOT/config"
 DO_BOOTSTRAP=false
 SKIP_SERVICES=false
 DO_UNINSTALL=false
+CONFIGURE_WSL_SYSTEMD=false
+BROKER_IMPL=""
 
 # Colours (if terminal supports them)
 RED='\033[0;31m'
@@ -32,11 +34,12 @@ usage() {
 OpenBaD installer
 
 Usage:
-  sudo ./install.sh [--bootstrap] [--skip-services]
+    sudo ./install.sh [--bootstrap] [--configure-wsl-systemd] [--skip-services]
   sudo ./install.sh --uninstall
 
 Options:
   --bootstrap      Install Linux prerequisites (Ubuntu/Debian apt path)
+    --configure-wsl-systemd  Configure /etc/wsl.conf with systemd=true (requires WSL restart)
   --skip-services  Do not install/enable/start systemd units
   --uninstall      Remove OpenBaD package + units
   --help           Show this help
@@ -51,6 +54,9 @@ parse_args() {
                 ;;
             --skip-services)
                 SKIP_SERVICES=true
+                ;;
+            --configure-wsl-systemd)
+                CONFIGURE_WSL_SYSTEMD=true
                 ;;
             --uninstall)
                 DO_UNINSTALL=true
@@ -91,6 +97,58 @@ has_systemd() {
     [[ -d /run/systemd/system ]] && command -v systemctl &>/dev/null
 }
 
+configure_wsl_systemd() {
+    if ! is_wsl; then
+        warn "--configure-wsl-systemd ignored (not running inside WSL)."
+        return
+    fi
+
+    local wsl_conf="/etc/wsl.conf"
+    info "Configuring WSL systemd support in $wsl_conf ..."
+
+    if [[ -f "$wsl_conf" ]] && grep -Eq '^\s*systemd\s*=\s*true\s*$' "$wsl_conf"; then
+        info "systemd=true already present in $wsl_conf"
+        return
+    fi
+
+    if [[ -f "$wsl_conf" ]] && grep -Eq '^\s*\[boot\]\s*$' "$wsl_conf"; then
+        {
+            echo
+            echo "# Added by OpenBaD installer"
+            echo "systemd=true"
+        } >> "$wsl_conf"
+    else
+        {
+            echo "[boot]"
+            echo "systemd=true"
+        } >> "$wsl_conf"
+    fi
+
+    warn "WSL restart required: run 'wsl.exe --shutdown' from Windows, then reopen WSL and rerun installer."
+}
+
+ensure_systemd_ready() {
+    if [[ "$SKIP_SERVICES" == "true" ]]; then
+        return
+    fi
+
+    if has_systemd; then
+        return
+    fi
+
+    if is_wsl; then
+        if [[ "$CONFIGURE_WSL_SYSTEMD" == "true" ]]; then
+            configure_wsl_systemd
+        fi
+        error "systemd is required for full install. Enable systemd in WSL and retry, or pass --skip-services for dev-only mode."
+        exit 1
+    fi
+
+    error "systemd is required for full install on Linux."
+    error "Use --skip-services only for development mode."
+    exit 1
+}
+
 install_prereqs_apt() {
     info "Bootstrapping OS dependencies with apt..."
     apt-get update
@@ -100,6 +158,14 @@ install_prereqs_apt() {
     if ! python3 -m venv --help &>/dev/null; then
         py_minor="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
         apt-get install -y "python${py_minor}-venv"
+    fi
+
+    # MQTT broker: prefer NanoMQ, fallback to Mosquitto.
+    if ! command -v nanomq &>/dev/null && ! command -v mosquitto &>/dev/null; then
+        apt-get install -y nanomq || true
+        if ! command -v nanomq &>/dev/null; then
+            apt-get install -y mosquitto
+        fi
     fi
 }
 
@@ -115,6 +181,54 @@ bootstrap_os() {
         warn "No supported package manager detected for bootstrap."
         warn "Install manually: python3, python3-pip, python3-venv"
     fi
+}
+
+select_broker_impl() {
+    if command -v nanomq &>/dev/null; then
+        BROKER_IMPL="nanomq"
+        info "Broker selected: NanoMQ"
+        return
+    fi
+
+    if command -v mosquitto &>/dev/null; then
+        BROKER_IMPL="mosquitto"
+        warn "NanoMQ not found. Falling back to Mosquitto broker service."
+        return
+    fi
+
+    error "No MQTT broker found (nanomq/mosquitto)."
+    error "Run with --bootstrap or install a broker manually."
+    exit 1
+}
+
+install_broker_unit() {
+    local dst="$SYSTEMD_DIR/openbad-broker.service"
+
+    if [[ "$BROKER_IMPL" == "nanomq" ]]; then
+        cp "$CONFIG_SRC/openbad-broker.service" "$dst"
+        info "  Installed openbad-broker.service (NanoMQ)"
+        return
+    fi
+
+    # Mosquitto fallback unit.
+    local mosquitto_bin
+    mosquitto_bin="$(command -v mosquitto)"
+    cat > "$dst" <<EOF
+[Unit]
+Description=OpenBaD MQTT Broker (Mosquitto fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${mosquitto_bin} -p 1883
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    info "  Installed openbad-broker.service (Mosquitto fallback)"
 }
 
 # ------------------------------------------------------------------
@@ -190,22 +304,17 @@ install_units() {
         warn "Skipping service installation (--skip-services set)."
         return
     fi
-    if ! has_systemd; then
-        warn "systemd not detected; skipping unit install."
-        warn "Tip: on WSL enable systemd in /etc/wsl.conf then restart WSL."
-        return
-    fi
+    ensure_systemd_ready
 
     info "Installing systemd units..."
-    for unit in openbad-broker.service openbad.service; do
-        src="$CONFIG_SRC/$unit"
-        if [ -f "$src" ]; then
-            cp "$src" "$SYSTEMD_DIR/$unit"
-            info "  Installed $unit"
-        else
-            warn "  $unit not found in $CONFIG_SRC"
-        fi
-    done
+    install_broker_unit
+
+    if [ -f "$CONFIG_SRC/openbad.service" ]; then
+        cp "$CONFIG_SRC/openbad.service" "$SYSTEMD_DIR/openbad.service"
+        info "  Installed openbad.service"
+    else
+        warn "  openbad.service not found in $CONFIG_SRC"
+    fi
 
     systemctl daemon-reload
     info "Enabling services..."
@@ -221,10 +330,7 @@ start_services() {
         warn "Skipping service start (--skip-services set)."
         return
     fi
-    if ! has_systemd; then
-        warn "systemd not detected; skipping service start."
-        return
-    fi
+    ensure_systemd_ready
 
     info "Starting services..."
     systemctl start openbad-broker.service
@@ -289,6 +395,11 @@ main() {
 
     if [[ "$DO_BOOTSTRAP" == "true" ]]; then
         bootstrap_os
+    fi
+
+    if [[ "$SKIP_SERVICES" != "true" ]]; then
+        select_broker_impl
+        ensure_systemd_ready
     fi
 
     info "=== OpenBaD Installation ==="
