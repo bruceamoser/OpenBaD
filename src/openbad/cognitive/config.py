@@ -3,9 +3,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 import yaml
+
+
+class CognitiveSystem(StrEnum):
+    """Named cognitive systems that receive explicit provider assignments."""
+
+    CHAT = "chat"
+    SLEEP = "sleep"
+    REASONING = "reasoning"
+    REACTIONS = "reactions"
+
+
+@dataclass(frozen=True)
+class SystemAssignment:
+    """Provider/model pair assigned to a cognitive system."""
+
+    provider: str = ""
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class FallbackCortisolConfig:
+    """Fallback stress-release and escalation thresholds."""
+
+    release_per_step: float = 0.1
+    escalation_after: int = 5
 
 
 @dataclass(frozen=True)
@@ -54,6 +80,15 @@ class CognitiveConfig:
     )
     default_provider: str = "ollama"
     enabled: bool = True
+    systems: dict[CognitiveSystem, SystemAssignment] = field(
+        default_factory=lambda: {
+            system: SystemAssignment() for system in CognitiveSystem
+        }
+    )
+    default_fallback_chain: tuple[SystemAssignment, ...] = field(default_factory=tuple)
+    fallback_cortisol: FallbackCortisolConfig = field(
+        default_factory=FallbackCortisolConfig
+    )
 
 
 def load_cognitive_config(
@@ -80,10 +115,42 @@ def load_cognitive_config(
         ReasoningDefaults(**reasoning_data) if reasoning_data else ReasoningDefaults()
     )
 
+    systems = {system: SystemAssignment() for system in CognitiveSystem}
+    for system_name, assignment in cog.get("systems", {}).items():
+        try:
+            system = CognitiveSystem(str(system_name).strip().lower())
+        except ValueError:
+            continue
+        if not isinstance(assignment, dict):
+            continue
+        systems[system] = SystemAssignment(
+            provider=str(assignment.get("provider", "")).strip(),
+            model=str(assignment.get("model", "")).strip(),
+        )
+
+    fallback_chain = tuple(
+        SystemAssignment(
+            provider=str(step.get("provider", "")).strip(),
+            model=str(step.get("model", "")).strip(),
+        )
+        for step in cog.get("default_fallback_chain", [])
+        if isinstance(step, dict)
+    )
+
+    fallback_cortisol_data = cog.get("fallback_cortisol", {})
+    fallback_cortisol = (
+        FallbackCortisolConfig(**fallback_cortisol_data)
+        if fallback_cortisol_data
+        else FallbackCortisolConfig()
+    )
+
     return CognitiveConfig(
         providers=providers,
         context_budget=budget,
         reasoning=reasoning,
         default_provider=cog.get("default_provider", "ollama"),
         enabled=cog.get("enabled", True),
+        systems=systems,
+        default_fallback_chain=fallback_chain,
+        fallback_cortisol=fallback_cortisol,
     )

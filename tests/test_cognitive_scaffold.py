@@ -8,9 +8,12 @@ import pytest
 
 from openbad.cognitive.config import (
     CognitiveConfig,
+    CognitiveSystem,
     ContextBudgetConfig,
+    FallbackCortisolConfig,
     ProviderConfig,
     ReasoningDefaults,
+    SystemAssignment,
     load_cognitive_config,
 )
 from openbad.nervous_system import topics
@@ -56,6 +59,8 @@ class TestCognitiveConfig:
         assert cc.default_provider == "ollama"
         assert cc.enabled is True
         assert cc.providers == []
+        assert cc.systems[CognitiveSystem.CHAT] == SystemAssignment()
+        assert cc.fallback_cortisol == FallbackCortisolConfig()
 
     def test_frozen(self) -> None:
         cc = CognitiveConfig()
@@ -86,6 +91,21 @@ class TestLoadCognitiveConfig:
                   model: "llama3.2"
                   timeout_ms: 5000
                   enabled: true
+              systems:
+                chat:
+                  provider: openai
+                  model: gpt-4o-mini
+                reasoning:
+                  provider: anthropic
+                  model: claude-sonnet-4-20250514
+              default_fallback_chain:
+                - provider: ollama
+                  model: llama3.2
+                - provider: openai
+                  model: gpt-4o-mini
+              fallback_cortisol:
+                release_per_step: 0.25
+                escalation_after: 3
               context_budget:
                 slm_max_tokens: 4096
                 llm_max_tokens: 16384
@@ -104,6 +124,20 @@ class TestLoadCognitiveConfig:
         assert len(config.providers) == 1
         assert config.providers[0].name == "ollama"
         assert config.providers[0].timeout_ms == 5000
+        assert config.systems[CognitiveSystem.CHAT] == SystemAssignment(
+            provider="openai", model="gpt-4o-mini"
+        )
+        assert config.systems[CognitiveSystem.REASONING] == SystemAssignment(
+            provider="anthropic", model="claude-sonnet-4-20250514"
+        )
+        assert config.default_fallback_chain == (
+            SystemAssignment(provider="ollama", model="llama3.2"),
+            SystemAssignment(provider="openai", model="gpt-4o-mini"),
+        )
+        assert config.fallback_cortisol == FallbackCortisolConfig(
+            release_per_step=0.25,
+            escalation_after=3,
+        )
         assert config.context_budget.slm_max_tokens == 4096
         assert config.context_budget.llm_max_tokens == 16384
         assert config.reasoning.default_max_tokens == 1024
