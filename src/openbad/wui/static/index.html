@@ -21,7 +21,7 @@
       <nav class="nav-links" aria-label="Primary navigation">
         <button type="button" class="nav-link active" data-view-target="health">Health</button>
         <button type="button" class="nav-link" data-view-target="chat">Chat</button>
-        <button type="button" class="nav-link" data-view-target="wiring">Wiring</button>
+        <button type="button" class="nav-link" data-view-target="providers">Providers</button>
         <button type="button" class="nav-link" data-view-target="models">Models <span class="nav-chip">next</span></button>
       </nav>
       <div class="nav-status">
@@ -68,7 +68,7 @@
             </div>
           </article>
 
-          <article class="card section-card wiring-controls-card">
+          <article class="card section-card providers-controls-card">
             <div class="section-head">
               <h3>Hormonal State</h3>
               <span class="section-note">Live endocrine levels</span>
@@ -140,8 +140,8 @@
               <span class="section-note">Operator conversation surface</span>
             </div>
             <div class="chat-thread">
-              <div class="chat-bubble system">Chat surface is staged. Health and wiring are live now; model interaction hooks come next.</div>
-              <div class="chat-bubble user">Use the left rail to move between runtime health and provider wiring.</div>
+              <div class="chat-bubble system">Chat surface is staged. Health and provider controls are live now; model interaction hooks come next.</div>
+              <div class="chat-bubble user">Use the left rail to move between runtime health and providers.</div>
             </div>
             <form class="chat-composer" id="chat-form">
               <label class="sr-only" for="chat-input">Chat input</label>
@@ -152,26 +152,26 @@
         </div>
       </section>
 
-      <section id="view-wiring" class="view-panel reveal hidden" data-view="wiring">
-        <div class="panel-grid wiring-layout">
-          <article class="card section-card wiring-controls-card">
+      <section id="view-providers" class="view-panel reveal hidden" data-view="providers">
+        <div class="panel-grid providers-layout">
+          <article class="card section-card providers-controls-card">
             <div class="section-head">
-              <h3>Provider Wiring</h3>
-              <span id="wiring-config-path" class="section-note mono">Loading config...</span>
+              <h3>Providers</h3>
+              <span id="providers-config-path" class="section-note mono">Loading config...</span>
             </div>
-            <div class="wiring-toolbar">
+            <div class="providers-toolbar">
               <label for="default-provider">Default provider</label>
               <select id="default-provider"></select>
               <label class="toggle-row">
-                <input id="wiring-enabled" type="checkbox" checked>
+                <input id="providers-enabled" type="checkbox" checked>
                 <span>Cognitive engine enabled</span>
               </label>
               <button id="add-provider" type="button" class="secondary-button">Add provider</button>
             </div>
-            <p id="wiring-status" class="inline-status">Provider wiring has not been loaded yet.</p>
+            <p id="providers-status" class="inline-status">Providers have not been loaded yet.</p>
           </article>
 
-          <article class="card section-card wiring-providers-card">
+          <article class="card section-card providers-providers-card">
             <div class="section-head">
               <h3>Providers</h3>
               <span class="section-note">Verified providers available to the runtime</span>
@@ -257,7 +257,7 @@
               <h3>Model Surface</h3>
               <span class="section-note">Reserved for the next pass</span>
             </div>
-            <p>This slot is reserved for the dedicated model surface. Health, chat navigation, and wiring are in place now.</p>
+            <p>This slot is reserved for the dedicated model surface. Health, chat navigation, and providers are in place now.</p>
           </article>
         </div>
       </section>

@@ -94,7 +94,7 @@ class TestDaemonStartStop:
 
 
 class TestDaemonSubsystems:
-    """Subsystem wiring."""
+    """Subsystem provider composition."""
 
     @pytest.fixture
     def mock_client(self):

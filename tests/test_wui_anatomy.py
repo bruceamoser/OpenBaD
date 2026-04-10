@@ -10,21 +10,21 @@ def test_index_contains_left_nav_shell():
     assert "side-nav" in html
     assert 'data-view-target="health"' in html
     assert 'data-view-target="chat"' in html
-    assert 'data-view-target="wiring"' in html
+    assert 'data-view-target="providers"' in html
     assert 'data-view-target="models"' in html
 
 
-def test_js_contains_view_and_wiring_logic():
+def test_js_contains_view_and_provider_logic():
     js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert "function setView" in js
-    assert "loadWiringConfig" in js
+    assert "loadProvidersConfig" in js
     assert "verifyWizardProvider" in js
     assert "saveWizardProvider" in js
-    assert "/api/wiring/providers" in js
-    assert "/api/wiring/providers/verify" in js
+    assert "/api/providers" in js
+    assert "/api/providers/verify" in js
 
 
-def test_css_contains_nav_and_wiring_styles():
+def test_css_contains_nav_and_provider_styles():
     css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
     assert ".side-nav" in css
     assert ".provider-card" in css
@@ -34,7 +34,7 @@ def test_css_contains_nav_and_wiring_styles():
 def test_index_uses_neutral_health_placeholder():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="i-health">--<' in html
-    assert 'id="wiring-config-path"' in html
+    assert 'id="providers-config-path"' in html
     assert 'id="provider-wizard"' in html
     assert 'id="copilot-user-code"' in html
     assert 'id="copilot-start-auth"' in html
