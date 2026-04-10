@@ -1,0 +1,25 @@
+endocrine:
+  publish_interval_seconds: 10.0
+  significant_change_delta: 0.1
+
+  dopamine:
+    increment: 0.15
+    activation_threshold: 0.50
+    half_life_seconds: 300.0
+
+  adrenaline:
+    increment: 0.25
+    activation_threshold: 0.60
+    escalation_threshold: 0.85
+    half_life_seconds: 60.0
+
+  cortisol:
+    increment: 0.15
+    activation_threshold: 0.50
+    escalation_threshold: 0.80
+    half_life_seconds: 900.0
+
+  endorphin:
+    increment: 0.15
+    activation_threshold: 0.40
+    half_life_seconds: 600.0

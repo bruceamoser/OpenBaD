@@ -85,7 +85,10 @@ IMMUNE_ALL = "agent/immune/+"
 ENDOCRINE = "agent/endocrine/{hormone}"
 ENDOCRINE_CORTISOL = "agent/endocrine/cortisol"
 ENDOCRINE_ADRENALINE = "agent/endocrine/adrenaline"
+ENDOCRINE_DOPAMINE = "agent/endocrine/dopamine"
 ENDOCRINE_ENDORPHIN = "agent/endocrine/endorphin"
+ENDOCRINE_STATE = "agent/endocrine/state"
+ENDOCRINE_TELEMETRY = "agent/endocrine/telemetry"
 
 # Wildcard: all endocrine events
 ENDOCRINE_ALL = "agent/endocrine/+"
@@ -98,6 +101,16 @@ MEMORY_LTM_CONSOLIDATE = "agent/memory/ltm/consolidate"
 
 # Wildcard: all memory events
 MEMORY_ALL = "agent/memory/#"
+
+# ---------------------------------------------------------------------------
+# Active inference (exploration / surprise)
+# ---------------------------------------------------------------------------
+INFERENCE_SURPRISE = "agent/inference/surprise"
+INFERENCE_EXPLORATION = "agent/inference/exploration"
+INFERENCE_TAKEAWAY = "agent/inference/takeaway"
+
+# Wildcard: all inference events
+INFERENCE_ALL = "agent/inference/+"
 
 # ---------------------------------------------------------------------------
 # Sleep / maintenance cycles
