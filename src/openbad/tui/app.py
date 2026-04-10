@@ -10,7 +10,7 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Header, Input, Static
 
 from openbad.nervous_system import topics
 from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus, ReasoningResponse
@@ -24,7 +24,14 @@ from openbad.nervous_system.schemas.telemetry_pb2 import (
     TokenTelemetry,
 )
 from openbad.tui.mqtt_feed import MqttConnected, MqttDisconnected, MqttFeed, MqttPayload
-from openbad.tui.panels import FSMPanel, HormonePanel, InferencePanel, VitalsPanel
+from openbad.tui.panels import (
+    CommandBar,
+    EventLogPanel,
+    FSMPanel,
+    HormonePanel,
+    InferencePanel,
+    VitalsPanel,
+)
 
 # ── Placeholder panels (replaced by #181-#183) ──────────────────────
 
@@ -107,12 +114,19 @@ class OpenBaDApp(App):
     #bottom-panels {
         height: 1fr;
     }
+    #event-row {
+        height: 14;
+    }
+    #command-bar {
+        height: 3;
+    }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("d", "toggle_dark", "Dark/Light", show=True),
         Binding("r", "reconnect", "Reconnect", show=True),
+        Binding(":", "focus_command", "Command", show=True),
     ]
 
     def __init__(
@@ -136,6 +150,12 @@ class OpenBaDApp(App):
                 with Horizontal(id="bottom-panels"):
                     yield InferencePanel(id="inference-panel")
                     yield VitalsPanel(id="vitals-panel")
+                with Horizontal(id="event-row"):
+                    yield EventLogPanel(id="event-log-panel")
+                yield CommandBar(
+                    placeholder="Type command: help | clear | reconnect | dark | quit",
+                    id="command-bar",
+                )
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -167,11 +187,13 @@ class OpenBaDApp(App):
         status = self.query_one(StatusPanel)
         status.update("FSM: -- | [green]MQTT: connected[/green] | Hormones: --")
         self._subscribe_topics()
+        self._log_event("[green]MQTT connected[/green]")
 
     def on_mqtt_payload(self, message: MqttPayload) -> None:
         """Route incoming MQTT messages to the appropriate panel."""
         topic = message.topic
         payload = message.payload
+        self._log_event(f"[cyan]{topic}[/cyan] {self._payload_summary(payload)}")
 
         if topic.startswith("agent/endocrine/"):
             hormone = topic.rsplit("/", 1)[-1]
@@ -236,6 +258,52 @@ class OpenBaDApp(App):
         """Reconnect to the MQTT broker."""
         self.run_worker(self.feed.disconnect())
         self.run_worker(self.feed.connect(self))
+        self._log_event("[yellow]Reconnect requested[/yellow]")
+
+    def action_focus_command(self) -> None:
+        bar = self.query_one("#command-bar", CommandBar)
+        bar.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "command-bar":
+            return
+        command = event.value.strip().lower()
+        event.input.value = ""
+        if not command:
+            return
+
+        self._log_event(f"[white]> {command}[/white]")
+        if command == "help":
+            self._log_event("Commands: help, clear, reconnect, dark, quit")
+        elif command == "clear":
+            panel = self.query_one("#event-log-panel", EventLogPanel)
+            panel.clear()
+            self._log_event("[dim]Event log cleared[/dim]")
+        elif command == "reconnect":
+            self.action_reconnect()
+        elif command == "dark":
+            self.action_toggle_dark()
+        elif command == "quit":
+            self.action_quit()
+        else:
+            self._log_event(f"[red]Unknown command:[/red] {command}")
 
     def action_toggle_dark(self) -> None:
         self.dark = not self.dark
+
+    def _log_event(self, line: str) -> None:
+        try:
+            panel = self.query_one("#event-log-panel", EventLogPanel)
+            panel.write(line)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    @staticmethod
+    def _payload_summary(payload: object) -> str:
+        if hasattr(payload, "ListFields"):
+            fields = payload.ListFields()[:3]
+            if not fields:
+                return "{}"
+            parts = [f"{descriptor.name}={value}" for descriptor, value in fields]
+            return "{" + ", ".join(parts) + "}"
+        return str(payload)
