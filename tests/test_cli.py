@@ -23,6 +23,7 @@ class TestMainGroup:
         assert "version" in result.output
         assert "setup" in result.output
         assert "tui" in result.output
+        assert "wui" in result.output
 
 
 class TestVersionCommand:
@@ -35,22 +36,37 @@ class TestVersionCommand:
         assert "0.1.0" in result.output
 
 
-class TestSetupPlaceholder:
-    """``openbad setup`` placeholder."""
+class TestSetupCommand:
+    """``openbad setup`` command surface."""
 
-    def test_setup_placeholder(self):
-        result = CliRunner().invoke(main, ["setup"])
+    def test_setup_help(self):
+        result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
-        assert "Setup wizard" in result.output
+        assert "--config-dir" in result.output
+        assert "--check" in result.output
+        assert "--non-interactive" in result.output
 
 
-class TestTuiPlaceholder:
-    """``openbad tui`` placeholder."""
+class TestTuiCommand:
+    """``openbad tui`` command surface."""
 
-    def test_tui_placeholder(self):
-        result = CliRunner().invoke(main, ["tui"])
+    def test_tui_help(self):
+        result = CliRunner().invoke(main, ["tui", "--help"])
         assert result.exit_code == 0
-        assert "TUI" in result.output
+        assert "--host" in result.output
+        assert "--port" in result.output
+
+
+class TestWuiCommand:
+    """``openbad wui`` command surface."""
+
+    def test_wui_help(self):
+        result = CliRunner().invoke(main, ["wui", "--help"])
+        assert result.exit_code == 0
+        assert "--host" in result.output
+        assert "--port" in result.output
+        assert "--mqtt-host" in result.output
+        assert "--mqtt-port" in result.output
 
 
 class TestStatusCommand:

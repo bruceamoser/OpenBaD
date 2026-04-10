@@ -114,6 +114,25 @@ def tui(host: str, port: int) -> None:
     app.run()
 
 
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Web UI bind host.")
+@click.option("--port", default=9200, type=int, help="Web UI bind port.")
+@click.option("--mqtt-host", default="localhost", help="MQTT broker host.")
+@click.option("--mqtt-port", default=1883, type=int, help="MQTT broker port.")
+def wui(host: str, port: int, mqtt_host: str, mqtt_port: int) -> None:
+    """Launch the web UI server with MQTT->WebSocket bridge."""
+    from openbad.wui.server import run_server
+
+    asyncio.run(
+        run_server(
+            host=host,
+            port=port,
+            mqtt_host=mqtt_host,
+            mqtt_port=mqtt_port,
+        )
+    )
+
+
 def _configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(

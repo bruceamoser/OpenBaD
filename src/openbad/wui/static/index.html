@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenBaD Live Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <main class="shell">
+    <header class="hero reveal">
+      <h1>OpenBaD</h1>
+      <p>Bio-digital runtime observability cockpit</p>
+      <span id="ws-status" class="pill offline">offline</span>
+    </header>
+
+    <section class="grid">
+      <article class="card reveal">
+        <h2>FSM</h2>
+        <p id="fsm-state" class="metric">UNKNOWN</p>
+      </article>
+
+      <article class="card reveal">
+        <h2>Hormones</h2>
+        <div id="hormones" class="stack">
+          <div class="row"><span>Dopamine</span><strong id="h-dopamine">0.00</strong></div>
+          <div class="row"><span>Adrenaline</span><strong id="h-adrenaline">0.00</strong></div>
+          <div class="row"><span>Cortisol</span><strong id="h-cortisol">0.00</strong></div>
+          <div class="row"><span>Endorphin</span><strong id="h-endorphin">0.00</strong></div>
+        </div>
+      </article>
+
+      <article class="card reveal">
+        <h2>Vitals</h2>
+        <div class="stack mono">
+          <div class="row"><span>CPU</span><strong id="v-cpu">0.0%</strong></div>
+          <div class="row"><span>Memory</span><strong id="v-memory">0.0%</strong></div>
+          <div class="row"><span>Disk</span><strong id="v-disk">0.0%</strong></div>
+          <div class="row"><span>Net TX</span><strong id="v-net-tx">0</strong></div>
+          <div class="row"><span>Net RX</span><strong id="v-net-rx">0</strong></div>
+          <div class="row"><span>Tokens</span><strong id="v-tokens">0</strong></div>
+          <div class="row"><span>Tier</span><strong id="v-tier">--</strong></div>
+        </div>
+      </article>
+
+      <article class="card reveal">
+        <h2>Inference</h2>
+        <div class="stack mono">
+          <div class="row"><span>Provider</span><strong id="i-provider">--</strong></div>
+          <div class="row"><span>Model</span><strong id="i-model">--</strong></div>
+          <div class="row"><span>Health</span><strong id="i-health">down</strong></div>
+          <div class="row"><span>p50</span><strong id="i-p50">0.0ms</strong></div>
+          <div class="row"><span>p99</span><strong id="i-p99">0.0ms</strong></div>
+          <div class="row"><span>Last Tokens</span><strong id="i-last-tokens">0</strong></div>
+          <div class="row"><span>Last Latency</span><strong id="i-last-latency">0.0ms</strong></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="log reveal">
+      <h2>Event Stream</h2>
+      <div id="event-log" class="log-body" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
