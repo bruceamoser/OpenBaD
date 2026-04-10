@@ -10,6 +10,7 @@ import asyncio
 import enum
 import logging
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,12 @@ from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.event_loop import CognitiveEventLoop, CognitiveRequest
 from openbad.cognitive.model_router import Priority
 from openbad.memory.forgetting import prune_store
+from openbad.memory.sleep.prompts import (
+    EXTRACT_TAGS,
+    SCORE_IMPORTANCE,
+    SUMMARIZE_BATCH,
+    SUMMARIZE_SINGLE,
+)
 
 if TYPE_CHECKING:
     from openbad.memory.base import MemoryEntry
@@ -137,19 +144,27 @@ class SleepOrchestrator:
         report = SleepReport(started_at=time.time())
         self._enter_sleep_state()
 
-        entries = self._memory_controller.stm.query("")
+        stm_entries = self._memory_controller.stm.query("")
+        episodic_entries = self._memory_controller.episodic.query("")
 
         try:
-            # SWS phase: summarize pending STM entries.
+            # SWS phase: summarize pending entries.
             self._set_phase(SleepPhase.SWS)
             t0 = time.time()
-            summaries = await self._summarize_entries(entries)
+            stm_summaries = await self._summarize_entries(stm_entries)
+            episodic_summaries = await self._summarize_episodic_batches(
+                episodic_entries,
+            )
             report.phase_durations[SleepPhase.SWS.value] = time.time() - t0
 
             # REM phase: extract tags, score importance, and write LTM.
             self._set_phase(SleepPhase.REM)
             t0 = time.time()
-            report.entries_consolidated = await self._write_ltm(entries, summaries)
+            stm_count = await self._write_ltm(stm_entries, stm_summaries)
+            episodic_count = await self._write_episodic_ltm(
+                episodic_entries, episodic_summaries,
+            )
+            report.entries_consolidated = stm_count + episodic_count
             report.phase_durations[SleepPhase.REM.value] = time.time() - t0
 
             # Pruning phase.
@@ -232,18 +247,46 @@ class SleepOrchestrator:
         self,
         entries: list[MemoryEntry],
     ) -> dict[str, str]:
+        """Summarize individual STM entries using the single-entry template."""
         summaries: dict[str, str] = {}
         for entry in entries:
+            prompt = SUMMARIZE_SINGLE.format(entry=str(entry.value))
             response = await self._request_sleep_pass(
                 entry=entry,
                 stage="summarize",
-                prompt=(
-                    "Summarize this memory entry for long-term recall in 1-2 "
-                    "sentences."
-                ),
+                prompt=prompt,
                 context=str(entry.value),
             )
             summaries[entry.key] = response.answer.strip()
+        return summaries
+
+    async def _summarize_episodic_batches(
+        self,
+        entries: list[MemoryEntry],
+    ) -> dict[str, str]:
+        """Batch episodic entries by context/topic and summarize each batch."""
+        batches = _batch_by_context(entries)
+        summaries: dict[str, str] = {}
+        for _topic, batch in batches.items():
+            if len(batch) == 1:
+                prompt = SUMMARIZE_SINGLE.format(entry=str(batch[0].value))
+            else:
+                entries_text = "\n---\n".join(
+                    f"[{e.key}] {e.value}" for e in batch
+                )
+                prompt = SUMMARIZE_BATCH.format(entries=entries_text)
+            # Use the first entry as the representative for the request.
+            representative = batch[0]
+            context = "\n".join(str(e.value) for e in batch)
+            response = await self._request_sleep_pass(
+                entry=representative,
+                stage="summarize",
+                prompt=prompt,
+                context=context,
+            )
+            summary = response.answer.strip()
+            for entry in batch:
+                summaries[entry.key] = summary
         return summaries
 
     async def _write_ltm(
@@ -251,31 +294,13 @@ class SleepOrchestrator:
         entries: list[MemoryEntry],
         summaries: dict[str, str],
     ) -> int:
+        """Write STM entries to semantic LTM and remove from STM."""
         consolidated = 0
         for entry in entries:
             summary = summaries.get(entry.key, "").strip()
             if not summary:
                 continue
-            tags_response = await self._request_sleep_pass(
-                entry=entry,
-                stage="extract",
-                prompt=(
-                    "Extract up to 5 short retrieval tags for this summary. Return "
-                    "a comma-separated list only."
-                ),
-                context=summary,
-            )
-            score_response = await self._request_sleep_pass(
-                entry=entry,
-                stage="score",
-                prompt=(
-                    "Score the long-term importance of this summary from 0.0 to 1.0. "
-                    "Return only the numeric score."
-                ),
-                context=summary,
-            )
-            tags = _parse_tags(tags_response.answer)
-            importance = _parse_importance(score_response.answer)
+            tags, importance = await self._extract_and_score(entry, summary)
             self._memory_controller.write_semantic(
                 f"sleep/{entry.key}",
                 summary,
@@ -290,6 +315,68 @@ class SleepOrchestrator:
             self._memory_controller.stm.delete(entry.key)
             consolidated += 1
         return consolidated
+
+    async def _write_episodic_ltm(
+        self,
+        entries: list[MemoryEntry],
+        summaries: dict[str, str],
+    ) -> int:
+        """Compress episodic entries into semantic LTM.
+
+        Originals are kept (not deleted) so they remain recoverable within
+        the configurable retention window.
+        """
+        batches = _batch_by_context(entries)
+        consolidated = 0
+        written_summaries: set[str] = set()
+        for _topic, batch in batches.items():
+            representative = batch[0]
+            summary = summaries.get(representative.key, "").strip()
+            if not summary or summary in written_summaries:
+                continue
+            tags, importance = await self._extract_and_score(
+                representative, summary,
+            )
+            source_keys = [e.key for e in batch]
+            self._memory_controller.write_semantic(
+                f"sleep/episodic/{representative.key}",
+                summary,
+                context="sleep_consolidation",
+                metadata={
+                    "source_episodic_keys": source_keys,
+                    "importance": importance,
+                    "tags": tags,
+                    "consolidated": True,
+                },
+            )
+            # Mark originals as consolidated but do NOT delete.
+            for entry in batch:
+                entry.metadata["consolidated"] = True
+            written_summaries.add(summary)
+            consolidated += len(batch)
+        return consolidated
+
+    async def _extract_and_score(
+        self,
+        entry: MemoryEntry,
+        summary: str,
+    ) -> tuple[list[str], float]:
+        """Run tag extraction and importance scoring for a summary."""
+        tags_response = await self._request_sleep_pass(
+            entry=entry,
+            stage="extract",
+            prompt=EXTRACT_TAGS.format(summary=summary),
+            context=summary,
+        )
+        score_response = await self._request_sleep_pass(
+            entry=entry,
+            stage="score",
+            prompt=SCORE_IMPORTANCE.format(summary=summary),
+            context=summary,
+        )
+        return _parse_tags(tags_response.answer), _parse_importance(
+            score_response.answer,
+        )
 
     async def _request_sleep_pass(
         self,
@@ -311,6 +398,19 @@ class SleepOrchestrator:
         if response.error:
             raise RuntimeError(response.error)
         return response
+
+
+def _batch_by_context(
+    entries: list[MemoryEntry],
+) -> dict[str, list[MemoryEntry]]:
+    """Group entries by their ``context`` field (or 'general' if blank)."""
+    batches: dict[str, list[MemoryEntry]] = defaultdict(list)
+    for entry in entries:
+        topic = (entry.context or entry.metadata.get("topic", "")).strip()
+        if not topic:
+            topic = "general"
+        batches[topic].append(entry)
+    return dict(batches)
 
 
 def _parse_tags(raw: str) -> list[str]:

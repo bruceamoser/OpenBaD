@@ -31,8 +31,15 @@ from openbad.memory.sleep.orchestrator import (
     SleepOrchestrator,
     SleepPhase,
     SleepReport,
+    _batch_by_context,
     _parse_importance,
     _parse_tags,
+)
+from openbad.memory.sleep.prompts import (
+    EXTRACT_TAGS,
+    SCORE_IMPORTANCE,
+    SUMMARIZE_BATCH,
+    SUMMARIZE_SINGLE,
 )
 
 
@@ -327,6 +334,185 @@ class TestHelpers:
     def test_parse_importance(self) -> None:
         assert _parse_importance("1.4") == 1.0
         assert _parse_importance("bad") == 0.5
+
+    def test_batch_by_context_groups_same_context(self) -> None:
+        entries = [
+            MemoryEntry(key="a", value="v1", tier=MemoryTier.EPISODIC, context="deploy"),
+            MemoryEntry(key="b", value="v2", tier=MemoryTier.EPISODIC, context="deploy"),
+            MemoryEntry(key="c", value="v3", tier=MemoryTier.EPISODIC, context="build"),
+        ]
+        batches = _batch_by_context(entries)
+        assert len(batches) == 2
+        assert len(batches["deploy"]) == 2
+        assert len(batches["build"]) == 1
+
+    def test_batch_by_context_uses_topic_metadata(self) -> None:
+        entries = [
+            MemoryEntry(
+                key="a", value="v1", tier=MemoryTier.EPISODIC,
+                context="", metadata={"topic": "network"},
+            ),
+            MemoryEntry(key="b", value="v2", tier=MemoryTier.EPISODIC, context=""),
+        ]
+        batches = _batch_by_context(entries)
+        assert "network" in batches
+        assert "general" in batches
+
+
+class TestPromptTemplates:
+    def test_summarize_single_template(self) -> None:
+        result = SUMMARIZE_SINGLE.format(entry="test data")
+        assert "test data" in result
+        assert "Summary:" in result
+
+    def test_summarize_batch_template(self) -> None:
+        result = SUMMARIZE_BATCH.format(entries="[a] one\n---\n[b] two")
+        assert "one" in result
+        assert "two" in result
+
+    def test_extract_tags_template(self) -> None:
+        result = EXTRACT_TAGS.format(summary="some summary")
+        assert "some summary" in result
+
+    def test_score_importance_template(self) -> None:
+        result = SCORE_IMPORTANCE.format(summary="some summary")
+        assert "some summary" in result
+
+
+class TestEpisodicBatching:
+    async def test_episodic_entries_batched_and_consolidated(self, tmp_path: Path) -> None:
+        mc = MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path))
+        mc.episodic.write(MemoryEntry(
+            key="e1", value="deploy failed at 3am",
+            tier=MemoryTier.EPISODIC, context="deploy",
+        ))
+        mc.episodic.write(MemoryEntry(
+            key="e2", value="deploy recovered after rollback",
+            tier=MemoryTier.EPISODIC, context="deploy",
+        ))
+        # Mock needs: 1 batch summary, tags, score (3 calls total)
+        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop.handle_request = AsyncMock(
+            side_effect=[
+                # batch summary for the deploy context
+                CognitiveResponse(
+                    request_id="s1",
+                    answer="Deploy failed at 3am and recovered after rollback",
+                ),
+                # tags
+                CognitiveResponse(request_id="t1", answer="deploy, failure, rollback"),
+                # importance
+                CognitiveResponse(request_id="i1", answer="0.9"),
+            ]
+        )
+        orch = SleepOrchestrator(
+            memory_controller=mc,
+            cognitive_event_loop=loop,
+            pruner=MemoryPruner(memory_controller=mc),
+        )
+        report = await orch.run_cycle()
+        assert report.entries_consolidated == 2
+        consolidated = mc.semantic.query("sleep/episodic/")
+        assert len(consolidated) == 1
+        assert consolidated[0].metadata["source_episodic_keys"] == ["e1", "e2"]
+        # Originals still in episodic (not deleted)
+        assert mc.episodic.read("e1") is not None
+        assert mc.episodic.read("e2") is not None
+
+    async def test_episodic_originals_marked_consolidated(self, tmp_path: Path) -> None:
+        mc = MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path))
+        mc.episodic.write(MemoryEntry(
+            key="e1", value="test note",
+            tier=MemoryTier.EPISODIC, context="notes",
+        ))
+        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop.handle_request = AsyncMock(
+            side_effect=[
+                CognitiveResponse(request_id="s1", answer="A test note summary"),
+                CognitiveResponse(request_id="t1", answer="notes, test"),
+                CognitiveResponse(request_id="i1", answer="0.5"),
+            ]
+        )
+        orch = SleepOrchestrator(
+            memory_controller=mc,
+            cognitive_event_loop=loop,
+        )
+        await orch.run_cycle()
+        orig = mc.episodic.read("e1")
+        assert orig is not None
+        assert orig.metadata.get("consolidated") is True
+
+
+class TestQuality:
+    async def test_summary_retains_key_facts(self, tmp_path: Path) -> None:
+        """Verify the summary prompt emitted to the LLM contains key facts."""
+        mc = MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path))
+        mc.stm.write(MemoryEntry(
+            key="fact1",
+            value="CPU hit 98% during batch job at 02:14 UTC",
+            tier=MemoryTier.STM,
+        ))
+        captured_prompts: list[str] = []
+
+        async def capture_request(req: object) -> CognitiveResponse:
+            captured_prompts.append(getattr(req, "prompt", ""))
+            return CognitiveResponse(
+                request_id="q",
+                answer="CPU spiked to 98% during batch at 02:14 UTC",
+            )
+
+        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop.handle_request = AsyncMock(side_effect=[
+            CognitiveResponse(
+                request_id="s",
+                answer="CPU spiked to 98% during batch at 02:14 UTC",
+            ),
+            CognitiveResponse(request_id="t", answer="cpu, spike, batch"),
+            CognitiveResponse(request_id="i", answer="0.7"),
+        ])
+        orch = SleepOrchestrator(
+            memory_controller=mc,
+            cognitive_event_loop=loop,
+        )
+        report = await orch.run_cycle()
+        assert report.entries_consolidated == 1
+        sem = mc.semantic.query("sleep/")
+        assert len(sem) == 1
+        summary_text = sem[0].value
+        # The summary should preserve key facts from the original
+        assert "98%" in summary_text
+        assert "02:14" in summary_text
+
+    async def test_batch_summary_preserves_all_entries(self, tmp_path: Path) -> None:
+        mc = MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path))
+        mc.episodic.write(MemoryEntry(
+            key="deploy-1", value="Deployed v2.3.1 to production",
+            tier=MemoryTier.EPISODIC, context="deployment",
+        ))
+        mc.episodic.write(MemoryEntry(
+            key="deploy-2", value="Rollback to v2.3.0 after 500 errors",
+            tier=MemoryTier.EPISODIC, context="deployment",
+        ))
+        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop.handle_request = AsyncMock(side_effect=[
+            CognitiveResponse(
+                request_id="s",
+                answer="Deployed v2.3.1 but rolled back to v2.3.0 due to 500 errors",
+            ),
+            CognitiveResponse(request_id="t", answer="deploy, rollback, v2.3.1"),
+            CognitiveResponse(request_id="i", answer="0.85"),
+        ])
+        orch = SleepOrchestrator(
+            memory_controller=mc,
+            cognitive_event_loop=loop,
+        )
+        await orch.run_cycle()
+        sem = mc.semantic.query("sleep/episodic/")
+        assert len(sem) == 1
+        summary = sem[0].value
+        # Both original facts should be reflected in the summary
+        assert "v2.3.1" in summary
+        assert "v2.3.0" in summary
 
 
 class TestIntegration:
