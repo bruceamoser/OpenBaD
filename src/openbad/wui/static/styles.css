@@ -108,6 +108,69 @@ html, body {
   padding: 0.8rem 1rem;
 }
 
+.anatomy {
+  margin-top: 0.9rem;
+  background: var(--card);
+  border: 1px solid var(--stroke);
+  border-radius: 14px;
+  padding: 0.8rem 1rem;
+}
+
+.anatomy-wrap {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 0.9rem;
+  align-items: start;
+}
+
+#anatomy-map {
+  width: 100%;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: rgba(1, 8, 13, 0.55);
+}
+
+#anatomy-map .body-shell {
+  fill: rgba(10, 20, 30, 0.4);
+  stroke: var(--stroke);
+}
+
+#anatomy-map .outline {
+  fill: none;
+  stroke: rgba(152, 179, 196, 0.35);
+  stroke-width: 2;
+}
+
+#anatomy-map .organ {
+  fill: url(#organFill);
+  stroke: rgba(122, 242, 217, 0.25);
+  stroke-width: 1.5;
+  transition: filter 200ms ease, stroke 200ms ease;
+}
+
+#anatomy-map .organ text {
+  font-size: 10px;
+  text-anchor: middle;
+  fill: #cceaf5;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+#anatomy-map .organ.pulse {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 8px rgba(122, 242, 217, 0.7));
+}
+
+.legend p,
+.legend li {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.legend ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1rem;
+}
+
 .log-body {
   height: 220px;
   overflow: auto;
@@ -152,5 +215,9 @@ html, body {
   .card:nth-child(3),
   .card:nth-child(4) {
     grid-column: span 12;
+  }
+
+  .anatomy-wrap {
+    grid-template-columns: 1fr;
   }
 }

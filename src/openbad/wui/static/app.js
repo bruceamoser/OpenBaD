@@ -26,7 +26,35 @@ const els = {
     lastLatency: document.getElementById('i-last-latency'),
   },
   log: document.getElementById('event-log'),
+  anatomy: {
+    nervous: document.getElementById('organ-nervous'),
+    endocrine: document.getElementById('organ-endocrine'),
+    reflex: document.getElementById('organ-reflex'),
+    cognitive: document.getElementById('organ-cognitive'),
+    immune: document.getElementById('organ-immune'),
+    memory: document.getElementById('organ-memory'),
+    sensory: document.getElementById('organ-sensory'),
+  },
 };
+
+function pulseOrgan(name) {
+  const node = els.anatomy[name] || els.anatomy.nervous;
+  if (!node) {
+    return;
+  }
+  node.classList.add('pulse');
+  window.setTimeout(() => node.classList.remove('pulse'), 380);
+}
+
+function mapTopicToOrgan(topic) {
+  if (topic.startsWith('agent/cognitive/')) return 'cognitive';
+  if (topic.startsWith('agent/endocrine/')) return 'endocrine';
+  if (topic.startsWith('agent/reflex/')) return 'reflex';
+  if (topic.startsWith('agent/immune/')) return 'immune';
+  if (topic.startsWith('agent/memory/')) return 'memory';
+  if (topic.startsWith('agent/sensory/')) return 'sensory';
+  return 'nervous';
+}
 
 function logLine(text) {
   const div = document.createElement('div');
@@ -120,6 +148,7 @@ function connect() {
       }
       if (msg.type === 'event') {
         const topic = msg.topic || 'unknown/topic';
+        pulseOrgan(mapTopicToOrgan(topic));
         updateFromEvent(topic, msg.payload || {});
         logLine(`[${msg.ts}] ${topic}`);
       }
