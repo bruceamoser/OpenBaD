@@ -33,6 +33,7 @@ _KNOWN_MODELS: list[dict[str, Any]] = [
     {"id": "claude-sonnet-4-20250514", "context_window": 200_000},
     {"id": "claude-3-5-haiku-20241022", "context_window": 200_000},
 ]
+_MODEL_DISCOVERY_PATHS = ("/models", "/chat/models", "/v1/models")
 
 _TOKEN_DIR = Path.home() / ".openbad"
 _TOKEN_FILE = _TOKEN_DIR / "copilot_token.json"
@@ -165,40 +166,69 @@ class GitHubCopilotProvider(ProviderAdapter):
         """Poll GitHub OAuth for access token after user authorizes."""
         import asyncio
 
+        while True:
+            result = await self.poll_for_token_once(device_code)
+            state = result.get("state", "error")
+
+            if state == "authorized":
+                return str(result["access_token"])
+            if state == "authorization_pending":
+                await asyncio.sleep(interval)
+                continue
+            if state == "slow_down":
+                interval = int(result.get("interval", interval + 5))
+                await asyncio.sleep(interval)
+                continue
+
+            msg = f"OAuth error: {result.get('error', '')} — {result.get('error_description', '')}"
+            raise CopilotAuthError(msg)
+
+    async def poll_for_token_once(self, device_code: str) -> dict[str, Any]:
+        """Check the OAuth device-code state once.
+
+        Returns a dict with a ``state`` field. Possible states are:
+        ``authorized``, ``authorization_pending``, ``slow_down``, and ``error``.
+        """
         url = _GITHUB_OAUTH_TOKEN_URL
         payload = {
             "client_id": _COPILOT_CLIENT_ID,
             "device_code": device_code,
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
         }
-        async with aiohttp.ClientSession(timeout=self._timeout) as session:
-            while True:
-                async with session.post(
-                    url,
-                    data=payload,
-                    headers={"Accept": "application/json"},
-                ) as resp:
-                    data = await resp.json(content_type=None)
 
-                if "access_token" in data:
-                    token = data["access_token"]
-                    self._save_token(token, data.get("expires_in", 28800))
-                    self._cached_token = token
-                    self._token_expires_at = time.time() + data.get(
-                        "expires_in", 28800
-                    )
-                    return token
+        async with aiohttp.ClientSession(timeout=self._timeout) as session, session.post(
+            url,
+            data=payload,
+            headers={"Accept": "application/json"},
+        ) as resp:
+            data = await resp.json(content_type=None)
 
-                error = data.get("error", "")
-                if error == "authorization_pending":
-                    await asyncio.sleep(interval)
-                    continue
-                if error == "slow_down":
-                    interval += 5
-                    await asyncio.sleep(interval)
-                    continue
-                msg = f"OAuth error: {error} — {data.get('error_description', '')}"
-                raise CopilotAuthError(msg)
+        if "access_token" in data:
+            token = data["access_token"]
+            expires_in = data.get("expires_in", 28800)
+            self._save_token(token, expires_in)
+            self._cached_token = token
+            self._token_expires_at = time.time() + expires_in
+            return {
+                "state": "authorized",
+                "access_token": token,
+                "expires_in": expires_in,
+            }
+
+        error = data.get("error", "")
+        if error == "authorization_pending":
+            return {"state": "authorization_pending"}
+        if error == "slow_down":
+            return {
+                "state": "slow_down",
+                "interval": data.get("interval", 10),
+            }
+
+        return {
+            "state": "error",
+            "error": error,
+            "error_description": data.get("error_description", ""),
+        }
 
     # ------------------------------------------------------------------ #
     # ProviderAdapter interface
@@ -270,6 +300,10 @@ class GitHubCopilotProvider(ProviderAdapter):
                     yield delta
 
     async def list_models(self) -> list[ModelInfo]:
+        discovered = await self._discover_models()
+        if discovered:
+            return discovered
+
         return [
             ModelInfo(
                 model_id=m["id"],
@@ -291,14 +325,62 @@ class GitHubCopilotProvider(ProviderAdapter):
             }
             await self._post("/chat/completions", payload)
             latency_ms = (time.monotonic() - t0) * 1000
+            models = await self.list_models()
             return HealthStatus(
                 provider="github-copilot",
                 available=True,
                 latency_ms=latency_ms,
-                models_available=len(_KNOWN_MODELS),
+                models_available=len(models),
             )
         except (aiohttp.ClientError, TimeoutError, OSError, CopilotAuthError):
             return HealthStatus(provider="github-copilot", available=False)
+
+    async def _discover_models(self) -> list[ModelInfo]:
+        for path in _MODEL_DISCOVERY_PATHS:
+            try:
+                data = await self._get(path)
+            except (aiohttp.ClientError, TimeoutError, OSError, CopilotAuthError):
+                continue
+
+            models = self._parse_models_payload(data)
+            if models:
+                return models
+
+        return []
+
+    def _parse_models_payload(self, data: dict[str, Any]) -> list[ModelInfo]:
+        raw_models = data.get("data")
+        if not isinstance(raw_models, list):
+            raw_models = data.get("models")
+        if not isinstance(raw_models, list):
+            return []
+
+        models: list[ModelInfo] = []
+        seen: set[str] = set()
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+
+            model_id = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+            if not model_id or model_id in seen:
+                continue
+
+            context_window = item.get("context_window") or item.get("max_context_length") or 0
+            try:
+                parsed_context_window = int(context_window)
+            except (TypeError, ValueError):
+                parsed_context_window = 0
+
+            models.append(
+                ModelInfo(
+                    model_id=model_id,
+                    provider="github-copilot",
+                    context_window=parsed_context_window,
+                )
+            )
+            seen.add(model_id)
+
+        return models
 
     # ------------------------------------------------------------------ #
     # HTTP with retry
@@ -313,6 +395,26 @@ class GitHubCopilotProvider(ProviderAdapter):
                 async with (
                     aiohttp.ClientSession(timeout=self._timeout) as session,
                     session.post(url, json=payload, headers=headers) as resp,
+                ):
+                    resp.raise_for_status()
+                    return await resp.json(content_type=None)
+            except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+                last_exc = exc
+                if attempt <= self._max_retries:
+                    import asyncio
+
+                    await asyncio.sleep(_RETRY_BACKOFF_S * attempt)
+        raise last_exc  # type: ignore[misc]
+
+    async def _get(self, path: str) -> dict[str, Any]:
+        url = f"{_COPILOT_API_URL}{path}"
+        headers = self._headers()
+        last_exc: BaseException | None = None
+        for attempt in range(1, self._max_retries + 2):
+            try:
+                async with (
+                    aiohttp.ClientSession(timeout=self._timeout) as session,
+                    session.get(url, headers=headers) as resp,
                 ):
                     resp.raise_for_status()
                     return await resp.json(content_type=None)

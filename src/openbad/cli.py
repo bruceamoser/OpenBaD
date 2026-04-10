@@ -289,10 +289,23 @@ def _service_enabled_state(unit: str) -> str:
 def _managed_service_units() -> tuple[str, ...]:
     units = []
     for unit in SERVICE_UNITS:
-        if _service_enabled_state(unit) == "disabled":
+        if _service_enabled_state(unit) in {
+            "disabled",
+            "masked",
+            "not-found",
+            "systemctl-unavailable",
+        }:
             continue
         units.append(unit)
-    return tuple(units) if units else CORE_SERVICE_UNITS
+    if units:
+        return tuple(units)
+
+    fallback_units = tuple(
+        unit
+        for unit in CORE_SERVICE_UNITS
+        if _service_enabled_state(unit) not in {"masked", "not-found", "systemctl-unavailable"}
+    )
+    return fallback_units or CORE_SERVICE_UNITS
 
 
 def _validate_health_url(wui_url: str) -> None:

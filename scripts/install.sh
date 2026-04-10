@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OpenBaD installation script
-# Usage: sudo ./install.sh [--bootstrap] [--configure-wsl-systemd] [--skip-services] [--uninstall]
+# Usage: sudo ./scripts/install.sh [--bootstrap] [--configure-wsl-systemd] [--skip-services] [--uninstall]
 set -euo pipefail
 
 OPENBAD_USER="openbad"
@@ -21,6 +21,8 @@ SKIP_SERVICES=false
 DO_UNINSTALL=false
 CONFIGURE_WSL_SYSTEMD=false
 BROKER_IMPL=""
+BROKER_SERVICE_MODE="managed"
+EXTERNAL_BROKER_UNIT=""
 
 # Colours (if terminal supports them)
 RED='\033[0;31m'
@@ -37,8 +39,8 @@ usage() {
 OpenBaD installer
 
 Usage:
-    sudo ./install.sh [--bootstrap] [--configure-wsl-systemd] [--skip-services]
-  sudo ./install.sh --uninstall
+        sudo ./scripts/install.sh [--bootstrap] [--configure-wsl-systemd] [--skip-services]
+    sudo ./scripts/install.sh --uninstall
 
 Options:
   --bootstrap      Install Linux prerequisites (Ubuntu/Debian apt path)
@@ -98,6 +100,11 @@ is_wsl() {
 
 has_systemd() {
     [[ -d /run/systemd/system ]] && command -v systemctl &>/dev/null
+}
+
+has_systemd_unit() {
+    local unit="$1"
+    has_systemd && systemctl list-unit-files --type=service --no-legend "$unit" 2>/dev/null | grep -q "^${unit}"
 }
 
 configure_wsl_systemd() {
@@ -189,12 +196,20 @@ bootstrap_os() {
 select_broker_impl() {
     if command -v nanomq &>/dev/null; then
         BROKER_IMPL="nanomq"
+        BROKER_SERVICE_MODE="managed"
         info "Broker selected: NanoMQ"
         return
     fi
 
     if command -v mosquitto &>/dev/null; then
         BROKER_IMPL="mosquitto"
+        if has_systemd_unit "mosquitto.service"; then
+            BROKER_SERVICE_MODE="external"
+            EXTERNAL_BROKER_UNIT="mosquitto.service"
+            info "Broker selected: existing Mosquitto system service"
+            return
+        fi
+        BROKER_SERVICE_MODE="managed"
         warn "NanoMQ not found. Falling back to Mosquitto broker service."
         return
     fi
@@ -206,6 +221,15 @@ select_broker_impl() {
 
 install_broker_unit() {
     local dst="$SYSTEMD_DIR/openbad-broker.service"
+
+    if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
+        if [[ -f "$dst" ]]; then
+            systemctl disable --now openbad-broker.service 2>/dev/null || true
+            rm -f "$dst"
+        fi
+        info "  Reusing ${EXTERNAL_BROKER_UNIT} for MQTT broker"
+        return
+    fi
 
     if [[ "$BROKER_IMPL" == "nanomq" ]]; then
         cp "$CONFIG_SRC/openbad-broker.service" "$dst"
@@ -232,6 +256,17 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
     info "  Installed openbad-broker.service (Mosquitto fallback)"
+}
+
+restart_or_start_service() {
+    local unit="$1"
+
+    if systemctl is-active --quiet "$unit"; then
+        systemctl restart "$unit"
+        return
+    fi
+
+    systemctl start "$unit"
 }
 
 # ------------------------------------------------------------------
@@ -292,9 +327,56 @@ install_configs() {
         fi
     done
 
+    ensure_identity_secret
+
     chown -R "$OPENBAD_USER:$OPENBAD_GROUP" "$CONFIG_DIR"
     chmod 750 "$CONFIG_DIR"
     chmod 640 "$CONFIG_DIR"/*
+}
+
+ensure_identity_secret() {
+    local status
+
+    status="$(OPENBAD_INSTALL_CONFIG_DIR="$CONFIG_DIR" "$VENV_DIR/bin/python" - <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import yaml
+
+from openbad.setup import generate_secret_key, patch_identity_config
+
+config_dir = Path(os.environ["OPENBAD_INSTALL_CONFIG_DIR"])
+identity_path = config_dir / "identity.yaml"
+if not identity_path.exists():
+    print("missing")
+    raise SystemExit(0)
+
+data = yaml.safe_load(identity_path.read_text()) or {}
+secret_hex = ((data.get("identity") or {}).get("secret_hex") or "").strip()
+if secret_hex:
+    print("present")
+else:
+    patch_identity_config(config_dir, generate_secret_key())
+    print("generated")
+PY
+)"
+
+    case "$status" in
+        generated)
+            info "  Generated persistent identity secret"
+            ;;
+        present)
+            info "  Preserved existing identity secret"
+            ;;
+        missing)
+            warn "  identity.yaml missing; skipping identity secret generation"
+            ;;
+        *)
+            warn "  Unexpected identity secret status: $status"
+            ;;
+    esac
 }
 
 # ------------------------------------------------------------------
@@ -336,7 +418,11 @@ install_units() {
 
     systemctl daemon-reload
     info "Enabling services..."
-    systemctl enable openbad-broker.service
+    if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
+        systemctl enable "$EXTERNAL_BROKER_UNIT"
+    else
+        systemctl enable openbad-broker.service
+    fi
     systemctl enable openbad.service
     systemctl enable openbad-wui.service
 }
@@ -352,10 +438,54 @@ start_services() {
     ensure_systemd_ready
 
     info "Starting services..."
-    systemctl start openbad-broker.service
-    systemctl start openbad.service
-    systemctl start openbad-wui.service
+    if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
+        restart_or_start_service "$EXTERNAL_BROKER_UNIT"
+    else
+        restart_or_start_service openbad-broker.service
+    fi
+    restart_or_start_service openbad.service
+    restart_or_start_service openbad-wui.service
     info "Services started. Check status with: systemctl status openbad"
+}
+
+validate_installation() {
+    local failures=0
+
+    if [[ "$SKIP_SERVICES" == "true" ]]; then
+        return
+    fi
+
+    info "Validating installation..."
+
+    for unit in openbad.service openbad-wui.service; do
+        if ! systemctl is-active --quiet "$unit"; then
+            error "Service failed to start: $unit"
+            failures=1
+        fi
+    done
+
+    if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
+        if ! systemctl is-active --quiet "$EXTERNAL_BROKER_UNIT"; then
+            error "Broker service failed to start: $EXTERNAL_BROKER_UNIT"
+            failures=1
+        fi
+    elif ! systemctl is-active --quiet openbad-broker.service; then
+        error "Service failed to start: openbad-broker.service"
+        failures=1
+    fi
+
+    if ! "$OPENBAD_BIN" health >/dev/null 2>&1; then
+        error "openbad health reported an unhealthy stack"
+        "$OPENBAD_BIN" health || true
+        failures=1
+    fi
+
+    if [[ "$failures" -ne 0 ]]; then
+        error "Installation validation failed. Review systemctl status and openbad health output."
+        exit 1
+    fi
+
+    info "Installation validation passed."
 }
 
 # ------------------------------------------------------------------
@@ -432,6 +562,7 @@ main() {
     create_dirs
     install_units
     start_services
+    validate_installation
     info "=== Installation complete ==="
     info "Run 'openbad status' to verify."
 }

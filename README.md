@@ -45,6 +45,8 @@ Notes:
 - `--bootstrap` installs Linux prerequisites (Ubuntu/Debian apt path) and broker deps.
 - Full install requires `systemd` (Linux + WSL).
 - In WSL, `--configure-wsl-systemd` writes `/etc/wsl.conf` and prompts for WSL restart.
+- If `mosquitto.service` already exists, the installer reuses it instead of creating a second broker service.
+- System installs generate and persist an identity secret in `/etc/openbad/identity.yaml` on first install.
 - Use `--skip-services` only for development mode.
 
 Validate setup/config:
@@ -66,6 +68,6 @@ openbad version
 
 Notes:
 
-- `openbad start` starts the broker, daemon, and web UI services and returns immediately.
+- `openbad start` starts the managed OpenBaD services and returns immediately.
 - `openbad health` reports systemd service state, MQTT reachability, and the WUI health endpoint.
 - `openbad tui` attaches a terminal UI to the running MQTT-backed stack.

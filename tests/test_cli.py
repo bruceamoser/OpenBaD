@@ -131,6 +131,19 @@ class TestServiceControlCommands:
         assert result.exit_code == 0
         assert run.call_args.args[0][-2:] == ["openbad.service", "openbad-wui.service"]
 
+    def test_start_skips_missing_broker_unit(self):
+        with patch("openbad.cli.subprocess.run") as run:
+            run.side_effect = [
+                MagicMock(stdout="not-found\n", stderr="", returncode=1),
+                MagicMock(stdout="enabled\n", stderr="", returncode=0),
+                MagicMock(stdout="enabled\n", stderr="", returncode=0),
+                MagicMock(stdout="", stderr="", returncode=0),
+            ]
+            result = CliRunner().invoke(main, ["start"])
+
+        assert result.exit_code == 0
+        assert run.call_args.args[0][-2:] == ["openbad.service", "openbad-wui.service"]
+
     def test_service_command_reports_systemctl_failure(self):
         with patch("openbad.cli.subprocess.run") as run:
             run.side_effect = FileNotFoundError()

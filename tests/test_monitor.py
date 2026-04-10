@@ -104,6 +104,10 @@ class TestCollectOnce:
         assert cpu_msg.usage_percent == 50.0
         assert mem_msg.usage_percent == 40.0
 
+    def test_default_interval_is_five_seconds(self, client_mock) -> None:
+        monitor = TelemetryMonitor(client_mock)
+        assert monitor._interval == pytest.approx(5.0)
+
 
 class TestPublishing:
     def test_publishes_cpu_and_memory(self, monitor: TelemetryMonitor, client_mock):
@@ -123,13 +127,11 @@ class TestPublishing:
         for call_obj in client_mock.publish.call_args_list:
             topic, payload = call_obj.args
             if topic == "agent/telemetry/cpu":
-                msg = CpuTelemetry()
-                msg.ParseFromString(payload)
-                assert msg.usage_percent == 50.0
+                assert isinstance(payload, CpuTelemetry)
+                assert payload.usage_percent == 50.0
             elif topic == "agent/telemetry/memory":
-                msg = MemoryTelemetry()
-                msg.ParseFromString(payload)
-                assert msg.usage_percent == 40.0
+                assert isinstance(payload, MemoryTelemetry)
+                assert payload.usage_percent == 40.0
 
 
 class TestStartStop:

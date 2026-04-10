@@ -23,6 +23,7 @@ from openbad.nervous_system.schemas.telemetry_pb2 import CpuTelemetry, MemoryTel
 logger = logging.getLogger(__name__)
 
 _IS_LINUX = platform.system() == "Linux"
+_DEFAULT_TELEMETRY_INTERVAL_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ class TelemetryMonitor:
         A :class:`NervousSystemClient` (or duck-typed mock with
         ``publish(topic, payload)``).
     interval:
-        Seconds between collection cycles (default 1.0).
+        Seconds between collection cycles (default 5.0).
     cpu_collector:
         Callable returning a :class:`CpuSnapshot`.  Defaults to
         :func:`collect_cpu`.
@@ -184,7 +185,7 @@ class TelemetryMonitor:
         self,
         client: object,
         *,
-        interval: float = 1.0,
+        interval: float = _DEFAULT_TELEMETRY_INTERVAL_S,
         cpu_collector: object | None = None,
         memory_collector: object | None = None,
     ) -> None:
