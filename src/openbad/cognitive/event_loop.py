@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.context_manager import ContextWindowManager
 from openbad.cognitive.model_router import ModelRouter, Priority
 from openbad.cognitive.reasoning.base import ReasoningStrategy
@@ -36,6 +37,7 @@ class CognitiveRequest:
     request_id: str
     prompt: str
     context: str = ""
+    system: CognitiveSystem = CognitiveSystem.CHAT
     priority: Priority = Priority.MEDIUM
     cortisol: float = 0.0
 
@@ -82,7 +84,7 @@ class CognitiveEventLoop:
         self,
         model_router: ModelRouter,
         context_manager: ContextWindowManager,
-        strategies: dict[Priority, ReasoningStrategy],
+        strategies: dict[Priority | CognitiveSystem, ReasoningStrategy],
         publish_fn: Any = None,
         validate_fn: Any = None,
     ) -> None:
@@ -118,11 +120,11 @@ class CognitiveEventLoop:
     async def handle_request(self, request: CognitiveRequest) -> CognitiveResponse:
         """Process a single reasoning request (can be called directly or via MQTT)."""
         if self._validate and not self._validate(request):
-                return CognitiveResponse(
-                    request_id=request.request_id,
-                    answer="",
-                    error="Request rejected by immune system",
-                )
+            return CognitiveResponse(
+                request_id=request.request_id,
+                answer="",
+                error="Request rejected by immune system",
+            )
 
         timeout = _TIMEOUTS.get(request.priority, 10.0)
 
@@ -165,6 +167,7 @@ class CognitiveEventLoop:
             request_id=data.get("request_id", ""),
             prompt=data.get("prompt", ""),
             context=data.get("context", ""),
+            system=_parse_system(data.get("system")),
             priority=Priority(data.get("priority", Priority.MEDIUM)),
             cortisol=data.get("cortisol", 0.0),
         )
@@ -179,7 +182,9 @@ class CognitiveEventLoop:
 
         # 1. Allocate context budget
         adapter, model_id, decision = await self._router.route(
-            request.priority, cortisol=request.cortisol,
+            request.priority,
+            system=request.system,
+            cortisol=request.cortisol,
         )
         budget = self._ctx.allocate(model_id)
 
@@ -189,7 +194,7 @@ class CognitiveEventLoop:
         )
 
         # 3. Select and execute reasoning strategy
-        strategy = self._strategies.get(request.priority)
+        strategy = self._select_strategy(request)
         if strategy:
             result = await strategy.reason(
                 request.prompt, compressed.text, self._router,
@@ -222,6 +227,14 @@ class CognitiveEventLoop:
             strategy=strategy_name,
         )
 
+    def _select_strategy(
+        self,
+        request: CognitiveRequest,
+    ) -> ReasoningStrategy | None:
+        return self._strategies.get(request.system) or self._strategies.get(
+            request.priority
+        )
+
 
 # ------------------------------------------------------------------ #
 # Helpers
@@ -230,6 +243,17 @@ class CognitiveEventLoop:
 
 async def _noop_publish(_topic: str, _payload: dict[str, Any]) -> None:
     pass
+
+
+def _parse_system(value: Any) -> CognitiveSystem:
+    if isinstance(value, CognitiveSystem):
+        return value
+    if isinstance(value, str):
+        try:
+            return CognitiveSystem(value.strip().lower())
+        except ValueError:
+            return CognitiveSystem.CHAT
+    return CognitiveSystem.CHAT
 
 
 def _response_to_dict(r: CognitiveResponse) -> dict[str, Any]:
