@@ -225,3 +225,77 @@ class TestSemanticPersistence:
         assert not path.exists()
         mem.save()
         assert path.exists()
+
+
+# ------------------------------------------------------------------ #
+# Tag-based retrieval boost
+# ------------------------------------------------------------------ #
+
+
+class TestTagBoost:
+    def test_tags_boost_ranking(self) -> None:
+        """Entries with matching tags should rank higher."""
+        mem = SemanticMemory()
+        mem.write(MemoryEntry(
+            key="a", value="alpha info", tier=MemoryTier.SEMANTIC,
+            metadata={"tags": ["deploy", "error"]},
+        ))
+        mem.write(MemoryEntry(
+            key="b", value="beta info", tier=MemoryTier.SEMANTIC,
+            metadata={"tags": ["network"]},
+        ))
+        results_no_tags = mem.search("info", top_k=2)
+        results_with_tags = mem.search(
+            "info", top_k=2, tags=["deploy"],
+        )
+        # With tag boost, 'a' (matching tag) should be first
+        assert results_with_tags[0][0].key == "a"
+        # Score with tag should be >= score without tag
+        score_a_boosted = results_with_tags[0][1]
+        score_a_plain = next(
+            s for e, s in results_no_tags if e.key == "a"
+        )
+        assert score_a_boosted >= score_a_plain
+
+    def test_tag_boost_capped_at_one(self) -> None:
+        mem = SemanticMemory()
+        mem.write(MemoryEntry(
+            key="a", value="a", tier=MemoryTier.SEMANTIC,
+            metadata={"tags": ["t1", "t2", "t3", "t4", "t5"]},
+        ))
+        results = mem.search(
+            "a", top_k=1, tags=["t1", "t2", "t3", "t4", "t5"],
+            tag_boost=0.5,
+        )
+        assert results[0][1] <= 1.0
+
+    def test_search_without_tags_unchanged(self) -> None:
+        """Backward compatibility: search without tags keyword works."""
+        mem = SemanticMemory()
+        mem.write(MemoryEntry(
+            key="x", value="hello", tier=MemoryTier.SEMANTIC,
+        ))
+        results = mem.search("hello", top_k=1)
+        assert len(results) == 1
+
+    def test_tag_matching_is_case_insensitive(self) -> None:
+        mem = SemanticMemory()
+        mem.write(MemoryEntry(
+            key="a", value="some stored information", tier=MemoryTier.SEMANTIC,
+            metadata={"tags": ["Deploy"]},
+        ))
+        results = mem.search("query text", top_k=1, tags=["deploy"])
+        boosted = results[0][1]
+        results_plain = mem.search("query text", top_k=1)
+        plain = results_plain[0][1]
+        assert boosted > plain
+
+    def test_extracted_tags_reasonable(self) -> None:
+        """Tags extracted by _parse_tags should be usable for retrieval."""
+        from openbad.memory.sleep.orchestrator import _parse_tags
+
+        raw = "deployment, rollback, v2.3.1, production"
+        tags = _parse_tags(raw)
+        assert len(tags) >= 3
+        assert "deployment" in tags
+        assert "rollback" in tags
