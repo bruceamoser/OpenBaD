@@ -65,6 +65,66 @@
       <h2>Event Stream</h2>
       <div id="event-log" class="log-body" aria-live="polite"></div>
     </section>
+
+    <section class="anatomy reveal">
+      <h2>Anatomical System Map</h2>
+      <div class="anatomy-wrap">
+        <svg id="anatomy-map" viewBox="0 0 760 360" role="img" aria-label="OpenBaD subsystem anatomical map">
+          <defs>
+            <linearGradient id="organFill" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#1f4f63"/>
+              <stop offset="100%" stop-color="#0c1d29"/>
+            </linearGradient>
+          </defs>
+
+          <rect x="2" y="2" width="756" height="356" rx="18" class="body-shell"/>
+          <circle cx="130" cy="88" r="52" class="outline"/>
+          <path d="M130,140 C84,150 64,198 66,246 C68,288 92,322 130,336 C168,322 192,288 194,246 C196,198 176,150 130,140" class="outline"/>
+
+          <g id="organ-cognitive" class="organ">
+            <circle cx="130" cy="88" r="28"/>
+            <text x="130" y="92">Cognitive</text>
+          </g>
+          <g id="organ-reflex" class="organ">
+            <rect x="114" y="146" width="32" height="46" rx="10"/>
+            <text x="130" y="173">Reflex</text>
+          </g>
+          <g id="organ-endocrine" class="organ">
+            <ellipse cx="98" cy="216" rx="20" ry="28"/>
+            <text x="98" y="220">Endocrine</text>
+          </g>
+          <g id="organ-immune" class="organ">
+            <ellipse cx="162" cy="216" rx="20" ry="28"/>
+            <text x="162" y="220">Immune</text>
+          </g>
+          <g id="organ-memory" class="organ">
+            <rect x="104" y="258" width="52" height="26" rx="9"/>
+            <text x="130" y="275">Memory</text>
+          </g>
+          <g id="organ-sensory" class="organ">
+            <circle cx="90" cy="120" r="12"/>
+            <circle cx="170" cy="120" r="12"/>
+            <text x="130" y="124">Sensory</text>
+          </g>
+          <g id="organ-nervous" class="organ">
+            <path d="M130,96 L130,312"/>
+            <text x="130" y="306">Nervous</text>
+          </g>
+        </svg>
+        <aside class="legend">
+          <p>Topics pulse corresponding subsystems in real time.</p>
+          <ul>
+            <li>Cognitive: agent/cognitive/*</li>
+            <li>Endocrine: agent/endocrine/*</li>
+            <li>Reflex: agent/reflex/*</li>
+            <li>Immune: agent/immune/*</li>
+            <li>Memory: agent/memory/*</li>
+            <li>Sensory: agent/sensory/*</li>
+            <li>Nervous: fallback for telemetry/system flow</li>
+          </ul>
+        </aside>
+      </div>
+    </section>
   </main>
 
   <script src="/static/app.js" defer></script>
