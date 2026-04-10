@@ -126,3 +126,88 @@ class FSMPanel(Static):
             sc = STATE_COLOURS.get(s, "white")
             lines.append(f"    {marker} [{sc}]{s}[/{sc}]")
         return "\n".join(lines)
+
+
+def _bytes_human(value: float) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(value)
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024.0
+        idx += 1
+    return f"{size:.1f} {units[idx]}"
+
+
+class VitalsPanel(Static):
+    """Displays key runtime telemetry from interoception topics."""
+
+    DEFAULT_CSS = """
+    VitalsPanel {
+        height: 1fr;
+        border: solid $accent;
+        padding: 1;
+    }
+    """
+
+    cpu_usage: reactive[float] = reactive(0.0)
+    mem_usage: reactive[float] = reactive(0.0)
+    disk_usage: reactive[float] = reactive(0.0)
+    net_sent: reactive[float] = reactive(0.0)
+    net_recv: reactive[float] = reactive(0.0)
+    tokens_used: reactive[int] = reactive(0)
+    token_remaining: reactive[float] = reactive(0.0)
+    model_tier: reactive[str] = reactive("--")
+
+    def render(self) -> str:  # type: ignore[override]
+        return "\n".join(
+            [
+                "[b]Vitals[/b]",
+                "",
+                f"CPU:    {self.cpu_usage:5.1f}%",
+                f"Memory: {self.mem_usage:5.1f}%",
+                f"Disk:   {self.disk_usage:5.1f}%",
+                f"Net TX: {_bytes_human(self.net_sent)}",
+                f"Net RX: {_bytes_human(self.net_recv)}",
+                f"Tokens: {self.tokens_used} ({self.token_remaining:4.1f}% left)",
+                f"Tier:   {self.model_tier}",
+            ]
+        )
+
+
+class InferencePanel(Static):
+    """Displays cognitive inference health and latest response metadata."""
+
+    DEFAULT_CSS = """
+    InferencePanel {
+        height: 1fr;
+        border: solid $accent;
+        padding: 1;
+    }
+    """
+
+    provider: reactive[str] = reactive("--")
+    model_id: reactive[str] = reactive("--")
+    available: reactive[bool] = reactive(False)
+    latency_p50: reactive[float] = reactive(0.0)
+    latency_p99: reactive[float] = reactive(0.0)
+    last_model_used: reactive[str] = reactive("--")
+    last_tokens: reactive[int] = reactive(0)
+    last_latency_ms: reactive[float] = reactive(0.0)
+
+    def render(self) -> str:  # type: ignore[override]
+        availability = "[green]up[/green]" if self.available else "[red]down[/red]"
+        return "\n".join(
+            [
+                "[b]Inference[/b]",
+                "",
+                f"Provider: {self.provider}",
+                f"Model:    {self.model_id}",
+                f"Health:   {availability}",
+                f"p50/p99:  {self.latency_p50:.1f}ms / {self.latency_p99:.1f}ms",
+                "",
+                "Last response:",
+                f"  model:  {self.last_model_used}",
+                f"  tokens: {self.last_tokens}",
+                f"  latency:{self.last_latency_ms:.1f}ms",
+            ]
+        )
