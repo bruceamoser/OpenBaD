@@ -121,7 +121,10 @@ class TestInstallScript:
         assert "openbad" in self.content
 
     def test_installs_package(self):
-        assert "pip" in self.content
+        assert "VENV_DIR" in self.content
+        assert "python3 -m venv" in self.content
+        assert "bin/python\" -m pip install" in self.content
+        assert "OPENBAD_BIN" in self.content
 
     def test_copies_configs(self):
         assert "CONFIG_DIR" in self.content

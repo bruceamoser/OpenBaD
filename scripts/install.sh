@@ -5,6 +5,9 @@ set -euo pipefail
 
 OPENBAD_USER="openbad"
 OPENBAD_GROUP="openbad"
+APP_HOME="/opt/openbad"
+VENV_DIR="/opt/openbad/venv"
+OPENBAD_BIN="/usr/local/bin/openbad"
 CONFIG_DIR="/etc/openbad"
 DATA_DIR="/var/lib/openbad"
 LOG_DIR="/var/log/openbad"
@@ -248,18 +251,26 @@ create_user() {
 # Install Python package
 # ------------------------------------------------------------------
 install_package() {
-    info "Installing openbad Python package..."
-    if command -v python3 &>/dev/null; then
-        python3 -m pip install --upgrade pip
-        python3 -m pip install --upgrade "$PROJECT_ROOT"
-    elif command -v pip3 &>/dev/null; then
-        pip3 install --upgrade "$PROJECT_ROOT"
-    elif command -v pip &>/dev/null; then
-        pip install --upgrade "$PROJECT_ROOT"
-    else
+    info "Installing openbad Python package into dedicated virtualenv..."
+    if ! command -v python3 &>/dev/null; then
         error "pip not found. Install Python >= 3.11 and pip first."
         exit 1
     fi
+
+    mkdir -p "$APP_HOME"
+
+    # Use a private virtualenv to avoid PEP 668 'externally managed' failures
+    # on Debian/Ubuntu and WSL images.
+    if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+        python3 -m venv "$VENV_DIR"
+    fi
+
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip
+    "$VENV_DIR/bin/python" -m pip install --upgrade "$PROJECT_ROOT"
+
+    # Keep CLI path stable for systemd and operators.
+    ln -sf "$VENV_DIR/bin/openbad" "$OPENBAD_BIN"
+    chmod 755 "$OPENBAD_BIN"
 }
 
 # ------------------------------------------------------------------
@@ -360,11 +371,11 @@ uninstall() {
     fi
 
     info "Removing Python package..."
-    if command -v python3 &>/dev/null; then
-        python3 -m pip uninstall -y openbad 2>/dev/null || true
-    else
-        pip3 uninstall -y openbad 2>/dev/null || true
+    if [[ -x "$VENV_DIR/bin/python" ]]; then
+        "$VENV_DIR/bin/python" -m pip uninstall -y openbad 2>/dev/null || true
     fi
+    rm -f "$OPENBAD_BIN"
+    rm -rf "$VENV_DIR"
 
     warn "Config ($CONFIG_DIR) and data ($DATA_DIR) directories preserved."
     warn "To fully remove: rm -rf $CONFIG_DIR $DATA_DIR $LOG_DIR"
