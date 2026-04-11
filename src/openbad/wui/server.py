@@ -6,11 +6,13 @@ Serves the static dashboard assets and hosts the MQTT->WebSocket bridge.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import contextlib
 import json
 import logging
 import os
+import stat
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,26 +24,126 @@ from openbad.cognitive.config import (
     CognitiveConfig,
     CognitiveSystem,
     ProviderConfig,
+    SystemAssignment,
     load_cognitive_config,
 )
+from openbad.cognitive.providers.anthropic import AnthropicProvider
 from openbad.cognitive.providers.github_copilot import (
+    _KNOWN_MODELS,
+    _TOKEN_FILE,
     CopilotAuthError,
     GitHubCopilotProvider,
-    _KNOWN_MODELS,
 )
-from openbad.cognitive.providers.openai_compat import custom_provider
+from openbad.cognitive.providers.ollama import OllamaProvider
+from openbad.cognitive.providers.openai_compat import (
+    custom_provider,
+    groq_provider,
+    mistral_provider,
+    openai_provider,
+    openrouter_provider,
+    xai_provider,
+)
 from openbad.identity.persistence import IdentityPersistence
 from openbad.identity.personality_modulator import PersonalityModulator
 from openbad.memory.episodic import EpisodicMemory
 from openbad.sensory.config import load_sensory_config
-from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.bridge import MqttWebSocketBridge
+from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.usage_tracker import UsageTracker
 
 # SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
 BUILD_DIR = Path(__file__).resolve().parent / "build"
 
 log = logging.getLogger(__name__)
+
+_RESTRICTED_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
+_SETUP_REDIRECT = "/providers?wizard=1"
+_SUPPORTED_PROVIDER_TYPES: tuple[dict[str, object], ...] = (
+    {
+        "provider_type": "openai",
+        "name": "openai",
+        "label": "OpenAI",
+        "auth": "api_key",
+        "base_url": "https://api.openai.com",
+        "api_key_env": "OPENAI_API_KEY",
+        "default_model": "gpt-4o-mini",
+    },
+    {
+        "provider_type": "anthropic",
+        "name": "anthropic",
+        "label": "Anthropic",
+        "auth": "api_key",
+        "base_url": "https://api.anthropic.com",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "default_model": "claude-sonnet-4-20250514",
+    },
+    {
+        "provider_type": "github-copilot",
+        "name": "github-copilot",
+        "label": "GitHub Copilot",
+        "auth": "device_code",
+        "base_url": "https://api.githubcopilot.com",
+        "api_key_env": "GITHUB_COPILOT_TOKEN",
+        "default_model": "gpt-4o",
+    },
+    {
+        "provider_type": "ollama",
+        "name": "ollama",
+        "label": "Ollama",
+        "auth": "local",
+        "base_url": "http://localhost:11434",
+        "api_key_env": "",
+        "default_model": "llama3.2",
+    },
+    {
+        "provider_type": "openrouter",
+        "name": "openrouter",
+        "label": "OpenRouter",
+        "auth": "api_key",
+        "base_url": "https://openrouter.ai/api",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "default_model": "openai/gpt-4o-mini",
+    },
+    {
+        "provider_type": "groq",
+        "name": "groq",
+        "label": "Groq",
+        "auth": "api_key",
+        "base_url": "https://api.groq.com/openai",
+        "api_key_env": "GROQ_API_KEY",
+        "default_model": "llama-3.1-8b-instant",
+    },
+    {
+        "provider_type": "mistral",
+        "name": "mistral",
+        "label": "Mistral",
+        "auth": "api_key",
+        "base_url": "https://api.mistral.ai",
+        "api_key_env": "MISTRAL_API_KEY",
+        "default_model": "mistral-small-latest",
+    },
+    {
+        "provider_type": "xai",
+        "name": "xai",
+        "label": "xAI",
+        "auth": "api_key",
+        "base_url": "https://api.x.ai",
+        "api_key_env": "XAI_API_KEY",
+        "default_model": "grok-3-mini",
+    },
+    {
+        "provider_type": "local-openai",
+        "name": "custom",
+        "label": "Local / OpenAI-Compatible",
+        "auth": "local",
+        "base_url": "http://localhost:11434/v1",
+        "api_key_env": "",
+        "default_model": "",
+    },
+)
+_SUPPORTED_PROVIDER_INDEX = {
+    str(entry["provider_type"]): entry for entry in _SUPPORTED_PROVIDER_TYPES
+}
 
 
 def _resolve_usage_db_path() -> Path:
@@ -139,6 +241,185 @@ def _resolve_identity_config_path() -> Path:
     return candidates[0]
 
 
+def _resolve_model_routing_path() -> Path:
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir) / "model_routing.yaml"
+    return Path("config/model_routing.yaml")
+
+
+def _restrict_permissions(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.chmod(_RESTRICTED_FILE_MODE)
+
+
+def _provider_uses_local_endpoint(provider: ProviderConfig) -> bool:
+    return provider.name in {"ollama", "custom"}
+
+
+def _provider_has_secret(provider: ProviderConfig) -> bool:
+    if provider.api_key:
+        return True
+    if provider.name == "github-copilot":
+        return bool(os.environ.get("GITHUB_COPILOT_TOKEN", "")) or _TOKEN_FILE.exists()
+    return bool(provider.api_key_env and os.environ.get(provider.api_key_env, ""))
+
+
+def _provider_is_valid(provider: ProviderConfig) -> bool:
+    if not provider.enabled:
+        return False
+    if _provider_uses_local_endpoint(provider):
+        return bool(provider.base_url)
+    return _provider_has_secret(provider)
+
+
+def _chat_assignment_is_ready(config: CognitiveConfig) -> bool:
+    assignment = config.systems.get(CognitiveSystem.CHAT, SystemAssignment())
+    if not assignment.provider or not assignment.model:
+        return False
+    for provider in config.providers:
+        if provider.name == assignment.provider and _provider_is_valid(provider):
+            return True
+    return False
+
+
+def _provider_setup_status(config: CognitiveConfig) -> dict[str, object]:
+    valid_providers = [provider for provider in config.providers if _provider_is_valid(provider)]
+    chat_ready = _chat_assignment_is_ready(config)
+    missing: list[str] = []
+    if not valid_providers:
+        missing.append("provider")
+    if not chat_ready:
+        missing.append("chat_assignment")
+    return {
+        "first_run": bool(missing),
+        "provider_ready": bool(valid_providers),
+        "chat_assignment_ready": chat_ready,
+        "configured_provider_count": len(valid_providers),
+        "missing": missing,
+        "redirect_to": _SETUP_REDIRECT if missing else "",
+        "supported_providers": list(_SUPPORTED_PROVIDER_TYPES),
+    }
+
+
+def _rank_model(model_id: str) -> int:
+    value = model_id.lower()
+    if any(token in value for token in ("opus", "gpt-5", "sonnet-4", "claude-sonnet-4", "grok-3")):
+        return 5
+    if any(token in value for token in ("sonnet", "gpt-4", "mixtral", "mistral-large")):
+        return 4
+    if any(token in value for token in ("mini", "haiku", "small", "8b", "7b", "instant")):
+        return 2
+    if any(token in value for token in ("tiny", "3b", "1b")):
+        return 1
+    return 3
+
+
+def _provider_model(provider: ProviderConfig) -> str:
+    return provider.model.strip()
+
+
+def _pick_primary_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
+    for provider in providers:
+        if provider.name not in {"ollama", "custom"}:
+            return provider
+    return providers[0] if providers else None
+
+
+def _pick_fast_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
+    ranked = [provider for provider in providers if _provider_model(provider)]
+    if not ranked:
+        return providers[0] if providers else None
+    return min(ranked, key=lambda provider: _rank_model(_provider_model(provider)))
+
+
+def _pick_capable_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
+    ranked = [provider for provider in providers if _provider_model(provider)]
+    if not ranked:
+        return providers[0] if providers else None
+    return max(ranked, key=lambda provider: _rank_model(_provider_model(provider)))
+
+
+def _pick_local_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
+    for provider in providers:
+        if provider.name == "ollama":
+            return provider
+    for provider in providers:
+        if provider.name == "custom" and provider.base_url.startswith("http://localhost"):
+            return provider
+    return None
+
+
+def _dedupe_assignments(assignments: list[SystemAssignment]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for assignment in assignments:
+        provider = assignment.provider.strip()
+        model = assignment.model.strip()
+        if not provider or not model:
+            continue
+        key = (provider, model)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"provider": provider, "model": model})
+    return result
+
+
+def _default_assignments(config: CognitiveConfig) -> dict[str, dict[str, str]]:
+    providers = [provider for provider in config.providers if _provider_is_valid(provider)]
+    primary = _pick_primary_provider(providers)
+    capable = _pick_capable_provider(providers) or primary
+    fast = _pick_fast_provider(providers) or primary
+    local = _pick_local_provider(providers) or fast or primary
+
+    def assignment(provider: ProviderConfig | None) -> dict[str, str]:
+        if provider is None:
+            return {"provider": "", "model": ""}
+        return {"provider": provider.name, "model": _provider_model(provider)}
+
+    return {
+        CognitiveSystem.CHAT.value: assignment(primary),
+        CognitiveSystem.REASONING.value: assignment(capable),
+        CognitiveSystem.REACTIONS.value: assignment(fast),
+        CognitiveSystem.SLEEP.value: assignment(local),
+    }
+
+
+def _write_model_routing_from_config(config: CognitiveConfig) -> None:
+    path = _resolve_model_routing_path()
+    existing = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+    defaults = _default_assignments(config)
+
+    def to_assignment(system: CognitiveSystem) -> SystemAssignment:
+        configured = config.systems.get(system, SystemAssignment())
+        if configured.provider and configured.model:
+            return configured
+        fallback = defaults.get(system.value, {"provider": "", "model": ""})
+        return SystemAssignment(provider=fallback["provider"], model=fallback["model"])
+
+    reasoning = to_assignment(CognitiveSystem.REASONING)
+    chat = to_assignment(CognitiveSystem.CHAT)
+    reactions = to_assignment(CognitiveSystem.REACTIONS)
+    sleep = to_assignment(CognitiveSystem.SLEEP)
+
+    document = {
+        "cortisol_threshold": existing.get("cortisol_threshold", 0.8),
+        "budget_limit": existing.get("budget_limit", 0),
+        "health_ttl_s": existing.get("health_ttl_s", 60),
+        "chains": {
+            "critical": _dedupe_assignments([reasoning, chat, reactions]),
+            "high": _dedupe_assignments([chat, reactions, reasoning]),
+            "medium": _dedupe_assignments([reactions, chat]),
+            "low": _dedupe_assignments([sleep, reactions]),
+        },
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    _restrict_permissions(path)
+
+
 def _initialize_identity_state(app: web.Application) -> None:
     config_path = _resolve_identity_config_path()
     if not config_path.exists():
@@ -164,6 +445,7 @@ def _serialize_cognitive_config(config: CognitiveConfig, path: Path) -> dict[str
                 "name": provider.name,
                 "base_url": provider.base_url,
                 "model": provider.model,
+                "has_api_key": bool(provider.api_key),
                 "api_key_env": provider.api_key_env,
                 "timeout_ms": provider.timeout_ms,
                 "enabled": provider.enabled,
@@ -195,6 +477,7 @@ def _coerce_provider(payload: object) -> ProviderConfig:
         name=name,
         base_url=str(payload.get("base_url", "")).strip(),
         model=str(payload.get("model", "")).strip(),
+        api_key=str(payload.get("api_key", "")).strip(),
         api_key_env=str(payload.get("api_key_env", "")).strip(),
         timeout_ms=max(timeout_ms, 1000),
         enabled=bool(payload.get("enabled", True)),
@@ -238,6 +521,7 @@ def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
                     "name": provider.name,
                     "base_url": provider.base_url,
                     "model": provider.model,
+                    "api_key": provider.api_key,
                     "api_key_env": provider.api_key_env,
                     "timeout_ms": provider.timeout_ms,
                     "enabled": provider.enabled,
@@ -251,12 +535,19 @@ def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
         existing = yaml.safe_load(path.read_text()) or {}
         cognitive = existing.get("cognitive", {})
         if isinstance(cognitive, dict):
-            for key in ("context_budget", "reasoning", "systems", "default_fallback_chain", "fallback_cortisol"):
+            for key in (
+                "context_budget",
+                "reasoning",
+                "systems",
+                "default_fallback_chain",
+                "fallback_cortisol",
+            ):
                 if key in cognitive and key not in document["cognitive"]:
                     document["cognitive"][key] = cognitive[key]
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    _restrict_permissions(path)
 
 
 async def _get_providers(_request: web.Request) -> web.Response:
@@ -272,6 +563,7 @@ async def _put_providers(request: web.Request) -> web.Response:
     path = _resolve_cognitive_config_path()
     _save_providers_config(path, payload)
     config = load_cognitive_config(path)
+    _write_model_routing_from_config(config)
 
     bridge = request.app.get("bridge")
     if bridge is not None:
@@ -284,30 +576,29 @@ async def _put_providers(request: web.Request) -> web.Response:
 
 def _wizard_provider_payload(payload: dict[str, object]) -> ProviderConfig:
     provider_type = str(payload.get("provider_type", "")).strip()
-    if provider_type == "github-copilot":
-        return ProviderConfig(
-            name="github-copilot",
-            base_url="https://api.githubcopilot.com",
-            model=str(payload.get("model", "")).strip(),
-            api_key_env="GITHUB_COPILOT_TOKEN",
-            timeout_ms=_coerce_timeout_ms(payload.get("timeout_ms", 30_000)),
-            enabled=True,
-        )
+    spec = _SUPPORTED_PROVIDER_INDEX.get(provider_type)
+    if spec is None:
+        raise web.HTTPBadRequest(text="unsupported provider_type")
 
-    if provider_type == "local-openai":
-        base_url = str(payload.get("base_url", "")).strip()
-        if not base_url:
-            raise web.HTTPBadRequest(text="base_url is required for local llama providers")
-        return ProviderConfig(
-            name="custom",
-            base_url=base_url,
-            model=str(payload.get("model", "")).strip(),
-            api_key_env=str(payload.get("api_key_env", "")).strip(),
-            timeout_ms=_coerce_timeout_ms(payload.get("timeout_ms", 30_000)),
-            enabled=True,
-        )
+    base_url = str(payload.get("base_url", spec["base_url"])).strip()
+    api_key = str(payload.get("api_key", "")).strip()
+    api_key_env = str(payload.get("api_key_env", spec["api_key_env"])).strip()
+    model = str(payload.get("model", spec["default_model"])).strip()
 
-    raise web.HTTPBadRequest(text="unsupported provider_type")
+    if spec["auth"] == "local" and not base_url:
+        raise web.HTTPBadRequest(text="base_url is required for local providers")
+    if spec["auth"] == "api_key" and not api_key and not api_key_env:
+        raise web.HTTPBadRequest(text="api_key is required for this provider")
+
+    return ProviderConfig(
+        name=str(spec["name"]),
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        timeout_ms=_coerce_timeout_ms(payload.get("timeout_ms", 30_000)),
+        enabled=True,
+    )
 
 
 def _build_wizard_adapter(provider: ProviderConfig):
@@ -318,8 +609,65 @@ def _build_wizard_adapter(provider: ProviderConfig):
             timeout_s=timeout_s,
         )
 
+    if provider.name == "anthropic":
+        return AnthropicProvider(
+            base_url=provider.base_url or "https://api.anthropic.com",
+            api_key=provider.api_key,
+            api_key_env=provider.api_key_env or "ANTHROPIC_API_KEY",
+            default_model=provider.model or "claude-sonnet-4-20250514",
+            timeout_s=timeout_s,
+        )
+
+    if provider.name == "ollama":
+        return OllamaProvider(
+            base_url=provider.base_url or "http://localhost:11434",
+            default_model=provider.model or "llama3.2",
+            timeout_s=timeout_s,
+        )
+
+    if provider.name == "openai":
+        return openai_provider(
+            api_key=provider.api_key,
+            api_key_env=provider.api_key_env or "OPENAI_API_KEY",
+            default_model=provider.model or "gpt-4o-mini",
+            timeout_s=timeout_s,
+        )
+
+    if provider.name == "openrouter":
+        return openrouter_provider(
+            api_key=provider.api_key,
+            api_key_env=provider.api_key_env or "OPENROUTER_API_KEY",
+            default_model=provider.model or "openai/gpt-4o-mini",
+            timeout_s=timeout_s,
+        )
+
+    if provider.name == "groq":
+        return groq_provider(
+            api_key=provider.api_key,
+            api_key_env=provider.api_key_env or "GROQ_API_KEY",
+            default_model=provider.model or "llama-3.1-8b-instant",
+            timeout_s=timeout_s,
+        )
+
+    if provider.name == "mistral":
+        return mistral_provider(
+            api_key=provider.api_key,
+            api_key_env=provider.api_key_env or "MISTRAL_API_KEY",
+            default_model=provider.model or "mistral-small-latest",
+            timeout_s=timeout_s,
+        )
+
+    if provider.name == "xai":
+        return xai_provider(
+            api_key=provider.api_key,
+            api_key_env=provider.api_key_env or "XAI_API_KEY",
+            default_model=provider.model or "grok-3-mini",
+            timeout_s=timeout_s,
+        )
+
     return custom_provider(
         base_url=provider.base_url,
+        api_key=provider.api_key,
         api_key_env=provider.api_key_env,
         default_model=provider.model,
         timeout_s=timeout_s,
@@ -333,8 +681,17 @@ async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]
         status = await adapter.health_check()
     except Exception:
         log.exception("Health check failed for %s", provider.name)
-        status = type("HS", (), {"available": False, "latency_ms": 0, "models_available": 0})()
-    log.info("Provider %s available=%s latency=%.0fms", provider.name, status.available, status.latency_ms)
+        status = type(
+            "HS",
+            (),
+            {"available": False, "latency_ms": 0, "models_available": 0},
+        )()
+    log.info(
+        "Provider %s available=%s latency=%.0fms",
+        provider.name,
+        status.available,
+        status.latency_ms,
+    )
     models: list[str] = []
     if status.available:
         try:
@@ -351,6 +708,8 @@ async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]
             "name": provider.name,
             "base_url": provider.base_url,
             "model": provider.model,
+            "api_key": provider.api_key,
+            "has_api_key": bool(provider.api_key),
             "api_key_env": provider.api_key_env,
             "timeout_ms": provider.timeout_ms,
             "enabled": provider.enabled,
@@ -384,6 +743,53 @@ async def _post_providers_verify(request: web.Request) -> web.Response:
             "provider": result["provider"],
         }
     )
+
+
+async def _get_setup_status(_request: web.Request) -> web.Response:
+    _path, config = _read_providers_config()
+    return web.json_response(_provider_setup_status(config))
+
+
+async def _post_setup(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    persistence = request.app.get("identity_persistence")
+    if persistence is not None:
+        user_payload = payload.get("user")
+        if isinstance(user_payload, dict):
+            persistence.update_user(**user_payload)
+
+        assistant_payload = payload.get("assistant")
+        if isinstance(assistant_payload, dict):
+            persistence.update_assistant(**assistant_payload)
+            modulator = request.app.get("personality_modulator")
+            if modulator is not None:
+                modulator.update(persistence.assistant)
+
+    senses_payload = payload.get("senses")
+    if isinstance(senses_payload, dict):
+        path = _resolve_senses_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(senses_payload, sort_keys=False), encoding="utf-8")
+        _restrict_permissions(path)
+
+    providers_payload = payload.get("providers")
+    if isinstance(providers_payload, list):
+        providers_path = _resolve_cognitive_config_path()
+        _save_providers_config(
+            providers_path,
+            {
+                "enabled": True,
+                "default_provider": str(payload.get("default_provider", "")).strip(),
+                "providers": providers_payload,
+            },
+        )
+
+    config = load_cognitive_config(_resolve_cognitive_config_path())
+    _write_model_routing_from_config(config)
+    return web.json_response(_provider_setup_status(config))
 
 
 def _legacy_providers_redirect_location(request: web.Request) -> str:
@@ -471,9 +877,11 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
 
     try:
         result = await provider.poll_for_token_once(str(flow["device_code"]))
-    except Exception:
+    except Exception as exc:
         log.exception("poll_for_token_once failed for flow %s", flow_id)
-        raise web.HTTPBadRequest(text="Failed to poll GitHub for authorization status")
+        raise web.HTTPBadRequest(
+            text="Failed to poll GitHub for authorization status"
+        ) from exc
     state = str(result.get("state", "error"))
     if state == "authorization_pending":
         return web.json_response(
@@ -622,7 +1030,7 @@ def _serialize_chat_turn(turn) -> dict[str, object]:
         "content": turn.content,
         "timestamp": datetime.fromtimestamp(
             turn.timestamp,
-            tz=timezone.utc,
+            tz=UTC,
         ).isoformat(),
     }
 
@@ -756,7 +1164,7 @@ async def _get_usage(request: web.Request) -> web.Response:
         raise web.HTTPServiceUnavailable(text="UsageTracker not available")
     return web.json_response(
         {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             **tracker.snapshot(),
         }
     )
@@ -815,8 +1223,10 @@ async def _put_systems(request: web.Request) -> web.Response:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(existing, sort_keys=False), encoding="utf-8")
+    _restrict_permissions(path)
 
     config = load_cognitive_config(path)
+    _write_model_routing_from_config(config)
     return web.json_response(_serialize_systems_config(config))
 
 
@@ -902,6 +1312,7 @@ async def _put_senses(request: web.Request) -> web.Response:
 
     try:
         path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        _restrict_permissions(path)
         cfg = load_sensory_config(path)
     except (ValueError, TypeError) as exc:
         raise web.HTTPBadRequest(text=str(exc)) from exc
@@ -1134,6 +1545,8 @@ def create_app(
     app.router.add_post("/api/providers/copilot/complete", _post_copilot_complete)
     app.router.add_post("/api/providers/verify", _post_providers_verify)
     app.router.add_put("/api/providers", _put_providers)
+    app.router.add_get("/api/setup-status", _get_setup_status)
+    app.router.add_post("/api/setup", _post_setup)
     app.router.add_get("/api/systems", _get_systems)
     app.router.add_put("/api/systems", _put_systems)
     app.router.add_get("/api/providers/{name}/models", _get_provider_models)

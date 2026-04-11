@@ -54,6 +54,7 @@ class OpenAICompatProvider(ProviderAdapter):
         *,
         provider_name: str,
         base_url: str,
+        api_key: str = "",
         api_key_env: str = "",
         default_model: str = "",
         timeout_s: float = 30,
@@ -62,6 +63,7 @@ class OpenAICompatProvider(ProviderAdapter):
     ) -> None:
         self._provider_name = provider_name
         self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
         self._api_key_env = api_key_env
         self._default_model = default_model
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -74,6 +76,8 @@ class OpenAICompatProvider(ProviderAdapter):
 
     def _resolve_api_key(self) -> str:
         """Return the API key or raise ``ProviderUnavailable``."""
+        if self._api_key:
+            return self._api_key
         if not self._api_key_env:
             return ""
         key = os.environ.get(self._api_key_env, "")

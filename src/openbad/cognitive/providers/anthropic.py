@@ -56,12 +56,14 @@ class AnthropicProvider(ProviderAdapter):
         self,
         *,
         base_url: str = _DEFAULT_BASE_URL,
+        api_key: str = "",
         api_key_env: str = "ANTHROPIC_API_KEY",
         default_model: str = _DEFAULT_MODEL,
         timeout_s: float = 30,
         max_retries: int = 2,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
         self._api_key_env = api_key_env
         self._default_model = default_model
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -72,6 +74,8 @@ class AnthropicProvider(ProviderAdapter):
     # ------------------------------------------------------------------ #
 
     def _resolve_api_key(self) -> str:
+        if self._api_key:
+            return self._api_key
         key = os.environ.get(self._api_key_env, "")
         if not key:
             msg = (
