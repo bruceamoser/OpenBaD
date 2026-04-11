@@ -47,6 +47,32 @@ from openbad.nervous_system.schemas.telemetry_pb2 import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# User presence tracking
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class UserSession:
+    """Singleton that tracks whether a human user is actively connected.
+
+    ``is_active`` is ``True`` whenever at least one WebSocket or SSE client
+    is connected.  ``last_seen`` records the most recent connect/disconnect
+    time so callers can reason about staleness.
+    """
+
+    is_active: bool = False
+    last_seen: datetime | None = None
+
+    def mark_connected(self) -> None:
+        self.is_active = True
+        self.last_seen = datetime.now(tz=UTC)
+
+    def mark_disconnected(self) -> None:
+        self.is_active = False
+        self.last_seen = datetime.now(tz=UTC)
+
+
 TOPIC_PROTO_MAP: dict[str, type] = {
     topics.ENDOCRINE_ALL: EndocrineEvent,
     topics.REFLEX_STATE: ReflexState,
@@ -83,6 +109,7 @@ class MqttWebSocketBridge:
         init=False,
         repr=False,
     )
+    _session: UserSession = field(default_factory=UserSession, init=False, repr=False)
 
     def create_app(self) -> web.Application:
         app = web.Application()
@@ -160,6 +187,7 @@ class MqttWebSocketBridge:
         await response.prepare(request)
         lock = asyncio.Lock()
         self._event_clients[response] = lock
+        self._update_presence(connected=True)
         logger.info("Event stream client connected")
 
         await self._send_sse(
@@ -184,6 +212,7 @@ class MqttWebSocketBridge:
             logger.exception("Event stream handler failed")
         finally:
             self._event_clients.pop(response, None)
+            self._update_presence(connected=False)
             logger.info("Event stream client disconnected")
             with contextlib.suppress(Exception):
                 await response.write_eof()
@@ -194,6 +223,7 @@ class MqttWebSocketBridge:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self._clients.add(ws)
+        self._update_presence(connected=True)
         logger.info("WebSocket client connected")
 
         await ws.send_json(
@@ -216,9 +246,46 @@ class MqttWebSocketBridge:
             logger.exception("WebSocket handler failed")
         finally:
             self._clients.discard(ws)
+            self._update_presence(connected=False)
             logger.info("WebSocket client disconnected (close_code=%s)", ws.close_code)
 
         return ws
+
+    @property
+    def user_session(self) -> UserSession:
+        """Return the live user-presence session object."""
+        return self._session
+
+    def _update_presence(self, *, connected: bool) -> None:
+        """Update :attr:`_session` based on current client count and publish.
+
+        A user is considered *present* when at least one WS or SSE client is
+        connected.  The method publishes to :data:`topics.WUI_PRESENCE` when
+        the active state changes.
+        """
+        total = len(self._clients) + len(self._event_clients)
+        was_active = self._session.is_active
+
+        if connected:
+            self._session.mark_connected()
+        else:
+            # Client has already been removed from the set before this call in
+            # the WS handler, but SSE handler removes it just before calling
+            # here too, so total already reflects the post-disconnect state.
+            if total > 0:
+                self._session.mark_connected()
+            else:
+                self._session.mark_disconnected()
+
+        if self._session.is_active != was_active and self._mqtt is not None:
+            payload = json.dumps({
+                "active": self._session.is_active,
+                "ts": self._session.last_seen.isoformat() if self._session.last_seen else None,
+            }).encode()
+            try:
+                self._mqtt.publish_bytes(topics.WUI_PRESENCE, payload)
+            except Exception:
+                logger.debug("Could not publish WUI_PRESENCE, MQTT not ready")
 
     def _on_mqtt(self, topic: str, payload: Any) -> None:
         """MQTT callback: schedule async fanout onto the aiohttp event loop."""

@@ -159,6 +159,11 @@ RESEARCH_DEEP_DIVE = "agent/research/deep_dive"
 RESEARCH_ALL = "agent/research/#"
 
 # ---------------------------------------------------------------------------
+# WUI (web user interface events)
+# ---------------------------------------------------------------------------
+WUI_PRESENCE = "system/wui/presence"
+
+# ---------------------------------------------------------------------------
 # Scheduler (Phase 9)
 # ---------------------------------------------------------------------------
 SCHEDULER_TICK = "agent/scheduler/tick"

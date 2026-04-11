@@ -152,6 +152,25 @@ class NervousSystemClient:
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             logger.error("Publish failed on %s: rc=%d", topic, info.rc)
 
+    def publish_bytes(
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int | None = None,
+        retain: bool | None = None,
+    ) -> None:
+        """Publish raw *payload* bytes to *topic* without protobuf serialization.
+
+        Useful for lightweight status messages (e.g. JSON-encoded presence events).
+        """
+        if qos is None:
+            qos = qos_for(topic)
+        if retain is None:
+            retain = should_retain(topic)
+        info = self._mqtt.publish(topic, payload, qos=qos, retain=retain)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            logger.error("publish_bytes failed on %s: rc=%d", topic, info.rc)
+
     def subscribe(
         self,
         topic: str,
