@@ -1,4 +1,4 @@
-.PHONY: install lint format test check proto
+.PHONY: install lint format test check proto wui-build wui-dev
 
 PROTO_SRC := src/openbad/nervous_system/schemas
 PROTO_FILES := $(wildcard $(PROTO_SRC)/*.proto)
@@ -29,3 +29,10 @@ test:
 
 test-all:
 	pytest
+
+wui-build:
+	cd wui-svelte && npm install && npm run build
+	@echo "Static assets built in wui-svelte/build/"
+
+wui-dev:
+	cd wui-svelte && npm run dev
