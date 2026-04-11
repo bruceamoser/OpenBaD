@@ -112,3 +112,41 @@ def rank_by_retention(
 
     scored.sort(key=lambda x: x[1])
     return scored
+
+
+def prune_consolidated_episodic(
+    store: MemoryStore,
+    retention_days: float = 7.0,
+    now: float | None = None,
+) -> list[str]:
+    """Delete consolidated episodic entries older than *retention_days*.
+
+    Only entries with ``metadata["consolidated"] == True`` are considered.
+    Returns a list of pruned keys.
+    """
+    if now is None:
+        now = time.time()
+
+    cutoff = now - (retention_days * 86400.0)
+    pruned: list[str] = []
+
+    for entry in store.query(""):
+        if not entry.metadata.get("consolidated"):
+            continue
+        if entry.created_at < cutoff:
+            store.delete(entry.key)
+            pruned.append(entry.key)
+            logger.debug(
+                "Pruned consolidated episodic %s (age=%.1f days)",
+                entry.key,
+                (now - entry.created_at) / 86400.0,
+            )
+
+    if pruned:
+        logger.info(
+            "Pruned %d consolidated episodic entries (retention=%.1f days)",
+            len(pruned),
+            retention_days,
+        )
+
+    return pruned

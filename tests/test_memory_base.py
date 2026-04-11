@@ -177,6 +177,7 @@ class TestMemoryConfig:
         assert cfg.ltm_backend == "json"
         assert cfg.pruning_interval_seconds == 3600.0
         assert cfg.forgetting_half_life_hours == 168.0
+        assert cfg.episodic_retention_days == 7.0
 
     def test_from_yaml(self, tmp_path) -> None:
         from openbad.memory.config import MemoryConfig
@@ -211,3 +212,17 @@ class TestMemoryConfig:
         yaml_file.write_text("")
         cfg = MemoryConfig.from_yaml(yaml_file)
         assert cfg.stm_max_tokens == 32768  # defaults
+        assert cfg.episodic_retention_days == 7.0
+
+    def test_episodic_retention_days_from_yaml(self, tmp_path) -> None:
+        from openbad.memory.config import MemoryConfig
+        data = {"memory": {"episodic_retention_days": 14.0}}
+        yaml_file = tmp_path / "ret.yaml"
+        yaml_file.write_text(yaml.dump(data))
+        cfg = MemoryConfig.from_yaml(yaml_file)
+        assert cfg.episodic_retention_days == 14.0
+
+    def test_episodic_retention_days_to_dict(self) -> None:
+        from openbad.memory.config import MemoryConfig
+        cfg = MemoryConfig(episodic_retention_days=3.0)
+        assert cfg.to_dict()["episodic_retention_days"] == 3.0
