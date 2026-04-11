@@ -116,13 +116,13 @@ class TestBackwardCompat:
             "  capture:\n"
             "    sample_rate: 22050\n"
             "  tts:\n"
-            "    engine: festival\n"
+            "    engine: espeak\n"
         )
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             cfg = load_sensory_config(tmp_path / "senses.yaml")
         assert cfg.hearing.capture.sample_rate == 22050
-        assert cfg.speech.tts.engine == "festival"
+        assert cfg.speech.tts.engine == "espeak"
         assert any("sensory_audio.yaml is deprecated" in str(x.message) for x in w)
 
     def test_merges_legacy_vision(self, tmp_path: Path) -> None:

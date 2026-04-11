@@ -102,6 +102,9 @@ class WakeWordConfig:
             raise ValueError(msg)
 
 
+_VALID_TTS_ENGINES = frozenset({"piper", "espeak", "disabled"})
+
+
 @dataclass
 class TTSConfig:
     """Text-to-speech output settings.
@@ -109,16 +112,37 @@ class TTSConfig:
     Attributes
     ----------
     engine : str
-        TTS backend: ``"piper"`` (default).
+        TTS backend: ``"piper"``, ``"espeak"``, or ``"disabled"`` (default ``"piper"``).
+    voice_model : str
+        Voice model name or path for the selected engine.
     model_path : str
-        Path to TTS voice model.
+        Path to TTS voice model (legacy alias for *voice_model*).
+    speaking_rate : float
+        Speech rate multiplier 0.25–4.0 (default 1.0).
+    volume : float
+        Output volume 0.0–1.0 (default 1.0).
     output_device : str
         PipeWire sink node for TTS output. Empty = default.
     """
 
     engine: str = "piper"
+    voice_model: str = ""
     model_path: str = ""
+    speaking_rate: float = 1.0
+    volume: float = 1.0
     output_device: str = ""
+
+    def __post_init__(self) -> None:
+        if self.engine not in _VALID_TTS_ENGINES:
+            allowed = ", ".join(sorted(_VALID_TTS_ENGINES))
+            msg = f"tts.engine must be one of ({allowed}), got '{self.engine}'"
+            raise ValueError(msg)
+        if not 0.25 <= self.speaking_rate <= 4.0:
+            msg = f"tts.speaking_rate must be 0.25-4.0, got {self.speaking_rate}"
+            raise ValueError(msg)
+        if not 0.0 <= self.volume <= 1.0:
+            msg = f"tts.volume must be 0.0-1.0, got {self.volume}"
+            raise ValueError(msg)
 
 
 @dataclass
