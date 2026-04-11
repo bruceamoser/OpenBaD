@@ -26,9 +26,14 @@ def retention_score(
 ) -> float:
     """Calculate Ebbinghaus retention score for an entry.
 
-    Uses exponential decay with access-count reinforcement:
-        strength = half_life_hours * (1 + ln(1 + access_count))
+    Uses exponential decay with access-count reinforcement and an
+    optional ``metadata["importance"]`` multiplier:
+
+        strength = half_life_hours * (1 + ln(1 + access_count)) * importance_factor
         R = e^(-elapsed_hours / strength)
+
+    ``importance_factor`` ranges from 0.5 (importance=0) to 1.5
+    (importance=1) with a neutral default of 1.0 when unset.
 
     Returns a value in [0.0, 1.0].
     """
@@ -39,7 +44,20 @@ def retention_score(
     elapsed_hours = max(0.0, (now - last_access) / 3600.0)
 
     # Strength increases with access count (logarithmic reinforcement)
-    strength = half_life_hours * (1.0 + math.log(1.0 + entry.access_count))
+    base_strength = half_life_hours * (1.0 + math.log(1.0 + entry.access_count))
+
+    # Importance multiplier: maps [0.0, 1.0] → [0.5, 1.5], default 1.0
+    importance = entry.metadata.get("importance")
+    if importance is not None:
+        try:
+            importance = max(0.0, min(1.0, float(importance)))
+        except (ValueError, TypeError):
+            importance = 0.5  # neutral default on bad data
+        importance_factor = 0.5 + importance
+    else:
+        importance_factor = 1.0
+
+    strength = base_strength * importance_factor
 
     return math.exp(-elapsed_hours / strength) if strength > 0 else 0.0
 
