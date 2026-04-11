@@ -72,6 +72,45 @@ const els = {
     chainAddModel: document.getElementById('fallback-add-model'),
     chainAddBtn: document.getElementById('fallback-add-btn'),
   },
+  senses: {
+    saveBtn: document.getElementById('senses-save-btn'),
+    saveStatus: document.getElementById('senses-save-status'),
+    // Vision
+    vFpsIdle: document.getElementById('sens-vision-fps-idle'),
+    vFpsActive: document.getElementById('sens-vision-fps-active'),
+    vRegion: document.getElementById('sens-vision-capture-region'),
+    vInterval: document.getElementById('sens-vision-interval'),
+    vMaxW: document.getElementById('sens-vision-max-w'),
+    vMaxH: document.getElementById('sens-vision-max-h'),
+    vCompFmt: document.getElementById('sens-vision-comp-format'),
+    vCompQual: document.getElementById('sens-vision-comp-quality'),
+    vSsim: document.getElementById('sens-vision-ssim'),
+    vCooldown: document.getElementById('sens-vision-cooldown'),
+    vRoi: document.getElementById('sens-vision-roi'),
+    vError: document.getElementById('sens-vision-error'),
+    // Hearing
+    hSampleRate: document.getElementById('sens-hearing-sample-rate'),
+    hChannels: document.getElementById('sens-hearing-channels'),
+    hFormat: document.getElementById('sens-hearing-format'),
+    hChunkMs: document.getElementById('sens-hearing-chunk-ms'),
+    hDevice: document.getElementById('sens-hearing-device'),
+    hPassive: document.getElementById('sens-hearing-passive'),
+    hAsrEngine: document.getElementById('sens-hearing-asr-engine'),
+    hVoskPath: document.getElementById('sens-hearing-vosk-path'),
+    hWhisperModel: document.getElementById('sens-hearing-whisper-model'),
+    hVad: document.getElementById('sens-hearing-vad'),
+    hPhrases: document.getElementById('sens-hearing-phrases'),
+    hThreshold: document.getElementById('sens-hearing-threshold'),
+    hError: document.getElementById('sens-hearing-error'),
+    // Speech
+    sEngine: document.getElementById('sens-speech-engine'),
+    sVoiceModel: document.getElementById('sens-speech-voice-model'),
+    sModelPath: document.getElementById('sens-speech-model-path'),
+    sRate: document.getElementById('sens-speech-rate'),
+    sVolume: document.getElementById('sens-speech-volume'),
+    sOutputDevice: document.getElementById('sens-speech-output-device'),
+    sError: document.getElementById('sens-speech-error'),
+  },
 };
 
 const viewMeta = {
@@ -86,6 +125,10 @@ const viewMeta = {
   providers: {
     title: 'Providers',
     subtitle: 'Verified providers and model access for the runtime.',
+  },
+  senses: {
+    title: 'Senses',
+    subtitle: 'Configure vision, hearing, and speech modalities.',
   },
   models: {
     title: 'Models',
@@ -158,6 +201,9 @@ function setView(name) {
   if (name === 'providers') {
     loadProvidersConfig();
     loadSystemsConfig();
+  }
+  if (name === 'senses') {
+    loadSensesConfig();
   }
 }
 
@@ -907,6 +953,172 @@ async function saveSystemsConfig() {
   }
 }
 
+// ── Senses config ──────────────────────────────────────────────── //
+
+let sensesData = null;
+
+async function loadSensesConfig() {
+  try {
+    const res = await fetch('/api/senses');
+    sensesData = await res.json();
+    populateSensesForm(sensesData);
+  } catch (err) {
+    if (els.senses.saveStatus) els.senses.saveStatus.textContent = `Load failed: ${err.message}`;
+  }
+}
+
+function populateSensesForm(d) {
+  const s = els.senses;
+  // Vision
+  const v = d.hearing ? d : d;
+  const vis = d.vision || {};
+  if (s.vFpsIdle) s.vFpsIdle.value = vis.fps_idle ?? '';
+  if (s.vFpsActive) s.vFpsActive.value = vis.fps_active ?? '';
+  if (s.vRegion) s.vRegion.value = vis.capture_region || 'active-window';
+  if (s.vInterval) s.vInterval.value = vis.capture_interval_s ?? '';
+  const maxRes = vis.max_resolution || [];
+  if (s.vMaxW) s.vMaxW.value = maxRes[0] ?? '';
+  if (s.vMaxH) s.vMaxH.value = maxRes[1] ?? '';
+  const comp = vis.compression || {};
+  if (s.vCompFmt) s.vCompFmt.value = comp.format || 'jpeg';
+  if (s.vCompQual) s.vCompQual.value = comp.quality ?? '';
+  const att = vis.attention || {};
+  if (s.vSsim) s.vSsim.value = att.ssim_threshold ?? '';
+  if (s.vCooldown) s.vCooldown.value = att.cooldown_ms ?? '';
+  if (s.vRoi) s.vRoi.checked = att.roi_enabled ?? false;
+  // Hearing
+  const h = d.hearing || {};
+  const cap = h.capture || {};
+  if (s.hSampleRate) s.hSampleRate.value = cap.sample_rate ?? '';
+  if (s.hChannels) s.hChannels.value = cap.channels ?? '';
+  if (s.hFormat) s.hFormat.value = cap.sample_format || '';
+  if (s.hChunkMs) s.hChunkMs.value = cap.chunk_duration_ms ?? '';
+  if (s.hDevice) s.hDevice.value = cap.device || '';
+  if (s.hPassive) s.hPassive.checked = cap.passive ?? true;
+  const asr = h.asr || {};
+  if (s.hAsrEngine) s.hAsrEngine.value = asr.default_engine || 'vosk';
+  if (s.hVoskPath) s.hVoskPath.value = asr.vosk_model_path || '';
+  if (s.hWhisperModel) s.hWhisperModel.value = asr.whisper_model || '';
+  if (s.hVad) s.hVad.value = asr.vad_sensitivity ?? '';
+  const ww = h.wake_word || {};
+  if (s.hPhrases) s.hPhrases.value = (ww.phrases || []).join(', ');
+  if (s.hThreshold) s.hThreshold.value = ww.threshold ?? '';
+  // Speech
+  const sp = d.speech || {};
+  const tts = sp.tts || {};
+  if (s.sEngine) s.sEngine.value = tts.engine || 'piper';
+  if (s.sVoiceModel) s.sVoiceModel.value = tts.voice_model || '';
+  if (s.sModelPath) s.sModelPath.value = tts.model_path || '';
+  if (s.sRate) s.sRate.value = tts.speaking_rate ?? '';
+  if (s.sVolume) s.sVolume.value = tts.volume ?? '';
+  if (s.sOutputDevice) s.sOutputDevice.value = tts.output_device || '';
+}
+
+function validateSensesForm() {
+  const s = els.senses;
+  let valid = true;
+  // Vision validation
+  const fpsIdle = parseFloat(s.vFpsIdle?.value);
+  if (isNaN(fpsIdle) || fpsIdle < 0.1 || fpsIdle > 30) {
+    if (s.vError) s.vError.textContent = 'FPS idle must be 0.1–30';
+    valid = false;
+  } else if (s.vError) {
+    s.vError.textContent = '';
+  }
+  // Hearing validation
+  const phrases = (s.hPhrases?.value || '').split(',').map(p => p.trim()).filter(Boolean);
+  if (phrases.length === 0) {
+    if (s.hError) s.hError.textContent = 'Wake phrases must not be empty';
+    valid = false;
+  } else if (s.hError) {
+    s.hError.textContent = '';
+  }
+  // Speech validation
+  const rate = parseFloat(s.sRate?.value);
+  if (isNaN(rate) || rate < 0.25 || rate > 4.0) {
+    if (s.sError) s.sError.textContent = 'Speaking rate must be 0.25–4.0';
+    valid = false;
+  } else if (s.sError) {
+    s.sError.textContent = '';
+  }
+  return valid;
+}
+
+function collectSensesPayload() {
+  const s = els.senses;
+  const phrases = (s.hPhrases?.value || '').split(',').map(p => p.trim()).filter(Boolean);
+  return {
+    hearing: {
+      capture: {
+        sample_rate: parseInt(s.hSampleRate?.value) || 16000,
+        channels: parseInt(s.hChannels?.value) || 1,
+        sample_format: s.hFormat?.value || 's16le',
+        chunk_duration_ms: parseInt(s.hChunkMs?.value) || 100,
+        device: s.hDevice?.value || '',
+        passive: s.hPassive?.checked ?? true,
+      },
+      asr: {
+        default_engine: s.hAsrEngine?.value || 'vosk',
+        vosk_model_path: s.hVoskPath?.value || '',
+        whisper_model: s.hWhisperModel?.value || 'base',
+        vad_sensitivity: parseFloat(s.hVad?.value) || 0.5,
+      },
+      wake_word: {
+        phrases: phrases,
+        threshold: parseFloat(s.hThreshold?.value) || 0.5,
+      },
+    },
+    vision: {
+      fps_idle: parseFloat(s.vFpsIdle?.value) || 1.0,
+      fps_active: parseFloat(s.vFpsActive?.value) || 5.0,
+      capture_region: s.vRegion?.value || 'active-window',
+      capture_interval_s: parseFloat(s.vInterval?.value) || 1.0,
+      max_resolution: [parseInt(s.vMaxW?.value) || 1920, parseInt(s.vMaxH?.value) || 1080],
+      compression: {
+        format: s.vCompFmt?.value || 'jpeg',
+        quality: parseInt(s.vCompQual?.value) || 85,
+      },
+      attention: {
+        ssim_threshold: parseFloat(s.vSsim?.value) || 0.05,
+        cooldown_ms: parseInt(s.vCooldown?.value) || 500,
+        roi_enabled: s.vRoi?.checked ?? false,
+      },
+    },
+    speech: {
+      tts: {
+        engine: s.sEngine?.value || 'piper',
+        voice_model: s.sVoiceModel?.value || '',
+        model_path: s.sModelPath?.value || '',
+        speaking_rate: parseFloat(s.sRate?.value) || 1.0,
+        volume: parseFloat(s.sVolume?.value) || 1.0,
+        output_device: s.sOutputDevice?.value || '',
+      },
+    },
+  };
+}
+
+async function saveSensesConfig() {
+  if (!validateSensesForm()) return;
+  const payload = collectSensesPayload();
+  if (els.senses.saveStatus) els.senses.saveStatus.textContent = 'Saving...';
+  try {
+    const res = await fetch('/api/senses', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `save failed (${res.status})`);
+    }
+    sensesData = await res.json();
+    populateSensesForm(sensesData);
+    if (els.senses.saveStatus) els.senses.saveStatus.textContent = 'Saved.';
+  } catch (err) {
+    if (els.senses.saveStatus) els.senses.saveStatus.textContent = `Save failed: ${err.message}`;
+  }
+}
+
 function bindEvents() {
   for (const link of els.navLinks) {
     link.addEventListener('click', () => setView(link.dataset.viewTarget));
@@ -974,6 +1186,20 @@ function bindEvents() {
       }
     });
   }
+
+  // Senses events
+  if (els.senses.saveBtn) {
+    els.senses.saveBtn.addEventListener('click', saveSensesConfig);
+  }
+  // Collapsible sections
+  document.querySelectorAll('[data-collapse-toggle]').forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      const target = document.getElementById(toggle.dataset.collapseToggle);
+      if (target) target.classList.toggle('collapsed');
+      const icon = toggle.querySelector('.collapse-icon');
+      if (icon) icon.textContent = target?.classList.contains('collapsed') ? '▸' : '▾';
+    });
+  });
 
   // Update model dropdown when system provider changes
   document.querySelectorAll('.system-provider').forEach(select => {
