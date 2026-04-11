@@ -11,6 +11,7 @@ import pytest
 from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.toolbelt.web_search import (
     WebFetchError,
+    WebFetchEscalator,
     WebSearchConfig,
     WebSearchToolAdapter,
     _RateLimiter,
@@ -221,3 +222,87 @@ class TestWebFetch:
     def test_file_scheme_rejected(self) -> None:
         with pytest.raises(ValueError):
             web_fetch("file:///etc/passwd")
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: research escalation bridge (#413)
+# ---------------------------------------------------------------------------
+
+
+def _mock_queue() -> MagicMock:
+    q = MagicMock()
+    q.enqueue.return_value = MagicMock(node_id="rn-001")
+    return q
+
+
+class TestWebFetchEscalator:
+    def test_successful_fetch_returns_content(self) -> None:
+        queue = _mock_queue()
+        escalator = WebFetchEscalator(queue)
+        with patch("openbad.toolbelt.web_search.web_fetch", return_value="page text"):
+            outcome = escalator.fetch("https://example.com")
+        assert outcome.content == "page text"
+        assert outcome.escalated is False
+        queue.enqueue.assert_not_called()
+
+    def test_http_404_escalates(self) -> None:
+        queue = _mock_queue()
+        escalator = WebFetchEscalator(queue)
+        err = WebFetchError("Not Found", status_code=404)
+        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+            outcome = escalator.fetch("https://example.com/gone", source_task_id="t1")
+        assert outcome.content is None
+        assert outcome.escalated is True
+        assert outcome.error is err
+        queue.enqueue.assert_called_once()
+        call_kw = queue.enqueue.call_args[1]
+        assert call_kw["source_task_id"] == "t1"
+        assert "404" in call_kw["description"] or "http_404" in call_kw["description"]
+
+    def test_http_403_escalates(self) -> None:
+        queue = _mock_queue()
+        escalator = WebFetchEscalator(queue)
+        err = WebFetchError("Forbidden", status_code=403)
+        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+            outcome = escalator.fetch("https://example.com/secret")
+        assert outcome.escalated is True
+        queue.enqueue.assert_called_once()
+
+    def test_timeout_escalates(self) -> None:
+        queue = _mock_queue()
+        escalator = WebFetchEscalator(queue)
+        err = WebFetchError("timed out", status_code=0)
+        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+            outcome = escalator.fetch("https://slow.example.com")
+        assert outcome.escalated is True
+        queue.enqueue.assert_called_once()
+
+    def test_research_node_includes_url_in_title(self) -> None:
+        queue = _mock_queue()
+        escalator = WebFetchEscalator(queue)
+        err = WebFetchError("Not Found", status_code=404)
+        url = "https://example.com/missing"
+        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+            escalator.fetch(url)
+        title_arg = queue.enqueue.call_args[0][0]
+        assert url in title_arg
+
+    def test_queue_failure_does_not_raise(self) -> None:
+        queue = _mock_queue()
+        queue.enqueue.side_effect = RuntimeError("db down")
+        escalator = WebFetchEscalator(queue)
+        err = WebFetchError("Not Found", status_code=404)
+        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+            outcome = escalator.fetch("https://example.com/gone")
+        assert outcome.escalated is True  # still escalated, but queue silently failed
+
+    def test_non_escalatable_http_error_reraises(self) -> None:
+        queue = _mock_queue()
+        escalator = WebFetchEscalator(queue)
+        err = WebFetchError("Internal Server Error", status_code=500)
+        with (
+            patch("openbad.toolbelt.web_search.web_fetch", side_effect=err),
+            pytest.raises(WebFetchError),
+        ):
+            escalator.fetch("https://example.com/fail")
+        queue.enqueue.assert_not_called()
