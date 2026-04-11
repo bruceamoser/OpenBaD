@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -143,6 +145,111 @@ async def test_put_providers_route(aiohttp_client, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_put_providers_route_persists_api_key_with_restricted_permissions(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    payload = {
+        "enabled": True,
+        "default_provider": "anthropic",
+        "providers": [
+            {
+                "name": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "model": "claude-sonnet-4-20250514",
+                "api_key": "secret-key",
+                "api_key_env": "ANTHROPIC_API_KEY",
+                "timeout_ms": 30000,
+                "enabled": True,
+            }
+        ],
+    }
+
+    resp = await client.put("/api/providers", json=payload)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["providers"][0]["has_api_key"] is True
+    assert "api_key" not in data["providers"][0]
+
+    saved = yaml.safe_load((config_dir / "cognitive.yaml").read_text())
+    assert saved["cognitive"]["providers"][0]["api_key"] == "secret-key"
+    assert stat.S_IMODE(os.stat(config_dir / "cognitive.yaml").st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_get_setup_status_flags_first_run_without_provider_config(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/setup-status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["first_run"] is True
+    assert "provider" in data["missing"]
+    assert "chat_assignment" in data["missing"]
+    assert data["redirect_to"] == "/providers?wizard=1"
+
+
+@pytest.mark.asyncio
+async def test_get_setup_status_ready_with_valid_provider_and_chat_assignment(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    config_path = config_dir / "cognitive.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "cognitive": {
+                    "enabled": True,
+                    "default_provider": "openai",
+                    "providers": [
+                        {
+                            "name": "openai",
+                            "base_url": "https://api.openai.com",
+                            "model": "gpt-4o-mini",
+                            "api_key": "secret-key",
+                            "api_key_env": "OPENAI_API_KEY",
+                            "timeout_ms": 30000,
+                            "enabled": True,
+                        }
+                    ],
+                    "systems": {
+                        "chat": {"provider": "openai", "model": "gpt-4o-mini"},
+                    },
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/setup-status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["first_run"] is False
+    assert data["provider_ready"] is True
+    assert data["chat_assignment_ready"] is True
+
+
+@pytest.mark.asyncio
 async def test_verify_copilot_provider_route(aiohttp_client):
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
@@ -271,6 +378,42 @@ async def test_verify_local_provider_route(aiohttp_client):
     assert data["available"] is True
     assert data["provider"]["name"] == "custom"
     assert data["models"] == ["bonsai-8b"]
+
+
+@pytest.mark.asyncio
+async def test_verify_openai_provider_route(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    with patch("openbad.wui.server.openai_provider") as provider_factory:
+        provider = provider_factory.return_value
+        provider.health_check = AsyncMock(
+            return_value=type(
+                "Status",
+                (),
+                {"available": True, "latency_ms": 9.0, "models_available": 2},
+            )()
+        )
+        provider.list_models = AsyncMock(
+            return_value=[
+                type("Model", (), {"model_id": "gpt-4o-mini"})(),
+                type("Model", (), {"model_id": "gpt-4.1"})(),
+            ]
+        )
+        resp = await client.post(
+            "/api/providers/verify",
+            json={
+                "provider_type": "openai",
+                "api_key": "secret-key",
+            },
+        )
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["available"] is True
+    assert data["provider"]["name"] == "openai"
+    assert data["provider"]["has_api_key"] is True
+    assert "gpt-4o-mini" in data["models"]
 
 
 @pytest.mark.asyncio
@@ -424,6 +567,7 @@ async def test_get_systems_includes_enabled_providers(aiohttp_client, tmp_path, 
 @pytest.mark.asyncio
 async def test_put_systems_updates_config(aiohttp_client, tmp_path, monkeypatch):
     config_dir = _cognitive_yaml_with_systems(tmp_path, monkeypatch)
+    (config_dir / "model_routing.yaml").write_text("chains: {}\n")
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
 
@@ -448,6 +592,10 @@ async def test_put_systems_updates_config(aiohttp_client, tmp_path, monkeypatch)
     saved = yaml.safe_load((config_dir / "cognitive.yaml").read_text())
     assert saved["cognitive"]["systems"]["chat"]["model"] == "bonsai-8b"
     assert len(saved["cognitive"]["default_fallback_chain"]) == 1
+
+    routing = yaml.safe_load((config_dir / "model_routing.yaml").read_text())
+    assert routing["chains"]["critical"][0]["model"] == "bonsai-8b"
+    assert stat.S_IMODE(os.stat(config_dir / "model_routing.yaml").st_mode) == 0o600
 
 
 @pytest.mark.asyncio
@@ -611,6 +759,76 @@ async def test_put_senses_rejects_non_object(aiohttp_client, tmp_path, monkeypat
 
     resp = await client.put("/api/senses", json="bad")
     assert resp.status == 400
+
+
+# ── Sleep config endpoint tests ─────────────────────────────────── #
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_config_defaults(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/sleep/config")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["sleep"]["sleep_window_start"] == "02:00"
+    assert data["sleep"]["sleep_window_duration_hours"] == 3.0
+    assert data["sleep"]["idle_timeout_minutes"] == 15
+    assert data["sleep"]["allow_daytime_naps"] is True
+
+
+@pytest.mark.asyncio
+async def test_put_sleep_config_persists_memory_yaml(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "sleep": {
+            "sleep_window_start": "01:30",
+            "sleep_window_duration_hours": 2.5,
+            "idle_timeout_minutes": 20,
+            "allow_daytime_naps": False,
+            "enabled": True,
+        }
+    }
+    resp = await client.put("/api/sleep/config", json=payload)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["sleep"]["sleep_window_start"] == "01:30"
+    assert data["sleep"]["idle_timeout_minutes"] == 20
+    assert data["next_scheduled_consolidation"] is not None
+
+    saved = yaml.safe_load((config_dir / "memory.yaml").read_text())
+    assert saved["memory"]["sleep"]["sleep_window_start"] == "01:30"
+    assert saved["memory"]["sleep"]["sleep_window_duration_hours"] == 2.5
+    assert saved["memory"]["sleep"]["allow_daytime_naps"] is False
+
+
+@pytest.mark.asyncio
+async def test_sleep_trigger_and_wake_update_last_summary(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    trigger_resp = await client.post("/api/sleep/trigger")
+    assert trigger_resp.status == 200
+
+    wake_resp = await client.post("/api/sleep/wake")
+    assert wake_resp.status == 200
+
+    cfg = await client.get("/api/sleep/config")
+    data = await cfg.json()
+    assert data["last_consolidation_summary"]["state"] == "manual_wake_requested"
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +1077,7 @@ async def test_chat_stream_route_emits_session_id_and_tokens(aiohttp_client, mon
     async def _fake_stream_chat(*args, **kwargs):
         assert kwargs["provider_name"] == "test-provider"
         assert args[3] == "session-123"
-        yield StreamChunk(token="hello", tokens_used=1)
+        yield StreamChunk(token="hello", tokens_used=1)  # noqa: S106
         yield StreamChunk(done=True, tokens_used=1)
 
     monkeypatch.setattr(srv, "stream_chat", _fake_stream_chat)

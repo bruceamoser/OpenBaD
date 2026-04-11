@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import Card from '$lib/components/Card.svelte';
-  import { post as apiPost } from '$lib/api/client';
+  import { get as apiGet, put as apiPut, post as apiPost } from '$lib/api/client';
   import {
     cpuTelemetry,
     memoryTelemetry,
@@ -13,11 +13,35 @@
 
   interface Transition { from: string; to: string; ts: string; }
 
+  interface SleepConfig {
+    sleep_window_start: string;
+    sleep_window_duration_hours: number;
+    idle_timeout_minutes: number;
+    allow_daytime_naps: boolean;
+    enabled: boolean;
+  }
+
+  interface SleepConfigResponse {
+    sleep: SleepConfig;
+    next_scheduled_consolidation: string | null;
+    last_consolidation_summary: Record<string, unknown> | null;
+  }
+
   const FSM_STATES = ['IDLE', 'ACTIVE', 'THROTTLED', 'SLEEP', 'EMERGENCY'];
   let transitions: Transition[] = $state([]);
   let cpuHistory: number[] = $state([]);
   let memHistory: number[] = $state([]);
   let statusMsg = $state('');
+  let sleepSaveMsg = $state('');
+  let sleepConfig = $state<SleepConfig>({
+    sleep_window_start: '02:00',
+    sleep_window_duration_hours: 3,
+    idle_timeout_minutes: 15,
+    allow_daytime_naps: true,
+    enabled: true,
+  });
+  let nextScheduledConsolidation = $state<string | null>(null);
+  let lastConsolidationSummary = $state<Record<string, unknown> | null>(null);
 
   let prevFsm = '';
   const SPARKLINE_MAX = 300;
@@ -41,7 +65,45 @@
   });
 
   let historyInterval: ReturnType<typeof setInterval> | undefined;
+
+  async function loadSleepConfig(): Promise<void> {
+    try {
+      const res = await apiGet<SleepConfigResponse>('/api/sleep/config');
+      sleepConfig = {
+        sleep_window_start: res.sleep?.sleep_window_start || '02:00',
+        sleep_window_duration_hours: Number(res.sleep?.sleep_window_duration_hours || 3),
+        idle_timeout_minutes: Number(res.sleep?.idle_timeout_minutes || 15),
+        allow_daytime_naps: !!res.sleep?.allow_daytime_naps,
+        enabled: res.sleep?.enabled !== false,
+      };
+      nextScheduledConsolidation = res.next_scheduled_consolidation;
+      lastConsolidationSummary = res.last_consolidation_summary;
+    } catch (e) {
+      sleepSaveMsg = `Sleep settings unavailable: ${e}`;
+    }
+  }
+
+  async function saveSleepConfig(): Promise<void> {
+    try {
+      const res = await apiPut<SleepConfigResponse>('/api/sleep/config', { sleep: sleepConfig });
+      sleepConfig = res.sleep;
+      nextScheduledConsolidation = res.next_scheduled_consolidation;
+      lastConsolidationSummary = res.last_consolidation_summary;
+      sleepSaveMsg = 'Sleep settings saved';
+    } catch (e) {
+      sleepSaveMsg = `Save failed: ${e}`;
+    }
+  }
+
+  function formatIso(ts: string | null): string {
+    if (!ts) return 'Not scheduled';
+    const parsed = new Date(ts);
+    if (Number.isNaN(parsed.getTime())) return ts;
+    return parsed.toLocaleString();
+  }
+
   onMount(() => {
+    loadSleepConfig();
     historyInterval = setInterval(() => {
       cpuHistory = [...cpuHistory, cpu].slice(-SPARKLINE_MAX);
       memHistory = [...memHistory, mem].slice(-SPARKLINE_MAX);
@@ -104,7 +166,7 @@
   <p>Live runtime telemetry and subsystem health</p>
 </div>
 
-<div class="grid">
+<div class="grid dashboard-grid">
   <!-- Row 1: FSM + Endocrine -->
   <Card label="FSM State">
     <div class="fsm-section">
@@ -122,7 +184,7 @@
       {#if transitions.length > 0}
         <div class="transitions">
           <h4>Recent Transitions</h4>
-          <div class="transition-list">
+          <div class="transition-list transition-log">
             {#each transitions as t}
               <div class="transition-item">
                 <span class="t-time">{t.ts}</span>
@@ -137,7 +199,7 @@
     </div>
   </Card>
 
-  <Card label="Endocrine System">
+  <Card label="Endocrine Levels">
     <div class="hormones">
       {#each [
         { name: 'Dopamine', val: dopamine, emoji: '🧠' },
@@ -151,7 +213,7 @@
             <span class="hormone-name">{h.name}</span>
           </div>
           <div class="hormone-bar">
-            <div class="hormone-fill" style="width:{h.val * 100}%; background:{hormoneColor(h.val)}"></div>
+            <div class="hormone-fill gauge-bar-fill" style="width:{h.val * 100}%; background:{hormoneColor(h.val)}"></div>
           </div>
           <span class="hormone-val">{(h.val * 100).toFixed(0)}%</span>
         </div>
@@ -218,11 +280,48 @@
 
   <Card label="Sleep Schedule">
     <div class="sleep-section">
-      <p class="muted">Next sleep window from sleep orchestrator.</p>
+      <p class="muted">Configure scheduled consolidation and idle-aware sleep behavior.</p>
+      <div class="sleep-config-grid">
+        <label>
+          Start
+          <input type="time" bind:value={sleepConfig.sleep_window_start} />
+        </label>
+        <label>
+          Duration (hours)
+          <input type="number" min="0.5" max="12" step="0.5" bind:value={sleepConfig.sleep_window_duration_hours} />
+        </label>
+        <label>
+          Idle timeout (minutes)
+          <input type="number" min="1" max="180" step="1" bind:value={sleepConfig.idle_timeout_minutes} />
+        </label>
+      </div>
+      <label class="sleep-check">
+        <input type="checkbox" bind:checked={sleepConfig.allow_daytime_naps} />
+        Allow daytime naps when idle
+      </label>
+      <label class="sleep-check">
+        <input type="checkbox" bind:checked={sleepConfig.enabled} />
+        Enable scheduler
+      </label>
+      <div class="sleep-metadata">
+        <div><strong>Next scheduled consolidation:</strong> {formatIso(nextScheduledConsolidation)}</div>
+        <div>
+          <strong>Last summary:</strong>
+          {#if lastConsolidationSummary}
+            {JSON.stringify(lastConsolidationSummary)}
+          {:else}
+            none yet
+          {/if}
+        </div>
+      </div>
       <div class="sleep-actions">
+        <button class="secondary" onclick={saveSleepConfig}>Save Settings</button>
         <button onclick={triggerSleep}>😴 Sleep Now</button>
         <button class="secondary" onclick={triggerWake}>☀️ Wake</button>
       </div>
+      {#if sleepSaveMsg}
+        <p class="status-msg">{sleepSaveMsg}</p>
+      {/if}
       {#if statusMsg}
         <p class="status-msg">{statusMsg}</p>
       {/if}
@@ -342,6 +441,42 @@
 
   /* Sleep */
   .sleep-section { display: flex; flex-direction: column; gap: 0.75rem; }
+  .sleep-config-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+  .sleep-config-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+    color: var(--text-sub);
+  }
+  .sleep-config-grid input {
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+    color: var(--text);
+  }
+  .sleep-check {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.85rem;
+  }
+  .sleep-metadata {
+    font-size: 0.8rem;
+    color: var(--text-sub);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
   .sleep-actions { display: flex; gap: 0.5rem; }
   .status-msg { font-size: 0.85rem; color: var(--text-sub); }
+
+  @media (max-width: 900px) {
+    .sleep-config-grid { grid-template-columns: 1fr; }
+  }
 </style>

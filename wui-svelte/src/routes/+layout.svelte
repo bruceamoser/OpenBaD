@@ -2,6 +2,7 @@
   import '../app.css';
   import type { Snippet } from 'svelte';
   import { onMount, onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { wsStatus, fsmState, connect, disconnect } from '$lib/stores/websocket';
   import { get as apiGet, post as apiPost } from '$lib/api/client';
@@ -62,8 +63,11 @@
 
   async function checkFirstRun(): Promise<void> {
     try {
-      const res = await apiGet<{ first_run: boolean }>('/api/setup-status');
-      showWizard = res.first_run;
+      const res = await apiGet<{ first_run: boolean; redirect_to?: string }>('/api/setup-status');
+      showWizard = false;
+      if (res.first_run && !$page.url.pathname.startsWith('/providers')) {
+        await goto(res.redirect_to || '/providers?wizard=1', { replaceState: true });
+      }
     } catch { }
   }
 

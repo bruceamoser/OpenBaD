@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -61,6 +62,19 @@ class TestSleepScheduleConfig:
         assert cfg.duration_hours == 4.0
         assert cfg.enabled is False
 
+    def test_from_dict_with_sleep_window_fields(self) -> None:
+        cfg = SleepScheduleConfig.from_dict({
+            "sleep_window_start": "01:30",
+            "duration_hours": 2.5,
+            "idle_timeout_minutes": 20,
+            "allow_daytime_naps": False,
+        })
+        assert cfg.start_hour == 1
+        assert cfg.start_minute == 30
+        assert cfg.sleep_window_start == "01:30"
+        assert cfg.idle_timeout_minutes == 20
+        assert cfg.allow_daytime_naps is False
+
     def test_invalid_start_hour(self) -> None:
         with pytest.raises(ValueError, match="start_hour"):
             SleepScheduleConfig(start_hour=25)
@@ -106,6 +120,10 @@ class TestSleepScheduleConfig:
         # At 03:00, ~23 hours until next 02:00
         assert cfg.seconds_until_start(_dt(3, 0)) == 23 * 3600.0
 
+    def test_seconds_until_start_respects_start_minute(self) -> None:
+        cfg = SleepScheduleConfig(start_hour=2, start_minute=30)
+        assert cfg.seconds_until_start(_dt(2, 0)) == 30 * 60.0
+
 
 # ------------------------------------------------------------------ #
 # SleepScheduler FSM transitions
@@ -146,6 +164,17 @@ class TestSleepSchedulerTransitions:
         cfg = SleepScheduleConfig(start_hour=2, duration_hours=3.0)
         scheduler = SleepScheduler(config=cfg, fsm=fsm)
         assert scheduler.manual_wake() is False
+
+    def test_idle_timeout_defers_sleep_until_idle(self) -> None:
+        fsm = FakeFSM()
+        cfg = SleepScheduleConfig(idle_timeout_minutes=15)
+        last_activity = time.time()
+        scheduler = SleepScheduler(
+            config=cfg,
+            fsm=fsm,
+            get_last_activity=lambda: last_activity,
+        )
+        assert scheduler._is_idle() is False
 
 
 # ------------------------------------------------------------------ #
