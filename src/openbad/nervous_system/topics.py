@@ -26,6 +26,7 @@ TELEMETRY_NETWORK = "agent/telemetry/network"
 TELEMETRY_TOKENS = "agent/telemetry/tokens"
 TELEMETRY_SENSORY_HEALTH = "agent/telemetry/sensory_health"
 TELEMETRY_TOOLBELT = "agent/telemetry/toolbelt"
+TELEMETRY_READINESS = "agent/telemetry/readiness"
 
 # Wildcard: subscribe to all telemetry
 TELEMETRY_ALL = "agent/telemetry/+"
