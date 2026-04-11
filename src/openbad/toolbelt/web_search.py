@@ -2,12 +2,17 @@
 
 Registers under ``ToolRole.WEB_SEARCH`` and provides structured search
 results with rate limiting and health checks.
+
+Also exposes :func:`web_fetch` for downloading and cleaning a single URL
+into sanitised plain text or minimal Markdown.
 """
 
 from __future__ import annotations
 
+import html as _html_mod
 import json as _json
 import logging
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -51,6 +56,109 @@ class _RateLimiter:
             return False
         self._timestamps.append(now)
         return True
+
+
+# ---------------------------------------------------------------------------
+# web_fetch
+# ---------------------------------------------------------------------------
+
+_MAX_FETCH_BYTES = 2 * 1024 * 1024  # 2 MB hard cap
+
+# Tags whose inner content is stripped completely (not converted)
+_DROP_TAGS_RE = re.compile(
+    r"<(script|style|noscript|head|header|footer|nav|aside)[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+_MULTI_BLANK_RE = re.compile(r"\n{3,}")
+
+
+class WebFetchError(OSError):
+    """Raised when :func:`web_fetch` cannot retrieve or decode the resource.
+
+    Attributes
+    ----------
+    status_code:
+        HTTP status code if available, otherwise 0.
+    """
+
+    def __init__(self, message: str, status_code: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def web_fetch(
+    url: str,
+    *,
+    timeout: float = 15.0,
+    max_chars: int = 32_000,
+) -> str:
+    """Fetch *url* and return its content as cleaned plain text.
+
+    Parameters
+    ----------
+    url:
+        The HTTP/HTTPS URL to fetch.  Other schemes are rejected.
+    timeout:
+        Request timeout in seconds (default 15).
+    max_chars:
+        Maximum characters returned after cleaning (default 32 000).
+
+    Returns
+    -------
+    str
+        Cleaned text extracted from the response body, truncated to
+        *max_chars* characters.
+
+    Raises
+    ------
+    ValueError
+        If *url* does not use http or https scheme.
+    WebFetchError
+        On HTTP errors (4xx, 5xx), network errors, or decode failures.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only http/https URLs are supported, got: {url!r}")
+
+    req = urllib.request.Request(url, headers={"User-Agent": "OpenBaD/1.0"})  # noqa: S310
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            raw: bytes = resp.read(_MAX_FETCH_BYTES)
+            content_type: str = resp.headers.get_content_type() or ""
+    except urllib.error.HTTPError as exc:
+        raise WebFetchError(
+            f"HTTP {exc.code} fetching {url!r}: {exc.reason}", status_code=exc.code
+        ) from exc
+    except Exception as exc:
+        raise WebFetchError(f"Failed to fetch {url!r}: {exc}") from exc
+
+    # Decode bytes
+    try:
+        charset = "utf-8"
+        if "charset=" in content_type:
+            charset = content_type.split("charset=")[-1].strip()
+        text = raw.decode(charset, errors="replace")
+    except Exception as exc:
+        raise WebFetchError(f"Could not decode response from {url!r}: {exc}") from exc
+
+    # Clean HTML if applicable
+    if "html" in content_type:
+        text = _clean_html(text)
+
+    return text[:max_chars]
+
+
+def _clean_html(html: str) -> str:
+    """Strip HTML markup, decode entities, and normalise whitespace."""
+    html = _DROP_TAGS_RE.sub("", html)
+    html = _TAG_RE.sub("\n", html)
+    html = _html_mod.unescape(html)
+    # Collapse whitespace
+    lines = [line.strip() for line in html.splitlines()]
+    text = "\n".join(line for line in lines if line)
+    text = _MULTI_BLANK_RE.sub("\n\n", text)
+    return text.strip()
 
 
 class WebSearchToolAdapter:
@@ -162,8 +270,6 @@ class WebSearchToolAdapter:
             close_a = html.find("</a>", tag_end)
             title = html[tag_end + 1:close_a].strip() if close_a > tag_end else ""
             # Strip HTML tags from title
-            import re
-
             title = re.sub(r"<[^>]+>", "", title)
 
             # Extract snippet
