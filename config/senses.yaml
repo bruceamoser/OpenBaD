@@ -41,5 +41,8 @@ vision:
 speech:
   tts:
     engine: "piper"
+    voice_model: ""
     model_path: ""
+    speaking_rate: 1.0
+    volume: 1.0
     output_device: ""
