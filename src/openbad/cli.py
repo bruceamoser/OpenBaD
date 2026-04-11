@@ -11,6 +11,7 @@ import logging
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -80,6 +81,68 @@ def restart() -> None:
     units = _managed_service_units()
     _systemctl("restart", *units)
     click.echo("Restarted: " + ", ".join(units))
+
+
+@main.command()
+@click.option(
+    "--skip-services",
+    is_flag=True,
+    help="Pass --skip-services to the installer (dev mode).",
+)
+def update(skip_services: bool) -> None:
+    """Pull latest code, reinstall, and restart services.
+
+    Runs ``scripts/install.sh`` from the project root to update the
+    Python package, configuration files, and systemd units, then
+    restarts all managed services.
+    """
+    install_script = Path(__file__).resolve().parents[2] / "scripts" / "install.sh"
+    if not install_script.is_file():
+        raise click.ClickException(
+            f"Install script not found at {install_script}. "
+            "Run from a git checkout of the OpenBaD repository."
+        )
+
+    project_root = install_script.parent.parent
+
+    # 1. git pull (best effort — may be a non-git install)
+    click.echo("Pulling latest changes...")
+    git_bin = shutil.which("git")
+    if git_bin:
+        pull = subprocess.run(  # noqa: S603
+            [git_bin, "-C", str(project_root), "pull", "--ff-only"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if pull.returncode == 0:
+            click.echo(pull.stdout.strip() or "Already up to date.")
+        else:
+            click.echo(f"git pull skipped: {pull.stderr.strip()}")
+    else:
+        click.echo("git not found, skipping pull.")
+
+    # 2. Run install script
+    click.echo("Running install script...")
+    cmd: list[str] = [str(install_script)]
+    if skip_services:
+        cmd.append("--skip-services")
+    try:
+        subprocess.run(  # noqa: S603
+            cmd,
+            check=True,
+            cwd=str(project_root),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise click.ClickException(
+            f"Install script failed with exit code {exc.returncode}"
+        ) from exc
+    except PermissionError as exc:
+        raise click.ClickException(
+            "Permission denied. Run 'sudo openbad update' to update system services."
+        ) from exc
+
+    click.echo("Update complete.")
 
 
 @main.command(name="health")

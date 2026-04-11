@@ -61,6 +61,7 @@ Control the installed stack with:
 openbad start
 openbad stop
 openbad restart
+openbad update
 openbad health
 openbad tui
 openbad version
@@ -69,5 +70,66 @@ openbad version
 Notes:
 
 - `openbad start` starts the managed OpenBaD services and returns immediately.
+- `openbad stop` stops all managed services.
+- `openbad restart` restarts all managed services.
+- `openbad update` pulls latest code, re-runs the install script, and restarts services. Requires `sudo`.
 - `openbad health` reports systemd service state, MQTT reachability, and the WUI health endpoint.
 - `openbad tui` attaches a terminal UI to the running MQTT-backed stack.
+
+## Web UI
+
+Once running, the Web UI is available at **http://localhost:9200**.
+
+The WUI is a SvelteKit single-page application served by the aiohttp backend.
+It provides panels for Providers, Senses, Toolbelt, Entity, Chat, and Health,
+plus a first-run setup wizard.
+
+### Building the WUI
+
+If you need to rebuild the SvelteKit frontend (requires Node.js):
+
+```bash
+make wui
+```
+
+This runs `npm install && npm run build` in `wui-svelte/` and copies the
+output to `src/openbad/wui/build/` where the aiohttp server serves it.
+
+### Development Mode (no systemd)
+
+For local development without a full system install:
+
+```bash
+# Install in editable mode
+pip install -e ".[dev]"
+
+# Set config dir to the repo's config/ (avoids /etc/openbad permission issues)
+export OPENBAD_CONFIG_DIR=./config
+
+# Start the WUI server directly
+openbad wui --host 127.0.0.1 --port 9200
+```
+
+Or run the SvelteKit dev server with hot-reload (proxies API calls to aiohttp):
+
+```bash
+# Terminal 1: start the backend
+export OPENBAD_CONFIG_DIR=./config
+openbad wui
+
+# Terminal 2: start the SvelteKit dev server
+make wui-dev
+```
+
+## Running Tests
+
+```bash
+pytest                   # unit tests (excludes integration)
+pytest --run-all         # all tests including integration
+ruff check src/ tests/   # lint
+ruff format src/ tests/  # auto-format
+```
+
+## License
+
+See [LICENSE](LICENSE).
