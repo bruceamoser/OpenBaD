@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from openbad.state.db import StateDatabase, initialize_state_db
+from openbad.state.db import DEFAULT_STATE_DB_PATH, StateDatabase, initialize_state_db
 
 REQUIRED_TABLES = {
     "schema_migrations",
@@ -88,3 +88,28 @@ def test_state_database_wrapper_initializes_db(tmp_path: Path) -> None:
 
     assert "tasks" in tables
     assert db_path.exists()
+
+
+def test_default_db_path_is_configurable() -> None:
+    assert Path("data/state.db") == DEFAULT_STATE_DB_PATH
+
+
+def test_custom_db_path_resolution(tmp_path: Path) -> None:
+    custom_path = tmp_path / "custom" / "nested" / "my.db"
+    conn = initialize_state_db(custom_path)
+    conn.close()
+
+    assert custom_path.exists()
+    assert custom_path.parent.is_dir()
+
+
+def test_connection_pragmas_applied(tmp_path: Path) -> None:
+    db_path = tmp_path / "pragma_test.db"
+    conn = initialize_state_db(db_path)
+
+    journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    fk_enabled = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.close()
+
+    assert journal_mode == "wal"
+    assert fk_enabled == 1
