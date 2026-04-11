@@ -1,6 +1,5 @@
 <script lang="ts">
-  // Health dashboard — live telemetry
+  import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
+  onMount(() => { goto('/health', { replaceState: true }); });
 </script>
-
-<h2>Health</h2>
-<p>Live runtime telemetry and subsystem health.</p>

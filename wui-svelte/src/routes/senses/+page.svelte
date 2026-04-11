@@ -170,261 +170,181 @@
   }
 </script>
 
-<h2>Senses</h2>
+<div class="page-header">
+  <h2>Senses</h2>
+  <p>Configure vision, hearing, and speech subsystems</p>
+</div>
 
-<!-- Vision -->
-<Card label="Vision">
-  <button
-    class="collapse-toggle"
-    onclick={() => visionOpen = !visionOpen}
-  >
-    {visionOpen ? '▾' : '▸'} Vision
-  </button>
-  {#if visionOpen}
-    <div class="form-grid">
-      <label>Capture Region
-        <select
-          bind:value={vision.capture_region}
-          onchange={markDirty}
-        >
-          <option value="full-screen">Full Screen</option>
-          <option value="active-window">Active Window</option>
-          <option value="custom-rect">Custom Rect</option>
-        </select>
-      </label>
+<div class="sections">
+  <!-- Vision -->
+  <Card label="👁 Vision">
+    <button class="section-toggle" onclick={() => visionOpen = !visionOpen}>
+      <span class="toggle-arrow">{visionOpen ? '▾' : '▸'}</span>
+      <span>Screen Capture Configuration</span>
+    </button>
+    {#if visionOpen}
+      <div class="form-grid">
+        <div class="form-row-2">
+          <label>Capture Region
+            <select bind:value={vision.capture_region} onchange={markDirty}>
+              <option value="full-screen">Full Screen</option>
+              <option value="active-window">Active Window</option>
+              <option value="custom-rect">Custom Rect</option>
+            </select>
+          </label>
+          <label>Interval (sec)
+            <input type="number" min="0.1" step="0.1" bind:value={vision.capture_interval_s} oninput={markDirty} />
+          </label>
+        </div>
+        <div class="form-row-2">
+          <label>Max Width
+            <input type="number" min="320" step="1" bind:value={vision.max_resolution[0]} oninput={markDirty} />
+          </label>
+          <label>Max Height
+            <input type="number" min="240" step="1" bind:value={vision.max_resolution[1]} oninput={markDirty} />
+          </label>
+        </div>
+        <div class="form-row-2">
+          <label>Format
+            <select bind:value={vision.compression.format} onchange={markDirty}>
+              <option value="jpeg">JPEG</option>
+              <option value="png">PNG</option>
+              <option value="raw_rgb">Raw RGB</option>
+            </select>
+          </label>
+          <label>Quality — {vision.compression.quality}
+            <input type="range" min="10" max="100" step="1" bind:value={vision.compression.quality} oninput={markDirty} />
+          </label>
+        </div>
+        <button class="secondary test-btn" onclick={previewCapture}>📸 Preview Capture</button>
+      </div>
+    {/if}
+  </Card>
 
-      <label>Interval (s)
-        <input
-          type="number" min="0.1" step="0.1"
-          bind:value={vision.capture_interval_s}
-          oninput={markDirty}
-        />
-      </label>
-
-      <label>Max Width
-        <input
-          type="number" min="320" step="1"
-          bind:value={vision.max_resolution[0]}
-          oninput={markDirty}
-        />
-      </label>
-
-      <label>Max Height
-        <input
-          type="number" min="240" step="1"
-          bind:value={vision.max_resolution[1]}
-          oninput={markDirty}
-        />
-      </label>
-
-      <label>Compression Format
-        <select
-          bind:value={vision.compression.format}
-          onchange={markDirty}
-        >
-          <option value="jpeg">JPEG</option>
-          <option value="png">PNG</option>
-          <option value="raw_rgb">Raw RGB</option>
-        </select>
-      </label>
-
-      <label>Quality
-        <input
-          type="range" min="10" max="100" step="1"
-          bind:value={vision.compression.quality}
-          oninput={markDirty}
-        />
-        <span>{vision.compression.quality}</span>
-      </label>
-
-      <button class="test-btn" onclick={previewCapture}>
-        Preview Capture
-      </button>
-    </div>
-  {/if}
-</Card>
-
-<!-- Hearing -->
-<Card label="Hearing">
-  <button
-    class="collapse-toggle"
-    onclick={() => hearingOpen = !hearingOpen}
-  >
-    {hearingOpen ? '▾' : '▸'} Hearing
-  </button>
-  {#if hearingOpen}
-    <div class="form-grid">
-      <label>ASR Engine
-        <select
-          bind:value={hearing.asr.default_engine}
-          onchange={markDirty}
-        >
-          <option value="vosk">Vosk</option>
-          <option value="whisper">Whisper</option>
-        </select>
-      </label>
-
-      <label>Model Path
-        <input
-          type="text"
-          bind:value={hearing.asr.vosk_model_path}
-          oninput={markDirty}
-        />
-      </label>
-
-      <label>VAD Sensitivity
-        <input
-          type="range" min="0" max="1" step="0.05"
-          bind:value={hearing.asr.vad_sensitivity}
-          oninput={markDirty}
-        />
-        <span>{hearing.asr.vad_sensitivity}</span>
-      </label>
-
-      <fieldset>
-        <legend>Wake Phrases</legend>
-        {#each hearing.wake_word.phrases as phrase, i}
-          <div class="phrase-row">
-            <input
-              type="text"
-              value={phrase}
-              oninput={(e: Event) => {
-                hearing.wake_word.phrases[i] =
-                  (e.target as HTMLInputElement).value;
-                dirty = true;
-              }}
-            />
-            <button
-              class="small-btn"
-              onclick={() => removePhrase(i)}
-            >✕</button>
+  <!-- Hearing -->
+  <Card label="👂 Hearing">
+    <button class="section-toggle" onclick={() => hearingOpen = !hearingOpen}>
+      <span class="toggle-arrow">{hearingOpen ? '▾' : '▸'}</span>
+      <span>ASR & Wake Word Configuration</span>
+    </button>
+    {#if hearingOpen}
+      <div class="form-grid">
+        <div class="form-row-2">
+          <label>ASR Engine
+            <select bind:value={hearing.asr.default_engine} onchange={markDirty}>
+              <option value="vosk">Vosk</option>
+              <option value="whisper">Whisper</option>
+            </select>
+          </label>
+          <label>Model Path
+            <input type="text" bind:value={hearing.asr.vosk_model_path} oninput={markDirty} placeholder="/path/to/model" />
+          </label>
+        </div>
+        <label>VAD Sensitivity — {hearing.asr.vad_sensitivity.toFixed(2)}
+          <input type="range" min="0" max="1" step="0.05" bind:value={hearing.asr.vad_sensitivity} oninput={markDirty} />
+        </label>
+        <div class="wake-section">
+          <div class="wake-header">
+            <h4>Wake Phrases</h4>
+            <button class="ghost" onclick={addPhrase}>+ Add</button>
           </div>
-        {/each}
-        <button class="small-btn" onclick={addPhrase}>
-          + Add phrase
-        </button>
-      </fieldset>
-    </div>
-  {/if}
-</Card>
+          {#each hearing.wake_word.phrases as phrase, i}
+            <div class="phrase-row">
+              <input
+                type="text"
+                value={phrase}
+                placeholder="e.g. hey agent"
+                oninput={(e: Event) => {
+                  hearing.wake_word.phrases[i] = (e.target as HTMLInputElement).value;
+                  dirty = true;
+                }}
+              />
+              <button class="ghost danger-text" onclick={() => removePhrase(i)}>✕</button>
+            </div>
+          {/each}
+          {#if hearing.wake_word.phrases.length === 0}
+            <p class="hint">No wake phrases configured.</p>
+          {/if}
+        </div>
+      </div>
+    {/if}
+  </Card>
 
-<!-- Speech -->
-<Card label="Speech">
-  <button
-    class="collapse-toggle"
-    onclick={() => speechOpen = !speechOpen}
-  >
-    {speechOpen ? '▾' : '▸'} Speech
-  </button>
-  {#if speechOpen}
-    <div class="form-grid">
-      <label>TTS Engine
-        <select bind:value={speech.engine} onchange={markDirty}>
-          <option value="piper">Piper</option>
-          <option value="espeak">eSpeak</option>
-        </select>
-      </label>
+  <!-- Speech -->
+  <Card label="🗣 Speech">
+    <button class="section-toggle" onclick={() => speechOpen = !speechOpen}>
+      <span class="toggle-arrow">{speechOpen ? '▾' : '▸'}</span>
+      <span>TTS Output Configuration</span>
+    </button>
+    {#if speechOpen}
+      <div class="form-grid">
+        <div class="form-row-2">
+          <label>TTS Engine
+            <select bind:value={speech.engine} onchange={markDirty}>
+              <option value="piper">Piper</option>
+              <option value="espeak">eSpeak</option>
+            </select>
+          </label>
+          <label>Voice Model
+            <input type="text" bind:value={speech.voice_model} oninput={markDirty} placeholder="e.g. en_US-amy-medium" />
+          </label>
+        </div>
+        <div class="form-row-2">
+          <label>Speed — {speech.speaking_rate.toFixed(1)}x
+            <input type="range" min="0.5" max="2.0" step="0.1" bind:value={speech.speaking_rate} oninput={markDirty} />
+          </label>
+          <label>Volume — {(speech.volume * 100).toFixed(0)}%
+            <input type="range" min="0" max="1" step="0.05" bind:value={speech.volume} oninput={markDirty} />
+          </label>
+        </div>
+        <label>Output Device
+          <input type="text" bind:value={speech.output_device} oninput={markDirty} placeholder="default" />
+        </label>
+        <button class="secondary test-btn" onclick={testTts}>🔊 Test TTS</button>
+      </div>
+    {/if}
+  </Card>
+</div>
 
-      <label>Voice Model
-        <input
-          type="text"
-          bind:value={speech.voice_model}
-          oninput={markDirty}
-        />
-      </label>
-
-      <label>Speed
-        <input
-          type="range" min="0.5" max="2.0" step="0.1"
-          bind:value={speech.speaking_rate}
-          oninput={markDirty}
-        />
-        <span>{speech.speaking_rate}</span>
-      </label>
-
-      <label>Volume
-        <input
-          type="range" min="0" max="1" step="0.05"
-          bind:value={speech.volume}
-          oninput={markDirty}
-        />
-        <span>{speech.volume}</span>
-      </label>
-
-      <label>Output Device
-        <input
-          type="text"
-          bind:value={speech.output_device}
-          oninput={markDirty}
-        />
-      </label>
-
-      <button class="test-btn" onclick={testTts}>Test TTS</button>
-    </div>
-  {/if}
-</Card>
-
-<!-- Save -->
-<div class="actions">
+<!-- Actions -->
+<div class="actions-bar">
   <button onclick={save} disabled={!dirty || saving}>
-    {saving ? 'Saving…' : 'Save'}
+    {saving ? 'Saving…' : 'Save Changes'}
   </button>
   {#if statusMsg}
-    <span class="status">{statusMsg}</span>
+    <span class="status-msg">{statusMsg}</span>
   {/if}
 </div>
 
 <style>
-  .form-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
+  .sections { display: flex; flex-direction: column; gap: 1rem; }
+
+  .section-toggle {
+    display: flex; align-items: center; gap: 0.5rem;
+    background: none; border: none; cursor: pointer; padding: 0; margin-bottom: 0.75rem;
+    font-size: 0.9rem; font-weight: 500; color: var(--text-sub);
   }
-  .form-grid label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-  .form-grid input, .form-grid select {
-    padding: 0.3rem 0.5rem;
-  }
-  .collapse-toggle {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 1rem;
-    font-weight: 600;
-    padding: 0;
-    margin-bottom: 0.5rem;
-  }
-  .test-btn {
-    align-self: flex-start;
-    padding: 0.4rem 1rem;
-    margin-top: 0.5rem;
-  }
-  .phrase-row {
-    display: flex;
-    gap: 0.3rem;
-    align-items: center;
-    margin-bottom: 0.3rem;
-  }
+  .section-toggle:hover { color: var(--text); }
+  .toggle-arrow { font-size: 0.8rem; width: 1rem; }
+
+  .form-grid { display: flex; flex-direction: column; gap: 0.75rem; }
+  .form-grid label { display: flex; flex-direction: column; gap: 0.3rem; }
+  .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  @media (max-width: 600px) { .form-row-2 { grid-template-columns: 1fr; } }
+
+  .test-btn { align-self: flex-start; margin-top: 0.25rem; }
+
+  .wake-section { display: flex; flex-direction: column; gap: 0.5rem; }
+  .wake-header { display: flex; justify-content: space-between; align-items: center; }
+  .wake-header h4 { margin: 0; font-size: 0.9rem; color: var(--text-sub); }
+  .phrase-row { display: flex; gap: 0.4rem; align-items: center; }
   .phrase-row input { flex: 1; }
-  .small-btn {
-    padding: 0.2rem 0.5rem;
-    font-size: 0.8rem;
+  .danger-text { color: var(--red); }
+  .hint { font-size: 0.8rem; color: var(--text-dim); }
+
+  .actions-bar {
+    display: flex; gap: 1rem; align-items: center; margin-top: 1.25rem;
+    padding-top: 1rem; border-top: 1px solid var(--border);
   }
-  fieldset {
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 0.5rem;
-  }
-  legend { font-weight: 600; }
-  .actions {
-    display: flex;
-    gap: 1rem;
-    align-items: center;
-    margin-top: 1rem;
-  }
-  .actions button { padding: 0.5rem 1.5rem; }
-  .status { font-size: 0.85rem; opacity: 0.8; }
+  .status-msg { font-size: 0.85rem; color: var(--text-sub); }
 </style>

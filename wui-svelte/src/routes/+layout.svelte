@@ -1,4 +1,5 @@
 <script lang="ts">
+  import '../app.css';
   import type { Snippet } from 'svelte';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
@@ -6,10 +7,6 @@
   import { get as apiGet, post as apiPost } from '$lib/api/client';
 
   let { children }: { children: Snippet } = $props();
-
-  // ----------------------------------------------------------------
-  // Nav items
-  // ----------------------------------------------------------------
 
   const NAV_ITEMS = [
     { href: '/',          label: 'Health',    icon: '❤' },
@@ -20,109 +17,67 @@
     { href: '/entity',    label: 'Entity',    icon: '👤' },
   ];
 
-  // ----------------------------------------------------------------
-  // Responsive hamburger
-  // ----------------------------------------------------------------
-
   let sidebarOpen = $state(true);
-
-  function toggleSidebar(): void {
-    sidebarOpen = !sidebarOpen;
-  }
-
-  // ----------------------------------------------------------------
-  // Active route
-  // ----------------------------------------------------------------
+  function toggleSidebar(): void { sidebarOpen = !sidebarOpen; }
 
   let pathname = $derived($page.url.pathname);
-
   function isActive(href: string): boolean {
     if (href === '/') return pathname === '/';
     return pathname.startsWith(href);
   }
 
-  // ----------------------------------------------------------------
-  // Connection status
-  // ----------------------------------------------------------------
-
   let wsStatusVal = $derived($wsStatus);
   let fsmVal = $derived($fsmState?.state ?? 'IDLE');
 
   function statusColor(s: string): string {
-    if (s === 'connected') return '#22c55e';
-    if (s === 'connecting') return '#eab308';
-    return '#ef4444';
+    if (s === 'connected') return 'var(--green)';
+    if (s === 'connecting') return 'var(--yellow)';
+    return 'var(--red)';
   }
 
-  // ----------------------------------------------------------------
-  // First-run wizard
-  // ----------------------------------------------------------------
+  function fsmColor(s: string): string {
+    switch (s) {
+      case 'IDLE':      return 'var(--green)';
+      case 'ACTIVE':    return 'var(--blue)';
+      case 'THROTTLED': return 'var(--yellow)';
+      case 'SLEEP':     return 'var(--mauve)';
+      case 'EMERGENCY': return 'var(--red)';
+      default:          return 'var(--text-dim)';
+    }
+  }
 
+  // First-run wizard
   let showWizard = $state(false);
   let wizardStep = $state(0);
-  const WIZARD_STEPS = [
-    'User Profile',
-    'Assistant Personality',
-    'Provider Setup',
-    'Senses Check',
-  ];
-
-  // Wizard field state
+  const WIZARD_STEPS = ['User Profile','Assistant Personality','Provider Setup','Senses Check'];
   let wUser = $state({ name: '', communication_style: 'casual' });
   let wAssistant = $state({
-    openness: 0.5,
-    conscientiousness: 0.5,
-    extraversion: 0.5,
-    agreeableness: 0.5,
-    stability: 0.5,
+    openness: 0.5, conscientiousness: 0.5, extraversion: 0.5,
+    agreeableness: 0.5, stability: 0.5,
   });
   let wProvider = $state({ name: '', model: '' });
-  let wSenses = $state({
-    vision: true,
-    hearing: true,
-    speech: true,
-  });
+  let wSenses = $state({ vision: true, hearing: true, speech: true });
 
   async function checkFirstRun(): Promise<void> {
     try {
-      const res = await apiGet<{ first_run: boolean }>(
-        '/api/setup-status',
-      );
+      const res = await apiGet<{ first_run: boolean }>('/api/setup-status');
       showWizard = res.first_run;
-    } catch {
-      // API not available; skip wizard
-    }
+    } catch { }
   }
-
   async function finishWizard(): Promise<void> {
     try {
       await apiPost('/api/setup', {
-        user: wUser,
-        assistant: wAssistant,
-        provider: wProvider,
-        senses: wSenses,
+        user: wUser, assistant: wAssistant, provider: wProvider, senses: wSenses,
       });
-    } catch {
-      // best effort
-    }
+    } catch { }
     showWizard = false;
   }
-
-  function skipWizard(): void {
-    showWizard = false;
-  }
-
+  function skipWizard(): void { showWizard = false; }
   function nextStep(): void {
-    if (wizardStep < WIZARD_STEPS.length - 1) {
-      wizardStep += 1;
-    } else {
-      finishWizard();
-    }
+    if (wizardStep < WIZARD_STEPS.length - 1) wizardStep += 1;
+    else finishWizard();
   }
-
-  function prevStep(): void {
-    if (wizardStep > 0) wizardStep -= 1;
-  }
+  function prevStep(): void { if (wizardStep > 0) wizardStep -= 1; }
 
   onMount(() => { checkFirstRun(); });
 </script>
@@ -131,63 +86,66 @@
 {#if showWizard}
   <div class="wizard-overlay">
     <div class="wizard-card">
-      <h2>OpenBaD Setup — Step {wizardStep + 1} of {WIZARD_STEPS.length}</h2>
-      <h3>{WIZARD_STEPS[wizardStep]}</h3>
+      <div class="wizard-header">
+        <span class="wizard-logo">OB</span>
+        <div>
+          <h2>OpenBaD Setup</h2>
+          <p class="wizard-progress">Step {wizardStep + 1} of {WIZARD_STEPS.length} — {WIZARD_STEPS[wizardStep]}</p>
+        </div>
+      </div>
 
-      {#if wizardStep === 0}
-        <label>Name
-          <input type="text" bind:value={wUser.name} />
-        </label>
-        <label>Communication Style
-          <select bind:value={wUser.communication_style}>
-            <option value="casual">Casual</option>
-            <option value="formal">Formal</option>
-            <option value="terse">Terse</option>
-          </select>
-        </label>
-      {:else if wizardStep === 1}
-        {#each Object.keys(wAssistant) as trait}
-          <label>{trait}
-            <input
-              type="range" min="0" max="1" step="0.05"
-              value={wAssistant[trait as keyof typeof wAssistant]}
-              oninput={(e: Event) => {
-                (wAssistant as any)[trait] =
-                  parseFloat((e.target as HTMLInputElement).value);
-              }}
-            />
-          </label>
+      <div class="wizard-steps">
+        {#each WIZARD_STEPS as step, i}
+          <div class="step-dot" class:done={i < wizardStep} class:current={i === wizardStep}></div>
+          {#if i < WIZARD_STEPS.length - 1}
+            <div class="step-line" class:done={i < wizardStep}></div>
+          {/if}
         {/each}
-      {:else if wizardStep === 2}
-        <label>Provider Name
-          <input type="text" bind:value={wProvider.name} />
-        </label>
-        <label>Model
-          <input type="text" bind:value={wProvider.model} />
-        </label>
-      {:else if wizardStep === 3}
-        <label>
-          <input type="checkbox" bind:checked={wSenses.vision} />
-          Vision
-        </label>
-        <label>
-          <input type="checkbox" bind:checked={wSenses.hearing} />
-          Hearing
-        </label>
-        <label>
-          <input type="checkbox" bind:checked={wSenses.speech} />
-          Speech
-        </label>
-      {/if}
+      </div>
+
+      <div class="wizard-body">
+        {#if wizardStep === 0}
+          <label>Name <input type="text" bind:value={wUser.name} placeholder="What should I call you?" /></label>
+          <label>Communication Style
+            <select bind:value={wUser.communication_style}>
+              <option value="casual">Casual</option>
+              <option value="formal">Formal</option>
+              <option value="terse">Terse</option>
+            </select>
+          </label>
+        {:else if wizardStep === 1}
+          {#each Object.keys(wAssistant) as trait}
+            <label class="trait-label">{trait}
+              <div class="trait-row">
+                <input type="range" min="0" max="1" step="0.05"
+                  value={wAssistant[trait as keyof typeof wAssistant]}
+                  oninput={(e: Event) => {
+                    (wAssistant as any)[trait] = parseFloat((e.target as HTMLInputElement).value);
+                  }} />
+                <span class="trait-val">{(wAssistant[trait as keyof typeof wAssistant] * 100).toFixed(0)}%</span>
+              </div>
+            </label>
+          {/each}
+        {:else if wizardStep === 2}
+          <label>Provider Name <input type="text" bind:value={wProvider.name} placeholder="e.g. ollama, openai" /></label>
+          <label>Model <input type="text" bind:value={wProvider.model} placeholder="e.g. llama3, gpt-4o" /></label>
+        {:else if wizardStep === 3}
+          <div class="sense-checks">
+            <label class="check-label"><input type="checkbox" bind:checked={wSenses.vision} /> Vision (screen capture)</label>
+            <label class="check-label"><input type="checkbox" bind:checked={wSenses.hearing} /> Hearing (microphone)</label>
+            <label class="check-label"><input type="checkbox" bind:checked={wSenses.speech} /> Speech (TTS output)</label>
+          </div>
+        {/if}
+      </div>
 
       <div class="wizard-actions">
         {#if wizardStep > 0}
-          <button onclick={prevStep}>Back</button>
+          <button class="secondary" onclick={prevStep}>Back</button>
         {/if}
         <button onclick={nextStep}>
           {wizardStep === WIZARD_STEPS.length - 1 ? 'Finish' : 'Next'}
         </button>
-        <button class="skip-btn" onclick={skipWizard}>Skip</button>
+        <button class="ghost skip-btn" onclick={skipWizard}>Skip setup</button>
       </div>
     </div>
   </div>
@@ -196,22 +154,34 @@
 <div class="app-shell" class:sidebar-collapsed={!sidebarOpen}>
   <!-- Top bar -->
   <header class="top-bar">
-    <button class="hamburger" onclick={toggleSidebar}>☰</button>
-    <span class="app-title">OpenBaD</span>
-    <div class="top-indicators">
-      <span
-        class="ws-dot"
-        style="background:{statusColor(wsStatusVal)}"
-        title="WebSocket: {wsStatusVal}"
-      ></span>
-      <span class="fsm-chip">{fsmVal}</span>
+    <div class="top-left">
+      <button class="hamburger" onclick={toggleSidebar} aria-label="Toggle sidebar">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <rect y="3" width="20" height="2" rx="1" fill="currentColor"/>
+          <rect y="9" width="20" height="2" rx="1" fill="currentColor"/>
+          <rect y="15" width="20" height="2" rx="1" fill="currentColor"/>
+        </svg>
+      </button>
+      <span class="app-title">Open<strong>BaD</strong></span>
+    </div>
+    <div class="top-right">
+      <div class="indicator" title="WebSocket: {wsStatusVal}">
+        <span class="ws-dot" style="background:{statusColor(wsStatusVal)}"></span>
+        <span class="indicator-label">{wsStatusVal}</span>
+      </div>
+      <div class="fsm-chip" style="border-color:{fsmColor(fsmVal)}; color:{fsmColor(fsmVal)}">
+        {fsmVal}
+      </div>
     </div>
   </header>
 
   <!-- Sidebar -->
   <nav class="side-nav" class:open={sidebarOpen}>
-    <div class="brand-mark">OB</div>
-    <ul>
+    <div class="nav-brand">
+      <div class="brand-logo">OB</div>
+      <span class="brand-text">OpenBaD</span>
+    </div>
+    <ul class="nav-list">
       {#each NAV_ITEMS as item}
         <li class:active={isActive(item.href)}>
           <a href={item.href}>
@@ -221,7 +191,16 @@
         </li>
       {/each}
     </ul>
+    <div class="nav-footer">
+      <div class="nav-divider"></div>
+      <span class="nav-version">v0.1.0</span>
+    </div>
   </nav>
+
+  <!-- Backdrop for mobile -->
+  {#if sidebarOpen}
+    <button class="sidebar-backdrop" onclick={toggleSidebar} aria-label="Close sidebar"></button>
+  {/if}
 
   <main class="workspace">
     {@render children()}
@@ -229,152 +208,369 @@
 </div>
 
 <style>
+  /* ============================================================
+     App Shell Grid
+     ============================================================ */
   .app-shell {
     display: grid;
     grid-template-areas:
-      "topbar topbar"
+      "sidebar topbar"
       "sidebar main";
-    grid-template-columns: 14rem 1fr;
-    grid-template-rows: auto 1fr;
+    grid-template-columns: var(--sidebar-w) 1fr;
+    grid-template-rows: var(--topbar-h) 1fr;
     height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    transition: grid-template-columns 0.25s var(--ease);
   }
   .app-shell.sidebar-collapsed {
     grid-template-columns: 0 1fr;
   }
 
+  /* ============================================================
+     Top Bar
+     ============================================================ */
   .top-bar {
     grid-area: topbar;
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    padding: 0 1.25rem;
+    background: var(--bg-surface0);
+    border-bottom: 1px solid var(--border);
+    z-index: 10;
+  }
+  .top-left {
+    display: flex;
+    align-items: center;
     gap: 0.75rem;
-    padding: 0.5rem 1rem;
-    background: #1e1e2e;
-    border-bottom: 1px solid #333;
   }
   .hamburger {
     background: none;
     border: none;
-    font-size: 1.3rem;
-    cursor: pointer;
-    color: inherit;
-  }
-  .app-title { font-weight: 700; }
-  .top-indicators {
-    margin-left: auto;
+    padding: 0.35rem;
+    border-radius: var(--radius-sm);
+    color: var(--text-sub);
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    cursor: pointer;
+    transition: background 0.15s var(--ease);
   }
-  .ws-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    display: inline-block;
+  .hamburger:hover {
+    background: var(--bg-surface1);
+    color: var(--text);
   }
-  .fsm-chip {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.5rem;
-    border: 1px solid #555;
-    border-radius: 4px;
+  .app-title {
+    font-size: 1rem;
+    color: var(--text-sub);
+    letter-spacing: 0.02em;
+  }
+  .app-title strong {
+    color: var(--text);
   }
 
+  .top-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .ws-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    box-shadow: 0 0 6px currentColor;
+  }
+  .indicator-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: capitalize;
+  }
+  .fsm-chip {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 0.2rem 0.65rem;
+    border: 1.5px solid;
+    border-radius: 999px;
+  }
+
+  /* ============================================================
+     Sidebar
+     ============================================================ */
   .side-nav {
     grid-area: sidebar;
-    background: #181825;
-    padding: 1rem 0;
+    background: var(--bg-mantle);
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
-    transition: width 0.2s ease;
+    transition: width 0.25s var(--ease);
+    border-right: 1px solid var(--border);
+    z-index: 20;
   }
   .side-nav:not(.open) {
     width: 0;
-    padding: 0;
+    border-right: none;
   }
-  .brand-mark {
-    text-align: center;
-    font-size: 1.5rem;
-    font-weight: 800;
-    margin-bottom: 1rem;
-  }
-  .side-nav ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  .side-nav li a {
+
+  .nav-brand {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    text-decoration: none;
-    color: inherit;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
   }
-  .side-nav li.active a {
-    background: rgba(59, 130, 246, 0.2);
-    border-left: 3px solid #3b82f6;
-    font-weight: 600;
+  .brand-logo {
+    width: 2.25rem;
+    height: 2.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.85rem;
+    background: linear-gradient(135deg, var(--blue), var(--mauve));
+    color: var(--text-on-color);
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
   }
-  .nav-icon { font-size: 1.1rem; }
+  .brand-text {
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--text);
+    white-space: nowrap;
+  }
 
-  .workspace {
-    grid-area: main;
-    padding: 1rem 1.5rem;
+  .nav-list {
+    list-style: none;
+    padding: 0.5rem 0;
+    flex: 1;
     overflow-y: auto;
   }
+  .nav-list li a {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 1.25rem;
+    text-decoration: none;
+    color: var(--text-sub);
+    font-size: 0.9rem;
+    font-weight: 500;
+    border-left: 3px solid transparent;
+    transition: all 0.15s var(--ease);
+    white-space: nowrap;
+  }
+  .nav-list li a:hover {
+    background: var(--bg-surface1);
+    color: var(--text);
+    text-decoration: none;
+  }
+  .nav-list li.active a {
+    background: var(--blue-dim);
+    color: var(--blue);
+    border-left-color: var(--blue);
+    font-weight: 600;
+  }
+  .nav-icon {
+    font-size: 1.1rem;
+    width: 1.5rem;
+    text-align: center;
+    flex-shrink: 0;
+  }
 
-  /* Responsive: collapse sidebar */
+  .nav-footer {
+    padding: 0.75rem 1.25rem;
+    margin-top: auto;
+  }
+  .nav-divider {
+    height: 1px;
+    background: var(--border);
+    margin-bottom: 0.75rem;
+  }
+  .nav-version {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+  }
+
+  /* Mobile backdrop */
+  .sidebar-backdrop {
+    display: none;
+  }
+
+  /* ============================================================
+     Workspace (main content area)
+     ============================================================ */
+  .workspace {
+    grid-area: main;
+    padding: 1.75rem 2rem;
+    overflow-y: auto;
+    background: var(--bg-base);
+  }
+
+  /* ============================================================
+     Responsive
+     ============================================================ */
   @media (max-width: 768px) {
     .app-shell {
-      grid-template-columns: 0 1fr;
+      grid-template-areas:
+        "topbar"
+        "main";
+      grid-template-columns: 1fr;
     }
     .side-nav {
       position: fixed;
       top: 0;
       left: 0;
       height: 100vh;
-      width: 14rem;
-      z-index: 100;
+      width: var(--sidebar-w);
       transform: translateX(-100%);
-      transition: transform 0.2s ease;
+      transition: transform 0.25s var(--ease);
     }
     .side-nav.open {
       transform: translateX(0);
     }
+    .sidebar-backdrop {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 15;
+      border: none;
+      cursor: default;
+    }
+    .workspace {
+      padding: 1.25rem 1rem;
+    }
   }
 
-  /* Wizard overlay */
+  /* ============================================================
+     Wizard Overlay
+     ============================================================ */
   .wizard-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(4px);
     display: flex;
     justify-content: center;
     align-items: center;
     z-index: 200;
   }
   .wizard-card {
-    background: #1e1e2e;
-    padding: 2rem;
-    border-radius: 12px;
-    max-width: 30rem;
-    width: 90%;
+    background: var(--bg-surface0);
+    padding: 2rem 2.25rem;
+    border-radius: var(--radius-lg);
+    max-width: 32rem;
+    width: 92%;
     display: flex;
     flex-direction: column;
-    gap: 0.8rem;
+    gap: 1.25rem;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--border);
   }
-  .wizard-card label {
+  .wizard-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .wizard-logo {
+    width: 2.5rem;
+    height: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.9rem;
+    background: linear-gradient(135deg, var(--blue), var(--mauve));
+    color: var(--text-on-color);
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+  }
+  .wizard-header h2 {
+    font-size: 1.2rem;
+    margin: 0;
+  }
+  .wizard-progress {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin: 0;
+  }
+
+  .wizard-steps {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 0.5rem;
+  }
+  .step-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--bg-surface2);
+    flex-shrink: 0;
+    transition: background 0.2s var(--ease);
+  }
+  .step-dot.done { background: var(--green); }
+  .step-dot.current { background: var(--blue); box-shadow: 0 0 8px rgba(137, 180, 250, 0.5); }
+  .step-line {
+    flex: 1;
+    height: 2px;
+    background: var(--bg-surface2);
+    transition: background 0.2s var(--ease);
+  }
+  .step-line.done { background: var(--green); }
+
+  .wizard-body {
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: 0.75rem;
   }
-  .wizard-card input,
-  .wizard-card select {
-    padding: 0.3rem 0.5rem;
+  .wizard-body label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
   }
+  .trait-label {
+    text-transform: capitalize;
+  }
+  .trait-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .trait-val {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    width: 3rem;
+    text-align: right;
+  }
+  .sense-checks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .check-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-direction: row;
+    font-size: 0.9rem;
+    color: var(--text);
+    cursor: pointer;
+  }
+
   .wizard-actions {
     display: flex;
     gap: 0.5rem;
-    margin-top: 0.5rem;
+    margin-top: 0.25rem;
   }
-  .wizard-actions button { padding: 0.4rem 1rem; }
-  .skip-btn { opacity: 0.6; margin-left: auto; }
+  .skip-btn {
+    margin-left: auto;
+    font-size: 0.8rem;
+  }
 </style>

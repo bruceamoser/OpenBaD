@@ -152,18 +152,21 @@
 <div class="chat-layout">
   <!-- Header bar -->
   <div class="chat-header">
-    <h2>Chat</h2>
+    <div class="chat-title">
+      <h2>Chat</h2>
+      <span class="badge">{system}</span>
+    </div>
     <div class="header-controls">
-      <label class="sys-select">
-        System
+      <div class="control-group">
+        <span class="control-label">System</span>
         <select bind:value={system}>
           <option value="CHAT">CHAT</option>
           <option value="REASONING">REASONING</option>
         </select>
-      </label>
+      </div>
       <label class="cot-toggle">
         <input type="checkbox" bind:checked={showCot} />
-        Chain of Thought
+        <span>Chain of Thought</span>
       </label>
     </div>
   </div>
@@ -175,7 +178,7 @@
       style="width:{Math.min(tokensUsed / tokensMax * 100, 100)}%"
     ></div>
     <span class="budget-label">
-      {tokensUsed} / {tokensMax} tokens
+      {tokensUsed.toLocaleString()} / {tokensMax.toLocaleString()} tokens
     </span>
   </div>
 
@@ -185,9 +188,23 @@
     bind:this={chatContainer}
     onscroll={onScroll}
   >
+    {#if messages.length === 0}
+      <div class="empty-state">
+        <div class="empty-icon">💬</div>
+        <h3>Start a conversation</h3>
+        <p>Type a message below to begin chatting with OpenBaD.</p>
+      </div>
+    {/if}
     {#each messages as msg}
       <div class="msg {msg.role}">
+        <div class="avatar">
+          {msg.role === 'user' ? '👤' : '🤖'}
+        </div>
         <div class="bubble">
+          <div class="bubble-header">
+            <span class="role-label">{msg.role === 'user' ? 'You' : 'Assistant'}</span>
+            <time class="ts">{new Date(msg.timestamp).toLocaleTimeString()}</time>
+          </div>
           <p class="content">{msg.content}</p>
           {#if showCot && msg.reasoning}
             <details class="reasoning">
@@ -195,12 +212,15 @@
               <pre>{msg.reasoning}</pre>
             </details>
           {/if}
-          <time class="ts">{msg.timestamp}</time>
         </div>
       </div>
     {/each}
     {#if streaming}
-      <div class="streaming-indicator">●●●</div>
+      <div class="streaming-indicator">
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
+      </div>
     {/if}
   </div>
 
@@ -222,108 +242,194 @@
   .chat-layout {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    max-height: calc(100vh - 4rem);
+    height: calc(100vh - var(--topbar-h) - 3.5rem);
   }
+
   .chat-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.5rem;
-    padding-bottom: 0.5rem;
+    gap: 0.75rem;
+    padding-bottom: 1rem;
   }
-  .chat-header h2 { margin: 0; }
+  .chat-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .chat-title h2 { margin: 0; }
   .header-controls {
     display: flex;
     gap: 1rem;
     align-items: center;
   }
-  .sys-select select { margin-left: 0.3rem; }
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .control-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+  .control-group select {
+    width: auto;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.8rem;
+  }
   .cot-toggle {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 0.4rem;
     font-size: 0.85rem;
+    color: var(--text-sub);
+    cursor: pointer;
   }
 
   .budget-bar {
     position: relative;
-    height: 14px;
-    background: #333;
-    border-radius: 7px;
+    height: 18px;
+    background: var(--bg-surface1);
+    border-radius: 9px;
     overflow: hidden;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.75rem;
   }
   .budget-fill {
     height: 100%;
-    background: #3b82f6;
-    transition: width 0.3s ease;
+    background: linear-gradient(90deg, var(--blue), var(--mauve));
+    transition: width 0.3s var(--ease);
+    border-radius: 9px;
   }
   .budget-label {
     position: absolute;
     top: 0;
-    left: 0.5rem;
+    left: 0;
+    right: 0;
+    text-align: center;
     font-size: 0.7rem;
-    line-height: 14px;
-    color: #fff;
+    font-weight: 600;
+    line-height: 18px;
+    color: var(--text);
   }
 
   .messages {
     flex: 1;
     overflow-y: auto;
     padding: 0.5rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
   }
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 0.5rem;
+    color: var(--text-dim);
+  }
+  .empty-icon { font-size: 2.5rem; opacity: 0.5; }
+  .empty-state h3 { color: var(--text-sub); font-weight: 600; }
+  .empty-state p { font-size: 0.9rem; }
+
   .msg {
     display: flex;
-    margin-bottom: 0.5rem;
+    gap: 0.6rem;
+    max-width: 80%;
   }
-  .msg.user { justify-content: flex-end; }
-  .msg.assistant { justify-content: flex-start; }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .msg.assistant { align-self: flex-start; }
+
+  .avatar {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-surface1);
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+
   .bubble {
-    max-width: 75%;
-    padding: 0.5rem 0.75rem;
-    border-radius: 8px;
+    padding: 0.65rem 0.9rem;
+    border-radius: var(--radius-md);
     word-break: break-word;
   }
-  .msg.user .bubble { background: #2563eb; color: #fff; }
-  .msg.assistant .bubble { background: #374151; color: #e5e7eb; }
-  .content { margin: 0; white-space: pre-wrap; }
+  .msg.user .bubble {
+    background: var(--blue);
+    color: var(--text-on-color);
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant .bubble {
+    background: var(--bg-surface0);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .bubble-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+  }
+  .role-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    opacity: 0.7;
+  }
   .ts {
-    display: block;
     font-size: 0.65rem;
     opacity: 0.5;
-    margin-top: 0.25rem;
   }
+  .content { margin: 0; white-space: pre-wrap; font-size: 0.9rem; line-height: 1.5; }
+
   .reasoning {
-    margin-top: 0.4rem;
-    font-size: 0.8rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+  .reasoning summary {
+    font-size: 0.75rem;
+    cursor: pointer;
+    color: var(--text-dim);
   }
   .reasoning pre {
     white-space: pre-wrap;
+    font-size: 0.8rem;
     opacity: 0.7;
     margin: 0.25rem 0 0 0;
+    font-family: 'JetBrains Mono', monospace;
   }
+
   .streaming-indicator {
-    text-align: center;
-    opacity: 0.5;
-    animation: pulse 1s infinite;
+    display: flex;
+    gap: 0.3rem;
+    align-self: flex-start;
+    padding: 0.75rem 1rem;
   }
-  @keyframes pulse {
-    0%, 100% { opacity: 0.3; }
-    50% { opacity: 0.8; }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    animation: bounce 1.4s infinite ease-in-out;
+  }
+  .dot:nth-child(2) { animation-delay: 0.16s; }
+  .dot:nth-child(3) { animation-delay: 0.32s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.3; }
+    40% { transform: scale(1); opacity: 1; }
   }
 
   .input-area {
     display: flex;
     gap: 0.5rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid #444;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+    margin-top: 0.5rem;
   }
-  .input-area textarea {
-    flex: 1;
-    resize: none;
-    padding: 0.5rem;
-  }
-  .input-area button { padding: 0.5rem 1.5rem; }
+  .input-area textarea { flex: 1; resize: none; }
 </style>

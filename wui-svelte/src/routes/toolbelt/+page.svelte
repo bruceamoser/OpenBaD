@@ -114,26 +114,28 @@
   }
 </script>
 
-<h2>Toolbelt</h2>
+<div class="page-header">
+  <h2>Toolbelt</h2>
+  <p>Equip, swap, and monitor agent tool integrations</p>
+</div>
 
 <!-- Belt (equipped) -->
 <Card label="Equipped Belt">
   {#if belt.length === 0}
-    <p class="muted">No tools equipped.</p>
+    <div class="empty-belt">
+      <span class="empty-icon">🔧</span>
+      <p>No tools equipped yet. Select tools from the cabinet below.</p>
+    </div>
   {:else}
     <div class="belt-grid">
       {#each belt as tool}
-        <div class="belt-card">
-          <span
-            class="health-dot"
-            style="background:{healthColor(tool.health)}"
-          ></span>
-          <strong>{tool.name}</strong>
-          <span class="role-tag">{tool.role}</span>
-          <button
-            class="small-btn"
-            onclick={() => unequip(tool.role)}
-          >Unequip</button>
+        <div class="belt-chip">
+          <span class="h-dot" style="background:{healthColor(tool.health)}"></span>
+          <div class="chip-info">
+            <span class="chip-name">{tool.name}</span>
+            <span class="chip-role">{tool.role}</span>
+          </div>
+          <button class="ghost danger-text" onclick={() => unequip(tool.role)}>✕</button>
         </div>
       {/each}
     </div>
@@ -141,126 +143,105 @@
 </Card>
 
 <!-- Cabinet grouped by role -->
-{#each TOOL_ROLES as role}
-  {#if (grouped[role] ?? []).length > 0}
-    <Card label={role}>
-      <ul class="tool-list">
-        {#each grouped[role] as tool}
-          <li class:equipped={tool.equipped}>
-            <span
-              class="health-dot"
-              style="background:{healthColor(tool.health)}"
-            ></span>
-            <span class="tool-name">{tool.name}</span>
-            <span class="health-label">{tool.health}</span>
-            {#if tool.equipped}
-              <span class="badge">equipped</span>
-            {:else}
-              <button
-                class="small-btn"
-                onclick={() => equip(role, tool.name)}
-              >Equip</button>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    </Card>
-  {/if}
-{/each}
+<div class="cabinet">
+  {#each TOOL_ROLES as role}
+    {#if (grouped[role] ?? []).length > 0}
+      <Card label={role.replace('_', ' ')}>
+        <div class="tool-list">
+          {#each grouped[role] as tool}
+            <div class="tool-row" class:is-equipped={tool.equipped}>
+              <span class="h-dot" style="background:{healthColor(tool.health)}"></span>
+              <span class="tool-name">{tool.name}</span>
+              <span class="health-tag" class:ok={tool.health === 'AVAILABLE'} class:degraded={tool.health === 'DEGRADED'}>
+                {tool.health.toLowerCase()}
+              </span>
+              {#if tool.equipped}
+                <span class="equipped-badge">✓ Equipped</span>
+              {:else}
+                <button class="secondary sm" onclick={() => equip(role, tool.name)}>Equip</button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </Card>
+    {/if}
+  {/each}
+</div>
 
 <!-- Auto-swap event log -->
 <Card label="Auto-Swap Log">
   {#if swapLog.length === 0}
-    <p class="muted">No auto-swap events yet.</p>
+    <p class="hint">No auto-swap events yet. Swaps are triggered by health degradation.</p>
   {:else}
-    <ul class="swap-log">
+    <div class="swap-log">
       {#each swapLog as evt}
-        <li>
-          <span class="ts">{evt.ts}</span>
-          <strong>{evt.role}</strong>:
-          {evt.from_tool} → {evt.to_tool}
-          <em>({evt.reason})</em>
-        </li>
+        <div class="swap-row">
+          <span class="swap-ts">{evt.ts}</span>
+          <span class="swap-role">{evt.role}</span>
+          <span class="swap-arrow">{evt.from_tool} → {evt.to_tool}</span>
+          <span class="swap-reason">{evt.reason}</span>
+        </div>
       {/each}
-    </ul>
+    </div>
   {/if}
 </Card>
 
 {#if statusMsg}
-  <p class="status">{statusMsg}</p>
+  <div class="status-toast">{statusMsg}</div>
 {/if}
 
 <style>
-  .belt-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
+  .empty-belt { text-align: center; padding: 1.5rem 0; color: var(--text-dim); }
+  .empty-icon { font-size: 2rem; display: block; margin-bottom: 0.5rem; }
+
+  .belt-grid { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+  .belt-chip {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 0.75rem; background: var(--bg-surface1); border-radius: var(--radius-sm);
+    border: 1px solid var(--bg-surface2);
   }
-  .belt-card {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid #555;
-    border-radius: 6px;
+  .chip-info { display: flex; flex-direction: column; }
+  .chip-name { font-weight: 600; font-size: 0.85rem; }
+  .chip-role { font-size: 0.7rem; color: var(--text-dim); text-transform: capitalize; }
+
+  .h-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    box-shadow: 0 0 6px currentColor;
   }
-  .health-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    display: inline-block;
-    flex-shrink: 0;
+  .danger-text { color: var(--red); }
+
+  .cabinet { display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem; }
+
+  .tool-list { display: flex; flex-direction: column; gap: 0.35rem; }
+  .tool-row {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.45rem 0.6rem; border-radius: var(--radius-sm);
+    transition: background 0.15s var(--ease);
   }
-  .role-tag {
-    font-size: 0.75rem;
-    opacity: 0.6;
+  .tool-row:hover { background: var(--bg-surface1); }
+  .tool-row.is-equipped { background: rgba(166, 227, 161, 0.06); }
+  .tool-name { flex: 1; font-size: 0.9rem; }
+  .health-tag { font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 3px; text-transform: capitalize; }
+  .health-tag.ok { color: var(--green); background: rgba(166, 227, 161, 0.1); }
+  .health-tag.degraded { color: var(--yellow); background: rgba(249, 226, 175, 0.1); }
+  .equipped-badge { font-size: 0.75rem; color: var(--green); font-weight: 600; }
+  .sm { font-size: 0.78rem; padding: 0.2rem 0.6rem; }
+
+  .swap-log { max-height: 14rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.25rem; }
+  .swap-row {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.3rem 0.5rem; font-size: 0.82rem;
+    border-left: 2px solid var(--bg-surface2);
   }
-  .tool-list {
-    list-style: none;
-    padding: 0;
+  .swap-ts { color: var(--text-dim); font-size: 0.72rem; min-width: 5rem; }
+  .swap-role { font-weight: 600; min-width: 6rem; }
+  .swap-arrow { flex: 1; }
+  .swap-reason { color: var(--text-dim); font-style: italic; }
+  .hint { font-size: 0.8rem; color: var(--text-dim); }
+
+  .status-toast {
+    margin-top: 1rem; padding: 0.5rem 1rem;
+    background: var(--bg-surface1); border-radius: var(--radius-sm);
+    font-size: 0.85rem; color: var(--text-sub);
   }
-  .tool-list li {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.35rem 0;
-  }
-  .tool-list li.equipped {
-    background: rgba(34, 197, 94, 0.08);
-    border-radius: 4px;
-    padding-left: 0.4rem;
-  }
-  .tool-name { flex: 1; }
-  .health-label {
-    font-size: 0.75rem;
-    opacity: 0.6;
-  }
-  .badge {
-    font-size: 0.7rem;
-    background: #22c55e;
-    color: #000;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-  }
-  .small-btn {
-    padding: 0.2rem 0.5rem;
-    font-size: 0.8rem;
-  }
-  .swap-log {
-    list-style: none;
-    padding: 0;
-    max-height: 15rem;
-    overflow-y: auto;
-  }
-  .swap-log li {
-    padding: 0.25rem 0;
-    font-size: 0.85rem;
-  }
-  .ts {
-    opacity: 0.5;
-    margin-right: 0.5rem;
-    font-size: 0.75rem;
-  }
-  .muted { opacity: 0.5; }
-  .status { font-size: 0.85rem; opacity: 0.8; margin-top: 1rem; }
 </style>

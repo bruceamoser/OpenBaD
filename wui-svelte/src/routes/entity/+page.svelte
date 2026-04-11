@@ -207,90 +207,72 @@
   }
 </script>
 
-<h2>Entity</h2>
+<div class="page-header">
+  <h2>Entity</h2>
+  <p>Configure user and assistant identity profiles</p>
+</div>
 
 <!-- Tab switcher -->
 <div class="tab-bar">
-  <button
-    class:active={tab === 'user'}
-    onclick={() => tab = 'user'}
-  >User</button>
-  <button
-    class:active={tab === 'assistant'}
-    onclick={() => tab = 'assistant'}
-  >Assistant</button>
+  <button class:active={tab === 'user'} onclick={() => tab = 'user'}>
+    <span class="tab-icon">👤</span> User
+  </button>
+  <button class:active={tab === 'assistant'} onclick={() => tab = 'assistant'}>
+    <span class="tab-icon">🤖</span> Assistant
+  </button>
 </div>
 
 <!-- User tab -->
 {#if tab === 'user'}
   <Card label="User Profile">
     <div class="form-grid">
-      <label>Name
-        <input
-          type="text"
-          bind:value={user.name}
-          oninput={() => userDirty = true}
-        />
-      </label>
-
-      <label>Preferred Name
-        <input
-          type="text"
-          bind:value={user.preferred_name}
-          oninput={() => userDirty = true}
-        />
-      </label>
-
+      <div class="form-row-2">
+        <label>Name
+          <input type="text" bind:value={user.name} oninput={() => userDirty = true} placeholder="Your name" />
+        </label>
+        <label>Preferred Name
+          <input type="text" bind:value={user.preferred_name} oninput={() => userDirty = true} placeholder="How the agent calls you" />
+        </label>
+      </div>
       <label>Communication Style
-        <select
-          bind:value={user.communication_style}
-          onchange={() => userDirty = true}
-        >
+        <select bind:value={user.communication_style} onchange={() => userDirty = true}>
           <option value="casual">Casual</option>
           <option value="formal">Formal</option>
           <option value="terse">Terse</option>
         </select>
       </label>
-
-      <fieldset>
-        <legend>Expertise Domains</legend>
-        {#each user.expertise_domains as domain, i}
-          <span class="chip">
-            {domain}
-            <button
-              class="chip-x"
-              onclick={() => removeDomain(i)}
-            >✕</button>
-          </span>
-        {/each}
+      <div class="domains-section">
+        <h4>Expertise Domains</h4>
+        <div class="domain-chips">
+          {#each user.expertise_domains as domain, i}
+            <span class="domain-chip">
+              {domain}
+              <button class="chip-x" onclick={() => removeDomain(i)}>✕</button>
+            </span>
+          {/each}
+        </div>
         <div class="add-row">
           <input
             type="text"
             bind:value={domainInput}
-            placeholder="Add domain…"
-            onkeydown={(e: KeyboardEvent) => {
-              if (e.key === 'Enter') addDomain();
-            }}
+            placeholder="Add expertise…"
+            onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') addDomain(); }}
           />
-          <button class="small-btn" onclick={addDomain}>Add</button>
+          <button class="secondary" onclick={addDomain}>Add</button>
         </div>
-      </fieldset>
+      </div>
     </div>
   </Card>
 
-  <Card label="Learned Summary (read-only)">
-    <p class="ro-summary">
-      {user.learned_summary || 'No learned data yet.'}
-    </p>
+  <Card label="Learned Summary">
+    <p class="ro-summary">{user.learned_summary || 'No learned data yet. The agent will build a summary over time.'}</p>
   </Card>
 
-  <div class="actions">
+  <div class="actions-bar">
     <button onclick={saveUser} disabled={!userDirty || saving}>
-      {saving ? 'Saving…' : 'Save'}
+      {saving ? 'Saving…' : 'Save Changes'}
     </button>
-    <button class="reset-btn" onclick={resetUser}>
-      Reset to Seed
-    </button>
+    <button class="ghost" onclick={resetUser}>Reset to Seed</button>
   </div>
 {/if}
 
@@ -299,207 +281,149 @@
   <Card label="Assistant Profile">
     <div class="form-grid">
       <label>Name
-        <input
-          type="text"
-          bind:value={assistant.name}
-          oninput={() => assistantDirty = true}
-        />
+        <input type="text" bind:value={assistant.name} oninput={() => assistantDirty = true} placeholder="Agent display name" />
       </label>
-
       <label>Persona Summary
-        <textarea
-          bind:value={assistant.persona_summary}
-          oninput={() => assistantDirty = true}
-          rows="3"
-        ></textarea>
+        <textarea bind:value={assistant.persona_summary} oninput={() => assistantDirty = true} rows="3" placeholder="Describe the assistant's personality…"></textarea>
       </label>
-
       <label>Learning Focus
-        <input
-          type="text"
-          bind:value={assistant.learning_focus}
-          oninput={() => assistantDirty = true}
-        />
+        <input type="text" bind:value={assistant.learning_focus} oninput={() => assistantDirty = true} placeholder="e.g. systems programming" />
       </label>
     </div>
   </Card>
 
   <Card label="OCEAN Personality">
-    {#each Object.keys(oceanLabels) as trait}
-      <div class="ocean-row">
-        <label class="ocean-label">{trait}</label>
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.05"
-          value={assistant[trait as keyof AssistantProfile] as number}
-          oninput={(e: Event) => {
-            const v = parseFloat((e.target as HTMLInputElement).value);
-            (assistant as any)[trait] = v;
-            assistantDirty = true;
-          }}
-        />
-        <span class="ocean-val">
-          {(assistant[trait as keyof AssistantProfile] as number).toFixed(2)}
-        </span>
-        <span class="ocean-desc">
-          {oceanDesc(trait, assistant[trait as keyof AssistantProfile] as number)}
-        </span>
-      </div>
-    {/each}
+    <div class="ocean-grid">
+      {#each Object.keys(oceanLabels) as trait}
+        {@const val = assistant[trait as keyof AssistantProfile] as number}
+        <div class="ocean-row">
+          <div class="ocean-top">
+            <span class="ocean-label">{trait}</span>
+            <span class="ocean-desc">{oceanDesc(trait, val)}</span>
+          </div>
+          <div class="ocean-slider-wrap">
+            <span class="ocean-pole">{oceanLabels[trait][0]}</span>
+            <input
+              type="range" min="0" max="1" step="0.05" value={val}
+              oninput={(e: Event) => {
+                const v = parseFloat((e.target as HTMLInputElement).value);
+                (assistant as any)[trait] = v;
+                assistantDirty = true;
+              }}
+            />
+            <span class="ocean-pole">{oceanLabels[trait][1]}</span>
+          </div>
+          <div class="ocean-val">{val.toFixed(2)}</div>
+        </div>
+      {/each}
+    </div>
   </Card>
 
-  <Card label="Modulation Factors (read-only)">
+  <Card label="Modulation Factors">
     {#if assistant.modulation}
-      <dl class="mod-factors">
-        <dt>Exploration Budget ×</dt>
-        <dd>{assistant.modulation.exploration_budget_multiplier.toFixed(2)}</dd>
-        <dt>Reasoning Depth ×</dt>
-        <dd>{assistant.modulation.max_reasoning_depth_multiplier.toFixed(2)}</dd>
-        <dt>Proactive Threshold</dt>
-        <dd>{assistant.modulation.proactive_suggestion_threshold.toFixed(2)}</dd>
-        <dt>Challenge Probability</dt>
-        <dd>{assistant.modulation.challenge_probability.toFixed(2)}</dd>
-        <dt>Cortisol Decay ×</dt>
-        <dd>{assistant.modulation.cortisol_decay_multiplier.toFixed(2)}</dd>
-      </dl>
+      <div class="mod-grid">
+        <div class="mod-item">
+          <span class="mod-label">Exploration Budget</span>
+          <span class="mod-val">{assistant.modulation.exploration_budget_multiplier.toFixed(2)}×</span>
+        </div>
+        <div class="mod-item">
+          <span class="mod-label">Reasoning Depth</span>
+          <span class="mod-val">{assistant.modulation.max_reasoning_depth_multiplier.toFixed(2)}×</span>
+        </div>
+        <div class="mod-item">
+          <span class="mod-label">Proactive Threshold</span>
+          <span class="mod-val">{assistant.modulation.proactive_suggestion_threshold.toFixed(2)}</span>
+        </div>
+        <div class="mod-item">
+          <span class="mod-label">Challenge Probability</span>
+          <span class="mod-val">{assistant.modulation.challenge_probability.toFixed(2)}</span>
+        </div>
+        <div class="mod-item">
+          <span class="mod-label">Cortisol Decay</span>
+          <span class="mod-val">{assistant.modulation.cortisol_decay_multiplier.toFixed(2)}×</span>
+        </div>
+      </div>
     {:else}
-      <p class="muted">
-        Modulation factors unavailable — save to compute.
-      </p>
+      <p class="hint">Save personality to compute modulation factors.</p>
     {/if}
   </Card>
 
-  <div class="actions">
-    <button
-      onclick={saveAssistant}
-      disabled={!assistantDirty || saving}
-    >
-      {saving ? 'Saving…' : 'Save'}
+  <div class="actions-bar">
+    <button onclick={saveAssistant} disabled={!assistantDirty || saving}>
+      {saving ? 'Saving…' : 'Save Changes'}
     </button>
-    <button class="reset-btn" onclick={resetAssistant}>
-      Reset to Seed
-    </button>
+    <button class="ghost" onclick={resetAssistant}>Reset to Seed</button>
   </div>
 {/if}
 
 {#if statusMsg}
-  <p class="status">{statusMsg}</p>
+  <div class="status-toast">{statusMsg}</div>
 {/if}
 
 <style>
-  .tab-bar {
-    display: flex;
-    gap: 0;
-    margin-bottom: 1rem;
-  }
+  .tab-bar { display: flex; gap: 0; margin-bottom: 1.25rem; }
   .tab-bar button {
-    padding: 0.5rem 1.2rem;
-    border: 1px solid #555;
-    background: transparent;
-    cursor: pointer;
+    display: flex; align-items: center; gap: 0.4rem;
+    padding: 0.55rem 1.2rem; border: 1px solid var(--border); background: transparent;
+    color: var(--text-sub); cursor: pointer; font-size: 0.9rem; transition: all 0.15s var(--ease);
   }
+  .tab-bar button:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+  .tab-bar button:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; border-left: none; }
   .tab-bar button.active {
-    background: #333;
-    font-weight: 600;
+    background: var(--bg-surface1); color: var(--text); font-weight: 600;
+    border-color: var(--blue);
   }
-  .tab-bar button:first-child {
-    border-radius: 6px 0 0 6px;
+  .tab-icon { font-size: 1rem; }
+
+  .form-grid { display: flex; flex-direction: column; gap: 0.75rem; }
+  .form-grid label { display: flex; flex-direction: column; gap: 0.3rem; }
+  .form-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  @media (max-width: 600px) { .form-row-2 { grid-template-columns: 1fr; } }
+  textarea { resize: vertical; }
+
+  .domains-section { display: flex; flex-direction: column; gap: 0.5rem; }
+  .domains-section h4 { margin: 0; font-size: 0.9rem; color: var(--text-sub); }
+  .domain-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .domain-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    background: var(--bg-surface1); border: 1px solid var(--bg-surface2);
+    padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.82rem;
   }
-  .tab-bar button:last-child {
-    border-radius: 0 6px 6px 0;
-  }
-  .form-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-  .form-grid label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-  .form-grid input,
-  .form-grid select,
-  .form-grid textarea {
-    padding: 0.3rem 0.5rem;
-  }
-  fieldset {
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 0.5rem;
-  }
-  legend { font-weight: 600; }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    background: #444;
-    padding: 0.15rem 0.5rem;
-    border-radius: 12px;
-    font-size: 0.85rem;
-    margin: 0.15rem;
-  }
-  .chip-x {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 0.75rem;
-    padding: 0;
-  }
-  .add-row {
-    display: flex;
-    gap: 0.3rem;
-    margin-top: 0.3rem;
-  }
+  .chip-x { background: none; border: none; cursor: pointer; color: var(--red); font-size: 0.75rem; padding: 0; }
+  .add-row { display: flex; gap: 0.4rem; }
   .add-row input { flex: 1; }
-  .small-btn {
-    padding: 0.2rem 0.5rem;
-    font-size: 0.8rem;
-  }
-  .ro-summary {
-    opacity: 0.7;
-    font-style: italic;
-    white-space: pre-wrap;
-  }
+  .ro-summary { color: var(--text-dim); font-style: italic; white-space: pre-wrap; line-height: 1.6; }
 
-  .ocean-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.4rem;
-    flex-wrap: wrap;
-  }
-  .ocean-label {
-    width: 9rem;
-    font-weight: 600;
-    text-transform: capitalize;
-  }
-  .ocean-row input[type="range"] { flex: 1; min-width: 8rem; }
-  .ocean-val { width: 3rem; text-align: right; font-size: 0.85rem; }
+  .ocean-grid { display: flex; flex-direction: column; gap: 1rem; }
+  .ocean-row { display: flex; flex-direction: column; gap: 0.25rem; }
+  .ocean-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .ocean-label { font-weight: 600; text-transform: capitalize; font-size: 0.9rem; }
   .ocean-desc {
-    width: 7rem;
-    font-size: 0.8rem;
-    opacity: 0.7;
+    font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 999px;
+    background: var(--bg-surface1); color: var(--text-sub);
   }
+  .ocean-slider-wrap { display: flex; align-items: center; gap: 0.5rem; }
+  .ocean-slider-wrap input[type="range"] { flex: 1; }
+  .ocean-pole { font-size: 0.72rem; color: var(--text-dim); min-width: 5rem; }
+  .ocean-pole:last-child { text-align: right; }
+  .ocean-val { font-size: 0.8rem; color: var(--text-dim); text-align: right; }
 
-  .mod-factors {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 0.3rem 1rem;
+  .mod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 0.6rem; }
+  .mod-item {
+    display: flex; flex-direction: column; gap: 0.2rem;
+    padding: 0.6rem 0.75rem; background: var(--bg-surface1); border-radius: var(--radius-sm);
   }
-  .mod-factors dt { font-weight: 600; }
-  .mod-factors dd { text-align: right; margin: 0; }
-  .muted { opacity: 0.5; }
+  .mod-label { font-size: 0.8rem; color: var(--text-dim); }
+  .mod-val { font-size: 1.1rem; font-weight: 700; }
+  .hint { font-size: 0.8rem; color: var(--text-dim); }
 
-  .actions {
-    display: flex;
-    gap: 1rem;
-    align-items: center;
-    margin-top: 1rem;
+  .actions-bar {
+    display: flex; gap: 1rem; align-items: center; margin-top: 1.25rem;
+    padding-top: 1rem; border-top: 1px solid var(--border);
   }
-  .actions button { padding: 0.5rem 1.5rem; }
-  .reset-btn { opacity: 0.7; }
-  .status { font-size: 0.85rem; opacity: 0.8; margin-top: 0.5rem; }
+  .status-toast {
+    margin-top: 1rem; padding: 0.5rem 1rem;
+    background: var(--bg-surface1); border-radius: var(--radius-sm);
+    font-size: 0.85rem; color: var(--text-sub);
+  }
 </style>

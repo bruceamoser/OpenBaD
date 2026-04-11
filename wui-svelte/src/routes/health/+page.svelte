@@ -8,35 +8,17 @@
     fsmState,
   } from '$lib/stores/websocket';
 
-  // ----------------------------------------------------------------
-  // Types
-  // ----------------------------------------------------------------
+  interface Transition { from: string; to: string; ts: string; }
 
-  interface Transition {
-    from: string;
-    to: string;
-    ts: string;
-  }
-
-  // ----------------------------------------------------------------
-  // State
-  // ----------------------------------------------------------------
-
-  const FSM_STATES = [
-    'IDLE', 'ACTIVE', 'THROTTLED', 'SLEEP', 'EMERGENCY',
-  ];
-
+  const FSM_STATES = ['IDLE', 'ACTIVE', 'THROTTLED', 'SLEEP', 'EMERGENCY'];
   let transitions: Transition[] = $state([]);
   let cpuHistory: number[] = $state([]);
   let memHistory: number[] = $state([]);
   let statusMsg = $state('');
 
-  // Track FSM transitions
   let prevFsm = '';
+  const SPARKLINE_MAX = 300;
 
-  const SPARKLINE_MAX = 300; // ~5 min at 1s interval
-
-  // Derived values from stores
   let currentFsm = $derived($fsmState?.state ?? 'IDLE');
   let cpu = $derived($cpuTelemetry?.cpu_percent ?? 0);
   let mem = $derived($cpuTelemetry?.memory_percent ?? 0);
@@ -48,76 +30,54 @@
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
   let endorphin = $derived($endocrineLevels?.endorphin ?? 0);
 
-  // ----------------------------------------------------------------
-  // FSM transition tracking
-  // ----------------------------------------------------------------
-
   $effect(() => {
     if (currentFsm && currentFsm !== prevFsm && prevFsm) {
-      transitions = [
-        {
-          from: prevFsm,
-          to: currentFsm,
-          ts: new Date().toISOString(),
-        },
-        ...transitions,
-      ].slice(0, 10);
+      transitions = [{ from: prevFsm, to: currentFsm, ts: new Date().toLocaleTimeString() }, ...transitions].slice(0, 10);
     }
     prevFsm = currentFsm;
   });
 
-  // ----------------------------------------------------------------
-  // Sparkline history
-  // ----------------------------------------------------------------
-
   let historyInterval: ReturnType<typeof setInterval> | undefined;
-
   onMount(() => {
     historyInterval = setInterval(() => {
       cpuHistory = [...cpuHistory, cpu].slice(-SPARKLINE_MAX);
       memHistory = [...memHistory, mem].slice(-SPARKLINE_MAX);
     }, 1000);
   });
-
-  onDestroy(() => {
-    if (historyInterval) clearInterval(historyInterval);
-  });
-
-  // ----------------------------------------------------------------
-  // Helpers
-  // ----------------------------------------------------------------
+  onDestroy(() => { if (historyInterval) clearInterval(historyInterval); });
 
   function fsmColor(state: string): string {
     switch (state) {
-      case 'IDLE':      return '#22c55e';
-      case 'ACTIVE':    return '#3b82f6';
-      case 'THROTTLED': return '#eab308';
-      case 'SLEEP':     return '#8b5cf6';
-      case 'EMERGENCY': return '#ef4444';
-      default:          return '#666';
+      case 'IDLE':      return 'var(--green)';
+      case 'ACTIVE':    return 'var(--blue)';
+      case 'THROTTLED': return 'var(--yellow)';
+      case 'SLEEP':     return 'var(--mauve)';
+      case 'EMERGENCY': return 'var(--red)';
+      default:          return 'var(--text-dim)';
     }
   }
 
   function hormoneColor(val: number): string {
-    if (val < 0.3) return '#22c55e';
-    if (val < 0.7) return '#eab308';
-    return '#ef4444';
+    if (val < 0.3) return 'var(--green)';
+    if (val < 0.7) return 'var(--yellow)';
+    return 'var(--red)';
   }
 
-  function sparklinePath(
-    data: number[],
-    w: number,
-    h: number,
-  ): string {
+  function sparklinePath(data: number[], w: number, h: number): string {
     if (data.length < 2) return '';
     const step = w / (data.length - 1);
-    return data
-      .map((v, i) => {
-        const x = i * step;
-        const y = h - (v / 100) * h;
-        return `${i === 0 ? 'M' : 'L'}${x},${y}`;
-      })
-      .join(' ');
+    return data.map((v, i) => {
+      const x = i * step;
+      const y = h - (v / 100) * h;
+      return `${i === 0 ? 'M' : 'L'}${x},${y}`;
+    }).join(' ');
+  }
+
+  function sparklineArea(data: number[], w: number, h: number): string {
+    if (data.length < 2) return '';
+    const path = sparklinePath(data, w, h);
+    const step = w / (data.length - 1);
+    return `${path} L${(data.length - 1) * step},${h} L0,${h} Z`;
   }
 
   function formatBytes(b: number): string {
@@ -126,203 +86,259 @@
     return `${(b / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  // ----------------------------------------------------------------
-  // Sleep controls
-  // ----------------------------------------------------------------
-
   async function triggerSleep(): Promise<void> {
-    try {
-      await apiPost('/api/sleep/trigger');
-      statusMsg = 'Sleep triggered';
-    } catch (e) {
-      statusMsg = `Sleep failed: ${e}`;
-    }
+    try { await apiPost('/api/sleep/trigger'); statusMsg = 'Sleep triggered'; }
+    catch (e) { statusMsg = `Failed: ${e}`; }
   }
-
   async function triggerWake(): Promise<void> {
-    try {
-      await apiPost('/api/sleep/wake');
-      statusMsg = 'Wake triggered';
-    } catch (e) {
-      statusMsg = `Wake failed: ${e}`;
-    }
+    try { await apiPost('/api/sleep/wake'); statusMsg = 'Wake triggered'; }
+    catch (e) { statusMsg = `Failed: ${e}`; }
   }
 </script>
 
-<h2>Health Dashboard</h2>
+<div class="page-header">
+  <h2>Health Dashboard</h2>
+  <p>Live runtime telemetry and subsystem health</p>
+</div>
 
-<div class="dashboard-grid">
-  <!-- FSM State -->
+<div class="grid">
+  <!-- Row 1: FSM + Endocrine -->
   <Card label="FSM State">
-    <div class="fsm-badge" style="background:{fsmColor(currentFsm)}">
-      {currentFsm}
+    <div class="fsm-section">
+      <div class="fsm-state-row">
+        <div class="fsm-badge" style="background:{fsmColor(currentFsm)}">
+          <span class="fsm-icon">◉</span>
+          {currentFsm}
+        </div>
+        <div class="fsm-states">
+          {#each FSM_STATES as s}
+            <span class="fsm-mini" class:current={s === currentFsm} style="--c:{fsmColor(s)}">{s}</span>
+          {/each}
+        </div>
+      </div>
+      {#if transitions.length > 0}
+        <div class="transitions">
+          <h4>Recent Transitions</h4>
+          <div class="transition-list">
+            {#each transitions as t}
+              <div class="transition-item">
+                <span class="t-time">{t.ts}</span>
+                <span class="t-from">{t.from}</span>
+                <span class="t-arrow">→</span>
+                <span class="t-to">{t.to}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     </div>
-    {#if transitions.length > 0}
-      <h4>Transitions</h4>
-      <ul class="transition-log">
-        {#each transitions as t}
-          <li>
-            <span class="ts">{t.ts}</span>
-            {t.from} → {t.to}
-          </li>
-        {/each}
-      </ul>
-    {/if}
   </Card>
 
-  <!-- Endocrine Gauges -->
-  <Card label="Endocrine Levels">
-    <div class="gauges">
+  <Card label="Endocrine System">
+    <div class="hormones">
       {#each [
-        { name: 'Dopamine', val: dopamine },
-        { name: 'Adrenaline', val: adrenaline },
-        { name: 'Cortisol', val: cortisol },
-        { name: 'Endorphin', val: endorphin },
+        { name: 'Dopamine', val: dopamine, emoji: '🧠' },
+        { name: 'Adrenaline', val: adrenaline, emoji: '⚡' },
+        { name: 'Cortisol', val: cortisol, emoji: '🔥' },
+        { name: 'Endorphin', val: endorphin, emoji: '✨' },
       ] as h}
-        <div class="gauge">
-          <label>{h.name}</label>
-          <div class="gauge-bar-bg">
-            <div
-              class="gauge-bar-fill"
-              style="width:{h.val * 100}%; background:{hormoneColor(h.val)}"
-            ></div>
+        <div class="hormone">
+          <div class="hormone-label">
+            <span class="hormone-emoji">{h.emoji}</span>
+            <span class="hormone-name">{h.name}</span>
           </div>
-          <span class="gauge-val">{(h.val * 100).toFixed(0)}%</span>
+          <div class="hormone-bar">
+            <div class="hormone-fill" style="width:{h.val * 100}%; background:{hormoneColor(h.val)}"></div>
+          </div>
+          <span class="hormone-val">{(h.val * 100).toFixed(0)}%</span>
         </div>
       {/each}
     </div>
   </Card>
 
-  <!-- CPU Sparkline -->
-  <Card label="CPU (5 min)">
-    <svg class="sparkline" viewBox="0 0 300 60" preserveAspectRatio="none">
-      <path d={sparklinePath(cpuHistory, 300, 60)} fill="none" stroke="#3b82f6" stroke-width="1.5" />
-    </svg>
-    <span class="metric">{cpu.toFixed(1)}%</span>
+  <!-- Row 2: CPU + Memory sparklines -->
+  <Card label="CPU Usage">
+    <div class="sparkline-card">
+      <div class="sparkline-metric">
+        <span class="metric-value text-blue">{cpu.toFixed(1)}%</span>
+        <span class="metric-sub">5 min history</span>
+      </div>
+      <svg class="sparkline" viewBox="0 0 300 60" preserveAspectRatio="none">
+        <path d={sparklineArea(cpuHistory, 300, 60)} fill="rgba(137, 180, 250, 0.1)" />
+        <path d={sparklinePath(cpuHistory, 300, 60)} fill="none" stroke="var(--blue)" stroke-width="2" />
+      </svg>
+    </div>
   </Card>
 
-  <!-- Memory Sparkline -->
-  <Card label="Memory (5 min)">
-    <svg class="sparkline" viewBox="0 0 300 60" preserveAspectRatio="none">
-      <path d={sparklinePath(memHistory, 300, 60)} fill="none" stroke="#a855f7" stroke-width="1.5" />
-    </svg>
-    <span class="metric">{mem.toFixed(1)}%</span>
+  <Card label="Memory Usage">
+    <div class="sparkline-card">
+      <div class="sparkline-metric">
+        <span class="metric-value text-mauve">{mem.toFixed(1)}%</span>
+        <span class="metric-sub">5 min history</span>
+      </div>
+      <svg class="sparkline" viewBox="0 0 300 60" preserveAspectRatio="none">
+        <path d={sparklineArea(memHistory, 300, 60)} fill="rgba(203, 166, 247, 0.1)" />
+        <path d={sparklinePath(memHistory, 300, 60)} fill="none" stroke="var(--mauve)" stroke-width="2" />
+      </svg>
+    </div>
   </Card>
 
-  <!-- Disk / Network -->
+  <!-- Row 3: I/O + Sleep -->
   <Card label="Disk / Network I/O">
-    <dl class="io-summary">
-      <dt>Disk</dt>
-      <dd>{disk.toFixed(1)}%</dd>
-      <dt>Net TX</dt>
-      <dd>{formatBytes(netTx)}</dd>
-      <dt>Net RX</dt>
-      <dd>{formatBytes(netRx)}</dd>
-    </dl>
+    <div class="io-grid">
+      <div class="io-item">
+        <span class="io-icon">💾</span>
+        <div class="io-detail">
+          <span class="io-label">Disk</span>
+          <span class="io-value">{disk.toFixed(1)}%</span>
+        </div>
+        <div class="io-bar">
+          <div class="io-fill" style="width:{disk}%; background:var(--teal)"></div>
+        </div>
+      </div>
+      <div class="io-item">
+        <span class="io-icon">📤</span>
+        <div class="io-detail">
+          <span class="io-label">Net TX</span>
+          <span class="io-value">{formatBytes(netTx)}</span>
+        </div>
+      </div>
+      <div class="io-item">
+        <span class="io-icon">📥</span>
+        <div class="io-detail">
+          <span class="io-label">Net RX</span>
+          <span class="io-value">{formatBytes(netRx)}</span>
+        </div>
+      </div>
+    </div>
   </Card>
 
-  <!-- Sleep Schedule -->
   <Card label="Sleep Schedule">
-    <p class="muted">
-      Next sleep window info sourced from sleep orchestrator.
-    </p>
-    <div class="sleep-controls">
-      <button onclick={triggerSleep}>Sleep Now</button>
-      <button onclick={triggerWake}>Wake</button>
+    <div class="sleep-section">
+      <p class="muted">Next sleep window from sleep orchestrator.</p>
+      <div class="sleep-actions">
+        <button onclick={triggerSleep}>😴 Sleep Now</button>
+        <button class="secondary" onclick={triggerWake}>☀️ Wake</button>
+      </div>
+      {#if statusMsg}
+        <p class="status-msg">{statusMsg}</p>
+      {/if}
     </div>
   </Card>
 </div>
 
-{#if statusMsg}
-  <p class="status">{statusMsg}</p>
-{/if}
-
 <style>
-  .dashboard-grid {
+  .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(2, 1fr);
     gap: 1rem;
   }
-  .fsm-badge {
-    display: inline-block;
-    padding: 0.4rem 1rem;
-    border-radius: 6px;
-    color: #000;
-    font-weight: 700;
-    font-size: 1.1rem;
-  }
-  .transition-log {
-    list-style: none;
-    padding: 0;
-    max-height: 10rem;
-    overflow-y: auto;
-  }
-  .transition-log li {
-    font-size: 0.8rem;
-    padding: 0.15rem 0;
-  }
-  .ts {
-    opacity: 0.5;
-    margin-right: 0.4rem;
-    font-size: 0.7rem;
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
   }
 
-  .gauges {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+  /* FSM */
+  .fsm-section { display: flex; flex-direction: column; gap: 1rem; }
+  .fsm-state-row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .fsm-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 1.1rem;
+    border-radius: var(--radius-sm);
+    color: var(--text-on-color);
+    font-weight: 700;
+    font-size: 1rem;
   }
-  .gauge {
+  .fsm-icon { font-size: 0.7rem; }
+  .fsm-states { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .fsm-mini {
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    background: var(--bg-surface1);
+    color: var(--text-dim);
+    letter-spacing: 0.03em;
+  }
+  .fsm-mini.current {
+    background: color-mix(in srgb, var(--c) 20%, transparent);
+    color: var(--c);
+  }
+
+  .transitions h4 {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .transition-list { display: flex; flex-direction: column; gap: 0.2rem; }
+  .transition-item {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    padding: 0.25rem 0.5rem;
+    background: var(--bg-surface1);
+    border-radius: var(--radius-sm);
   }
-  .gauge label {
-    width: 6rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-  }
-  .gauge-bar-bg {
+  .t-time { color: var(--text-dim); font-size: 0.7rem; width: 5rem; }
+  .t-from { color: var(--text-sub); }
+  .t-arrow { color: var(--text-dim); }
+  .t-to { color: var(--text); font-weight: 600; }
+
+  /* Hormones */
+  .hormones { display: flex; flex-direction: column; gap: 0.75rem; }
+  .hormone { display: flex; align-items: center; gap: 0.6rem; }
+  .hormone-label { display: flex; align-items: center; gap: 0.4rem; width: 7.5rem; flex-shrink: 0; }
+  .hormone-emoji { font-size: 1rem; }
+  .hormone-name { font-size: 0.85rem; font-weight: 600; color: var(--text-sub); }
+  .hormone-bar {
     flex: 1;
-    height: 10px;
-    background: #333;
-    border-radius: 5px;
+    height: 8px;
+    background: var(--bg-surface1);
+    border-radius: 4px;
     overflow: hidden;
   }
-  .gauge-bar-fill {
+  .hormone-fill {
     height: 100%;
-    transition: width 0.3s ease;
-    border-radius: 5px;
+    border-radius: 4px;
+    transition: width 0.4s var(--ease);
   }
-  .gauge-val {
+  .hormone-val {
     width: 3rem;
     text-align: right;
     font-size: 0.8rem;
-  }
-
-  .sparkline {
-    width: 100%;
-    height: 60px;
-  }
-  .metric {
-    font-size: 1.1rem;
     font-weight: 600;
+    color: var(--text-sub);
   }
 
-  .io-summary {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 0.3rem 1rem;
-  }
-  .io-summary dt { font-weight: 600; }
-  .io-summary dd { text-align: right; margin: 0; }
+  /* Sparklines */
+  .sparkline-card { display: flex; flex-direction: column; gap: 0.5rem; }
+  .sparkline-metric { display: flex; align-items: baseline; gap: 0.5rem; }
+  .metric-value { font-size: 1.5rem; font-weight: 700; }
+  .metric-sub { font-size: 0.75rem; color: var(--text-dim); }
+  .sparkline { width: 100%; height: 60px; }
 
-  .sleep-controls {
-    display: flex;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-  }
-  .sleep-controls button { padding: 0.4rem 1rem; }
-  .muted { opacity: 0.5; font-size: 0.85rem; }
-  .status { font-size: 0.85rem; opacity: 0.8; margin-top: 1rem; }
+  /* I/O */
+  .io-grid { display: flex; flex-direction: column; gap: 0.75rem; }
+  .io-item { display: flex; align-items: center; gap: 0.6rem; }
+  .io-icon { font-size: 1.1rem; flex-shrink: 0; }
+  .io-detail { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+  .io-label { font-size: 0.75rem; color: var(--text-dim); }
+  .io-value { font-size: 0.95rem; font-weight: 600; }
+  .io-bar {
+    width: 100%;
+    height: 4px;
+    background: var(--bg-surface1);
+    border-radius: 2px;
+    overflow: hidden;
+   }
+  .io-fill { height: 100%; border-radius: 2px; transition: width 0.3s var(--ease); }
+
+  /* Sleep */
+  .sleep-section { display: flex; flex-direction: column; gap: 0.75rem; }
+  .sleep-actions { display: flex; gap: 0.5rem; }
+  .status-msg { font-size: 0.85rem; color: var(--text-sub); }
 </style>
