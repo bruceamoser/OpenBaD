@@ -691,3 +691,142 @@ async def test_delete_toolbelt_unequip(aiohttp_client):
     assert resp.status == 200
     data = await resp.json()
     assert data["belt"].get("cli") is None
+
+
+# ---------------------------------------------------------------------- #
+# Entity endpoints
+# ---------------------------------------------------------------------- #
+
+
+def _app_with_persistence(tmp_path):
+    """Create a WUI app with IdentityPersistence wired in."""
+
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "user": {
+                    "name": "Alice",
+                    "preferred_name": "Ali",
+                    "communication_style": "casual",
+                    "expertise_domains": ["python"],
+                    "interaction_history_summary": "",
+                },
+                "assistant": {
+                    "name": "OpenBaD",
+                    "persona_summary": "Helpful",
+                    "learning_focus": [],
+                    "ocean": {
+                        "openness": 0.7,
+                        "conscientiousness": 0.8,
+                        "extraversion": 0.5,
+                        "agreeableness": 0.4,
+                        "stability": 0.6,
+                    },
+                },
+            },
+            default_flow_style=False,
+        ),
+        encoding="utf-8",
+    )
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    return app
+
+
+@pytest.mark.asyncio
+async def test_get_entity_user(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/entity/user")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["name"] == "Alice"
+    assert data["communication_style"] == "casual"
+
+
+@pytest.mark.asyncio
+async def test_get_entity_assistant(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/entity/assistant")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["name"] == "OpenBaD"
+    assert data["openness"] == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_put_entity_user(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/api/entity/user",
+        json={"preferred_name": "Bob"},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["preferred_name"] == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_put_entity_assistant(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/api/entity/assistant",
+        json={"openness": 0.9},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["openness"] == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_put_entity_user_bad_field(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/api/entity/user",
+        json={"nonexistent": "x"},
+    )
+    assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_post_entity_user_reset(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    # Modify first
+    await client.put("/api/entity/user", json={"preferred_name": "Changed"})
+    # Reset
+    resp = await client.post("/api/entity/user/reset")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["preferred_name"] == "Ali"
+
+
+@pytest.mark.asyncio
+async def test_post_entity_assistant_reset(aiohttp_client, tmp_path):
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+    await client.put("/api/entity/assistant", json={"openness": 0.1})
+    resp = await client.post("/api/entity/assistant/reset")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["openness"] == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_entity_no_persistence_returns_503(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/entity/user")
+    assert resp.status == 503

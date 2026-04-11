@@ -134,6 +134,10 @@ const viewMeta = {
     title: 'Toolbelt',
     subtitle: 'Cabinet inventory, equipped tools, and health status.',
   },
+  entity: {
+    title: 'Entity',
+    subtitle: 'User and assistant identity profiles with OCEAN personality.',
+  },
   models: {
     title: 'Models',
     subtitle: 'Reserved for the upcoming model surface.',
@@ -211,6 +215,9 @@ function setView(name) {
   }
   if (name === 'toolbelt') {
     loadToolbelt();
+  }
+  if (name === 'entity') {
+    loadEntityUser();
   }
 }
 
@@ -1235,6 +1242,183 @@ function bindToolbeltButtons() {
   }
 }
 
+// ------------------------------------------------------------------ //
+// Entity panel — user + assistant profiles
+// ------------------------------------------------------------------ //
+
+async function loadEntityUser() {
+  try {
+    const resp = await fetch('/api/entity/user');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    populateEntityUser(data);
+  } catch (err) {
+    logLine(`entity/user load failed: ${err.message}`);
+  }
+}
+
+function populateEntityUser(data) {
+  const f = id => document.getElementById(id);
+  f('eu-name').value = data.name || '';
+  f('eu-preferred-name').value = data.preferred_name || '';
+  f('eu-style').value = data.communication_style || 'casual';
+  f('eu-domains').value = (data.expertise_domains || []).join(', ');
+  f('eu-summary').textContent = data.interaction_history_summary || '—';
+}
+
+async function saveEntityUser() {
+  const f = id => document.getElementById(id);
+  const domainsRaw = f('eu-domains').value;
+  const domains = domainsRaw ? domainsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const payload = {
+    name: f('eu-name').value,
+    preferred_name: f('eu-preferred-name').value,
+    communication_style: f('eu-style').value,
+    expertise_domains: domains,
+  };
+  const status = document.getElementById('entity-user-status');
+  try {
+    const resp = await fetch('/api/entity/user', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) { status.textContent = `Error: ${resp.statusText}`; return; }
+    const data = await resp.json();
+    populateEntityUser(data);
+    status.textContent = 'Saved.';
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function resetEntityUser() {
+  const status = document.getElementById('entity-user-status');
+  try {
+    const resp = await fetch('/api/entity/user/reset', {method: 'POST'});
+    const data = await resp.json();
+    populateEntityUser(data);
+    status.textContent = 'Reset to seed.';
+  } catch (err) {
+    status.textContent = `Reset failed: ${err.message}`;
+  }
+}
+
+async function loadEntityAssistant() {
+  try {
+    const resp = await fetch('/api/entity/assistant');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    populateEntityAssistant(data);
+  } catch (err) {
+    logLine(`entity/assistant load failed: ${err.message}`);
+  }
+}
+
+function populateEntityAssistant(data) {
+  const f = id => document.getElementById(id);
+  f('ea-name').value = data.name || '';
+  f('ea-persona').value = data.persona_summary || '';
+  f('ea-focus').value = (data.learning_focus || []).join(', ');
+
+  const sliders = [
+    ['ea-openness', 'ea-o-val', 'ea-o-desc', data.openness, v => `exploration_budget = ${(0.5 + v).toFixed(2)}`],
+    ['ea-conscientiousness', 'ea-c-val', 'ea-c-desc', data.conscientiousness, v => `reasoning_depth = ${(0.5 + v).toFixed(2)}`],
+    ['ea-extraversion', 'ea-e-val', 'ea-e-desc', data.extraversion, v => `proactive_threshold = ${(1.0 - v).toFixed(2)}`],
+    ['ea-agreeableness', 'ea-a-val', 'ea-a-desc', data.agreeableness, v => `challenge_prob = ${(1.0 - v).toFixed(2)}`],
+    ['ea-stability', 'ea-s-val', 'ea-s-desc', data.stability, v => `cortisol_decay = ${(0.5 + v).toFixed(2)}`],
+  ];
+  for (const [sliderId, valId, descId, value, descFn] of sliders) {
+    const v = value ?? 0.5;
+    f(sliderId).value = v;
+    f(valId).textContent = Number(v).toFixed(2);
+    f(descId).textContent = descFn(Number(v));
+  }
+}
+
+function updateOceanPreview(sliderId, valId, descId, descFn) {
+  const slider = document.getElementById(sliderId);
+  if (!slider) return;
+  slider.addEventListener('input', () => {
+    const v = Number(slider.value);
+    document.getElementById(valId).textContent = v.toFixed(2);
+    document.getElementById(descId).textContent = descFn(v);
+  });
+}
+
+async function saveEntityAssistant() {
+  const f = id => document.getElementById(id);
+  const focusRaw = f('ea-focus').value;
+  const focus = focusRaw ? focusRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const payload = {
+    name: f('ea-name').value,
+    persona_summary: f('ea-persona').value,
+    learning_focus: focus,
+    openness: Number(f('ea-openness').value),
+    conscientiousness: Number(f('ea-conscientiousness').value),
+    extraversion: Number(f('ea-extraversion').value),
+    agreeableness: Number(f('ea-agreeableness').value),
+    stability: Number(f('ea-stability').value),
+  };
+  const status = document.getElementById('entity-assistant-status');
+  try {
+    const resp = await fetch('/api/entity/assistant', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) { status.textContent = `Error: ${resp.statusText}`; return; }
+    await resp.json();
+    status.textContent = 'Saved.';
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function resetEntityAssistant() {
+  const status = document.getElementById('entity-assistant-status');
+  try {
+    const resp = await fetch('/api/entity/assistant/reset', {method: 'POST'});
+    const data = await resp.json();
+    populateEntityAssistant(data);
+    status.textContent = 'Reset to seed.';
+  } catch (err) {
+    status.textContent = `Reset failed: ${err.message}`;
+  }
+}
+
+function bindEntityEvents() {
+  // Tab switching
+  for (const tab of document.querySelectorAll('.entity-tab')) {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.entity-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const target = tab.dataset.entityTab;
+      document.getElementById('entity-user-panel').classList.toggle('hidden', target !== 'user');
+      document.getElementById('entity-assistant-panel').classList.toggle('hidden', target !== 'assistant');
+      if (target === 'user') loadEntityUser();
+      else loadEntityAssistant();
+    });
+  }
+
+  // Save and reset
+  const userSave = document.getElementById('entity-user-save');
+  if (userSave) userSave.addEventListener('click', saveEntityUser);
+  const userReset = document.getElementById('entity-user-reset');
+  if (userReset) userReset.addEventListener('click', resetEntityUser);
+  const assistantSave = document.getElementById('entity-assistant-save');
+  if (assistantSave) assistantSave.addEventListener('click', saveEntityAssistant);
+  const assistantReset = document.getElementById('entity-assistant-reset');
+  if (assistantReset) assistantReset.addEventListener('click', resetEntityAssistant);
+
+  // OCEAN live preview
+  updateOceanPreview('ea-openness', 'ea-o-val', 'ea-o-desc', v => `exploration_budget = ${(0.5 + v).toFixed(2)}`);
+  updateOceanPreview('ea-conscientiousness', 'ea-c-val', 'ea-c-desc', v => `reasoning_depth = ${(0.5 + v).toFixed(2)}`);
+  updateOceanPreview('ea-extraversion', 'ea-e-val', 'ea-e-desc', v => `proactive_threshold = ${(1.0 - v).toFixed(2)}`);
+  updateOceanPreview('ea-agreeableness', 'ea-a-val', 'ea-a-desc', v => `challenge_prob = ${(1.0 - v).toFixed(2)}`);
+  updateOceanPreview('ea-stability', 'ea-s-val', 'ea-s-desc', v => `cortisol_decay = ${(0.5 + v).toFixed(2)}`);
+}
+
 function bindEvents() {
   for (const link of els.navLinks) {
     link.addEventListener('click', () => setView(link.dataset.viewTarget));
@@ -1307,6 +1491,10 @@ function bindEvents() {
   if (els.senses.saveBtn) {
     els.senses.saveBtn.addEventListener('click', saveSensesConfig);
   }
+
+  // Entity events
+  bindEntityEvents();
+
   // Collapsible sections
   document.querySelectorAll('[data-collapse-toggle]').forEach(toggle => {
     toggle.addEventListener('click', () => {
