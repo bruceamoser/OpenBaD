@@ -44,6 +44,9 @@ class AudioCaptureConfig:
         return samples * self.channels * bytes_per_sample
 
 
+_VALID_ASR_ENGINES = frozenset({"vosk", "whisper"})
+
+
 @dataclass
 class ASRConfig:
     """Automatic speech recognition settings.
@@ -56,11 +59,23 @@ class ASRConfig:
         Whisper model size (default ``"base"``).
     default_engine : str
         Default ASR engine: ``"vosk"`` or ``"whisper"`` (default ``"vosk"``).
+    vad_sensitivity : float
+        Voice-activity-detection sensitivity 0.0–1.0 (default 0.5).
     """
 
     vosk_model_path: str = ""
     whisper_model: str = "base"
     default_engine: str = "vosk"
+    vad_sensitivity: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.default_engine not in _VALID_ASR_ENGINES:
+            allowed = ", ".join(sorted(_VALID_ASR_ENGINES))
+            msg = f"default_engine must be one of ({allowed}), got '{self.default_engine}'"
+            raise ValueError(msg)
+        if not 0.0 <= self.vad_sensitivity <= 1.0:
+            msg = f"vad_sensitivity must be 0.0-1.0, got {self.vad_sensitivity}"
+            raise ValueError(msg)
 
 
 @dataclass
@@ -77,6 +92,14 @@ class WakeWordConfig:
 
     phrases: list[str] = field(default_factory=lambda: ["hey agent"])
     threshold: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not self.phrases:
+            msg = "wake_word.phrases must not be empty"
+            raise ValueError(msg)
+        if not 0.0 <= self.threshold <= 1.0:
+            msg = f"wake_word.threshold must be 0.0-1.0, got {self.threshold}"
+            raise ValueError(msg)
 
 
 @dataclass
