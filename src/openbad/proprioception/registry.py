@@ -34,11 +34,24 @@ class HealthStatus(Enum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
+class ToolRole(Enum):
+    """Functional role for a registered tool / subsystem."""
+
+    CLI = "CLI"
+    WEB_SEARCH = "WEB_SEARCH"
+    MEMORY = "MEMORY"
+    MEDIA = "MEDIA"
+    CODE = "CODE"
+    FILE_SYSTEM = "FILE_SYSTEM"
+    COMMUNICATION = "COMMUNICATION"
+
+
 @dataclass
 class ToolStatus:
     """Live status entry for a single tool / subsystem."""
 
     name: str
+    role: ToolRole | None = None
     status: HealthStatus = HealthStatus.AVAILABLE
     last_heartbeat: float = field(default_factory=time.time)
     metadata: dict[str, str] = field(default_factory=dict)
@@ -79,6 +92,7 @@ class ToolRegistry:
         name: str,
         metadata: dict[str, str] | None = None,
         health_check: Callable[[], bool] | None = None,
+        role: ToolRole | None = None,
     ) -> ToolStatus:
         """Register a tool/subsystem.  Idempotent for the same *name*."""
         with self._lock:
@@ -90,9 +104,12 @@ class ToolRegistry:
                     entry.metadata.update(metadata)
                 if health_check is not None:
                     entry.health_check = health_check
+                if role is not None:
+                    entry.role = role
             else:
                 entry = ToolStatus(
                     name=name,
+                    role=role,
                     metadata=metadata or {},
                     health_check=health_check,
                 )
@@ -259,6 +276,7 @@ class ToolRegistry:
             return [
                 {
                     "name": t.name,
+                    "role": t.role.value if t.role else None,
                     "status": t.status.value,
                     "last_heartbeat": t.last_heartbeat,
                     "metadata": t.metadata,
