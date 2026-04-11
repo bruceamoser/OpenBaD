@@ -16,9 +16,9 @@ class Migration:
     path: Path
 
 
-def _discover_migrations() -> list[Migration]:
+def _discover_migrations(migrations_dir: Path = _MIGRATIONS_DIR) -> list[Migration]:
     migrations: list[Migration] = []
-    for path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+    for path in sorted(migrations_dir.glob("*.sql")):
         migrations.append(Migration(name=path.stem, path=path))
     return migrations
 
@@ -53,7 +53,11 @@ def _apply_migration(conn: sqlite3.Connection, migration: Migration) -> None:
         ) from exc
 
 
-def initialize_state_db(db_path: str | Path = DEFAULT_STATE_DB_PATH) -> sqlite3.Connection:
+def initialize_state_db(
+    db_path: str | Path = DEFAULT_STATE_DB_PATH,
+    *,
+    migrations_dir: Path | None = None,
+) -> sqlite3.Connection:
     """Create or open the state DB and apply pending migrations."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,10 +67,12 @@ def initialize_state_db(db_path: str | Path = DEFAULT_STATE_DB_PATH) -> sqlite3.
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
 
+    effective_dir = migrations_dir if migrations_dir is not None else _MIGRATIONS_DIR
+
     try:
         _create_migration_table(conn)
         applied = _applied_migrations(conn)
-        for migration in _discover_migrations():
+        for migration in _discover_migrations(effective_dir):
             if migration.name in applied:
                 continue
             _apply_migration(conn, migration)
