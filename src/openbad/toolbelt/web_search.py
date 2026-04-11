@@ -295,3 +295,136 @@ class WebSearchToolAdapter:
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return resp.read()
+
+
+# ---------------------------------------------------------------------------
+# Research escalation bridge (#413)
+# ---------------------------------------------------------------------------
+
+
+#: HTTP status codes that trigger a research escalation instead of failure.
+ESCALATION_STATUS_CODES: frozenset[int] = frozenset({403, 404})
+
+
+@dataclass
+class FetchOutcome:
+    """Result of a :class:`WebFetchEscalator` guarded fetch.
+
+    Attributes
+    ----------
+    content:
+        Cleaned text content, or ``None`` if the fetch was escalated.
+    escalated:
+        ``True`` when the error was converted into a research escalation.
+    error:
+        The underlying :class:`WebFetchError` that caused escalation, or
+        ``None`` on success.
+    """
+
+    content: str | None
+    escalated: bool = False
+    error: WebFetchError | None = None
+
+
+class WebFetchEscalator:
+    """Wraps :func:`web_fetch` so that recoverable HTTP errors trigger a
+    :class:`~openbad.tasks.research_queue.ResearchNode` instead of failing.
+
+    On HTTP 403, 404, or request timeout the current fetch is suspended
+    (``FetchOutcome.escalated = True``) and a research node is pushed to the
+    provided queue so the agent can investigate the broken resource later.
+
+    Parameters
+    ----------
+    research_queue:
+        A :class:`~openbad.tasks.research_queue.ResearchQueue` instance.
+    escalation_priority:
+        Priority for escalated research nodes (lower = urgency, default -5).
+    """
+
+    def __init__(
+        self,
+        research_queue: object,  # ResearchQueue — not imported at top level to avoid cycle
+        *,
+        escalation_priority: int = -5,
+    ) -> None:
+        self._queue = research_queue
+        self._priority = escalation_priority
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        source_task_id: str | None = None,
+        timeout: float = 15.0,
+        max_chars: int = 50_000,
+    ) -> FetchOutcome:
+        """Fetch *url* and escalate to research on recoverable error.
+
+        Parameters
+        ----------
+        url:
+            The URL to fetch.
+        source_task_id:
+            Optional task node ID used to link the research node.
+        timeout:
+            Request timeout forwarded to :func:`web_fetch`.
+        max_chars:
+            Maximum characters, forwarded to :func:`web_fetch`.
+
+        Returns
+        -------
+        FetchOutcome
+            ``content`` is set on success; ``escalated=True`` and ``error`` is
+            set when the fetch was suspended for research.
+        """
+        try:
+            text = web_fetch(url, timeout=timeout, max_chars=max_chars)
+            return FetchOutcome(content=text)
+        except OSError as exc:
+            # Detect timeout by checking for TimeoutError / ConnectionError subtype
+            # or WebFetchError with status_code == 0.
+            is_escalatable = False
+            error_type = "timeout"
+            if isinstance(exc, WebFetchError):
+                if exc.status_code in ESCALATION_STATUS_CODES:
+                    is_escalatable = True
+                    error_type = f"http_{exc.status_code}"
+                elif exc.status_code == 0:
+                    is_escalatable = True  # timeout / connection error
+            else:
+                is_escalatable = True  # generic OS/timeout error
+
+            if not is_escalatable:
+                raise
+
+            self._push_research(url, source_task_id, error_type, exc)
+            return FetchOutcome(content=None, escalated=True, error=exc)  # type: ignore[arg-type]
+
+    def _push_research(
+        self,
+        url: str,
+        source_task_id: str | None,
+        error_type: str,
+        exc: OSError,
+    ) -> None:
+        """Enqueue a research node for the broken URL."""
+        title = f"Investigate broken resource: {url}"
+        description = (
+            f"web_fetch failed with {error_type!r} for URL {url!r}.\n"
+            f"Error: {exc}\n"
+            f"Source task: {source_task_id or 'unknown'}\n"
+            "Goal: determine whether the resource has moved, is restricted, or "
+            "can be replaced by an alternative source."
+        )
+        try:
+            self._queue.enqueue(
+                title,
+                priority=self._priority,
+                description=description,
+                source_task_id=source_task_id,
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "WebFetchEscalator: could not enqueue research node", exc_info=True
+            )
