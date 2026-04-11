@@ -18,7 +18,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openbad.cognitive.config import (
     CognitiveSystem,
@@ -39,8 +39,17 @@ from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.semantic import SemanticMemory
 from openbad.memory.stm import ShortTermMemory
+from openbad.nervous_system import topics
 
 log = logging.getLogger(__name__)
+
+# Type hint for nervous system client (avoid circular import)
+if TYPE_CHECKING:
+    from openbad.nervous_system.client import NervousSystemClient
+
+    NervousSystemClient_T = NervousSystemClient
+else:
+    NervousSystemClient_T = Any
 
 
 # ── Configuration ─────────────────────────────────────────────────── #
@@ -526,18 +535,32 @@ async def stream_chat(
     assistant_profile: Any | None = None,
     modulation: Any | None = None,
     usage_tracker: Any | None = None,
+    nervous_system_client: NervousSystemClient_T | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Full chat pipeline: scan → assemble → stream → consolidate.
 
     Yields StreamChunk objects as tokens arrive. The final chunk has done=True.
+
+    If a nervous_system_client is provided, publishes events to the MQTT bus:
+    - COGNITIVE_INPUT on user message received
+    - COGNITIVE_OUTPUT on successful completion
+    - COGNITIVE_ERROR on failures
     """
     request_id = uuid.uuid4().hex[:12]
+    start_timestamp = time.time()
 
     # ── 1. Immune scan ──
     report = scan_input(message)
     if report.is_threat:
         threat_names = ", ".join(m.rule_name for m in report.matches)
         log.warning("Immune scan blocked message (request=%s): %s", request_id, threat_names)
+        _publish_error(
+            nervous_system_client,
+            source="wui",
+            error_type="immune_scan_blocked",
+            message_hash=_hash_message(message),
+            timestamp=start_timestamp,
+        )
         yield StreamChunk(
             error=f"Message blocked by security scan: {threat_names}",
             done=True,
@@ -563,6 +586,15 @@ async def stream_chat(
         ConversationTurn(role="user", content=message, timestamp=time.time()),
     )
 
+    # Publish cognitive input event
+    _publish_input(
+        nervous_system_client,
+        source="wui",
+        user_id=session_id,
+        message_hash=_hash_message(message),
+        timestamp=start_timestamp,
+    )
+
     log.info(
         "Chat request=%s system=%s model=%s context_tokens=%d history_turns=%d",
         request_id, system.value, model_id,
@@ -579,8 +611,15 @@ async def stream_chat(
             tokens_used += 1
             full_response.append(token)
             yield StreamChunk(token=token, tokens_used=tokens_used)
-    except Exception:
+    except Exception as e:
         log.exception("Stream error request=%s", request_id)
+        _publish_error(
+            nervous_system_client,
+            source="wui",
+            error_type=type(e).__name__,
+            message_hash=_hash_message(message),
+            timestamp=time.time(),
+        )
         yield StreamChunk(error="Provider request failed", done=True)
         return
 
@@ -605,9 +644,104 @@ async def stream_chat(
         ConversationTurn(role="assistant", content=response_text, timestamp=time.time()),
     )
 
+    # Publish cognitive output event
+    _publish_output(
+        nervous_system_client,
+        source="wui",
+        tokens_used=tokens_used,
+        model=model_id,
+        latency_ms=latency_ms,
+        timestamp=time.time(),
+    )
+
     log.info(
         "Chat complete request=%s tokens=%d latency=%.0fms",
         request_id, tokens_used, latency_ms,
     )
 
     yield StreamChunk(done=True, tokens_used=tokens_used)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Nervous system event publishing helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _hash_message(message: str) -> str:
+    """Create a short hash of the message for event correlation."""
+    import hashlib
+    return hashlib.blake2b(message.encode(), digest_size=8).hexdigest()
+
+
+def _publish_input(
+    client: NervousSystemClient_T | None,
+    source: str,
+    user_id: str,
+    message_hash: str,
+    timestamp: float,
+) -> None:
+    """Publish COGNITIVE_INPUT event on user message received."""
+    if client is None or not client.is_connected:
+        return
+
+    try:
+        payload = {
+            "source": source,
+            "user_id": user_id,
+            "message_hash": message_hash,
+            "timestamp": timestamp,
+        }
+        import json
+        client.publish(topics.COGNITIVE_INPUT, json.dumps(payload).encode())
+    except Exception:
+        log.debug("Failed to publish cognitive input event", exc_info=True)
+
+
+def _publish_output(
+    client: NervousSystemClient_T | None,
+    source: str,
+    tokens_used: int,
+    model: str,
+    latency_ms: float,
+    timestamp: float,
+) -> None:
+    """Publish COGNITIVE_OUTPUT event on LLM response complete."""
+    if client is None or not client.is_connected:
+        return
+
+    try:
+        payload = {
+            "source": source,
+            "tokens_used": tokens_used,
+            "model": model,
+            "latency_ms": latency_ms,
+            "timestamp": timestamp,
+        }
+        import json
+        client.publish(topics.COGNITIVE_OUTPUT, json.dumps(payload).encode())
+    except Exception:
+        log.debug("Failed to publish cognitive output event", exc_info=True)
+
+
+def _publish_error(
+    client: NervousSystemClient_T | None,
+    source: str,
+    error_type: str,
+    message_hash: str,
+    timestamp: float,
+) -> None:
+    """Publish COGNITIVE_ERROR event on chat error."""
+    if client is None or not client.is_connected:
+        return
+
+    try:
+        payload = {
+            "source": source,
+            "error_type": error_type,
+            "message_hash": message_hash,
+            "timestamp": timestamp,
+        }
+        import json
+        client.publish(topics.COGNITIVE_ERROR, json.dumps(payload).encode())
+    except Exception:
+        log.debug("Failed to publish cognitive error event", exc_info=True)
