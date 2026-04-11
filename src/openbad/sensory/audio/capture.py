@@ -148,17 +148,42 @@ class PipeWireAudioStream:
         )
 
     async def _read_audio(self) -> bytes:
-        """Read audio from PipeWire (placeholder for real implementation).
+        """Read audio from PipeWire using sounddevice.
 
-        In production this would use pw-cat subprocess or PipeWire's
-        native Python bindings to read PCM data.  For now, it raises
-        NotImplementedError to indicate the integration point.
+        Uses sounddevice library which supports PipeWire backend on Linux.
+        Captures one chunk of audio based on configured duration.
         """
-        msg = (
-            "PipeWire audio read not yet connected. "
-            "Production implementation will use pw-cat or libpipewire."
+        try:
+            import sounddevice as sd  # noqa: PLC0415
+        except ImportError as exc:
+            msg = (
+                "sounddevice library required for audio capture. "
+                "Install with: pip install sounddevice"
+            )
+            raise RuntimeError(msg) from exc
+
+        samples_per_chunk = int(
+            self._config.sample_rate * self._config.chunk_duration_ms / 1000
         )
-        raise NotImplementedError(msg)
+
+        try:
+            device = self._config.device if self._config.device else None
+            audio_data = sd.rec(
+                frames=samples_per_chunk,
+                samplerate=self._config.sample_rate,
+                channels=self._config.channels,
+                dtype="int16" if self._config.sample_format == "s16le" else "float32",
+                device=device,
+                blocking=True,
+            )
+            return audio_data.tobytes()
+        except Exception as exc:
+            logger.warning(
+                "Failed to read audio from device '%s': %s",
+                self._config.device or "default",
+                exc,
+            )
+            return b""
 
     async def capture_loop(
         self,
