@@ -3,10 +3,43 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+class CaptureRegion(StrEnum):
+    """Screen region to capture."""
+
+    FULL_SCREEN = "full-screen"
+    ACTIVE_WINDOW = "active-window"
+    CUSTOM_RECT = "custom-rect"
+
+
+@dataclass
+class CompressionConfig:
+    """Image compression settings.
+
+    Attributes
+    ----------
+    format : str
+        Output format — ``"jpeg"`` or ``"png"`` (default ``"jpeg"``).
+    quality : int
+        Compression quality 1-100 (default 85, used for JPEG only).
+    """
+
+    format: str = "jpeg"
+    quality: int = 85
+
+    def __post_init__(self) -> None:
+        if self.format not in ("jpeg", "png"):
+            msg = f"compression.format must be 'jpeg' or 'png', got '{self.format}'"
+            raise ValueError(msg)
+        if not 1 <= self.quality <= 100:
+            msg = f"compression.quality must be 1-100, got {self.quality}"
+            raise ValueError(msg)
 
 
 @dataclass
@@ -41,9 +74,25 @@ class VisionConfig:
     max_width: int = 1920
     max_height: int = 1080
     portal_backend: str = ""
+    capture_region: str = "active-window"
+    capture_interval_s: float = 1.0
+    max_resolution: tuple[int, int] = (1920, 1080)
+    compression: CompressionConfig = field(default_factory=CompressionConfig)
 
     # Attention filter settings (co-located for convenience)
     attention: AttentionConfig = field(default_factory=lambda: AttentionConfig())
+
+    def __post_init__(self) -> None:
+        # Validate capture_region
+        try:
+            CaptureRegion(self.capture_region)
+        except ValueError:
+            allowed = ", ".join(r.value for r in CaptureRegion)
+            msg = f"capture_region must be one of ({allowed}), got '{self.capture_region}'"
+            raise ValueError(msg) from None
+        if self.capture_interval_s <= 0:
+            msg = f"capture_interval_s must be > 0, got {self.capture_interval_s}"
+            raise ValueError(msg)
 
 
 @dataclass
@@ -65,6 +114,10 @@ class AttentionConfig:
     roi_enabled: bool = False
 
 
+def _filter_fields(cls: type, raw: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in raw.items() if k in cls.__dataclass_fields__}
+
+
 def load_vision_config(path: Path | str | None = None) -> VisionConfig:
     """Load :class:`VisionConfig` from a YAML file.
 
@@ -81,13 +134,27 @@ def load_vision_config(path: Path | str | None = None) -> VisionConfig:
     vision_raw = raw.get("vision", raw)
 
     attention_raw = vision_raw.pop("attention", {})
-    attention = AttentionConfig(**{
-        k: v for k, v in attention_raw.items() if k in AttentionConfig.__dataclass_fields__
-    })
+    attention = AttentionConfig(**_filter_fields(AttentionConfig, attention_raw))
 
+    compression_raw = vision_raw.pop("compression", {})
+    compression = CompressionConfig(**_filter_fields(CompressionConfig, compression_raw))
+
+    # max_resolution may come as a list [w, h]
+    max_res = vision_raw.pop("max_resolution", None)
+    if isinstance(max_res, list) and len(max_res) == 2:
+        max_res = tuple(max_res)
+
+    skip = {"attention", "compression", "max_resolution"}
     fields = {
         k: v
         for k, v in vision_raw.items()
-        if k in VisionConfig.__dataclass_fields__ and k != "attention"
+        if k in VisionConfig.__dataclass_fields__ and k not in skip
     }
-    return VisionConfig(**fields, attention=attention)
+    kwargs: dict[str, Any] = {
+        **fields,
+        "attention": attention,
+        "compression": compression,
+    }
+    if max_res is not None:
+        kwargs["max_resolution"] = max_res
+    return VisionConfig(**kwargs)
