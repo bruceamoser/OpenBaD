@@ -1,0 +1,11 @@
+# FSM (Finite State Machine) Configuration
+
+# Chat activity idle timeout
+# When no COGNITIVE_INPUT events received for this duration,
+# transition from ACTIVE → IDLE automatically
+idle_timeout_seconds: 300  # 5 minutes
+
+# Debounce window for activate events
+# Prevents redundant activate triggers when multiple messages
+# arrive in quick succession
+debounce_window_seconds: 2
