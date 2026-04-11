@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from openbad.nervous_system.topics import TELEMETRY_SENSORY_HEALTH
-from openbad.proprioception.registry import HealthStatus, ToolRegistry
+from openbad.proprioception.registry import HealthStatus, ToolRegistry, ToolRole
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +54,19 @@ def register_sensory_tools(
         "sensory.vision",
         metadata={"modality": "vision"},
         health_check=vision_check,
+        role=ToolRole.MEDIA,
     )
     registry.register(
         "sensory.hearing",
         metadata={"modality": "hearing"},
         health_check=hearing_check,
+        role=ToolRole.MEDIA,
     )
     registry.register(
         "sensory.speech",
         metadata={"modality": "speech"},
         health_check=speech_check,
+        role=ToolRole.MEDIA,
     )
 
 
