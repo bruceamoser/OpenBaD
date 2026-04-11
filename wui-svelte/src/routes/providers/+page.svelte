@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/stores';
   import Card from '$lib/components/Card.svelte';
   import { get as apiGet, put as apiPut, post as apiPost } from '$lib/api/client';
   import { endocrineLevels } from '$lib/stores/websocket';
@@ -31,14 +32,13 @@
 
   interface ProvidersData {
     enabled: boolean;
-    default_provider: string;
     providers: ProviderEntry[];
   }
 
   interface SystemsData {
     systems: Record<string, SystemAssignment>;
     fallback_chain: FallbackEntry[];
-    providers: { name: string; model: string }[];
+    providers: { name: string }[];
   }
 
   interface VerifyResult {
@@ -82,10 +82,7 @@
   // State
   // ----------------------------------------------------------------
 
-  const COGNITIVE_SYSTEMS = ['chat', 'reasoning', 'reactions', 'sleep'];
-
   let providers: ProviderEntry[] = $state([]);
-  let defaultProvider = $state('');
   let systems: Record<string, SystemAssignment> = $state({});
   let fallbackChain: FallbackEntry[] = $state([]);
   let dirty = $state(false);
@@ -93,6 +90,7 @@
   let statusMsg = $state('');
   let dragIdx: number | null = $state(null);
   let loading = $state(true);
+  let lastAutoOpenSearch = $state('');
 
   // Wizard state
   let wizStep: WizardStep = $state('closed');
@@ -108,7 +106,6 @@
 
   // Local OpenAI wizard
   let localBaseUrl = $state('http://localhost:11434/v1');
-  let localModel = $state('');
   let localApiKeyEnv = $state('');
   let localVerified = $state(false);
   let localModels: string[] = $state([]);
@@ -123,6 +120,18 @@
 
   // Derived cortisol from WS
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
+  let systemNames = $derived.by(() => {
+    const preferredOrder = ['chat', 'reasoning', 'reactions', 'sleep'];
+    const keys = Object.keys(systems);
+    return [...keys].sort((left, right) => {
+      const leftIndex = preferredOrder.indexOf(left);
+      const rightIndex = preferredOrder.indexOf(right);
+      if (leftIndex !== -1 && rightIndex !== -1) return leftIndex - rightIndex;
+      if (leftIndex !== -1) return -1;
+      if (rightIndex !== -1) return 1;
+      return left.localeCompare(right);
+    });
+  });
 
   // Show wizard prominently if no providers configured
   let hasProviders = $derived(providers.length > 0);
@@ -136,7 +145,6 @@
     try {
       const pData = await apiGet<ProvidersData>('/api/providers');
       providers = pData.providers ?? [];
-      defaultProvider = pData.default_provider ?? '';
 
       const sData = await apiGet<SystemsData>('/api/systems');
       systems = sData.systems ?? {};
@@ -158,6 +166,29 @@
 
   onMount(() => { load(); });
 
+  function syncWizardFromRoute(): void {
+    const search = $page.url.search;
+    if (!search || lastAutoOpenSearch === search || loading) return;
+
+    const wizard = $page.url.searchParams.get('wizard');
+    const onboarding = $page.url.searchParams.get('onboarding');
+
+    if (onboarding === 'sleep') {
+      lastAutoOpenSearch = search;
+      void openSleepWizard();
+      return;
+    }
+
+    if (wizard === '1' || onboarding === 'providers') {
+      lastAutoOpenSearch = search;
+      openWizard();
+    }
+  }
+
+  $effect(() => {
+    syncWizardFromRoute();
+  });
+
   // ----------------------------------------------------------------
   // Persist providers to backend
   // ----------------------------------------------------------------
@@ -166,11 +197,9 @@
     try {
       const result = await apiPut<ProvidersData>('/api/providers', {
         enabled: true,
-        default_provider: defaultProvider || (providers[0]?.name ?? ''),
         providers,
       });
       providers = result.providers ?? providers;
-      defaultProvider = result.default_provider ?? defaultProvider;
     } catch (e) {
       statusMsg = `Save failed: ${e}`;
     }
@@ -203,13 +232,7 @@
   // ----------------------------------------------------------------
 
   async function removeProvider(idx: number): Promise<void> {
-    const removed = providers[idx];
     providers = providers.filter((_, i) => i !== idx);
-    if (defaultProvider === removed.name && providers.length > 0) {
-      defaultProvider = providers[0].name;
-    } else if (providers.length === 0) {
-      defaultProvider = '';
-    }
     await persistProviders();
   }
 
@@ -223,6 +246,13 @@
     wizError = '';
   }
 
+  async function openSleepWizard(): Promise<void> {
+    wizError = '';
+    wizMsg = 'Complete sleep setup to finish onboarding.';
+    await loadSleepConfig();
+    wizStep = 'sleep-config';
+  }
+
   function closeWizard(): void {
     wizStep = 'closed';
     wizMsg = '';
@@ -230,7 +260,6 @@
     wizBusy = false;
     // Reset local form
     localBaseUrl = 'http://localhost:11434/v1';
-    localModel = '';
     localApiKeyEnv = '';
     localVerified = false;
     localModels = [];
@@ -327,7 +356,6 @@
             models: copilotModels,
           };
           providers = [...providers, entry];
-          if (!defaultProvider) defaultProvider = entry.name;
           await persistProviders();
         }
         await loadSleepConfig();
@@ -365,7 +393,6 @@
       const res = await apiPost<VerifyResult>('/api/providers/verify', {
         provider_type: 'local-openai',
         base_url: localBaseUrl,
-        model: localModel,
         api_key_env: localApiKeyEnv,
         timeout_ms: 30000,
       });
@@ -374,9 +401,6 @@
         localModels = res.models ?? [];
         localLatency = res.latency_ms ?? 0;
         wizMsg = `Verified — ${res.models_available} model(s) available (${res.latency_ms?.toFixed(0)}ms)`;
-        if (!localModel && localModels.length > 0) {
-          localModel = localModels[0];
-        }
       } else {
         wizError = res.message || 'Verification failed';
       }
@@ -391,7 +415,7 @@
     const entry: ProviderEntry = {
       name: 'custom',
       base_url: localBaseUrl,
-      model: localModel,
+      model: '',
       api_key_env: localApiKeyEnv,
       timeout_ms: 30000,
       enabled: true,
@@ -399,11 +423,10 @@
       models: localModels,
     };
     providers = [...providers, entry];
-    if (!defaultProvider) defaultProvider = entry.name;
     await persistProviders();
     await loadSleepConfig();
     wizStep = 'sleep-config';
-    wizMsg = `Added local provider (${localModel || 'custom'})`;
+    wizMsg = 'Added local provider. Choose models under System Assignments.';
   }
 
   // ----------------------------------------------------------------
@@ -430,7 +453,6 @@
       const p = providers.find(pp => pp.name === providerName);
       const fallback: string[] = [];
       if (p?.models && p.models.length > 0) fallback.push(...p.models);
-      if (p?.model && !fallback.includes(p.model)) fallback.push(p.model);
       providerModelsCache = { ...providerModelsCache, [providerName]: fallback };
     } finally {
       modelsFetching = { ...modelsFetching, [providerName]: false };
@@ -444,11 +466,6 @@
     dirty = true;
     if (providerName) {
       await fetchModelsForProvider(providerName);
-      // Auto-select first model
-      const models = providerModelsCache[providerName] ?? [];
-      if (models.length > 0) {
-        systems[sys].model = models[0];
-      }
     }
     await saveSystems();
   }
@@ -519,7 +536,7 @@
 
 <div class="page-header">
   <h2>Providers</h2>
-  <p>Manage LLM providers, system assignments, and fallback chains</p>
+  <p>Manage provider connections, explicit system models, and fallback chains</p>
 </div>
 
 <!-- ============================================================ -->
@@ -595,7 +612,7 @@
       {:else if wizStep === 'local-form'}
         <!-- Step 2b: Local OpenAI form -->
         <h3>Local / OpenAI-Compatible Provider</h3>
-        <p class="wizard-subtitle">Point to any OpenAI-compatible API endpoint.</p>
+        <p class="wizard-subtitle">Point to any OpenAI-compatible API endpoint. Models are assigned per system after the provider is added.</p>
         <div class="local-form">
           <label for="wiz-base-url">
             Base URL
@@ -605,26 +622,6 @@
               bind:value={localBaseUrl}
               placeholder="http://localhost:11434/v1"
             />
-          </label>
-          <label for="wiz-model">
-            Model
-            <input
-              id="wiz-model"
-              type="text"
-              bind:value={localModel}
-              placeholder="llama3.2 (leave blank to auto-detect)"
-            />
-            {#if localModels.length > 0}
-              <div class="model-chips">
-                {#each localModels as m}
-                  <button
-                    class="model-chip"
-                    class:selected={localModel === m}
-                    onclick={() => { localModel = m; }}
-                  >{m}</button>
-                {/each}
-              </div>
-            {/if}
           </label>
           <label for="wiz-apikey">
             API Key Env Var <span class="optional">(optional)</span>
@@ -698,7 +695,7 @@
         <p class="wizard-done-msg">{wizMsg}</p>
         {#if copilotModels.length > 0 || localModels.length > 0}
           <div class="available-models">
-            <span class="available-models-label">Available models:</span>
+            <span class="available-models-label">Available models for system assignment:</span>
             <div class="model-chips">
               {#each (copilotModels.length > 0 ? copilotModels : localModels) as m}
                 <span class="model-chip">{m}</span>
@@ -755,7 +752,7 @@
               <span class="health-dot" style="background:{healthColor(p)}"></span>
               <div class="provider-info">
                 <span class="provider-name">{providerDisplayName(p)}</span>
-                <span class="provider-model">{p.model || '(auto)'}</span>
+                <span class="provider-model">{p.base_url || 'Configured connection'}</span>
                 <span class="provider-status">{p.verified ? 'verified' : 'unverified'}</span>
               </div>
               <button class="btn-icon btn-remove" onclick={() => removeProvider(i)} aria-label="Remove provider" title="Remove provider">&times;</button>
@@ -783,9 +780,9 @@
     <!-- System assignments -->
     <div class="full-width">
       <Card label="System Assignments">
-        <p class="hint">Assign a provider and model to each cognitive system.</p>
+        <p class="hint">Assign a provider and model to each cognitive system. Providers do not define default models.</p>
         <div class="systems-grid">
-          {#each COGNITIVE_SYSTEMS as sys}
+          {#each systemNames as sys}
             {@const assignment = systems[sys] ?? { provider: '', model: '' }}
             {@const availableModels = modelsForProvider(assignment.provider)}
             <div class="sys-row">
@@ -1074,7 +1071,7 @@
     background: var(--bg-surface2); color: var(--text-sub); border: 1px solid var(--border);
     cursor: pointer; transition: all 0.15s var(--ease);
   }
-  .model-chip.selected, .model-chip:hover { border-color: var(--accent); color: var(--accent); background: rgba(137, 180, 250, 0.1); }
+  .model-chip:hover { border-color: var(--accent); color: var(--accent); background: rgba(137, 180, 250, 0.1); }
 
   .available-models { margin-top: 1rem; }
   .available-models-label { font-size: 0.8rem; color: var(--text-dim); display: block; margin-bottom: 0.35rem; }
@@ -1090,6 +1087,4 @@
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-
-  .verify-spinner { display: flex; justify-content: center; padding: 2rem; }
 </style>

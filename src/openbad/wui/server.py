@@ -328,35 +328,14 @@ def _provider_model(provider: ProviderConfig) -> str:
     return provider.model.strip()
 
 
-def _pick_primary_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
-    for provider in providers:
-        if provider.name not in {"ollama", "custom"}:
-            return provider
-    return providers[0] if providers else None
-
-
-def _pick_fast_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
-    ranked = [provider for provider in providers if _provider_model(provider)]
-    if not ranked:
-        return providers[0] if providers else None
-    return min(ranked, key=lambda provider: _rank_model(_provider_model(provider)))
-
-
-def _pick_capable_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
-    ranked = [provider for provider in providers if _provider_model(provider)]
-    if not ranked:
-        return providers[0] if providers else None
-    return max(ranked, key=lambda provider: _rank_model(_provider_model(provider)))
-
-
-def _pick_local_provider(providers: list[ProviderConfig]) -> ProviderConfig | None:
-    for provider in providers:
-        if provider.name == "ollama":
-            return provider
-    for provider in providers:
-        if provider.name == "custom" and provider.base_url.startswith("http://localhost"):
-            return provider
-    return None
+def _provider_verification_model(provider_name: str) -> str:
+    spec = next(
+        (entry for entry in _SUPPORTED_PROVIDER_TYPES if entry["name"] == provider_name),
+        None,
+    )
+    if spec is None:
+        return ""
+    return str(spec.get("default_model", "")).strip()
 
 
 def _dedupe_assignments(assignments: list[SystemAssignment]) -> list[dict[str, str]]:
@@ -375,42 +354,13 @@ def _dedupe_assignments(assignments: list[SystemAssignment]) -> list[dict[str, s
     return result
 
 
-def _default_assignments(config: CognitiveConfig) -> dict[str, dict[str, str]]:
-    providers = [provider for provider in config.providers if _provider_is_valid(provider)]
-    primary = _pick_primary_provider(providers)
-    capable = _pick_capable_provider(providers) or primary
-    fast = _pick_fast_provider(providers) or primary
-    local = _pick_local_provider(providers) or fast or primary
-
-    def assignment(provider: ProviderConfig | None) -> dict[str, str]:
-        if provider is None:
-            return {"provider": "", "model": ""}
-        return {"provider": provider.name, "model": _provider_model(provider)}
-
-    return {
-        CognitiveSystem.CHAT.value: assignment(primary),
-        CognitiveSystem.REASONING.value: assignment(capable),
-        CognitiveSystem.REACTIONS.value: assignment(fast),
-        CognitiveSystem.SLEEP.value: assignment(local),
-    }
-
-
 def _write_model_routing_from_config(config: CognitiveConfig) -> None:
     path = _resolve_model_routing_path()
     existing = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
-    defaults = _default_assignments(config)
-
-    def to_assignment(system: CognitiveSystem) -> SystemAssignment:
-        configured = config.systems.get(system, SystemAssignment())
-        if configured.provider and configured.model:
-            return configured
-        fallback = defaults.get(system.value, {"provider": "", "model": ""})
-        return SystemAssignment(provider=fallback["provider"], model=fallback["model"])
-
-    reasoning = to_assignment(CognitiveSystem.REASONING)
-    chat = to_assignment(CognitiveSystem.CHAT)
-    reactions = to_assignment(CognitiveSystem.REACTIONS)
-    sleep = to_assignment(CognitiveSystem.SLEEP)
+    reasoning = config.systems.get(CognitiveSystem.REASONING, SystemAssignment())
+    chat = config.systems.get(CognitiveSystem.CHAT, SystemAssignment())
+    reactions = config.systems.get(CognitiveSystem.REACTIONS, SystemAssignment())
+    sleep = config.systems.get(CognitiveSystem.SLEEP, SystemAssignment())
 
     document = {
         "cortisol_threshold": existing.get("cortisol_threshold", 0.8),
@@ -448,13 +398,12 @@ def _serialize_cognitive_config(config: CognitiveConfig, path: Path) -> dict[str
     return {
         "config_path": str(path),
         "enabled": config.enabled,
-        "default_provider": config.default_provider,
         "providers": [
             {
                 "name": provider.name,
                 "base_url": provider.base_url,
-                "model": provider.model,
-                "has_api_key": bool(provider.api_key),
+                "model": "",
+                "has_api_key": _provider_has_secret(provider),
                 "api_key_env": provider.api_key_env,
                 "timeout_ms": provider.timeout_ms,
                 "enabled": provider.enabled,
@@ -518,18 +467,15 @@ def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
         raise web.HTTPBadRequest(text="providers must be a list")
 
     providers = [_coerce_provider(provider) for provider in providers_payload]
-    default_provider = str(payload.get("default_provider", "")).strip()
     enabled = bool(payload.get("enabled", True))
 
     document = {
         "cognitive": {
-            "default_provider": default_provider,
             "enabled": enabled,
             "providers": [
                 {
                     "name": provider.name,
                     "base_url": provider.base_url,
-                    "model": provider.model,
                     "api_key": provider.api_key,
                     "api_key_env": provider.api_key_env,
                     "timeout_ms": provider.timeout_ms,
@@ -592,7 +538,6 @@ def _wizard_provider_payload(payload: dict[str, object]) -> ProviderConfig:
     base_url = str(payload.get("base_url", spec["base_url"])).strip()
     api_key = str(payload.get("api_key", "")).strip()
     api_key_env = str(payload.get("api_key_env", spec["api_key_env"])).strip()
-    model = str(payload.get("model", spec["default_model"])).strip()
 
     if spec["auth"] == "local" and not base_url:
         raise web.HTTPBadRequest(text="base_url is required for local providers")
@@ -602,7 +547,7 @@ def _wizard_provider_payload(payload: dict[str, object]) -> ProviderConfig:
     return ProviderConfig(
         name=str(spec["name"]),
         base_url=base_url,
-        model=model,
+        model="",
         api_key=api_key,
         api_key_env=api_key_env,
         timeout_ms=_coerce_timeout_ms(payload.get("timeout_ms", 30_000)),
@@ -612,9 +557,10 @@ def _wizard_provider_payload(payload: dict[str, object]) -> ProviderConfig:
 
 def _build_wizard_adapter(provider: ProviderConfig):
     timeout_s = max(1.0, provider.timeout_ms / 1000)
+    verification_model = _provider_verification_model(provider.name)
     if provider.name == "github-copilot":
         return GitHubCopilotProvider(
-            default_model=provider.model or "gpt-4o",
+            default_model=verification_model or "gpt-4o",
             timeout_s=timeout_s,
         )
 
@@ -623,14 +569,14 @@ def _build_wizard_adapter(provider: ProviderConfig):
             base_url=provider.base_url or "https://api.anthropic.com",
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "ANTHROPIC_API_KEY",
-            default_model=provider.model or "claude-sonnet-4-20250514",
+            default_model=verification_model or "claude-sonnet-4-20250514",
             timeout_s=timeout_s,
         )
 
     if provider.name == "ollama":
         return OllamaProvider(
             base_url=provider.base_url or "http://localhost:11434",
-            default_model=provider.model or "llama3.2",
+            default_model=verification_model or "llama3.2",
             timeout_s=timeout_s,
         )
 
@@ -638,7 +584,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
         return openai_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "OPENAI_API_KEY",
-            default_model=provider.model or "gpt-4o-mini",
+            default_model=verification_model or "gpt-4o-mini",
             timeout_s=timeout_s,
         )
 
@@ -646,7 +592,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
         return openrouter_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "OPENROUTER_API_KEY",
-            default_model=provider.model or "openai/gpt-4o-mini",
+            default_model=verification_model or "openai/gpt-4o-mini",
             timeout_s=timeout_s,
         )
 
@@ -654,7 +600,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
         return groq_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "GROQ_API_KEY",
-            default_model=provider.model or "llama-3.1-8b-instant",
+            default_model=verification_model or "llama-3.1-8b-instant",
             timeout_s=timeout_s,
         )
 
@@ -662,7 +608,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
         return mistral_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "MISTRAL_API_KEY",
-            default_model=provider.model or "mistral-small-latest",
+            default_model=verification_model or "mistral-small-latest",
             timeout_s=timeout_s,
         )
 
@@ -670,7 +616,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
         return xai_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "XAI_API_KEY",
-            default_model=provider.model or "grok-3-mini",
+            default_model=verification_model or "grok-3-mini",
             timeout_s=timeout_s,
         )
 
@@ -678,7 +624,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
         base_url=provider.base_url,
         api_key=provider.api_key,
         api_key_env=provider.api_key_env,
-        default_model=provider.model,
+        default_model=verification_model,
         timeout_s=timeout_s,
     )
 
@@ -716,9 +662,9 @@ async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]
         "provider": {
             "name": provider.name,
             "base_url": provider.base_url,
-            "model": provider.model,
+            "model": "",
             "api_key": provider.api_key,
-            "has_api_key": bool(provider.api_key),
+            "has_api_key": _provider_has_secret(provider),
             "api_key_env": provider.api_key_env,
             "timeout_ms": provider.timeout_ms,
             "enabled": provider.enabled,
@@ -791,7 +737,6 @@ async def _post_setup(request: web.Request) -> web.Response:
             providers_path,
             {
                 "enabled": True,
-                "default_provider": str(payload.get("default_provider", "")).strip(),
                 "providers": providers_payload,
             },
         )
@@ -799,17 +744,6 @@ async def _post_setup(request: web.Request) -> web.Response:
     config = load_cognitive_config(_resolve_cognitive_config_path())
     _write_model_routing_from_config(config)
     return web.json_response(_provider_setup_status(config))
-
-
-def _legacy_providers_redirect_location(request: web.Request) -> str:
-    location = request.path.replace("/api/wiring/providers", "/api/providers", 1)
-    if request.query_string:
-        return f"{location}?{request.query_string}"
-    return location
-
-
-async def _redirect_legacy_wiring_providers(request: web.Request) -> web.StreamResponse:
-    raise web.HTTPMovedPermanently(location=_legacy_providers_redirect_location(request))
 
 
 def _cleanup_copilot_flows(app: web.Application) -> None:
@@ -827,7 +761,7 @@ async def _post_copilot_device_code(request: web.Request) -> web.Response:
 
     timeout_ms = _coerce_timeout_ms(payload.get("timeout_ms", 30_000))
     provider = GitHubCopilotProvider(
-        default_model=str(payload.get("model", "gpt-4o")).strip() or "gpt-4o",
+        default_model=_provider_verification_model("github-copilot") or "gpt-4o",
         timeout_s=max(1.0, timeout_ms / 1000),
     )
 
@@ -839,7 +773,6 @@ async def _post_copilot_device_code(request: web.Request) -> web.Response:
     flow_id = uuid4().hex
     request.app["copilot_device_flows"][flow_id] = {
         "device_code": device.device_code,
-        "default_model": provider._default_model,
         "timeout_ms": timeout_ms,
         "interval": device.interval,
         "expires_at": time.time() + device.expires_in,
@@ -880,7 +813,7 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
         )
 
     provider = GitHubCopilotProvider(
-        default_model=str(flow["default_model"]),
+        default_model=_provider_verification_model("github-copilot") or "gpt-4o",
         timeout_s=max(1.0, int(flow["timeout_ms"]) / 1000),
     )
 
@@ -929,7 +862,7 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
     provider_dict = {
         "name": "github-copilot",
         "base_url": "https://api.githubcopilot.com",
-        "model": str(flow["default_model"]),
+        "model": "",
         "api_key_env": "GITHUB_COPILOT_TOKEN",
         "timeout_ms": int(flow["timeout_ms"]),
         "enabled": True,
@@ -958,13 +891,17 @@ def _serialize_systems_config(config: CognitiveConfig) -> dict[str, object]:
         {"provider": step.provider, "model": step.model}
         for step in config.default_fallback_chain
     ]
+    provider_names: list[str] = []
+    for provider in config.providers:
+        if not provider.enabled or provider.name in provider_names:
+            continue
+        provider_names.append(provider.name)
     return {
         "systems": systems,
         "fallback_chain": fallback_chain,
         "providers": [
-            {"name": p.name, "model": p.model}
-            for p in config.providers
-            if p.enabled
+            {"name": provider_name}
+            for provider_name in provider_names
         ],
     }
 
@@ -1027,9 +964,10 @@ def _resolve_chat_adapter(config: CognitiveConfig, system_name: str):
 
     for p in config.providers:
         if p.name == assignment.provider and p.enabled:
+            if not assignment.model:
+                return None, None, None
             adapter = _build_wizard_adapter(p)
-            model = assignment.model or p.model
-            return adapter, model, p.name
+            return adapter, assignment.model, p.name
     return None, None, None
 
 
@@ -1082,8 +1020,8 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
 
     if adapter is None:
         raise web.HTTPBadRequest(
-            text=f"No provider configured for system '{system_name}'. "
-            "Assign a provider on the Providers page."
+            text=f"No provider/model configured for system '{system_name}'. "
+            "Assign both on the Providers page."
         )
 
     resp = web.StreamResponse(
@@ -1422,6 +1360,12 @@ async def _put_sleep_config(request: web.Request) -> web.Response:
     memory["sleep"] = _sleep_config_to_dict(config)
     document["memory"] = memory
 
+    onboarding = document.get("onboarding")
+    if not isinstance(onboarding, dict):
+        onboarding = {}
+    onboarding["sleep_configured"] = True
+    document["onboarding"] = onboarding
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
@@ -1734,13 +1678,11 @@ async def _post_entity_assistant_reset(request: web.Request) -> web.Response:
 # ── Onboarding endpoints ─────────────────────────────────────────────────────
 
 
-def _resolve_memory_config_path() -> Path | None:
-    """Resolve path to memory.yaml config file."""
+def _resolve_onboarding_memory_config_path() -> Path | None:
+    """Resolve path to memory.yaml config file for onboarding checks."""
     config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
     if config_dir:
-        candidate = Path(config_dir) / "memory.yaml"
-        if candidate.is_file():
-            return candidate
+        return Path(config_dir) / "memory.yaml"
 
     candidates = [
         Path("/etc/openbad/memory.yaml"),
@@ -1748,12 +1690,15 @@ def _resolve_memory_config_path() -> Path | None:
         Path("config/memory.yaml"),
     ]
     for p in candidates:
-        if p.is_file():
-            return p
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
     return None
 
 
-def _read_sleep_config(path: Path) -> tuple[dict, dict]:
+def _read_onboarding_sleep_config(path: Path) -> tuple[dict, dict]:
     """Read minimal sleep config for onboarding status check.
 
     Returns (full_doc, sleep_config) where sleep_config contains
@@ -1769,6 +1714,11 @@ def _read_sleep_config(path: Path) -> tuple[dict, dict]:
     if "idle_timeout_minutes" in doc:
         sleep_cfg["idle_timeout_minutes"] = doc["idle_timeout_minutes"]
         sleep_cfg["enabled"] = doc.get("enabled", True)
+    elif "sleep" in doc and isinstance(doc["sleep"], dict):
+        sleep = doc["sleep"]
+        if "idle_timeout_minutes" in sleep:
+            sleep_cfg["idle_timeout_minutes"] = sleep["idle_timeout_minutes"]
+            sleep_cfg["enabled"] = sleep.get("enabled", True)
     elif "memory" in doc and isinstance(doc["memory"], dict):
         mem = doc["memory"]
         if "sleep" in mem and isinstance(mem["sleep"], dict):
@@ -1780,22 +1730,29 @@ def _read_sleep_config(path: Path) -> tuple[dict, dict]:
     return doc, sleep_cfg
 
 
+def _sleep_onboarding_marked_complete(doc: dict[str, object]) -> bool:
+    onboarding = doc.get("onboarding")
+    if not isinstance(onboarding, dict):
+        return False
+    return onboarding.get("sleep_configured") is True
+
+
 async def _get_onboarding_status(request: web.Request) -> web.Response:
     """GET /api/onboarding/status - check completion of onboarding steps."""
     persistence = request.app.get("identity_persistence")
     if persistence is None:
         raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
 
-    # Check provider configuration
+    # Reuse the same provider + chat assignment readiness used by /api/setup-status.
     providers_complete = False
     try:
         cfg_path = _resolve_cognitive_config_path()
         if cfg_path and cfg_path.is_file():
             cfg = load_cognitive_config(str(cfg_path))
-            # At least one provider configured with non-placeholder values
-            providers_complete = any(
-                p.api_base and p.api_base != "http://localhost:11434"
-                for p in cfg.providers
+            setup_status = _provider_setup_status(cfg)
+            providers_complete = bool(
+                setup_status.get("provider_ready")
+                and setup_status.get("chat_assignment_ready")
             )
     except Exception:
         pass
@@ -1803,11 +1760,12 @@ async def _get_onboarding_status(request: web.Request) -> web.Response:
     # Check sleep configuration
     sleep_complete = False
     try:
-        mem_path = _resolve_memory_config_path()
+        mem_path = _resolve_onboarding_memory_config_path()
         if mem_path:
-            _, sleep_cfg = _read_sleep_config(mem_path)
-            # Sleep is configured if it differs from defaults (idle_timeout=15, enabled=True)
-            if sleep_cfg:
+            doc, sleep_cfg = _read_onboarding_sleep_config(mem_path)
+            if _sleep_onboarding_marked_complete(doc):
+                sleep_complete = True
+            elif sleep_cfg:
                 idle = sleep_cfg.get("idle_timeout_minutes", 15)
                 enabled = sleep_cfg.get("enabled", True)
                 sleep_complete = idle != 15 or not enabled
@@ -1828,6 +1786,22 @@ async def _get_onboarding_status(request: web.Request) -> web.Response:
         and user_profile_complete
     )
 
+    if not providers_complete:
+        next_step = "providers"
+        redirect_to = "/providers?wizard=1"
+    elif not sleep_complete:
+        next_step = "sleep"
+        redirect_to = "/health?onboarding=sleep"
+    elif not assistant_identity_complete:
+        next_step = "assistant_identity"
+        redirect_to = "/chat?onboarding=assistant"
+    elif not user_profile_complete:
+        next_step = "user_profile"
+        redirect_to = "/chat?onboarding=user"
+    else:
+        next_step = "complete"
+        redirect_to = None
+
     return web.json_response(
         {
             "providers_complete": providers_complete,
@@ -1835,6 +1809,8 @@ async def _get_onboarding_status(request: web.Request) -> web.Response:
             "assistant_identity_complete": assistant_identity_complete,
             "user_profile_complete": user_profile_complete,
             "onboarding_complete": onboarding_complete,
+            "next_step": next_step,
+            "redirect_to": redirect_to,
         }
     )
 
@@ -2016,16 +1992,6 @@ def create_app(
     app.router.add_post("/api/onboarding/assistant/complete", _post_assistant_interview_complete)
     app.router.add_post("/api/onboarding/user/complete", _post_user_interview_complete)
     app.router.add_post("/api/onboarding/skip", _post_onboarding_skip)
-    # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
-    app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
-    app.router.add_post(
-        "/api/wiring/providers/copilot/device-code", _redirect_legacy_wiring_providers
-    )
-    app.router.add_post(
-        "/api/wiring/providers/copilot/complete", _redirect_legacy_wiring_providers
-    )
-    app.router.add_post("/api/wiring/providers/verify", _redirect_legacy_wiring_providers)
-    app.router.add_put("/api/wiring/providers", _redirect_legacy_wiring_providers)
 
     # SvelteKit static assets + SPA fallback for client-side routing
     _app_dir = BUILD_DIR / "_app"

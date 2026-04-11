@@ -52,6 +52,12 @@ def test_system_provider_model_inputs():
     assert 'placeholder="model"' in t
 
 
+def test_provider_models_are_assigned_per_system():
+    t = _text()
+    assert 'Providers do not define default models.' in t
+    assert 'Choose models under System Assignments.' in t
+
+
 # -- Fallback chain --
 
 def test_fallback_chain_section():

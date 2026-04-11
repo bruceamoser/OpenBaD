@@ -26,7 +26,7 @@ class TestVitalAndInferencePanels:
         assert isinstance(InferencePanel(), InferencePanel)
 
 
-class TestTopicSubscriptionWiring:
+class TestTopicSubscriptionRegistration:
     def test_subscribe_topics_registers_expected_proto_topics(self):
         app = OpenBaDApp()
         app.feed = MagicMock()

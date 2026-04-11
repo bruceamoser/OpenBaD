@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { goto } from '$app/navigation';
-  import { get as apiGet } from '$lib/api/client';
+  import { page } from '$app/stores';
+  import { get as apiGet, post as apiPost } from '$lib/api/client';
+  import { resolveOnboardingRedirect } from '$lib/api/onboarding';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
 
@@ -37,6 +39,8 @@
   let tokensUsed = $state(0);
   let tokensMax = $state(8192);
   let sessionId = $state('');
+  let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
+  let onboardingTransition = $state(false);
 
   const CHAT_SESSION_STORAGE_KEY = 'openbad.chat.sessionId';
 
@@ -57,9 +61,120 @@
   }
 
   function persistSession(nextSessionId: string): void {
+    const storageKey = currentSessionStorageKey();
     sessionId = nextSessionId;
-    localStorage.setItem(CHAT_SESSION_STORAGE_KEY, nextSessionId);
+    localStorage.setItem(storageKey, nextSessionId);
+    if (onboardingHint) {
+      localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    }
   }
+
+  function currentSessionStorageKey(): string {
+    return onboardingHint
+      ? `${CHAT_SESSION_STORAGE_KEY}.${onboardingHint}`
+      : CHAT_SESSION_STORAGE_KEY;
+  }
+
+  function clearSession(): void {
+    sessionId = '';
+    localStorage.removeItem(currentSessionStorageKey());
+    if (onboardingHint) {
+      localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    }
+  }
+
+  function extractOnboardingCompletionPayload(text: string): string | null {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    const candidate = (fencedMatch?.[1] ?? trimmed).trim();
+
+    try {
+      const parsed = JSON.parse(candidate) as Record<string, unknown>;
+      return typeof parsed.name === 'string' ? candidate : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function resetOnboardingConversation(): Promise<void> {
+    onboardingTransition = true;
+    clearSession();
+    messages = [];
+    tokensUsed = 0;
+    tokensMax = 8192;
+    await tick();
+  }
+
+  function ensureOnboardingIntro(): void {
+    if (onboardingTransition) return;
+    if (messages.length > 0) return;
+
+    if (onboardingHint === 'assistant') {
+      messages = [
+        {
+          role: 'assistant',
+          content:
+            "Let's establish my identity first. If you already know my name, role, and communication style, give them to me in one message and I'll use them without re-asking. What should I call myself, what role do you want me to play, and how should I communicate with you? You can adjust these values later on the Entity page if we want to refine them.",
+          timestamp: new Date().toISOString(),
+        },
+      ];
+      return;
+    }
+
+    if (onboardingHint === 'user') {
+      messages = [
+        {
+          role: 'assistant',
+          content:
+            "Now I'd like to learn about you. What should I call you, what do you work on, and how do you prefer I communicate? You can adjust these values later on the Entity page too.",
+          timestamp: new Date().toISOString(),
+        },
+      ];
+    }
+  }
+
+  async function finalizeOnboardingInterview(interviewText: string): Promise<void> {
+    if (onboardingHint !== 'assistant' && onboardingHint !== 'user') return;
+
+    const completionPath =
+      onboardingHint === 'assistant'
+        ? '/api/onboarding/assistant/complete'
+        : '/api/onboarding/user/complete';
+
+    try {
+      await apiPost<{ success: boolean }>(completionPath, {
+        interview_text: interviewText,
+      });
+    } catch {
+      return;
+    }
+
+    const redirectTo = await resolveOnboardingRedirect(apiGet);
+    const currentRoute = `${$page.url.pathname}${$page.url.search}`;
+
+    if (redirectTo && redirectTo !== currentRoute) {
+      await resetOnboardingConversation();
+      await goto(redirectTo, { replaceState: true });
+      onboardingTransition = false;
+      ensureOnboardingIntro();
+      return;
+    }
+
+    if (!redirectTo && currentRoute !== '/chat') {
+      await resetOnboardingConversation();
+      await goto('/chat', { replaceState: true });
+      onboardingTransition = false;
+      return;
+    }
+
+    onboardingTransition = false;
+  }
+
+  $effect(() => {
+    ensureOnboardingIntro();
+  });
 
   async function loadHistory(existingSessionId: string): Promise<void> {
     if (!existingSessionId) return;
@@ -173,6 +288,23 @@
     } finally {
       streaming = false;
     }
+
+    const rawAssistantContent = assistantMsg.content;
+    const onboardingPayload = extractOnboardingCompletionPayload(rawAssistantContent);
+
+    if (onboardingPayload && (onboardingHint === 'assistant' || onboardingHint === 'user')) {
+      assistantMsg.content =
+        onboardingHint === 'assistant'
+          ? 'Assistant identity saved. Moving on to your profile.'
+          : 'User profile saved. Onboarding is complete.';
+      messages = [...messages.slice(0, -1), { ...assistantMsg }];
+      await tick();
+      scrollToBottom();
+    }
+
+    if (onboardingPayload) {
+      await finalizeOnboardingInterview(onboardingPayload);
+    }
   }
 
   function handleKeydown(e: KeyboardEvent): void {
@@ -187,27 +319,22 @@
   // ----------------------------------------------------------------
 
   onMount(async () => {
-    // Check onboarding status before loading chat
     try {
-      const status = await apiGet<{
-        onboarding_complete: boolean;
-        providers_complete: boolean;
-        sleep_complete: boolean;
-        assistant_identity_complete: boolean;
-        user_profile_complete: boolean;
-      }>('/api/onboarding/status');
-
-      if (!status.onboarding_complete) {
-        // Redirect to providers wizard to complete onboarding
-        goto('/providers?wizard=1');
+      const redirectTo = await resolveOnboardingRedirect(apiGet);
+      const currentRoute = `${$page.url.pathname}${$page.url.search}`;
+      if (redirectTo && currentRoute !== redirectTo) {
+        await goto(redirectTo, { replaceState: true });
         return;
       }
     } catch (err) {
       console.error('Failed to check onboarding status:', err);
-      // Continue anyway - don't block chat access if API fails
     }
 
-    const storedSessionId = localStorage.getItem(CHAT_SESSION_STORAGE_KEY) ?? '';
+    if (onboardingHint) {
+      localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    }
+
+    const storedSessionId = localStorage.getItem(currentSessionStorageKey()) ?? '';
     if (storedSessionId) {
       persistSession(storedSessionId);
       await loadHistory(storedSessionId);
@@ -258,8 +385,12 @@
     {#if messages.length === 0}
       <div class="empty-state">
         <div class="empty-icon">💬</div>
-        <h3>Start a conversation</h3>
-        <p>Type a message below to begin chatting with OpenBaD.</p>
+        <h3>{onboardingHint ? 'Onboarding Chat' : 'Start a conversation'}</h3>
+        <p>
+          {onboardingHint
+            ? 'Answer the assistant in chat to complete the remaining identity setup.'
+            : 'Type a message below to begin chatting with OpenBaD.'}
+        </p>
       </div>
     {/if}
     {#each messages as msg}

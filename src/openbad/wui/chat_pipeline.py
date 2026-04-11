@@ -181,7 +181,12 @@ def _next_turn_idx(session_id: str) -> int:
     return max(int(entry.metadata.get("turn_idx", 0)) for entry in entries) + 1
 
 
-def _write_turn(session_id: str, turn: ConversationTurn) -> None:
+def _write_turn(
+    session_id: str,
+    turn: ConversationTurn,
+    *,
+    onboarding_mode: bool = False,
+) -> None:
     """Write a conversation turn to STM and episodic memory."""
     stm = _get_stm()
     episodic = _get_episodic()
@@ -203,6 +208,7 @@ def _write_turn(session_id: str, turn: ConversationTurn) -> None:
             "session_id": session_id,
             "role": turn.role,
             "turn_idx": turn_idx,
+            "onboarding_mode": onboarding_mode,
         },
     )
     stm.write(entry)
@@ -220,26 +226,29 @@ def _write_turn(session_id: str, turn: ConversationTurn) -> None:
             "role": turn.role,
             "turn_idx": turn_idx,
             "task_id": session_id,
+            "onboarding_mode": onboarding_mode,
         },
     )
     episodic.write(ep_entry)
 
-    semantic.write(
-        MemoryEntry(
-            key=_semantic_key(session_id, turn_idx),
-            value=turn.content,
-            tier=MemoryTier.SEMANTIC,
-            created_at=now,
-            accessed_at=now,
-            context=turn.role,
-            metadata={
-                "session_id": session_id,
-                "role": turn.role,
-                "turn_idx": turn_idx,
-                "tags": [turn.role, session_id],
-            },
+    if not onboarding_mode:
+        semantic.write(
+            MemoryEntry(
+                key=_semantic_key(session_id, turn_idx),
+                value=turn.content,
+                tier=MemoryTier.SEMANTIC,
+                created_at=now,
+                accessed_at=now,
+                context=turn.role,
+                metadata={
+                    "session_id": session_id,
+                    "role": turn.role,
+                    "turn_idx": turn_idx,
+                    "tags": [turn.role, session_id],
+                    "onboarding_mode": onboarding_mode,
+                },
+            )
         )
-    )
 
 
 def _get_conversation_history(session_id: str) -> list[ConversationTurn]:
@@ -283,6 +292,7 @@ def _get_episodic_context(session_id: str, query: str) -> str:
         prior = [
             e for e in recent
             if e.metadata.get("session_id") != session_id
+            and not e.metadata.get("onboarding_mode", False)
         ]
         if not prior:
             return ""
@@ -313,6 +323,7 @@ def _get_semantic_context(session_id: str, query: str) -> str:
         (entry, score)
         for entry, score in matches
         if entry.metadata.get("session_id") != session_id
+        and not entry.metadata.get("onboarding_mode", False)
     ]
     if not filtered:
         return ""
@@ -436,12 +447,17 @@ def assemble_context(
             + _build_identity_prompt(user_profile, assistant_profile, modulation)
         )
 
+    onboarding_mode = assistant_needs_config or user_needs_config
+
     # Retrieve conversation history
     history = _get_conversation_history(session_id)
 
     # Retrieve long-term context from prior sessions
-    episodic_ctx = _get_episodic_context(session_id, message)
-    semantic_ctx = _get_semantic_context(session_id, message)
+    episodic_ctx = ""
+    semantic_ctx = ""
+    if not onboarding_mode:
+        episodic_ctx = _get_episodic_context(session_id, message)
+        semantic_ctx = _get_semantic_context(session_id, message)
 
     # Calculate tokens for each piece
     system_tokens = estimate_tokens(system_prompt)
@@ -548,6 +564,10 @@ async def stream_chat(
     """
     request_id = uuid.uuid4().hex[:12]
     start_timestamp = time.time()
+    onboarding_mode = (
+        (assistant_profile is not None and not is_assistant_configured(assistant_profile))
+        or (user_profile is not None and not is_user_configured(user_profile))
+    )
 
     # ── 1. Immune scan ──
     report = scan_input(message)
@@ -584,6 +604,7 @@ async def stream_chat(
     _write_turn(
         session_id,
         ConversationTurn(role="user", content=message, timestamp=time.time()),
+        onboarding_mode=onboarding_mode,
     )
 
     # Publish cognitive input event
@@ -620,7 +641,18 @@ async def stream_chat(
             message_hash=_hash_message(message),
             timestamp=time.time(),
         )
-        yield StreamChunk(error="Provider request failed", done=True)
+        status = getattr(e, "status", None)
+        detail = getattr(e, "message", "") or str(e)
+        provider_label = provider_name or "provider"
+        if status is not None:
+            error_text = f"{provider_label} returned {status}"
+            if detail:
+                error_text += f": {detail}"
+        elif detail:
+            error_text = f"{provider_label} request failed: {detail}"
+        else:
+            error_text = f"{provider_label} request failed"
+        yield StreamChunk(error=error_text, done=True)
         return
 
     latency_ms = (time.monotonic() - t0) * 1000
@@ -642,6 +674,7 @@ async def stream_chat(
     _write_turn(
         session_id,
         ConversationTurn(role="assistant", content=response_text, timestamp=time.time()),
+        onboarding_mode=onboarding_mode,
     )
 
     # Publish cognitive output event
