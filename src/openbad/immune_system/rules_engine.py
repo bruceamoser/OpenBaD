@@ -327,3 +327,89 @@ class FileOperationRule:
             self._ns.publish(IMMUNE_ALERT, payload)
         except Exception:
             log.debug("FileOperationRule: could not publish immune alert", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Destructive CLI command immune gate
+# ---------------------------------------------------------------------------
+
+# Patterns that, when matched against the full command string, indicate a
+# destructive operation that must never be executed.
+_DESTRUCTIVE_CLI_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\brm\s+(-\S*r\S*f|-\S*f\S*r|--force|--recursive)[^\n]*(/|~|\$HOME)", re.I),
+    re.compile(r"\brm\s+-rf\b", re.I),
+    re.compile(r"\bmkfs\b", re.I),
+    re.compile(r"\bdd\s+if=", re.I),
+    re.compile(r"\bchmod\s+(-R\s+)?777\s+/", re.I),
+    re.compile(r":\(\)\s*\{.*:\s*\|.*:\s*&.*\}", re.I),  # fork bomb
+    re.compile(r">\s*/dev/sd", re.I),  # disk overwrite
+    re.compile(r"\bshred\b.*(/dev/|/sys/)", re.I),
+]
+
+
+def is_destructive_command(command: str, args: list[str] | None = None) -> bool:
+    """Return True if the command + args string matches a destructive pattern."""
+    full = " ".join([command] + (args or []))
+    return any(p.search(full) for p in _DESTRUCTIVE_CLI_PATTERNS)
+
+
+class DestructiveCommandRule:
+    """Immune rule that blocks destructive shell commands before execution.
+
+    Usage::
+
+        rule = DestructiveCommandRule(nervous_system_client)
+        rule.check("rm", ["-rf", "/"])   # raises PermissionError + publishes alert
+        rule.check("ls", ["-la"])        # passes silently
+    """
+
+    def __init__(self, nervous_system: object | None = None) -> None:
+        self._ns = nervous_system
+
+    def check(self, command: str, args: list[str] | None = None) -> None:
+        """Raise :exc:`PermissionError` if the command is destructive.
+
+        Parameters
+        ----------
+        command:
+            Base command name.
+        args:
+            Command arguments.
+
+        Raises
+        ------
+        PermissionError
+            When a destructive signature is detected.
+        """
+        if not is_destructive_command(command, args):
+            return
+
+        full = " ".join([command] + (args or []))
+        log.warning("DestructiveCommandRule: blocked destructive command %r", full)
+        self._publish_quarantine(full)
+        raise PermissionError(
+            f"DestructiveCommandRule: command {full!r} matches destructive pattern."
+        )
+
+    def _publish_quarantine(self, command_str: str) -> None:
+        """Publish IMMUNE_ALERT and IMMUNE_QUARANTINE to the nervous system."""
+        if self._ns is None:
+            return
+        try:
+            import json as _json
+
+            from openbad.nervous_system.topics import IMMUNE_ALERT, IMMUNE_QUARANTINE
+
+            payload = _json.dumps(
+                {
+                    "rule": "destructive_command_rule",
+                    "severity": "critical",
+                    "blocked_command": command_str,
+                }
+            )
+            self._ns.publish(IMMUNE_ALERT, payload)
+            self._ns.publish(IMMUNE_QUARANTINE, payload)
+        except Exception:
+            log.debug(
+                "DestructiveCommandRule: could not publish immune alert", exc_info=True
+            )
