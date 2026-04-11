@@ -6,11 +6,11 @@ Serves the static dashboard assets and hosts the MQTT->WebSocket bridge.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,17 +25,21 @@ from openbad.cognitive.config import (
     load_cognitive_config,
 )
 from openbad.cognitive.providers.github_copilot import (
+    _KNOWN_MODELS,
     CopilotAuthError,
     GitHubCopilotProvider,
-    _KNOWN_MODELS,
 )
 from openbad.cognitive.providers.openai_compat import custom_provider
+from openbad.identity.onboarding import (
+    extract_profile_from_json,
+    is_assistant_configured,
+)
 from openbad.identity.persistence import IdentityPersistence
 from openbad.identity.personality_modulator import PersonalityModulator
 from openbad.memory.episodic import EpisodicMemory
 from openbad.sensory.config import load_sensory_config
-from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.bridge import MqttWebSocketBridge
+from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.usage_tracker import UsageTracker
 
 # SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
@@ -137,6 +141,62 @@ def _resolve_identity_config_path() -> Path:
         if path.exists():
             return path
     return candidates[0]
+
+
+def _resolve_memory_config_path() -> Path:
+    """Resolve path to memory.yaml config file."""
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir) / "memory.yaml"
+
+    candidates = [
+        Path("/etc/openbad/memory.yaml"),
+        Path.home() / ".config" / "openbad" / "memory.yaml",
+        Path(__file__).resolve().parent.parent.parent.parent / "config" / "memory.yaml",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def _read_sleep_config(path: Path) -> tuple[dict, object]:
+    """Read sleep configuration from memory.yaml.
+
+    Returns (document_dict, sleep_config_object).
+    For onboarding status check, we just need idle_timeout_minutes and enabled.
+    """
+    if not path.exists():
+        # Return defaults
+        return {}, type("SleepConfig", (), {"idle_timeout_minutes": 15, "enabled": True})()
+
+    with path.open("r") as f:
+        doc = yaml.safe_load(f) or {}
+
+    sleep_raw = {}
+    if isinstance(doc, dict):
+        # Try "memory.sleep" first (full config format)
+        memory = doc.get("memory", {})
+        if isinstance(memory, dict):
+            sleep_raw = memory.get("sleep", {})
+        # Fall back to top-level "sleep" (test format)
+        if not sleep_raw:
+            sleep_raw = doc.get("sleep", {})
+
+    if not isinstance(sleep_raw, dict):
+        sleep_raw = {}
+
+    # Create minimal config object with just fields we need
+    idle_timeout = sleep_raw.get("idle_timeout_minutes", 15)
+    enabled = sleep_raw.get("enabled", True)
+
+    config = type("SleepConfig", (), {
+        "idle_timeout_minutes": idle_timeout,
+        "enabled": enabled,
+    })()
+
+    return doc, config
 
 
 def _initialize_identity_state(app: web.Application) -> None:
@@ -251,7 +311,13 @@ def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
         existing = yaml.safe_load(path.read_text()) or {}
         cognitive = existing.get("cognitive", {})
         if isinstance(cognitive, dict):
-            for key in ("context_budget", "reasoning", "systems", "default_fallback_chain", "fallback_cortisol"):
+            for key in (
+                "context_budget",
+                "reasoning",
+                "systems",
+                "default_fallback_chain",
+                "fallback_cortisol",
+            ):
                 if key in cognitive and key not in document["cognitive"]:
                     document["cognitive"][key] = cognitive[key]
 
@@ -334,7 +400,12 @@ async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]
     except Exception:
         log.exception("Health check failed for %s", provider.name)
         status = type("HS", (), {"available": False, "latency_ms": 0, "models_available": 0})()
-    log.info("Provider %s available=%s latency=%.0fms", provider.name, status.available, status.latency_ms)
+    log.info(
+        "Provider %s available=%s latency=%.0fms",
+        provider.name,
+        status.available,
+        status.latency_ms,
+    )
     models: list[str] = []
     if status.available:
         try:
@@ -471,9 +542,11 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
 
     try:
         result = await provider.poll_for_token_once(str(flow["device_code"]))
-    except Exception:
+    except Exception as exc:
         log.exception("poll_for_token_once failed for flow %s", flow_id)
-        raise web.HTTPBadRequest(text="Failed to poll GitHub for authorization status")
+        raise web.HTTPBadRequest(
+            text="Failed to poll GitHub for authorization status"
+        ) from exc
     state = str(result.get("state", "error"))
     if state == "authorization_pending":
         return web.json_response(
@@ -622,7 +695,7 @@ def _serialize_chat_turn(turn) -> dict[str, object]:
         "content": turn.content,
         "timestamp": datetime.fromtimestamp(
             turn.timestamp,
-            tz=timezone.utc,
+            tz=UTC,
         ).isoformat(),
     }
 
@@ -756,7 +829,7 @@ async def _get_usage(request: web.Request) -> web.Response:
         raise web.HTTPServiceUnavailable(text="UsageTracker not available")
     return web.json_response(
         {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             **tracker.snapshot(),
         }
     )
@@ -1089,6 +1162,97 @@ async def _post_entity_assistant_reset(request: web.Request) -> web.Response:
     return web.json_response(_serialize_assistant(persistence.assistant))
 
 
+async def _get_onboarding_status(request: web.Request) -> web.Response:
+    """Return onboarding completion status for providers, sleep, and identity."""
+    # Check providers
+    providers_complete = False
+    try:
+        _, config = _read_providers_config()
+        providers_complete = bool(config.providers and config.default_provider)
+    except Exception:
+        pass
+
+    # Check sleep schedule
+    sleep_complete = False
+    try:
+        path = _resolve_memory_config_path()
+        _, sleep_config = _read_sleep_config(path)
+        # Sleep is considered configured if it differs from defaults
+        # Default is: enabled=True, idle_timeout_minutes=15
+        has_defaults = (
+            sleep_config.enabled is True
+            and sleep_config.idle_timeout_minutes == 15
+        )
+        sleep_complete = not has_defaults
+    except Exception:
+        pass
+
+    # Check assistant identity
+    assistant_complete = False
+    persistence = request.app.get("identity_persistence")
+    if persistence is not None:
+        assistant_complete = is_assistant_configured(persistence.assistant)
+
+    return web.json_response(
+        {
+            "providers_complete": providers_complete,
+            "sleep_complete": sleep_complete,
+            "assistant_identity_complete": assistant_complete,
+            "onboarding_complete": providers_complete
+            and sleep_complete
+            and assistant_complete,
+        }
+    )
+
+
+async def _post_assistant_interview_complete(request: web.Request) -> web.Response:
+    """Complete assistant interview by extracting profile from conversation."""
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Request body must be an object")
+
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise web.HTTPBadRequest(text="text field is required")
+
+    extracted = extract_profile_from_json(text)
+    if extracted is None:
+        return web.json_response(
+            {"success": False, "message": "No valid profile JSON found in response"},
+            status=400,
+        )
+
+    # Import apply logic here to avoid circular dependency
+    from openbad.identity.onboarding import apply_interview_result
+
+    updated_profile = apply_interview_result(persistence.assistant, extracted)
+    persistence.update_assistant(
+        name=updated_profile.name,
+        persona_summary=updated_profile.persona_summary,
+        learning_focus=updated_profile.learning_focus,
+        worldview=updated_profile.worldview,
+        boundaries=updated_profile.boundaries,
+        rhetorical_style=updated_profile.rhetorical_style,
+        openness=updated_profile.openness,
+        conscientiousness=updated_profile.conscientiousness,
+        extraversion=updated_profile.extraversion,
+        agreeableness=updated_profile.agreeableness,
+        stability=updated_profile.stability,
+    )
+
+    modulator = request.app.get("personality_modulator")
+    if modulator is not None:
+        modulator.update(persistence.assistant)
+
+    return web.json_response(
+        {"success": True, "assistant": _serialize_assistant(persistence.assistant)}
+    )
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -1152,6 +1316,8 @@ def create_app(
     app.router.add_get("/api/entity/assistant", _get_entity_assistant)
     app.router.add_put("/api/entity/assistant", _put_entity_assistant)
     app.router.add_post("/api/entity/assistant/reset", _post_entity_assistant_reset)
+    app.router.add_get("/api/onboarding/status", _get_onboarding_status)
+    app.router.add_post("/api/onboarding/assistant/complete", _post_assistant_interview_complete)
     # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
     app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_post(

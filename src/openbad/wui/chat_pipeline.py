@@ -12,28 +12,26 @@ engaging the subsystems that make OpenBaD more than a pass-through to an LLM:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aiohttp import web
-
 from openbad.cognitive.config import (
-    CognitiveConfig,
     CognitiveSystem,
-    ProviderConfig,
-    SystemAssignment,
 )
 from openbad.cognitive.context_manager import (
     ContextWindowManager,
     estimate_tokens,
 )
 from openbad.cognitive.providers.base import ProviderAdapter
+from openbad.identity.onboarding import (
+    INTERVIEW_SYSTEM_PROMPT,
+    is_assistant_configured,
+)
 from openbad.immune_system.rules_engine import RulesEngine, ScanReport
 from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.memory.episodic import EpisodicMemory
@@ -342,10 +340,14 @@ def _build_identity_prompt(
             )
 
     if user_profile is not None:
-        user_name = getattr(user_profile, "preferred_name", "") or getattr(user_profile, "name", "")
+        user_name = getattr(user_profile, "preferred_name", "") or getattr(
+            user_profile, "name", ""
+        )
         communication_style = getattr(user_profile, "communication_style", "")
         expertise_domains = getattr(user_profile, "expertise_domains", []) or []
-        interaction_history_summary = getattr(user_profile, "interaction_history_summary", "")
+        interaction_history_summary = getattr(
+            user_profile, "interaction_history_summary", ""
+        )
         if user_name:
             lines.append(f"User identity: {user_name}")
         if communication_style:
@@ -396,15 +398,21 @@ def assemble_context(
     ctx = _get_ctx_manager()
     budget = ctx.allocate(model_id)
 
-    base_system_prompt = (
-        _SYSTEM_PROMPT_REASONING
-        if system == CognitiveSystem.REASONING
-        else _SYSTEM_PROMPT_CHAT
-    )
-    system_prompt = (
-        base_system_prompt
-        + _build_identity_prompt(user_profile, assistant_profile, modulation)
-    )
+    # Check if we're in onboarding interview mode
+    if assistant_profile is not None and not is_assistant_configured(assistant_profile):
+        # Interview mode: use specialized onboarding prompt
+        system_prompt = INTERVIEW_SYSTEM_PROMPT
+    else:
+        # Normal mode: use chat or reasoning prompt
+        base_system_prompt = (
+            _SYSTEM_PROMPT_REASONING
+            if system == CognitiveSystem.REASONING
+            else _SYSTEM_PROMPT_CHAT
+        )
+        system_prompt = (
+            base_system_prompt
+            + _build_identity_prompt(user_profile, assistant_profile, modulation)
+        )
 
     # Retrieve conversation history
     history = _get_conversation_history(session_id)

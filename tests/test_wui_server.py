@@ -950,3 +950,247 @@ async def test_get_version_route_returns_current_version(aiohttp_client):
     assert resp.status == 200
     data = await resp.json()
     assert data["version"] == openbad.__version__
+
+
+@pytest.mark.asyncio
+async def test_get_onboarding_status_all_incomplete(aiohttp_client, tmp_path, monkeypatch):
+    """Onboarding status returns false for all components when unconfigured."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    # Empty cognitive config (no providers)
+    (config_dir / "cognitive.yaml").write_text(
+        """
+cognitive:
+  default_provider: ""
+  enabled: false
+  providers: []
+""".strip()
+    )
+
+    # Default memory config (sleep defaults)
+    (config_dir / "memory.yaml").write_text(
+        """
+sleep:
+  sleep_window_start: "02:00"
+  sleep_window_duration_hours: 3
+  idle_timeout_minutes: 15
+  allow_daytime_naps: true
+  enabled: true
+""".strip()
+    )
+
+    # Default identity config (assistant not configured)
+    (config_dir / "identity.yaml").write_text(
+        """
+user:
+  name: "User"
+assistant:
+  name: "OpenBaD"
+  persona_summary: "A self-aware Linux agent with biological metaphors"
+  learning_focus: []
+  ocean:
+    openness: 0.7
+    conscientiousness: 0.8
+    extraversion: 0.5
+    agreeableness: 0.4
+    stability: 0.6
+""".strip()
+    )
+
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    app = create_app(enable_mqtt=False)
+
+    # Initialize identity persistence
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+    episodic = EpisodicMemory(storage_path=tmp_path / "episodic.json")
+    persistence = IdentityPersistence(config_dir / "identity.yaml", episodic)
+    app["identity_persistence"] = persistence
+
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/onboarding/status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["providers_complete"] is False
+    assert data["sleep_complete"] is False  # Still has defaults
+    assert data["assistant_identity_complete"] is False
+    assert data["onboarding_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_onboarding_status_all_complete(aiohttp_client, tmp_path, monkeypatch):
+    """Onboarding status returns true when all components are configured."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    # Configured cognitive
+    (config_dir / "cognitive.yaml").write_text(
+        """
+cognitive:
+  default_provider: ollama
+  enabled: true
+  providers:
+    - name: ollama
+      base_url: http://localhost:11434
+      model: llama3.2
+      timeout_ms: 30000
+      enabled: true
+""".strip()
+    )
+
+    # Modified sleep config (idle timeout changed from default)
+    (config_dir / "memory.yaml").write_text(
+        """
+sleep:
+  sleep_window_start: "03:00"
+  sleep_window_duration_hours: 4
+  idle_timeout_minutes: 30
+  allow_daytime_naps: false
+  enabled: true
+""".strip()
+    )
+
+    # Configured assistant identity
+    (config_dir / "identity.yaml").write_text(
+        """
+user:
+  name: "User"
+assistant:
+  name: "Ada"
+  persona_summary: "A helpful coding assistant"
+  learning_focus: ["Python", "Rust"]
+  ocean:
+    openness: 0.9
+    conscientiousness: 0.8
+    extraversion: 0.6
+    agreeableness: 0.5
+    stability: 0.7
+""".strip()
+    )
+
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    app = create_app(enable_mqtt=False)
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+    episodic = EpisodicMemory(storage_path=tmp_path / "episodic.json")
+    persistence = IdentityPersistence(config_dir / "identity.yaml", episodic)
+    app["identity_persistence"] = persistence
+
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/onboarding/status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["providers_complete"] is True
+    assert data["sleep_complete"] is True
+    assert data["assistant_identity_complete"] is True
+    assert data["onboarding_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_assistant_interview_complete_valid_json(aiohttp_client, tmp_path, monkeypatch):
+    """Interview completion endpoint extracts profile and updates persistence."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    (config_dir / "identity.yaml").write_text(
+        """
+user:
+  name: "User"
+assistant:
+  name: "OpenBaD"
+  persona_summary: ""
+  learning_focus: []
+  ocean:
+    openness: 0.5
+    conscientiousness: 0.5
+    extraversion: 0.5
+    agreeableness: 0.5
+    stability: 0.5
+""".strip()
+    )
+
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    app = create_app(enable_mqtt=False)
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+    episodic = EpisodicMemory(storage_path=tmp_path / "episodic.json")
+    persistence = IdentityPersistence(config_dir / "identity.yaml", episodic)
+    app["identity_persistence"] = persistence
+
+    client = await aiohttp_client(app)
+
+    interview_response = """
+Here's my understanding of your preferences:
+
+```json
+{
+  "name": "Sage",
+  "persona_summary": "A thoughtful research assistant",
+  "learning_focus": ["AI safety", "distributed systems"],
+  "worldview": ["prefer simple solutions"],
+  "boundaries": ["no dark patterns"],
+  "rhetorical_tone": "direct",
+  "rhetorical_sentence_pattern": "concise",
+  "rhetorical_challenge_mode": "steel-man first",
+  "rhetorical_explanation_depth": "balanced",
+  "openness": 0.8,
+  "conscientiousness": 0.9,
+  "extraversion": 0.4,
+  "agreeableness": 0.6,
+  "stability": 0.7
+}
+```
+
+Does this look correct?
+"""
+
+    resp = await client.post(
+        "/api/onboarding/assistant/complete",
+        json={"text": interview_response},
+    )
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["success"] is True
+    assert data["assistant"]["name"] == "Sage"
+    assert data["assistant"]["persona_summary"] == "A thoughtful research assistant"
+    assert data["assistant"]["learning_focus"] == ["AI safety", "distributed systems"]
+    assert data["assistant"]["worldview"] == ["prefer simple solutions"]
+    assert data["assistant"]["boundaries"] == ["no dark patterns"]
+    assert data["assistant"]["openness"] == 0.8
+    assert data["assistant"]["conscientiousness"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_post_assistant_interview_complete_no_json_returns_error(aiohttp_client, tmp_path, monkeypatch):
+    """Interview completion fails when no JSON found in response."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "identity.yaml").write_text("user:\n  name: User\nassistant:\n  name: OpenBaD")
+
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    app = create_app(enable_mqtt=False)
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+    episodic = EpisodicMemory(storage_path=tmp_path / "episodic.json")
+    persistence = IdentityPersistence(config_dir / "identity.yaml", episodic)
+    app["identity_persistence"] = persistence
+
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/onboarding/assistant/complete",
+        json={"text": "This is just a regular chat response with no JSON."},
+    )
+
+    assert resp.status == 400
+    data = await resp.json()
+    assert data["success"] is False
+    assert "No valid profile JSON" in data["message"]
+

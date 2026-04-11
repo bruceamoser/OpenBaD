@@ -188,3 +188,77 @@ async def test_stream_chat_records_usage_to_tracker(tmp_path):
     assert snapshot["by_provider_model"][0]["provider"] == "test-provider"
     assert snapshot["by_provider_model"][0]["model"] == "test-model"
     assert snapshot["by_system"][0]["system"] == "reasoning"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_uses_interview_mode_when_assistant_unconfigured():
+    """When assistant profile is unconfigured, use onboarding interview system prompt."""
+    from openbad.identity.assistant_profile import AssistantProfile
+
+    # Default/unconfigured assistant profile
+    unconfigured_assistant = AssistantProfile(
+        name="OpenBaD",
+        persona_summary="A self-aware Linux agent with biological metaphors",
+    )
+
+    adapter = _CapturingAdapter(["I'd", " like", " to", " help"])
+
+    chunks = [
+        chunk
+        async for chunk in chat_pipeline.stream_chat(
+            adapter,
+            "test-model",
+            "Hello, who are you?",
+            "interview-session",
+            provider_name="test-provider",
+            assistant_profile=unconfigured_assistant,
+        )
+    ]
+
+    assert adapter.prompts
+    prompt = adapter.prompts[0]
+    # Should use interview system prompt, not the default chat prompt
+    assert "You are a new AI assistant being configured" in prompt
+    assert "interview" in prompt.lower()
+    # Should NOT have the default identity context injection since we're in interview mode
+    assert "Assistant identity:" not in prompt or "OpenBaD" not in prompt
+
+    assert chunks[-1].done is True
+    assert [chunk.token for chunk in chunks if chunk.token] == ["I'd", " like", " to", " help"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_uses_normal_mode_when_assistant_configured():
+    """When assistant profile is configured, use normal chat system prompt."""
+    from openbad.identity.assistant_profile import AssistantProfile
+
+    # Configured assistant profile (custom name)
+    configured_assistant = AssistantProfile(
+        name="Ada",
+        persona_summary="A helpful coding assistant",
+        learning_focus=["Python", "Rust"],
+    )
+
+    adapter = _CapturingAdapter(["Hello"])
+
+    chunks = [
+        chunk
+        async for chunk in chat_pipeline.stream_chat(
+            adapter,
+            "test-model",
+            "What's your name?",
+            "normal-session",
+            provider_name="test-provider",
+            assistant_profile=configured_assistant,
+        )
+    ]
+
+    assert adapter.prompts
+    prompt = adapter.prompts[0]
+    # Should use normal chat prompt, not interview
+    assert "You are OpenBaD, a helpful AI assistant" in prompt
+    assert "interview" not in prompt.lower()
+    # Should have identity context since assistant is configured
+    assert "Assistant identity: Ada" in prompt
+
+    assert chunks[-1].done is True
