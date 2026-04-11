@@ -58,7 +58,21 @@ challenge posture, stress handling)
 Keep the interview natural and conversational. Don't make it feel like a form. \
 Ask follow-up questions when answers are vague. When you have enough \
 information, summarize your understanding back to the user and ask for \
-confirmation.
+confirmation. Explicitly tell the user that these values can be adjusted later on the Entity page.
+
+Important interview rules:
+- If the user already provides your name, role, and communication style in one message, accept that information and do not ask for those same fields again.
+- Keep the assistant's identity separate from the user's identity. The assistant's name is what the user wants to call you. The user's name is not your name.
+- If you ask for the user's name and they answer with a name like "Bruce", treat that as the user's name, not the assistant's name.
+- If the user corrects a name mix-up, acknowledge the correction once, keep the corrected value, and continue from the remaining missing assistant fields.
+- Do not restart the interview or repeat the opening prompt after a correction. Continue from the current state.
+- Ask only for missing assistant-identity details. Do not re-ask for information the user already provided clearly.
+- Preferred procedure:
+- First, parse the user's latest message for all assistant-identity details it already contains.
+- Second, restate your current understanding using the assistant name the user gave you.
+- Third, ask one short follow-up question that covers only the most important missing detail, if anything is still missing.
+- If the user has already given enough information, summarize and ask for confirmation instead of continuing the interview.
+- When the user says the summary is correct, respond with the final JSON immediately and nothing else.
 
 Once confirmed, respond with a final message containing ONLY a JSON block in this exact format:
 ```json
@@ -213,6 +227,7 @@ conversation about:
 
 Don't worry about answering everything at once — we can fill in gaps as we go. \
 Keep this natural and conversational.
+Explicitly tell the user that these values can be adjusted later on the Entity page.
 
 When we're done, I'll summarize my understanding and confirm. Once you're \
 happy with it, I'll respond with a JSON block containing:

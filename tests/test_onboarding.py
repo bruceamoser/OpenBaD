@@ -2,6 +2,8 @@
 
 from openbad.identity.assistant_profile import AssistantProfile
 from openbad.identity.onboarding import (
+    INTERVIEW_SYSTEM_PROMPT,
+    USER_INTERVIEW_SYSTEM_PROMPT,
     apply_interview_result,
     apply_user_interview_result,
     extract_profile_from_json,
@@ -10,6 +12,22 @@ from openbad.identity.onboarding import (
     is_user_configured,
 )
 from openbad.identity.user_profile import CommunicationStyle, UserProfile
+
+
+def test_assistant_interview_prompt_mentions_entity_page_adjustments():
+    assert "Entity page" in INTERVIEW_SYSTEM_PROMPT
+
+
+def test_assistant_interview_prompt_preserves_user_supplied_identity_details():
+    assert "do not ask for those same fields again" in INTERVIEW_SYSTEM_PROMPT
+    assert "assistant's identity separate from the user's identity" in INTERVIEW_SYSTEM_PROMPT
+    assert "Do not restart the interview" in INTERVIEW_SYSTEM_PROMPT
+    assert "Preferred procedure" in INTERVIEW_SYSTEM_PROMPT
+    assert "respond with the final JSON immediately" in INTERVIEW_SYSTEM_PROMPT
+
+
+def test_user_interview_prompt_mentions_entity_page_adjustments():
+    assert "Entity page" in USER_INTERVIEW_SYSTEM_PROMPT
 
 # ── Assistant configuration detection ────────────────────────────────
 

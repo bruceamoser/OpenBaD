@@ -357,9 +357,21 @@ async def _count_operational_providers_from_config(
 
 def _build_provider_adapter(provider: ProviderConfig) -> Any | None:
     timeout_s = max(1.0, min(provider.timeout_ms / 1000, 2.0))
+    verification_model = {
+        "openai": "gpt-4o-mini",
+        "openai-codex": "codex",
+        "openrouter": "openai/gpt-4o-mini",
+        "groq": "llama-3.1-8b-instant",
+        "xai": "grok-3-mini",
+        "mistral": "mistral-small-latest",
+        "anthropic": "claude-sonnet-4-20250514",
+        "ollama": "llama3.2",
+        "github-copilot": "gpt-4o",
+        "custom": "",
+    }.get(provider.name, "")
     common = {
         "base_url": provider.base_url,
-        "default_model": provider.model,
+        "default_model": verification_model,
         "timeout_s": timeout_s,
     }
 
@@ -390,19 +402,19 @@ def _build_provider_adapter(provider: ProviderConfig) -> Any | None:
         return AnthropicProvider(
             base_url=provider.base_url,
             api_key_env=provider.api_key_env or "ANTHROPIC_API_KEY",
-            default_model=provider.model,
+            default_model=verification_model,
             timeout_s=timeout_s,
         )
     if provider.name == "github-copilot":
         return GitHubCopilotProvider(
-            default_model=provider.model or "gpt-4o",
+            default_model=verification_model or "gpt-4o",
             timeout_s=timeout_s,
         )
     if provider.name == "custom":
         return custom_provider(
             base_url=provider.base_url,
             api_key_env=provider.api_key_env,
-            default_model=provider.model,
+            default_model=verification_model,
             timeout_s=timeout_s,
         )
 

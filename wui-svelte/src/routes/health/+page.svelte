@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
   import Card from '$lib/components/Card.svelte';
   import { get as apiGet, put as apiPut, post as apiPost } from '$lib/api/client';
+  import { resolveOnboardingRedirect } from '$lib/api/onboarding';
   import {
     cpuTelemetry,
     memoryTelemetry,
@@ -33,6 +36,7 @@
   let memHistory: number[] = $state([]);
   let statusMsg = $state('');
   let sleepSaveMsg = $state('');
+  let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
   let sleepConfig = $state<SleepConfig>({
     sleep_window_start: '02:00',
     sleep_window_duration_hours: 3,
@@ -90,6 +94,14 @@
       nextScheduledConsolidation = res.next_scheduled_consolidation;
       lastConsolidationSummary = res.last_consolidation_summary;
       sleepSaveMsg = 'Sleep settings saved';
+
+      if (onboardingHint === 'sleep') {
+        const redirectTo = await resolveOnboardingRedirect(apiGet);
+        const currentRoute = `${$page.url.pathname}${$page.url.search}`;
+        if (redirectTo && redirectTo !== currentRoute) {
+          await goto(redirectTo, { replaceState: true });
+        }
+      }
     } catch (e) {
       sleepSaveMsg = `Save failed: ${e}`;
     }
@@ -165,6 +177,12 @@
   <h2>Health Dashboard</h2>
   <p>Live runtime telemetry and subsystem health</p>
 </div>
+
+{#if onboardingHint === 'sleep'}
+  <div class="onboarding-banner">
+    Adjust the sleep schedule here to complete first-run setup before returning to chat.
+  </div>
+{/if}
 
 <div class="grid dashboard-grid">
   <!-- Row 1: FSM + Endocrine -->
@@ -330,6 +348,16 @@
 </div>
 
 <style>
+  .onboarding-banner {
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid color-mix(in srgb, var(--teal) 45%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--teal) 12%, var(--bg-surface1));
+    color: var(--text-sub);
+    font-size: 0.9rem;
+  }
+
   .grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);

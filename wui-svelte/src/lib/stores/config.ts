@@ -7,8 +7,7 @@ import { get, put } from '$lib/api/client';
 
 export interface ProviderConfig {
   enabled: boolean;
-  default_provider: string;
-  providers: Array<{ name: string; model: string; verified: boolean }>;
+  providers: Array<{ name: string; verified: boolean }>;
 }
 
 export const providerConfig = writable<ProviderConfig | null>(null);

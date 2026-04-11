@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/stores';
   import Card from '$lib/components/Card.svelte';
   import {
     get as apiGet,
@@ -68,6 +69,7 @@
   let assistantDirty = $state(false);
   let saving = $state(false);
   let statusMsg = $state('');
+  let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
 
   // Live OCEAN behavior descriptions
   const oceanLabels: Record<string, [string, string]> = {
@@ -110,6 +112,13 @@
   }
 
   onMount(() => { loadUser(); loadAssistant(); });
+
+  $effect(() => {
+    const requestedTab = $page.url.searchParams.get('tab');
+    if (requestedTab === 'user' || requestedTab === 'assistant') {
+      tab = requestedTab;
+    }
+  });
 
   // ----------------------------------------------------------------
   // Save
@@ -211,6 +220,16 @@
   <h2>Entity</h2>
   <p>Configure user and assistant identity profiles</p>
 </div>
+
+{#if onboardingHint === 'user' || onboardingHint === 'assistant'}
+  <div class="onboarding-banner">
+    {#if onboardingHint === 'assistant'}
+      Finish the assistant profile to unlock the guided first-run flow.
+    {:else}
+      Finish the user profile so OpenBaD can personalize the first-run experience.
+    {/if}
+  </div>
+{/if}
 
 <!-- Tab switcher -->
 <div class="tab-bar">
@@ -361,6 +380,16 @@
 {/if}
 
 <style>
+  .onboarding-banner {
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--blue) 12%, var(--bg-surface1));
+    color: var(--text-sub);
+    font-size: 0.9rem;
+  }
+
   .tab-bar { display: flex; gap: 0; margin-bottom: 1.25rem; }
   .tab-bar button {
     display: flex; align-items: center; gap: 0.4rem;

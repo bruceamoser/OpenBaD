@@ -79,7 +79,6 @@ class CognitiveConfig:
     reasoning: ReasoningDefaults = field(
         default_factory=ReasoningDefaults
     )
-    default_provider: str = "ollama"
     enabled: bool = True
     systems: dict[CognitiveSystem, SystemAssignment] = field(
         default_factory=lambda: {
@@ -149,7 +148,6 @@ def load_cognitive_config(
         providers=providers,
         context_budget=budget,
         reasoning=reasoning,
-        default_provider=cog.get("default_provider", "ollama"),
         enabled=cog.get("enabled", True),
         systems=systems,
         default_fallback_chain=fallback_chain,

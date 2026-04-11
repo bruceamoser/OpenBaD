@@ -6,6 +6,7 @@
   import { page } from '$app/stores';
   import { wsStatus, fsmState, connect, disconnect } from '$lib/stores/websocket';
   import { get as apiGet, post as apiPost } from '$lib/api/client';
+  import { resolveOnboardingRedirect } from '$lib/api/onboarding';
 
   let { children }: { children: Snippet } = $props();
 
@@ -61,12 +62,13 @@
   let wProvider = $state({ name: '', model: '' });
   let wSenses = $state({ vision: true, hearing: true, speech: true });
 
-  async function checkFirstRun(): Promise<void> {
+  async function checkOnboarding(): Promise<void> {
     try {
-      const res = await apiGet<{ first_run: boolean; redirect_to?: string }>('/api/setup-status');
       showWizard = false;
-      if (res.first_run && !$page.url.pathname.startsWith('/providers')) {
-        await goto(res.redirect_to || '/providers?wizard=1', { replaceState: true });
+      const redirectTo = await resolveOnboardingRedirect(apiGet);
+      const currentRoute = `${$page.url.pathname}${$page.url.search}`;
+      if (redirectTo && currentRoute !== redirectTo) {
+        await goto(redirectTo, { replaceState: true });
       }
     } catch { }
   }
@@ -95,7 +97,7 @@
 
   onMount(() => {
     connect();
-    checkFirstRun();
+    checkOnboarding();
     loadVersion();
   });
 
@@ -182,7 +184,6 @@
           <rect y="15" width="20" height="2" rx="1" fill="currentColor"/>
         </svg>
       </button>
-      <img class="app-logo topbar-logo" src="/logo.png" alt="OpenBaD" />
     </div>
     <div class="top-right">
       <div class="indicator" title="WebSocket: {wsStatusVal}">
@@ -284,11 +285,6 @@
     height: auto;
     object-fit: contain;
   }
-  .topbar-logo {
-    width: 8.75rem;
-    max-width: 38vw;
-  }
-
   .top-right {
     display: flex;
     align-items: center;

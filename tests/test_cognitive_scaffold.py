@@ -56,7 +56,6 @@ class TestReasoningDefaults:
 class TestCognitiveConfig:
     def test_defaults(self) -> None:
         cc = CognitiveConfig()
-        assert cc.default_provider == "ollama"
         assert cc.enabled is True
         assert cc.providers == []
         assert cc.systems[CognitiveSystem.CHAT] == SystemAssignment()
@@ -76,14 +75,12 @@ class TestCognitiveConfig:
 class TestLoadCognitiveConfig:
     def test_missing_file_gives_defaults(self) -> None:
         config = load_cognitive_config("nonexistent.yaml")
-        assert config.default_provider == "ollama"
         assert config.providers == []
 
     def test_load_from_yaml(self, tmp_path: pytest.TempPathFactory) -> None:
         yaml_path = tmp_path / "cog.yaml"
         yaml_path.write_text(textwrap.dedent("""\
             cognitive:
-              default_provider: openai
               enabled: false
               providers:
                 - name: ollama
@@ -119,7 +116,6 @@ class TestLoadCognitiveConfig:
                 low_timeout_ms: 3000
         """))
         config = load_cognitive_config(yaml_path)
-        assert config.default_provider == "openai"
         assert config.enabled is False
         assert len(config.providers) == 1
         assert config.providers[0].name == "ollama"
@@ -147,13 +143,12 @@ class TestLoadCognitiveConfig:
         yaml_path = tmp_path / "empty.yaml"
         yaml_path.write_text("")
         config = load_cognitive_config(yaml_path)
-        assert config.default_provider == "ollama"
+        assert config.enabled is True
 
-    def test_partial_yaml(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_partial_yaml_with_legacy_default_provider(self, tmp_path: pytest.TempPathFactory) -> None:
         yaml_path = tmp_path / "partial.yaml"
         yaml_path.write_text("cognitive:\n  default_provider: anthropic\n")
         config = load_cognitive_config(yaml_path)
-        assert config.default_provider == "anthropic"
         assert config.providers == []
         assert config.context_budget.slm_max_tokens == 8_192
 

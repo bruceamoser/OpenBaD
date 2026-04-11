@@ -7,6 +7,8 @@ import pytest
 
 from openbad.cognitive.context_manager import ContextWindowManager
 from openbad.cognitive.providers.base import HealthStatus, ModelInfo, ProviderAdapter
+from openbad.identity.assistant_profile import AssistantProfile
+from openbad.identity.user_profile import UserProfile
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.semantic import SemanticMemory
 from openbad.memory.stm import ShortTermMemory
@@ -188,3 +190,92 @@ async def test_stream_chat_records_usage_to_tracker(tmp_path):
     assert snapshot["by_provider_model"][0]["provider"] == "test-provider"
     assert snapshot["by_provider_model"][0]["model"] == "test-model"
     assert snapshot["by_system"][0]["system"] == "reasoning"
+
+
+def test_assemble_context_skips_prior_memory_during_onboarding():
+    chat_pipeline._write_turn(
+        "session-previous",
+        chat_pipeline.ConversationTurn(
+            role="assistant",
+            content="Prior chat says the assistant should be named Legacy.",
+        ),
+    )
+
+    assistant_profile = AssistantProfile(name="OpenBaD", persona_summary="A self-aware Linux agent")
+    user_profile = UserProfile(name="User")
+
+    context = chat_pipeline.assemble_context(
+        "session-onboarding",
+        "You are Sven.",
+        chat_pipeline.CognitiveSystem.CHAT,
+        "test-model",
+        user_profile=user_profile,
+        assistant_profile=assistant_profile,
+    )
+
+    assert context.system_prompt == chat_pipeline.INTERVIEW_SYSTEM_PROMPT
+    assert context.supporting_context == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_excludes_onboarding_turns_from_future_retrieval():
+    adapter = _CapturingAdapter(["Acknowledged"])
+    assistant_profile = AssistantProfile(name="OpenBaD", persona_summary="A self-aware Linux agent")
+    user_profile = UserProfile(name="User")
+
+    _ = [
+        chunk
+        async for chunk in chat_pipeline.stream_chat(
+            adapter,
+            "test-model",
+            "You are Sven, a systems engineer.",
+            "session-onboarding",
+            provider_name="test-provider",
+            user_profile=user_profile,
+            assistant_profile=assistant_profile,
+        )
+    ]
+
+    context = chat_pipeline.assemble_context(
+        "session-later",
+        "What should I remember about Sven?",
+        chat_pipeline.CognitiveSystem.CHAT,
+        "test-model",
+    )
+
+    assert "Relevant prior memories:" not in context.supporting_context
+    assert "Prior conversation context:" not in context.supporting_context
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_surfaces_provider_status_errors():
+    class _FailingAdapter(ProviderAdapter):
+        async def complete(self, prompt: str, model_id: str | None = None, **kwargs):
+            raise NotImplementedError
+
+        async def stream(self, prompt: str, model_id: str | None = None, **kwargs):
+            error = RuntimeError("Forbidden")
+            error.status = 403
+            error.message = "Forbidden"
+            raise error
+            yield  # pragma: no cover
+
+        async def list_models(self) -> list[ModelInfo]:
+            return []
+
+        async def health_check(self) -> HealthStatus:
+            return HealthStatus(provider="github-copilot", available=False)
+
+    chunks = [
+        chunk
+        async for chunk in chat_pipeline.stream_chat(
+            _FailingAdapter(),
+            "gpt-4o",
+            "Hello",
+            "session-error",
+            provider_name="github-copilot",
+        )
+    ]
+
+    assert chunks[-1].done is True
+    assert chunks[-1].error == "github-copilot returned 403: Forbidden"

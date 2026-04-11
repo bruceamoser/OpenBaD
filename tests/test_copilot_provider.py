@@ -174,6 +174,37 @@ class TestStream:
             chunks = [c async for c in provider.stream("hello")]
         assert chunks == ["Hi", "!"]
 
+    async def test_stream_falls_back_to_complete_on_stream_error(
+        self, provider: GitHubCopilotProvider
+    ) -> None:
+        error_resp = _json_response({}, status=403)
+        success_resp = _json_response(_CHAT_RESPONSE)
+        session = AsyncMock()
+        session.post = MagicMock(side_effect=[error_resp, success_resp])
+        session.get = MagicMock(return_value=success_resp)
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=session):
+            chunks = [c async for c in provider.stream("hello")]
+
+        assert chunks == ["Hello!"]
+
+    async def test_stream_ignores_empty_choice_chunks(
+        self, provider: GitHubCopilotProvider
+    ) -> None:
+        events = [
+            'data: {"choices":[]}\n',
+            'data: {"choices":[{"delta":{"content":"Hi"}}]}\n',
+            'data: [DONE]\n',
+        ]
+        resp = _sse_response(events)
+        session = _make_session(resp)
+        with patch("aiohttp.ClientSession", return_value=session):
+            chunks = [c async for c in provider.stream("hello")]
+
+        assert chunks == ["Hi"]
+
     async def test_stream_missing_token(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

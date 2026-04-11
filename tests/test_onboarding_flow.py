@@ -19,7 +19,10 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def app_with_onboarding(tmp_path: Path) -> tuple[web.Application, Path]:
+def app_with_onboarding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[web.Application, Path]:
     """Create an app with onboarding endpoints and identity persistence."""
     from aiohttp import web
 
@@ -53,6 +56,7 @@ user:
     app = web.Application()
     app["identity_persistence"] = persistence
     app["personality_modulator"] = modulator
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(tmp_path))
 
     app.router.add_get("/api/onboarding/status", _get_onboarding_status)
     app.router.add_post(
@@ -91,6 +95,8 @@ async def test_fresh_install_shows_incomplete(
     assert data["sleep_complete"] is False
     assert data["assistant_identity_complete"] is False
     assert data["user_profile_complete"] is False
+    assert data["next_step"] == "providers"
+    assert data["redirect_to"] == "/providers?wizard=1"
 
 
 # ------------------------------------------------------------------ #
@@ -116,6 +122,7 @@ async def test_partial_completion_assistant_only(
     assert data["onboarding_complete"] is False
     assert data["assistant_identity_complete"] is True
     assert data["user_profile_complete"] is False
+    assert data["next_step"] == "providers"
 
 
 async def test_partial_completion_user_only(
@@ -136,6 +143,7 @@ async def test_partial_completion_user_only(
     assert data["onboarding_complete"] is False
     assert data["assistant_identity_complete"] is False
     assert data["user_profile_complete"] is True
+    assert data["next_step"] == "providers"
 
 
 async def test_partial_completion_with_providers_and_sleep(
@@ -149,15 +157,16 @@ async def test_partial_completion_with_providers_and_sleep(
     # Create cognitive config with non-default provider
     cog_cfg = tmp_path / "cognitive.yaml"
     cog_cfg.write_text(
-        """providers:
-  - name: anthropic
-    base_url: https://api.anthropic.com
-    api_key_env: ANTHROPIC_API_KEY
-    enabled: true
-assignments:
-  - system: chat
-    provider: anthropic
-    model: claude-sonnet-4-20250514
+        """cognitive:
+  providers:
+    - name: custom
+      base_url: https://api.example.com
+      model: claude-sonnet-4-20250514
+      enabled: true
+  systems:
+    chat:
+      provider: custom
+      model: claude-sonnet-4-20250514
 """
     )
 
@@ -170,28 +179,17 @@ assignments:
 """
     )
 
-    # Mock config path resolution
-    import openbad.wui.server as server_module
+    resp = await client.get("/api/onboarding/status")
+    assert resp.status == 200
+    data = await resp.json()
 
-    original_resolve = server_module._resolve_memory_config_path
-
-    def mock_resolve():
-        return mem_cfg
-
-    server_module._resolve_memory_config_path = mock_resolve
-
-    try:
-        resp = await client.get("/api/onboarding/status")
-        assert resp.status == 200
-        data = await resp.json()
-
-        # Providers/sleep would be complete if we had the full setup detection
-        # For now, identity is still incomplete
-        assert data["onboarding_complete"] is False
-        assert data["assistant_identity_complete"] is False
-        assert data["user_profile_complete"] is False
-    finally:
-        server_module._resolve_memory_config_path = original_resolve
+    assert data["providers_complete"] is True
+    assert data["sleep_complete"] is True
+    assert data["onboarding_complete"] is False
+    assert data["assistant_identity_complete"] is False
+    assert data["user_profile_complete"] is False
+    assert data["next_step"] == "assistant_identity"
+    assert data["redirect_to"] == "/chat?onboarding=assistant"
 
 
 # ------------------------------------------------------------------ #

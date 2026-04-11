@@ -9,6 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import yaml
 
+from openbad.cognitive.config import (
+    CognitiveConfig,
+    CognitiveSystem,
+    ProviderConfig,
+    SystemAssignment,
+)
 from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
 from openbad.wui.server import BUILD_DIR, create_app
 
@@ -88,7 +94,6 @@ async def test_get_providers_route(aiohttp_client, tmp_path, monkeypatch):
     config_path.write_text(
         """
 cognitive:
-  default_provider: ollama
   enabled: true
   providers:
     - name: ollama
@@ -106,7 +111,6 @@ cognitive:
 
     assert resp.status == 200
     data = await resp.json()
-    assert data["default_provider"] == "ollama"
     assert data["providers"][0]["name"] == "ollama"
     assert data["config_path"].endswith("cognitive.yaml")
 
@@ -121,12 +125,10 @@ async def test_put_providers_route(aiohttp_client, tmp_path, monkeypatch):
     client = await aiohttp_client(app)
     payload = {
         "enabled": True,
-        "default_provider": "openai",
         "providers": [
             {
                 "name": "openai",
                 "base_url": "https://api.openai.com/v1",
-                "model": "gpt-4o-mini",
                 "api_key_env": "OPENAI_API_KEY",
                 "timeout_ms": 45000,
                 "enabled": True,
@@ -138,7 +140,6 @@ async def test_put_providers_route(aiohttp_client, tmp_path, monkeypatch):
 
     assert resp.status == 200
     data = await resp.json()
-    assert data["default_provider"] == "openai"
     saved = yaml.safe_load((config_dir / "cognitive.yaml").read_text())
     assert saved["cognitive"]["providers"][0]["api_key_env"] == "OPENAI_API_KEY"
     assert saved["cognitive"]["providers"][0]["timeout_ms"] == 45000
@@ -156,12 +157,10 @@ async def test_put_providers_route_persists_api_key_with_restricted_permissions(
     client = await aiohttp_client(app)
     payload = {
         "enabled": True,
-        "default_provider": "anthropic",
         "providers": [
             {
                 "name": "anthropic",
                 "base_url": "https://api.anthropic.com",
-                "model": "claude-sonnet-4-20250514",
                 "api_key": "secret-key",
                 "api_key_env": "ANTHROPIC_API_KEY",
                 "timeout_ms": 30000,
@@ -180,6 +179,49 @@ async def test_put_providers_route_persists_api_key_with_restricted_permissions(
     saved = yaml.safe_load((config_dir / "cognitive.yaml").read_text())
     assert saved["cognitive"]["providers"][0]["api_key"] == "secret-key"
     assert stat.S_IMODE(os.stat(config_dir / "cognitive.yaml").st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_get_providers_route_reports_saved_copilot_token(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    config_path = config_dir / "cognitive.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "cognitive": {
+                    "enabled": True,
+                    "providers": [
+                        {
+                            "name": "github-copilot",
+                            "base_url": "https://api.githubcopilot.com",
+                            "api_key_env": "GITHUB_COPILOT_TOKEN",
+                            "timeout_ms": 30000,
+                            "enabled": True,
+                        }
+                    ],
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    token_dir = tmp_path / "home" / ".openbad"
+    token_dir.mkdir(parents=True)
+    (token_dir / "copilot_token.json").write_text('{"access_token":"token","expires_at":9999999999}')
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr("openbad.cognitive.providers.github_copilot._TOKEN_FILE", token_dir / "copilot_token.json")
+    monkeypatch.setattr("openbad.wui.server._TOKEN_FILE", token_dir / "copilot_token.json")
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/providers")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["providers"][0]["has_api_key"] is True
 
 
 @pytest.mark.asyncio
@@ -215,12 +257,10 @@ async def test_get_setup_status_ready_with_valid_provider_and_chat_assignment(
             {
                 "cognitive": {
                     "enabled": True,
-                    "default_provider": "openai",
                     "providers": [
                         {
                             "name": "openai",
                             "base_url": "https://api.openai.com",
-                            "model": "gpt-4o-mini",
                             "api_key": "secret-key",
                             "api_key_env": "OPENAI_API_KEY",
                             "timeout_ms": 30000,
@@ -312,7 +352,6 @@ async def test_complete_copilot_device_flow_route(aiohttp_client):
     app = create_app(enable_mqtt=False)
     app["copilot_device_flows"]["flow-1"] = {
         "device_code": "device-123",
-        "default_model": "gpt-4o",
         "timeout_ms": 30000,
         "interval": 5,
         "expires_at": 9999999999,
@@ -418,48 +457,30 @@ async def test_verify_openai_provider_route(aiohttp_client):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method", "path", "payload", "location"),
+    ("method", "path", "payload", "expected_status"),
     [
-        ("get", "/api/wiring/providers", None, "/api/providers"),
-        (
-            "put",
-            "/api/wiring/providers",
-            {"enabled": True, "default_provider": "", "providers": []},
-            "/api/providers",
-        ),
-        (
-            "post",
-            "/api/wiring/providers/verify",
-            {"provider_type": "github-copilot"},
-            "/api/providers/verify",
-        ),
-        (
-            "post",
-            "/api/wiring/providers/copilot/device-code",
-            {"timeout_ms": 30000},
-            "/api/providers/copilot/device-code",
-        ),
-        (
-            "post",
-            "/api/wiring/providers/copilot/complete",
-            {"flow_id": "flow-1"},
-            "/api/providers/copilot/complete",
-        ),
+        ("get", "/api/wiring/providers", None, 200),
+        ("put", "/api/wiring/providers", {"enabled": True, "providers": []}, 405),
+        ("post", "/api/wiring/providers/verify", {"provider_type": "github-copilot"}, 405),
+        ("post", "/api/wiring/providers/copilot/device-code", {"timeout_ms": 30000}, 405),
+        ("post", "/api/wiring/providers/copilot/complete", {"flow_id": "flow-1"}, 405),
     ],
 )
-async def test_legacy_wiring_routes_redirect(aiohttp_client, method, path, payload, location):
+async def test_legacy_provider_prefix_routes_removed(
+    aiohttp_client, method, path, payload, expected_status
+):
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
 
     request = getattr(client, method)
-    kwargs = {"allow_redirects": False}
+    kwargs = {}
     if payload is not None:
         kwargs["json"] = payload
 
     resp = await request(path, **kwargs)
 
-    assert resp.status == 301
-    assert resp.headers["Location"] == location
+    assert resp.status == expected_status
+    assert resp.status != 301
 
 
 @pytest.mark.asyncio
@@ -496,19 +517,10 @@ def _cognitive_yaml_with_systems(tmp_path, monkeypatch, *, extra_sections=None):
     base = {
         "cognitive": {
             "enabled": True,
-            "default_provider": "ollama",
             "providers": [
                 {
                     "name": "ollama",
                     "base_url": "http://localhost:11434",
-                    "model": "llama3.2",
-                    "timeout_ms": 30000,
-                    "enabled": True,
-                },
-                {
-                    "name": "ollama",
-                    "base_url": "http://localhost:11434",
-                    "model": "bonsai-8b",
                     "timeout_ms": 30000,
                     "enabled": True,
                 },
@@ -559,9 +571,40 @@ async def test_get_systems_includes_enabled_providers(aiohttp_client, tmp_path, 
     resp = await client.get("/api/systems")
     data = await resp.json()
 
-    provider_models = [(p["name"], p["model"]) for p in data["providers"]]
-    assert ("ollama", "llama3.2") in provider_models
-    assert ("ollama", "bonsai-8b") in provider_models
+    provider_names = [p["name"] for p in data["providers"]]
+    assert provider_names == ["ollama"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_adapter_requires_explicit_system_model(aiohttp_client, tmp_path, monkeypatch):
+    import openbad.wui.server as srv
+
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    config = CognitiveConfig(
+        providers=[
+            ProviderConfig(
+                name="github-copilot",
+                base_url="https://api.githubcopilot.com",
+                model="gpt-4o",
+                api_key_env="GITHUB_COPILOT_TOKEN",
+            )
+        ],
+        systems={
+            CognitiveSystem.CHAT: SystemAssignment(provider="github-copilot", model=""),
+            CognitiveSystem.REASONING: SystemAssignment(),
+            CognitiveSystem.REACTIONS: SystemAssignment(),
+            CognitiveSystem.SLEEP: SystemAssignment(),
+        },
+    )
+
+    adapter, model, provider_name = srv._resolve_chat_adapter(config, "chat")
+
+    assert adapter is None
+    assert model is None
+    assert provider_name is None
 
 
 @pytest.mark.asyncio
@@ -813,6 +856,85 @@ async def test_put_sleep_config_persists_memory_yaml(aiohttp_client, tmp_path, m
     assert saved["memory"]["sleep"]["sleep_window_start"] == "01:30"
     assert saved["memory"]["sleep"]["sleep_window_duration_hours"] == 2.5
     assert saved["memory"]["sleep"]["allow_daytime_naps"] is False
+    assert saved["onboarding"]["sleep_configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_onboarding_status_marks_saved_default_sleep_as_complete(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    """Explicitly saved default sleep values should satisfy onboarding."""
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "user": {"name": "User"},
+        "assistant": {"name": "OpenBaD"},
+    }))
+
+    cognitive_path = tmp_path / "cognitive.yaml"
+    cognitive_path.write_text(
+        yaml.safe_dump(
+            {
+                "cognitive": {
+                    "providers": [
+                        {
+                            "name": "github-copilot",
+                            "base_url": "https://api.githubcopilot.com",
+                            "api_key_env": "GITHUB_COPILOT_TOKEN",
+                            "enabled": True,
+                        }
+                    ],
+                    "systems": {
+                        "chat": {
+                            "provider": "github-copilot",
+                            "model": "gpt-4o",
+                        }
+                    },
+                }
+            },
+            sort_keys=False,
+        )
+    )
+
+    memory_path = tmp_path / "memory.yaml"
+    memory_path.write_text(
+        yaml.safe_dump(
+            {
+                "memory": {
+                    "sleep": {
+                        "sleep_window_start": "02:00",
+                        "sleep_window_duration_hours": 1.0,
+                        "idle_timeout_minutes": 15,
+                        "allow_daytime_naps": True,
+                        "enabled": True,
+                    }
+                },
+                "onboarding": {"sleep_configured": True},
+            },
+            sort_keys=False,
+        )
+    )
+
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GITHUB_COPILOT_TOKEN", "test-token")
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/onboarding/status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["providers_complete"] is True
+    assert data["sleep_complete"] is True
+    assert data["next_step"] == "assistant_identity"
+    assert data["redirect_to"] == "/chat?onboarding=assistant"
 
 
 @pytest.mark.asyncio
@@ -1202,6 +1324,8 @@ async def test_get_onboarding_status_with_default_profiles(aiohttp_client, tmp_p
     data = await resp.json()
     assert data["assistant_identity_complete"] is False  # OpenBaD is default
     assert data["user_profile_complete"] is False  # "User" is default
+    assert data["next_step"] == "providers"
+    assert data["redirect_to"] == "/providers?wizard=1"
 
 
 @pytest.mark.asyncio
@@ -1235,6 +1359,64 @@ async def test_get_onboarding_status_with_configured_profiles(aiohttp_client, tm
     data = await resp.json()
     assert data["assistant_identity_complete"] is True
     assert data["user_profile_complete"] is True
+    assert data["next_step"] == "providers"
+    assert data["redirect_to"] == "/providers?wizard=1"
+
+
+@pytest.mark.asyncio
+async def test_get_onboarding_status_uses_setup_ready_provider_logic(aiohttp_client, tmp_path, monkeypatch):
+    """Configured providers plus chat assignment should not redirect back to provider setup."""
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "user": {"name": "User"},
+        "assistant": {"name": "OpenBaD"},
+    }))
+
+    cognitive_path = tmp_path / "cognitive.yaml"
+    cognitive_path.write_text(
+        yaml.safe_dump(
+            {
+                "cognitive": {
+                    "providers": [
+                        {
+                            "name": "github-copilot",
+                            "base_url": "https://api.githubcopilot.com",
+                            "api_key_env": "GITHUB_COPILOT_TOKEN",
+                            "enabled": True,
+                        }
+                    ],
+                    "systems": {
+                        "chat": {
+                            "provider": "github-copilot",
+                            "model": "gpt-4o",
+                        }
+                    },
+                },
+            },
+            sort_keys=False,
+        )
+    )
+
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("GITHUB_COPILOT_TOKEN", "test-token")
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/onboarding/status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["providers_complete"] is True
+    assert data["next_step"] == "sleep"
+    assert data["redirect_to"] == "/health?onboarding=sleep"
 
 
 @pytest.mark.asyncio

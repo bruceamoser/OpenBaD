@@ -295,26 +295,37 @@ class GitHubCopilotProvider(ProviderAdapter):
         }
         url = f"{_COPILOT_API_URL}/chat/completions"
         headers = self._headers()
-        async with (
-            aiohttp.ClientSession(timeout=self._timeout) as session,
-            session.post(url, json=payload, headers=headers) as resp,
-        ):
-            resp.raise_for_status()
-            async for line in resp.content:
-                text = line.decode().strip()
-                if not text or not text.startswith("data:"):
-                    continue
-                data_str = text[len("data:"):].strip()
-                if data_str == "[DONE]":
-                    break
-                chunk = json.loads(data_str)
-                delta = (
-                    chunk.get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content", "")
-                )
-                if delta:
-                    yield delta
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=self._timeout) as session,
+                session.post(url, json=payload, headers=headers) as resp,
+            ):
+                resp.raise_for_status()
+                async for line in resp.content:
+                    text = line.decode().strip()
+                    if not text or not text.startswith("data:"):
+                        continue
+                    data_str = text[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        break
+                    chunk = json.loads(data_str)
+                    choices = chunk.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    first_choice = choices[0]
+                    if not isinstance(first_choice, dict):
+                        continue
+                    delta_payload = first_choice.get("delta", {})
+                    if not isinstance(delta_payload, dict):
+                        continue
+                    delta = delta_payload.get("content", "")
+                    if isinstance(delta, str) and delta:
+                        yield delta
+                return
+        except (aiohttp.ClientError, TimeoutError, OSError, ValueError, KeyError, IndexError):
+            completion = await self.complete(prompt, model_id=model, **kwargs)
+            if completion.content:
+                yield completion.content
 
     async def list_models(self) -> list[ModelInfo]:
         discovered = await self._discover_models()
