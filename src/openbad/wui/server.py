@@ -12,7 +12,7 @@ import logging
 import os
 import stat
 import time
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -1112,6 +1112,8 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
 
         persistence = request.app.get("identity_persistence")
         modulator = request.app.get("personality_modulator")
+        bridge = request.app.get("bridge")
+        nervous_system_client = getattr(bridge, "_mqtt", None) if bridge else None
 
         async for chunk in stream_chat(
             adapter,
@@ -1124,6 +1126,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
             assistant_profile=getattr(persistence, "assistant", None),
             modulation=getattr(modulator, "factors", None),
             usage_tracker=request.app.get("usage_tracker"),
+            nervous_system_client=nervous_system_client,
         ):
             if chunk.error:
                 data = json.dumps(
@@ -1332,7 +1335,7 @@ def _sleep_payload(
     *,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    ts = now or datetime.now(timezone.utc)
+    ts = now or datetime.now(UTC)
 
     next_scheduled: str | None
     if not config.enabled:
@@ -1391,7 +1394,7 @@ async def _post_sleep_trigger(request: web.Request) -> web.Response:
     if isinstance(runtime, dict):
         runtime["last_summary"] = {
             "state": "manual_sleep_requested",
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": datetime.now(UTC).isoformat(),
         }
     _publish_sleep_command(request, "sleep")
     return web.json_response({"ok": True, "state": "sleep_requested"})
@@ -1402,7 +1405,7 @@ async def _post_sleep_wake(request: web.Request) -> web.Response:
     if isinstance(runtime, dict):
         runtime["last_summary"] = {
             "state": "manual_wake_requested",
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": datetime.now(UTC).isoformat(),
         }
     _publish_sleep_command(request, "wake")
     return web.json_response({"ok": True, "state": "wake_requested"})

@@ -66,6 +66,9 @@ COGNITIVE_REQUEST = "agent/cognitive/request"
 COGNITIVE_RESPONSE = "agent/cognitive/response"
 COGNITIVE_HEALTH = "agent/cognitive/health"
 COGNITIVE_CONTEXT = "agent/cognitive/context"
+COGNITIVE_INPUT = "agent/cognitive/input"
+COGNITIVE_OUTPUT = "agent/cognitive/output"
+COGNITIVE_ERROR = "agent/cognitive/error"
 
 # Wildcard: all cognitive traffic
 COGNITIVE_ALL = "agent/cognitive/#"
