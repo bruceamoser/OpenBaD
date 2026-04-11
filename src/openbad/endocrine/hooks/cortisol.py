@@ -55,6 +55,11 @@ class CortisolHooks:
         amount *= min(float(error_count), 3.0)
         return self._controller.trigger("cortisol", amount)
 
+    def on_tool_degraded(self, tool_name: str, reason: str = "") -> float:
+        """Fire cortisol when a sensory tool transitions to DEGRADED."""
+        amount = self._controller._config.cortisol.increment  # noqa: SLF001
+        return self._controller.trigger("cortisol", amount)
+
     def fire(self, event: CortisolEvent) -> float:
         """Generic cortisol trigger from a ``CortisolEvent``."""
         amount = (

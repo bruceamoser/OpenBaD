@@ -24,6 +24,7 @@ TELEMETRY_MEMORY = "agent/telemetry/memory"
 TELEMETRY_DISK = "agent/telemetry/disk"
 TELEMETRY_NETWORK = "agent/telemetry/network"
 TELEMETRY_TOKENS = "agent/telemetry/tokens"
+TELEMETRY_SENSORY_HEALTH = "agent/telemetry/sensory_health"
 
 # Wildcard: subscribe to all telemetry
 TELEMETRY_ALL = "agent/telemetry/+"
