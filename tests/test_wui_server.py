@@ -330,3 +330,161 @@ async def test_github_copilot_list_models_falls_back_to_known_models():
     models = await provider.list_models()
 
     assert "gpt-4o" in [model.model_id for model in models]
+
+
+# ── System assignment endpoints ──────────────────────────────────── #
+
+
+def _cognitive_yaml_with_systems(tmp_path, monkeypatch, *, extra_sections=None):
+    """Create a temporary cognitive.yaml with systems + fallback chain."""
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir(exist_ok=True)
+    base = {
+        "cognitive": {
+            "enabled": True,
+            "default_provider": "ollama",
+            "providers": [
+                {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434",
+                    "model": "llama3.2",
+                    "timeout_ms": 30000,
+                    "enabled": True,
+                },
+                {
+                    "name": "ollama",
+                    "base_url": "http://localhost:11434",
+                    "model": "bonsai-8b",
+                    "timeout_ms": 30000,
+                    "enabled": True,
+                },
+            ],
+            "systems": {
+                "chat": {"provider": "ollama", "model": "llama3.2"},
+                "sleep": {"provider": "ollama", "model": "bonsai-8b"},
+                "reasoning": {"provider": "ollama", "model": "llama3.2"},
+                "reactions": {"provider": "ollama", "model": "bonsai-8b"},
+            },
+            "default_fallback_chain": [
+                {"provider": "ollama", "model": "bonsai-8b"},
+                {"provider": "ollama", "model": "llama3.2"},
+            ],
+        }
+    }
+    if extra_sections:
+        base["cognitive"].update(extra_sections)
+    config_path = config_dir / "cognitive.yaml"
+    config_path.write_text(yaml.safe_dump(base, sort_keys=False))
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    return config_dir
+
+
+@pytest.mark.asyncio
+async def test_get_systems_returns_assignments(aiohttp_client, tmp_path, monkeypatch):
+    _cognitive_yaml_with_systems(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/systems")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["systems"]["chat"]["provider"] == "ollama"
+    assert data["systems"]["chat"]["model"] == "llama3.2"
+    assert data["systems"]["sleep"]["model"] == "bonsai-8b"
+    assert len(data["fallback_chain"]) == 2
+    assert data["fallback_chain"][0]["model"] == "bonsai-8b"
+
+
+@pytest.mark.asyncio
+async def test_get_systems_includes_enabled_providers(aiohttp_client, tmp_path, monkeypatch):
+    _cognitive_yaml_with_systems(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/systems")
+    data = await resp.json()
+
+    provider_models = [(p["name"], p["model"]) for p in data["providers"]]
+    assert ("ollama", "llama3.2") in provider_models
+    assert ("ollama", "bonsai-8b") in provider_models
+
+
+@pytest.mark.asyncio
+async def test_put_systems_updates_config(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = _cognitive_yaml_with_systems(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "systems": {
+            "chat": {"provider": "ollama", "model": "bonsai-8b"},
+            "sleep": {"provider": "ollama", "model": "bonsai-8b"},
+            "reasoning": {"provider": "ollama", "model": "bonsai-8b"},
+            "reactions": {"provider": "ollama", "model": "llama3.2"},
+        },
+        "fallback_chain": [
+            {"provider": "ollama", "model": "llama3.2"},
+        ],
+    }
+    resp = await client.put("/api/systems", json=payload)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["systems"]["chat"]["model"] == "bonsai-8b"
+    assert len(data["fallback_chain"]) == 1
+
+    saved = yaml.safe_load((config_dir / "cognitive.yaml").read_text())
+    assert saved["cognitive"]["systems"]["chat"]["model"] == "bonsai-8b"
+    assert len(saved["cognitive"]["default_fallback_chain"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_put_systems_preserves_other_sections(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = _cognitive_yaml_with_systems(
+        tmp_path, monkeypatch, extra_sections={"model_routing": {"tier": "balanced"}}
+    )
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "systems": {
+            "chat": {"provider": "ollama", "model": "llama3.2"},
+            "sleep": {"provider": "ollama", "model": "bonsai-8b"},
+            "reasoning": {"provider": "ollama", "model": "llama3.2"},
+            "reactions": {"provider": "ollama", "model": "bonsai-8b"},
+        },
+        "fallback_chain": [],
+    }
+    resp = await client.put("/api/systems", json=payload)
+    assert resp.status == 200
+
+    saved = yaml.safe_load((config_dir / "cognitive.yaml").read_text())
+    assert saved["cognitive"]["model_routing"]["tier"] == "balanced"
+    assert saved["cognitive"]["providers"][0]["name"] == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_put_systems_rejects_unknown_system(aiohttp_client, tmp_path, monkeypatch):
+    _cognitive_yaml_with_systems(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "systems": {"badname": {"provider": "x", "model": "y"}},
+        "fallback_chain": [],
+    }
+    resp = await client.put("/api/systems", json=payload)
+    assert resp.status == 400
+    text = await resp.text()
+    assert "unknown system" in text
+
+
+@pytest.mark.asyncio
+async def test_put_systems_rejects_invalid_body(aiohttp_client, tmp_path, monkeypatch):
+    _cognitive_yaml_with_systems(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.put("/api/systems", json={"systems": "bad", "fallback_chain": []})
+    assert resp.status == 400

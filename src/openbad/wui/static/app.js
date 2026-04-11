@@ -63,6 +63,15 @@ const els = {
     save: document.getElementById('save-provider'),
     modelSelect: document.getElementById('wizard-model-select'),
   },
+  systems: {
+    status: document.getElementById('systems-status'),
+    saveStatus: document.getElementById('systems-save-status'),
+    saveBtn: document.getElementById('save-systems'),
+    chainList: document.getElementById('fallback-chain-list'),
+    chainAddProvider: document.getElementById('fallback-add-provider'),
+    chainAddModel: document.getElementById('fallback-add-model'),
+    chainAddBtn: document.getElementById('fallback-add-btn'),
+  },
 };
 
 const viewMeta = {
@@ -99,6 +108,8 @@ let activeEventSource = null;
 let providerDrafts = [];
 let activeTransport = 'offline';
 let currentView = 'health';
+let systemsData = { systems: {}, fallback_chain: [], providers: [] };
+let fallbackCounts = { chat: 0, sleep: 0, reasoning: 0, reactions: 0 };
 let wizardState = {
   open: false,
   editIndex: null,
@@ -146,6 +157,7 @@ function setView(name) {
 
   if (name === 'providers') {
     loadProvidersConfig();
+    loadSystemsConfig();
   }
 }
 
@@ -264,6 +276,22 @@ function updateFromEvent(topic, payload) {
   if (topic === 'agent/cognitive/response') {
     els.inference.lastTokens.textContent = `${payload.tokens_used || 0}`;
     els.inference.lastLatency.textContent = `${Number(payload.latency_ms || 0).toFixed(1)}ms`;
+    return;
+  }
+
+  if (topic === 'agent/cognitive/fallback') {
+    const system = payload.system || '';
+    if (system in fallbackCounts) {
+      fallbackCounts[system]++;
+      const badge = document.querySelector(`.fallback-badge[data-system="${system}"]`);
+      if (badge) {
+        badge.textContent = String(fallbackCounts[system]);
+        badge.classList.remove('green', 'yellow', 'red');
+        if (fallbackCounts[system] >= 5) badge.classList.add('red');
+        else if (fallbackCounts[system] >= 2) badge.classList.add('yellow');
+        else badge.classList.add('green');
+      }
+    }
   }
 }
 
@@ -721,6 +749,164 @@ async function removeProvider(index) {
   }
 }
 
+// ------------------------------------------------------------------ //
+// System Assignments
+// ------------------------------------------------------------------ //
+
+async function loadSystemsConfig() {
+  if (els.systems.status) els.systems.status.textContent = 'Loading system assignments...';
+  try {
+    const response = await fetch('/api/systems');
+    if (!response.ok) throw new Error(`load failed (${response.status})`);
+    systemsData = await response.json();
+    renderSystemAssignments();
+    renderFallbackChain();
+    if (els.systems.status) els.systems.status.textContent = 'System assignments loaded.';
+  } catch (error) {
+    if (els.systems.status) els.systems.status.textContent = `Unable to load systems: ${error.message}`;
+  }
+}
+
+function renderSystemAssignments() {
+  const providers = systemsData.providers || [];
+  const providerNames = [...new Set(providers.map(p => p.name))];
+
+  for (const system of ['chat', 'sleep', 'reasoning', 'reactions']) {
+    const assignment = (systemsData.systems || {})[system] || {};
+    const providerSelect = document.querySelector(`.system-provider[data-system="${system}"]`);
+    const modelInput = document.querySelector(`.system-model[data-system="${system}"]`);
+    if (!providerSelect || !modelInput) continue;
+
+    providerSelect.innerHTML = '<option value="">--</option>';
+    for (const name of providerNames) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      opt.selected = name === assignment.provider;
+      providerSelect.append(opt);
+    }
+
+    modelInput.innerHTML = '<option value="">--</option>';
+    const matchingModels = providers.filter(p => p.name === assignment.provider).map(p => p.model).filter(Boolean);
+    for (const model of matchingModels) {
+      const opt = document.createElement('option');
+      opt.value = model;
+      opt.textContent = model;
+      opt.selected = model === assignment.model;
+      modelInput.append(opt);
+    }
+    // If the current model isn't in the list, add it as an option
+    if (assignment.model && !matchingModels.includes(assignment.model)) {
+      const opt = document.createElement('option');
+      opt.value = assignment.model;
+      opt.textContent = assignment.model;
+      opt.selected = true;
+      modelInput.append(opt);
+    }
+  }
+
+  // Populate fallback chain add-provider dropdown
+  if (els.systems.chainAddProvider) {
+    els.systems.chainAddProvider.innerHTML = '<option value="">Provider</option>';
+    for (const name of providerNames) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      els.systems.chainAddProvider.append(opt);
+    }
+  }
+}
+
+function renderFallbackChain() {
+  const list = els.systems.chainList;
+  if (!list) return;
+  const chain = systemsData.fallback_chain || [];
+  if (chain.length === 0) {
+    list.innerHTML = '<div class="empty-state"><p>No fallback chain configured.</p></div>';
+    return;
+  }
+  list.innerHTML = chain.map((step, i) => `
+    <div class="fallback-step" data-index="${i}">
+      <span class="fallback-step-handle" draggable="true">&#x2630;</span>
+      <span class="mono">${escapeHtml(step.provider)}/${escapeHtml(step.model)}</span>
+      <button type="button" class="ghost-button fallback-remove" data-remove-chain="${i}">&times;</button>
+    </div>
+  `).join('');
+
+  // Simple drag-and-drop reorder
+  list.querySelectorAll('.fallback-step-handle').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', handle.closest('.fallback-step').dataset.index);
+    });
+  });
+  list.querySelectorAll('.fallback-step').forEach(step => {
+    step.addEventListener('dragover', (e) => { e.preventDefault(); });
+    step.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const fromIdx = Number(e.dataTransfer.getData('text/plain'));
+      const toIdx = Number(step.dataset.index);
+      if (fromIdx !== toIdx) {
+        const chain = systemsData.fallback_chain;
+        const [moved] = chain.splice(fromIdx, 1);
+        chain.splice(toIdx, 0, moved);
+        renderFallbackChain();
+      }
+    });
+  });
+}
+
+function addFallbackStep() {
+  const provider = (els.systems.chainAddProvider?.value || '').trim();
+  const model = (els.systems.chainAddModel?.value || '').trim();
+  if (!provider) return;
+  if (!systemsData.fallback_chain) systemsData.fallback_chain = [];
+  systemsData.fallback_chain.push({ provider, model });
+  renderFallbackChain();
+  if (els.systems.chainAddProvider) els.systems.chainAddProvider.value = '';
+  if (els.systems.chainAddModel) els.systems.chainAddModel.value = '';
+}
+
+function removeFallbackStep(index) {
+  if (systemsData.fallback_chain) {
+    systemsData.fallback_chain.splice(index, 1);
+    renderFallbackChain();
+  }
+}
+
+async function saveSystemsConfig() {
+  const systems = {};
+  for (const system of ['chat', 'sleep', 'reasoning', 'reactions']) {
+    const providerSelect = document.querySelector(`.system-provider[data-system="${system}"]`);
+    const modelSelect = document.querySelector(`.system-model[data-system="${system}"]`);
+    systems[system] = {
+      provider: providerSelect?.value || '',
+      model: modelSelect?.value || '',
+    };
+  }
+  const payload = {
+    systems,
+    fallback_chain: systemsData.fallback_chain || [],
+  };
+  if (els.systems.saveStatus) els.systems.saveStatus.textContent = 'Saving...';
+  try {
+    const response = await fetch('/api/systems', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `save failed (${response.status})`);
+    }
+    systemsData = await response.json();
+    renderSystemAssignments();
+    renderFallbackChain();
+    if (els.systems.saveStatus) els.systems.saveStatus.textContent = 'Saved.';
+  } catch (error) {
+    if (els.systems.saveStatus) els.systems.saveStatus.textContent = `Save failed: ${error.message}`;
+  }
+}
+
 function bindEvents() {
   for (const link of els.navLinks) {
     link.addEventListener('click', () => setView(link.dataset.viewTarget));
@@ -771,6 +957,41 @@ function bindEvents() {
     if (remove) {
       removeProvider(Number(remove.dataset.removeProvider));
     }
+  });
+
+  // System assignment events
+  if (els.systems.saveBtn) {
+    els.systems.saveBtn.addEventListener('click', saveSystemsConfig);
+  }
+  if (els.systems.chainAddBtn) {
+    els.systems.chainAddBtn.addEventListener('click', addFallbackStep);
+  }
+  if (els.systems.chainList) {
+    els.systems.chainList.addEventListener('click', (event) => {
+      const removeBtn = event.target.closest('[data-remove-chain]');
+      if (removeBtn) {
+        removeFallbackStep(Number(removeBtn.dataset.removeChain));
+      }
+    });
+  }
+
+  // Update model dropdown when system provider changes
+  document.querySelectorAll('.system-provider').forEach(select => {
+    select.addEventListener('change', () => {
+      const system = select.dataset.system;
+      const modelSelect = document.querySelector(`.system-model[data-system="${system}"]`);
+      if (!modelSelect) return;
+      const providerName = select.value;
+      const providers = systemsData.providers || [];
+      const models = providers.filter(p => p.name === providerName).map(p => p.model).filter(Boolean);
+      modelSelect.innerHTML = '<option value="">--</option>';
+      for (const model of models) {
+        const opt = document.createElement('option');
+        opt.value = model;
+        opt.textContent = model;
+        modelSelect.append(opt);
+      }
+    });
   });
 
   document.getElementById('chat-form').addEventListener('submit', (event) => {

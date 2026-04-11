@@ -247,6 +247,57 @@
             </form>
             <p id="wizard-status" class="inline-status">Choose a provider type to begin the setup walkthrough.</p>
           </article>
+
+          <article class="card section-card system-assignments-card">
+            <div class="section-head">
+              <h3>System Assignments</h3>
+              <span class="section-note">Per-system provider and model routing</span>
+            </div>
+            <div id="system-assignments" class="stack">
+              <div class="row system-row" data-system="chat">
+                <div class="label-block"><span class="label-title">Chat</span></div>
+                <select class="system-provider" data-system="chat"><option value="">--</option></select>
+                <select class="system-model" data-system="chat"><option value="">--</option></select>
+                <span class="fallback-badge" data-system="chat" title="Fallback count in last hour">0</span>
+              </div>
+              <div class="row system-row" data-system="sleep">
+                <div class="label-block"><span class="label-title">Sleep</span></div>
+                <select class="system-provider" data-system="sleep"><option value="">--</option></select>
+                <select class="system-model" data-system="sleep"><option value="">--</option></select>
+                <span class="fallback-badge" data-system="sleep" title="Fallback count in last hour">0</span>
+              </div>
+              <div class="row system-row" data-system="reasoning">
+                <div class="label-block"><span class="label-title">Reasoning</span></div>
+                <select class="system-provider" data-system="reasoning"><option value="">--</option></select>
+                <select class="system-model" data-system="reasoning"><option value="">--</option></select>
+                <span class="fallback-badge" data-system="reasoning" title="Fallback count in last hour">0</span>
+              </div>
+              <div class="row system-row" data-system="reactions">
+                <div class="label-block"><span class="label-title">Reactions</span></div>
+                <select class="system-provider" data-system="reactions"><option value="">--</option></select>
+                <select class="system-model" data-system="reactions"><option value="">--</option></select>
+                <span class="fallback-badge" data-system="reactions" title="Fallback count in last hour">0</span>
+              </div>
+            </div>
+            <p id="systems-status" class="inline-status">Loading system assignments...</p>
+          </article>
+
+          <article class="card section-card fallback-chain-card">
+            <div class="section-head">
+              <h3>Fallback Chain</h3>
+              <span class="section-note">Shared default chain — drag to reorder</span>
+            </div>
+            <div id="fallback-chain-list" class="fallback-list"></div>
+            <div class="fallback-controls">
+              <select id="fallback-add-provider"><option value="">Provider</option></select>
+              <input id="fallback-add-model" type="text" placeholder="model">
+              <button id="fallback-add-btn" type="button" class="secondary-button">Add</button>
+            </div>
+            <div class="wizard-actions">
+              <button id="save-systems" type="button" class="primary-button">Save assignments</button>
+            </div>
+            <p id="systems-save-status" class="inline-status"></p>
+          </article>
         </div>
       </section>
 
