@@ -143,3 +143,70 @@ class TestImportability:
             TELEMETRY_TOKENS,
         ):
             assert isinstance(name, str)
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: task / research / scheduler topic constants — Issue #341
+# ---------------------------------------------------------------------------
+
+
+class TestPhase9TopicConstants:
+    """New Phase 9 topics must have correct static values and set membership."""
+
+    # --- constant values ---
+
+    def test_task_all_wildcard_value(self) -> None:
+        assert topics.TASK_ALL == "agent/task/#"
+
+    def test_research_all_wildcard_value(self) -> None:
+        assert topics.RESEARCH_ALL == "agent/research/#"
+
+    def test_scheduler_all_wildcard_value(self) -> None:
+        assert topics.SCHEDULER_ALL == "agent/scheduler/+"
+
+    def test_scheduler_tick_static_value(self) -> None:
+        assert topics.SCHEDULER_TICK == "agent/scheduler/tick"
+
+    def test_research_queued_static_value(self) -> None:
+        assert topics.RESEARCH_QUEUED == "agent/research/queued"
+
+    # --- wildcard set membership ---
+
+    def test_task_all_in_wildcard_topics(self) -> None:
+        assert topics.TASK_ALL in topics.WILDCARD_TOPICS
+
+    def test_research_all_in_wildcard_topics(self) -> None:
+        assert topics.RESEARCH_ALL in topics.WILDCARD_TOPICS
+
+    def test_scheduler_all_in_wildcard_topics(self) -> None:
+        assert topics.SCHEDULER_ALL in topics.WILDCARD_TOPICS
+
+    # --- static set membership ---
+
+    def test_scheduler_constants_in_static_topics(self) -> None:
+        for constant in (
+            topics.SCHEDULER_TICK,
+            topics.SCHEDULER_WINDOW_START,
+            topics.SCHEDULER_WINDOW_END,
+            topics.SCHEDULER_DISPATCH,
+        ):
+            assert constant in topics.STATIC_TOPICS, f"{constant!r} missing from STATIC_TOPICS"
+
+    def test_research_queued_in_static_topics(self) -> None:
+        assert topics.RESEARCH_QUEUED in topics.STATIC_TOPICS
+
+    # --- template resolution ---
+
+    def test_task_status_template(self) -> None:
+        result = topics.topic_for(topics.TASK_STATUS, task_id="abc-123")
+        assert result == "agent/task/abc-123/status"
+
+    def test_task_node_status_template(self) -> None:
+        result = topics.topic_for(
+            topics.TASK_NODE_STATUS, task_id="t-1", node_id="n-1"
+        )
+        assert result == "agent/task/t-1/node/n-1/status"
+
+    def test_research_finding_template(self) -> None:
+        result = topics.topic_for(topics.RESEARCH_FINDING, research_id="r-99")
+        assert result == "agent/research/r-99/finding"

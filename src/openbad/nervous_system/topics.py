@@ -130,6 +130,41 @@ SLEEP_ALL = "agent/sleep/+"
 PROPRIOCEPTION_HEARTBEAT = "agent/proprioception/{tool_id}/heartbeat"
 PROPRIOCEPTION_ALL = "agent/proprioception/#"
 
+# ---------------------------------------------------------------------------
+# Task orchestration (Phase 9)
+# ---------------------------------------------------------------------------
+TASK_CREATED = "agent/task/{task_id}/created"
+TASK_UPDATED = "agent/task/{task_id}/updated"
+TASK_STATUS = "agent/task/{task_id}/status"
+TASK_NODE_STATUS = "agent/task/{task_id}/node/{node_id}/status"
+TASK_COMPLETED = "agent/task/{task_id}/completed"
+TASK_FAILED = "agent/task/{task_id}/failed"
+
+# Wildcard: all task events
+TASK_ALL = "agent/task/#"
+
+# ---------------------------------------------------------------------------
+# Research queue (Phase 9)
+# ---------------------------------------------------------------------------
+RESEARCH_QUEUED = "agent/research/queued"
+RESEARCH_STARTED = "agent/research/{research_id}/started"
+RESEARCH_COMPLETED = "agent/research/{research_id}/completed"
+RESEARCH_FINDING = "agent/research/{research_id}/finding"
+
+# Wildcard: all research events
+RESEARCH_ALL = "agent/research/#"
+
+# ---------------------------------------------------------------------------
+# Scheduler (Phase 9)
+# ---------------------------------------------------------------------------
+SCHEDULER_TICK = "agent/scheduler/tick"
+SCHEDULER_WINDOW_START = "agent/scheduler/window/start"
+SCHEDULER_WINDOW_END = "agent/scheduler/window/end"
+SCHEDULER_DISPATCH = "agent/scheduler/dispatch"
+
+# Wildcard: all scheduler events
+SCHEDULER_ALL = "agent/scheduler/+"
+
 
 # ---------------------------------------------------------------------------
 # Helper: resolve topic templates
@@ -167,6 +202,12 @@ STATIC_TOPICS: tuple[str, ...] = (
     MEMORY_LTM_CONSOLIDATE,
     SENSORY_AUDIO_TTS_COMPLETE,
     SENSORY_ATTENTION_TRIGGER,
+    # Phase 9
+    RESEARCH_QUEUED,
+    SCHEDULER_TICK,
+    SCHEDULER_WINDOW_START,
+    SCHEDULER_WINDOW_END,
+    SCHEDULER_DISPATCH,
 )
 
 TEMPLATE_TOPICS: tuple[str, ...] = (
@@ -178,6 +219,16 @@ TEMPLATE_TOPICS: tuple[str, ...] = (
     ENDOCRINE,
     SLEEP,
     PROPRIOCEPTION_HEARTBEAT,
+    # Phase 9
+    TASK_CREATED,
+    TASK_UPDATED,
+    TASK_STATUS,
+    TASK_NODE_STATUS,
+    TASK_COMPLETED,
+    TASK_FAILED,
+    RESEARCH_STARTED,
+    RESEARCH_COMPLETED,
+    RESEARCH_FINDING,
 )
 
 WILDCARD_TOPICS: tuple[str, ...] = (
@@ -191,4 +242,8 @@ WILDCARD_TOPICS: tuple[str, ...] = (
     MEMORY_ALL,
     SLEEP_ALL,
     PROPRIOCEPTION_ALL,
+    # Phase 9
+    TASK_ALL,
+    RESEARCH_ALL,
+    SCHEDULER_ALL,
 )
