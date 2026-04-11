@@ -151,3 +151,73 @@ def test_task_terminal_states_have_no_transitions(terminal: TaskStatus) -> None:
 def test_node_terminal_states_have_no_transitions(terminal: NodeStatus) -> None:
     for other in NodeStatus:
         assert not is_valid_node_transition(terminal, other)
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: new status enum values (#406)
+# ---------------------------------------------------------------------------
+
+
+class TestPhase10StatusEnums:
+    def test_task_blocked_on_user_exists(self) -> None:
+        assert TaskStatus.BLOCKED_ON_USER == "blocked_on_user"
+
+    def test_node_deferred_resources_exists(self) -> None:
+        assert NodeStatus.DEFERRED_RESOURCES == "deferred_resources"
+
+    def test_node_quarantined_exists(self) -> None:
+        assert NodeStatus.QUARANTINED == "quarantined"
+
+    def test_node_blocked_on_user_exists(self) -> None:
+        assert NodeStatus.BLOCKED_ON_USER == "blocked_on_user"
+
+    # New valid task transitions
+    @pytest.mark.parametrize(
+        "current, next_status",
+        [
+            (TaskStatus.RUNNING, TaskStatus.BLOCKED_ON_USER),
+            (TaskStatus.BLOCKED_ON_USER, TaskStatus.RUNNING),
+            (TaskStatus.BLOCKED_ON_USER, TaskStatus.CANCELLED),
+        ],
+    )
+    def test_valid_task_transitions_phase10(
+        self, current: TaskStatus, next_status: TaskStatus
+    ) -> None:
+        assert is_valid_task_transition(current, next_status)
+        assert_valid_task_transition(current, next_status)
+
+    # New valid node transitions
+    @pytest.mark.parametrize(
+        "current, next_status",
+        [
+            (NodeStatus.RUNNING, NodeStatus.DEFERRED_RESOURCES),
+            (NodeStatus.DEFERRED_RESOURCES, NodeStatus.RUNNING),
+            (NodeStatus.DEFERRED_RESOURCES, NodeStatus.CANCELLED),
+            (NodeStatus.RUNNING, NodeStatus.QUARANTINED),
+            (NodeStatus.RUNNING, NodeStatus.BLOCKED_ON_USER),
+            (NodeStatus.BLOCKED_ON_USER, NodeStatus.RUNNING),
+            (NodeStatus.BLOCKED_ON_USER, NodeStatus.CANCELLED),
+        ],
+    )
+    def test_valid_node_transitions_phase10(
+        self, current: NodeStatus, next_status: NodeStatus
+    ) -> None:
+        assert is_valid_node_transition(current, next_status)
+        assert_valid_node_transition(current, next_status)
+
+    def test_quarantined_is_terminal(self) -> None:
+        for other in NodeStatus:
+            assert not is_valid_node_transition(NodeStatus.QUARANTINED, other)
+
+    def test_new_values_round_trip_to_string(self) -> None:
+        assert str(TaskStatus.BLOCKED_ON_USER) == "blocked_on_user"
+        assert str(NodeStatus.DEFERRED_RESOURCES) == "deferred_resources"
+        assert str(NodeStatus.QUARANTINED) == "quarantined"
+        assert str(NodeStatus.BLOCKED_ON_USER) == "blocked_on_user"
+
+    def test_blocked_on_user_invalid_task_transitions(self) -> None:
+        # Can't jump straight from BLOCKED_ON_USER to terminal without RUNNING
+        assert not is_valid_task_transition(TaskStatus.BLOCKED_ON_USER, TaskStatus.DONE)
+        assert not is_valid_task_transition(
+            TaskStatus.BLOCKED_ON_USER, TaskStatus.FAILED
+        )

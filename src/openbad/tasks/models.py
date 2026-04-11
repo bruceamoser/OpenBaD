@@ -18,6 +18,7 @@ class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     BLOCKED = "blocked"
+    BLOCKED_ON_USER = "blocked_on_user"
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -29,6 +30,9 @@ class NodeStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     BLOCKED = "blocked"
+    DEFERRED_RESOURCES = "deferred_resources"
+    QUARANTINED = "quarantined"
+    BLOCKED_ON_USER = "blocked_on_user"
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -78,9 +82,16 @@ class TaskPriority(int, Enum):
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PENDING: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
     TaskStatus.RUNNING: frozenset(
-        {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+        {
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.BLOCKED_ON_USER,
+            TaskStatus.CANCELLED,
+        }
     ),
     TaskStatus.BLOCKED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
+    TaskStatus.BLOCKED_ON_USER: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
     TaskStatus.DONE: frozenset(),
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),
@@ -92,9 +103,20 @@ NODE_TRANSITIONS: dict[NodeStatus, frozenset[NodeStatus]] = {
         {NodeStatus.RUNNING, NodeStatus.BLOCKED, NodeStatus.CANCELLED}
     ),
     NodeStatus.RUNNING: frozenset(
-        {NodeStatus.DONE, NodeStatus.FAILED, NodeStatus.BLOCKED, NodeStatus.CANCELLED}
+        {
+            NodeStatus.DONE,
+            NodeStatus.FAILED,
+            NodeStatus.BLOCKED,
+            NodeStatus.DEFERRED_RESOURCES,
+            NodeStatus.QUARANTINED,
+            NodeStatus.BLOCKED_ON_USER,
+            NodeStatus.CANCELLED,
+        }
     ),
     NodeStatus.BLOCKED: frozenset({NodeStatus.RUNNING, NodeStatus.CANCELLED}),
+    NodeStatus.DEFERRED_RESOURCES: frozenset({NodeStatus.RUNNING, NodeStatus.CANCELLED}),
+    NodeStatus.QUARANTINED: frozenset(),
+    NodeStatus.BLOCKED_ON_USER: frozenset({NodeStatus.RUNNING, NodeStatus.CANCELLED}),
     NodeStatus.DONE: frozenset(),
     NodeStatus.FAILED: frozenset(),
     NodeStatus.CANCELLED: frozenset(),
