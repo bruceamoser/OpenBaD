@@ -178,6 +178,30 @@ class TaskStore:
             )
         return result
 
+    # ------------------------------------------------------------------
+    # Edges
+    # ------------------------------------------------------------------
+
+    def create_edge(self, task_id: str, from_node_id: str, to_node_id: str) -> None:
+        """Insert a directed edge (from_node_id → to_node_id) for *task_id*.
+
+        Silently does nothing if the edge already exists.
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO task_edges (task_id, from_node_id, to_node_id)"
+            " VALUES (?, ?, ?)",
+            (task_id, from_node_id, to_node_id),
+        )
+        self._conn.commit()
+
+    def list_edges(self, task_id: str) -> list[tuple[str, str]]:
+        """Return all edges for *task_id* as (from_node_id, to_node_id) pairs."""
+        rows = self._conn.execute(
+            "SELECT from_node_id, to_node_id FROM task_edges WHERE task_id = ?",
+            (task_id,),
+        ).fetchall()
+        return [(row["from_node_id"], row["to_node_id"]) for row in rows]
+
 
 # ---------------------------------------------------------------------------
 # Row ↔ model helpers
