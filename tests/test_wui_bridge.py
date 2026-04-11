@@ -11,6 +11,7 @@ import pytest
 from openbad.cognitive.config import ProviderConfig
 from openbad.wui.bridge import (
     MqttWebSocketBridge,
+    UserSession,
     _count_operational_providers_from_config,
     _payload_to_jsonable,
 )
@@ -244,3 +245,89 @@ class TestMqttCallback:
             bridge._on_mqtt("agent/test", {"k": "v"})
 
         submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: UserSession presence tracking (#414)
+# ---------------------------------------------------------------------------
+
+
+class TestUserSession:
+    def test_initial_state_inactive(self) -> None:
+        session = UserSession()
+        assert not session.is_active
+        assert session.last_seen is None
+
+    def test_mark_connected(self) -> None:
+        session = UserSession()
+        session.mark_connected()
+        assert session.is_active
+        assert session.last_seen is not None
+
+    def test_mark_disconnected(self) -> None:
+        session = UserSession()
+        session.mark_connected()
+        session.mark_disconnected()
+        assert not session.is_active
+        assert session.last_seen is not None
+
+    def test_mark_disconnected_updates_last_seen(self) -> None:
+        session = UserSession()
+        session.mark_connected()
+        ts1 = session.last_seen
+        session.mark_disconnected()
+        assert session.last_seen >= ts1  # type: ignore[operator]
+
+
+class TestBridgePresence:
+    def test_user_session_initially_inactive(self) -> None:
+        bridge = MqttWebSocketBridge()
+        assert not bridge.user_session.is_active
+
+    def test_update_presence_single_client_connect(self) -> None:
+        bridge = MqttWebSocketBridge()
+        # Simulate adding one WS client, then calling update
+        ws = MagicMock()
+        bridge._clients.add(ws)
+        bridge._update_presence(connected=True)
+        assert bridge.user_session.is_active
+
+    def test_update_presence_last_client_disconnect(self) -> None:
+        bridge = MqttWebSocketBridge()
+        ws = MagicMock()
+        bridge._clients.add(ws)
+        bridge._update_presence(connected=True)
+        # Now simulate disconnect: remove from set, then call update
+        bridge._clients.discard(ws)
+        bridge._update_presence(connected=False)
+        assert not bridge.user_session.is_active
+
+    def test_update_presence_two_clients_one_leaves(self) -> None:
+        bridge = MqttWebSocketBridge()
+        ws1, ws2 = MagicMock(), MagicMock()
+        bridge._clients.add(ws1)
+        bridge._clients.add(ws2)
+        bridge._update_presence(connected=True)
+        bridge._clients.discard(ws1)
+        bridge._update_presence(connected=False)
+        # second still connected
+        assert bridge.user_session.is_active
+
+    def test_update_presence_publishes_on_change(self) -> None:
+        bridge = MqttWebSocketBridge()
+        mqtt = MagicMock()
+        bridge._mqtt = mqtt
+        ws = MagicMock()
+        bridge._clients.add(ws)
+        bridge._update_presence(connected=True)
+        mqtt.publish_bytes.assert_called_once()
+        args = mqtt.publish_bytes.call_args
+        assert "system/wui/presence" in args[0][0]
+
+    def test_update_presence_no_publish_without_change(self) -> None:
+        bridge = MqttWebSocketBridge()
+        mqtt = MagicMock()
+        bridge._mqtt = mqtt
+        # is_active already False, calling disconnect again should not trigger
+        bridge._update_presence(connected=False)
+        mqtt.publish_bytes.assert_not_called()
