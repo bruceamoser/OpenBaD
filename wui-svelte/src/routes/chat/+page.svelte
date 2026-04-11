@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { goto } from '$app/navigation';
   import { get as apiGet } from '$lib/api/client';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
@@ -186,6 +187,26 @@
   // ----------------------------------------------------------------
 
   onMount(async () => {
+    // Check onboarding status before loading chat
+    try {
+      const status = await apiGet<{
+        onboarding_complete: boolean;
+        providers_complete: boolean;
+        sleep_complete: boolean;
+        assistant_identity_complete: boolean;
+        user_profile_complete: boolean;
+      }>('/api/onboarding/status');
+
+      if (!status.onboarding_complete) {
+        // Redirect to providers wizard to complete onboarding
+        goto('/providers?wizard=1');
+        return;
+      }
+    } catch (err) {
+      console.error('Failed to check onboarding status:', err);
+      // Continue anyway - don't block chat access if API fails
+    }
+
     const storedSessionId = localStorage.getItem(CHAT_SESSION_STORAGE_KEY) ?? '';
     if (storedSessionId) {
       persistSession(storedSessionId);
