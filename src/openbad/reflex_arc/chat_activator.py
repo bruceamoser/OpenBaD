@@ -34,6 +34,8 @@ import yaml
 if TYPE_CHECKING:
     from openbad.nervous_system.client import NervousSystemClient
     from openbad.reflex_arc.fsm import AgentFSM
+    from openbad.tasks.models import NodeModel
+    from openbad.tasks.store import TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -197,3 +199,172 @@ class ChatActivator:
                     "ChatActivator: idle timeout but FSM not ACTIVE (state=%s)",
                     current_state,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Re-engagement hook (Phase 10, Issue #416)
+# ---------------------------------------------------------------------------
+
+
+class ReEngagementHook:
+    """Surfaces BLOCKED_ON_USER questions when the WUI reconnects.
+
+    On a WUI presence flip to ``active=True``, queries the ``TaskStore`` for
+    all nodes in the ``BLOCKED_ON_USER`` state and publishes their pending
+    questions to ``agent/chat/response`` *before* the standard greeting.
+
+    When the user answers, the reply published to ``agent/chat/inbound``
+    transitions the first pending node from ``BLOCKED_ON_USER`` to
+    ``RUNNING``.
+
+    Parameters
+    ----------
+    client:
+        Live :class:`~openbad.nervous_system.client.NervousSystemClient`.
+    store:
+        :class:`~openbad.tasks.store.TaskStore` backed by the task database.
+    greeting:
+        Optional greeting message sent after pending questions.
+    """
+
+    def __init__(
+        self,
+        client: NervousSystemClient,
+        store: TaskStore,
+        *,
+        greeting: str = "Hello — I'm back. What would you like to work on?",
+    ) -> None:
+        self._client = client
+        self._store = store
+        self._greeting = greeting
+        self._pending: list[NodeModel] = []
+        self._lock = threading.Lock()
+        self._running = False
+
+    def start(self) -> None:
+        """Subscribe to presence events and inbound chat replies."""
+        from openbad.nervous_system import topics
+
+        self._running = True
+        self._client.subscribe(topics.WUI_PRESENCE, bytes, self._on_presence)
+        self._client.subscribe(topics.AGENT_CHAT_INBOUND, bytes, self._on_inbound)
+        logger.info("ReEngagementHook started")
+
+    def stop(self) -> None:
+        """Unsubscribe and clear pending queue."""
+        from openbad.nervous_system import topics
+
+        self._running = False
+        self._client.unsubscribe(topics.WUI_PRESENCE)
+        self._client.unsubscribe(topics.AGENT_CHAT_INBOUND)
+        with self._lock:
+            self._pending.clear()
+        logger.info("ReEngagementHook stopped")
+
+    # ------------------------------------------------------------------
+    # Internal handlers
+    # ------------------------------------------------------------------
+
+    def _on_presence(self, _topic: str, payload: bytes) -> None:
+        """Handle WUI_PRESENCE events; re-engage on active=True."""
+        if not self._running:
+            return
+        try:
+            body = json.loads(payload)
+            if not body.get("active", False):
+                return
+        except Exception:
+            logger.debug("ReEngagementHook: could not parse presence payload")
+            return
+
+        self._load_pending()
+        self._surface_pending()
+
+    def _on_inbound(self, _topic: str, payload: bytes) -> None:
+        """Handle user reply; unblock the first pending node."""
+        if not self._running:
+            return
+
+        with self._lock:
+            if not self._pending:
+                return
+            node = self._pending.pop(0)
+
+        try:
+            self._store.update_node_status(node.node_id, _RUNNING)
+            logger.info(
+                "ReEngagementHook: node %s unblocked (→ RUNNING)", node.node_id
+            )
+        except Exception:
+            logger.exception(
+                "ReEngagementHook: could not update node %s to RUNNING", node.node_id
+            )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _load_pending(self) -> None:
+        """Query the store for BLOCKED_ON_USER nodes, ordered by priority."""
+        from openbad.tasks.models import NodeStatus
+
+        try:
+            nodes = self._store.list_nodes_by_status(NodeStatus.BLOCKED_ON_USER)
+        except Exception:
+            logger.exception("ReEngagementHook: could not query pending nodes")
+            return
+
+        with self._lock:
+            # Sort by task priority proxy (node_id is UUID — use created_at ordering
+            # already returned DESC from the store; reverse to oldest-first so we
+            # surface the earliest blocked question first).
+            self._pending = list(reversed(nodes))
+
+    def _surface_pending(self) -> None:
+        """Publish pending questions to the chat feed, then send the greeting."""
+        from openbad.nervous_system import topics
+
+        with self._lock:
+            pending_snapshot = list(self._pending)
+
+        for node in pending_snapshot:
+            payload = json.dumps(
+                {
+                    "question": node.title,
+                    "task_id": node.task_id,
+                    "node_id": node.node_id,
+                    "type": "pending_question",
+                }
+            ).encode()
+            try:
+                self._client.publish_bytes(topics.AGENT_CHAT_RESPONSE, payload)
+            except Exception:
+                logger.exception(
+                    "ReEngagementHook: could not publish question for node %s",
+                    node.node_id,
+                )
+
+        if not pending_snapshot:
+            # No blocked questions — send standard greeting directly.
+            self._send_greeting()
+        else:
+            # Greeting follows after questions.
+            self._send_greeting()
+
+    def _send_greeting(self) -> None:
+        from openbad.nervous_system import topics
+
+        payload = json.dumps({"text": self._greeting, "type": "greeting"}).encode()
+        try:
+            self._client.publish_bytes(topics.AGENT_CHAT_RESPONSE, payload)
+        except Exception:
+            logger.debug("ReEngagementHook: could not send greeting")
+
+
+# Shorthand used within the hook — resolved at import time.
+try:
+    from openbad.tasks.models import NodeStatus as _NodeStatus
+
+    _RUNNING = _NodeStatus.RUNNING
+except ImportError:  # pragma: no cover
+    _RUNNING = "running"  # type: ignore[assignment]

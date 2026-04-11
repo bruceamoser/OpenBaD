@@ -125,6 +125,16 @@ class TaskStore:
         ).fetchall()
         return [_node_from_row(r) for r in rows]
 
+    def list_nodes_by_status(
+        self, status: NodeStatus, *, limit: int = 100
+    ) -> list[NodeModel]:
+        """Return nodes in *status* ordered by creation time, newest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM task_nodes WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+            (status.value, limit),
+        ).fetchall()
+        return [_node_from_row(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Event operations (append-only)
     # ------------------------------------------------------------------
