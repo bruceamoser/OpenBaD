@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.toolbelt.web_search import (
+    WebFetchError,
     WebSearchConfig,
     WebSearchToolAdapter,
     _RateLimiter,
+    web_fetch,
 )
 
 # ── Helpers ────────────────────────────────────────────────────────── #
@@ -144,3 +150,74 @@ class TestRegistration:
         reg.register("web-search", role=ToolRole.WEB_SEARCH)
         reg.equip(ToolRole.WEB_SEARCH, "web-search")
         assert reg.get_belt()[ToolRole.WEB_SEARCH].name == "web-search"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: web_fetch (#412)
+# ---------------------------------------------------------------------------
+
+
+class TestWebFetch:
+    def _fake_resp(self, body: bytes, content_type: str = "text/html; charset=utf-8"):
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.headers.get_content_type.return_value = content_type
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    def test_plain_text_returned(self) -> None:
+        body = b"Hello world"
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(body, "text/plain")):
+            result = web_fetch("https://example.com/page")
+        assert "Hello world" in result
+
+    def test_html_tags_stripped(self) -> None:
+        body = b"<html><body><p>Hello <b>world</b></p></body></html>"
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(body)):
+            result = web_fetch("https://example.com/page")
+        assert "Hello" in result
+        assert "<b>" not in result
+
+    def test_script_content_removed(self) -> None:
+        body = b"<html><head><script>alert('evil')</script></head><body>ok</body></html>"
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(body)):
+            result = web_fetch("https://example.com/page")
+        assert "alert" not in result
+        assert "ok" in result
+
+    def test_max_chars_truncated(self) -> None:
+        body = b"<html><body>" + b"A" * 10000 + b"</body></html>"
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(body)):
+            result = web_fetch("https://example.com/page", max_chars=100)
+        assert len(result) <= 100
+
+    def test_http_error_raises_web_fetch_error(self) -> None:
+        err = urllib.error.HTTPError(
+            url="https://example.com/404",
+            code=404,
+            msg="Not Found",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,  # type: ignore[arg-type]
+        )
+        with (
+            patch("urllib.request.urlopen", side_effect=err),
+            pytest.raises(WebFetchError) as exc_info,
+        ):
+            web_fetch("https://example.com/404")
+        assert exc_info.value.status_code == 404
+
+    def test_network_error_raises_web_fetch_error(self) -> None:
+        with (
+            patch("urllib.request.urlopen", side_effect=OSError("timeout")),
+            pytest.raises(WebFetchError),
+        ):
+            web_fetch("https://example.com/page")
+
+    def test_non_http_scheme_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Only http/https"):
+            web_fetch("ftp://example.com/file")
+
+    def test_file_scheme_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            web_fetch("file:///etc/passwd")
