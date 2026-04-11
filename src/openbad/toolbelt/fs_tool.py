@@ -19,12 +19,20 @@ Security guarantees
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openbad.immune_system.rules_engine import FileOperationRule
+
+if TYPE_CHECKING:
+    from openbad.endocrine.controller import EndocrineController
+    from openbad.interoception.disk_network import DiskSnapshot
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Allowed roots
@@ -40,6 +48,66 @@ ALLOWED_ROOTS: list[str] = [
 # Module-level rule instance.  Replace with a wired instance (passing a
 # NervousSystemClient) to enable IMMUNE_ALERT publishing.
 _FILE_OP_RULE: FileOperationRule = FileOperationRule()
+
+# ---------------------------------------------------------------------------
+# Endocrine / disk throttling
+# ---------------------------------------------------------------------------
+
+#: Operations larger than this many bytes trigger the disk-saturation check.
+LARGE_OP_THRESHOLD_BYTES: int = 1024 * 1024  # 1 MiB
+
+#: Disk I/O latency (ms) above which the disk is considered saturated.
+DISK_LATENCY_SATURATION_MS: float = 200.0
+
+#: Free-bytes floor below which the disk is considered saturated.
+DISK_FREE_BYTES_MIN: int = 50 * 1024 * 1024  # 50 MiB
+
+#: Cortisol level (0–1) at or above which "high cortisol" is asserted.
+CORTISOL_HIGH_THRESHOLD: float = 0.5
+
+
+def should_defer(
+    byte_count: int,
+    disk_snapshot: DiskSnapshot | None = None,
+    endocrine: EndocrineController | None = None,
+) -> bool:
+    """Return *True* if the operation should be deferred due to resource pressure.
+
+    Parameters
+    ----------
+    byte_count:
+        Approximate size of the pending I/O operation in bytes.
+    disk_snapshot:
+        Current disk metrics (optional).  If *None*, no disk check is performed.
+    endocrine:
+        Endocrine controller to read cortisol level (optional).
+
+    Returns
+    -------
+    bool
+        ``True``  — defer the operation; the caller should raise / return DEFERRED.
+        ``False`` — proceed normally.
+    """
+    if byte_count < LARGE_OP_THRESHOLD_BYTES:
+        return False
+    if disk_snapshot is None or endocrine is None:
+        return False
+    saturated = (
+        disk_snapshot.io_latency_ms >= DISK_LATENCY_SATURATION_MS
+        or disk_snapshot.free_bytes < DISK_FREE_BYTES_MIN
+    )
+    if not saturated:
+        return False
+    high_cortisol = endocrine.level("cortisol") >= CORTISOL_HIGH_THRESHOLD
+    return high_cortisol
+
+
+class ResourceDeferredError(OSError):
+    """Raised when an FS operation is deferred due to disk saturation + high cortisol.
+
+    Callers should set the associated task node to ``NodeStatus.DEFERRED_RESOURCES``
+    and reschedule the operation.
+    """
 
 
 def _is_safe_path(resolved: str) -> bool:
@@ -74,7 +142,13 @@ def _validate(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def read_file(path: str, *, encoding: str = "utf-8") -> str:
+def read_file(
+    path: str,
+    *,
+    encoding: str = "utf-8",
+    disk_snapshot: DiskSnapshot | None = None,
+    endocrine: EndocrineController | None = None,
+) -> str:
     """Read and return the contents of *path* as a string.
 
     Parameters
@@ -83,6 +157,10 @@ def read_file(path: str, *, encoding: str = "utf-8") -> str:
         The file path to read.  May be relative.
     encoding:
         Text encoding (default ``utf-8``).
+    disk_snapshot:
+        Optional current disk snapshot for endocrine throttling.
+    endocrine:
+        Optional endocrine controller for cortisol check.
 
     Returns
     -------
@@ -97,12 +175,27 @@ def read_file(path: str, *, encoding: str = "utf-8") -> str:
         If the file does not exist.
     IsADirectoryError
         If the path points to a directory.
+    ResourceDeferredError
+        If disk is saturated and cortisol is high; the operation should be retried later.
     """
     resolved = _validate(path)
+    byte_estimate = Path(resolved).stat().st_size if Path(resolved).exists() else 0
+    if should_defer(byte_estimate, disk_snapshot=disk_snapshot, endocrine=endocrine):
+        log.info("fs_tool.read_file: deferring large read due to resource saturation")
+        raise ResourceDeferredError(
+            f"read_file deferred: disk saturated (path={resolved!r})"
+        )
     return Path(resolved).read_text(encoding=encoding)
 
 
-def write_file(path: str, content: str, *, encoding: str = "utf-8") -> None:
+def write_file(
+    path: str,
+    content: str,
+    *,
+    encoding: str = "utf-8",
+    disk_snapshot: DiskSnapshot | None = None,
+    endocrine: EndocrineController | None = None,
+) -> None:
     """Write *content* to *path* atomically.
 
     The write is performed to a sibling temporary file and then renamed into
@@ -116,14 +209,26 @@ def write_file(path: str, content: str, *, encoding: str = "utf-8") -> None:
         Text to write.
     encoding:
         Text encoding (default ``utf-8``).
+    disk_snapshot:
+        Optional current disk snapshot for endocrine throttling.
+    endocrine:
+        Optional endocrine controller for cortisol check.
 
     Raises
     ------
     PermissionError
-        If the path is outside allowed roots.
+        If the path is outside allowed roots or is a restricted system path.
     FileNotFoundError
         If the parent directory does not exist.
+    ResourceDeferredError
+        If disk is saturated and cortisol is high; the operation should be retried later.
     """
+    byte_count = len(content.encode(encoding))
+    if should_defer(byte_count, disk_snapshot=disk_snapshot, endocrine=endocrine):
+        log.info("fs_tool.write_file: deferring large write due to resource saturation")
+        raise ResourceDeferredError(
+            f"write_file deferred: disk saturated (path={path!r})"
+        )
     resolved = _validate(path)
     # Immune gate: block writes to restricted system paths before any I/O.
     _FILE_OP_RULE.check_write(resolved)
