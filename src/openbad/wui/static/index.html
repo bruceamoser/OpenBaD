@@ -24,6 +24,7 @@
         <button type="button" class="nav-link" data-view-target="providers">Providers</button>
         <button type="button" class="nav-link" data-view-target="senses">Senses</button>
         <button type="button" class="nav-link" data-view-target="toolbelt">Toolbelt</button>
+        <button type="button" class="nav-link" data-view-target="entity">Entity</button>
         <button type="button" class="nav-link" data-view-target="models">Models <span class="nav-chip">next</span></button>
       </nav>
       <div class="nav-status">
@@ -419,6 +420,87 @@
             <div id="toolbelt-swap-body" class="collapse-body">
               <ul id="toolbelt-swap-log" class="swap-log"></ul>
             </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-entity" class="view-panel reveal hidden" data-view="entity">
+        <div class="panel-grid single-column">
+          <div class="entity-tabs">
+            <button type="button" class="entity-tab active" data-entity-tab="user">User</button>
+            <button type="button" class="entity-tab" data-entity-tab="assistant">Assistant</button>
+          </div>
+
+          <!-- User tab -->
+          <article id="entity-user-panel" class="card section-card">
+            <div class="section-head">
+              <h3>User Profile</h3>
+              <span class="section-note">Identity layer 1 (config-seeded)</span>
+            </div>
+            <form id="entity-user-form" class="stack">
+              <label><span>Name</span><input id="eu-name" type="text"></label>
+              <label><span>Preferred name</span><input id="eu-preferred-name" type="text"></label>
+              <label>
+                <span>Communication style</span>
+                <select id="eu-style">
+                  <option value="casual">Casual</option>
+                  <option value="formal">Formal</option>
+                  <option value="terse">Terse</option>
+                </select>
+              </label>
+              <label><span>Expertise domains (comma-separated)</span><input id="eu-domains" type="text"></label>
+              <div class="row"><span>Learned summary</span><em id="eu-summary" class="mono">—</em></div>
+            </form>
+            <div class="wizard-actions">
+              <button id="entity-user-save" type="button" class="primary-button">Save</button>
+              <button id="entity-user-reset" type="button" class="secondary-button">Reset to seed</button>
+            </div>
+            <p id="entity-user-status" class="inline-status"></p>
+          </article>
+
+          <!-- Assistant tab -->
+          <article id="entity-assistant-panel" class="card section-card hidden">
+            <div class="section-head">
+              <h3>Assistant Profile</h3>
+              <span class="section-note">OCEAN personality with live modulation preview</span>
+            </div>
+            <form id="entity-assistant-form" class="stack">
+              <label><span>Name</span><input id="ea-name" type="text"></label>
+              <label><span>Persona summary</span><input id="ea-persona" type="text"></label>
+              <label><span>Learning focus (comma-separated)</span><input id="ea-focus" type="text"></label>
+              <div class="ocean-sliders">
+                <div class="ocean-row">
+                  <label>Openness <strong id="ea-o-val">0.7</strong></label>
+                  <input id="ea-openness" type="range" min="0" max="1" step="0.01" value="0.7">
+                  <em id="ea-o-desc" class="mono">exploration_budget = 1.20</em>
+                </div>
+                <div class="ocean-row">
+                  <label>Conscientiousness <strong id="ea-c-val">0.8</strong></label>
+                  <input id="ea-conscientiousness" type="range" min="0" max="1" step="0.01" value="0.8">
+                  <em id="ea-c-desc" class="mono">reasoning_depth = 1.30</em>
+                </div>
+                <div class="ocean-row">
+                  <label>Extraversion <strong id="ea-e-val">0.5</strong></label>
+                  <input id="ea-extraversion" type="range" min="0" max="1" step="0.01" value="0.5">
+                  <em id="ea-e-desc" class="mono">proactive_threshold = 0.50</em>
+                </div>
+                <div class="ocean-row">
+                  <label>Agreeableness <strong id="ea-a-val">0.4</strong></label>
+                  <input id="ea-agreeableness" type="range" min="0" max="1" step="0.01" value="0.4">
+                  <em id="ea-a-desc" class="mono">challenge_prob = 0.60</em>
+                </div>
+                <div class="ocean-row">
+                  <label>Stability <strong id="ea-s-val">0.6</strong></label>
+                  <input id="ea-stability" type="range" min="0" max="1" step="0.01" value="0.6">
+                  <em id="ea-s-desc" class="mono">cortisol_decay = 1.10</em>
+                </div>
+              </div>
+            </form>
+            <div class="wizard-actions">
+              <button id="entity-assistant-save" type="button" class="primary-button">Save</button>
+              <button id="entity-assistant-reset" type="button" class="secondary-button">Reset to seed</button>
+            </div>
+            <p id="entity-assistant-status" class="inline-status"></p>
           </article>
         </div>
       </section>

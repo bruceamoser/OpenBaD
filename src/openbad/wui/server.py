@@ -682,6 +682,100 @@ async def _delete_toolbelt_role(request: web.Request) -> web.Response:
     return web.json_response(_serialize_toolbelt(registry))
 
 
+# ---------------------------------------------------------------------- #
+# Entity endpoints — user / assistant profile management
+# ---------------------------------------------------------------------- #
+
+
+def _serialize_user(profile) -> dict:
+    from dataclasses import asdict
+    d = asdict(profile)
+    d["communication_style"] = profile.communication_style.value
+    return d
+
+
+def _serialize_assistant(profile) -> dict:
+    from dataclasses import asdict
+    return asdict(profile)
+
+
+async def _get_entity_user(request: web.Request) -> web.Response:
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+    return web.json_response(_serialize_user(persistence.user))
+
+
+async def _get_entity_assistant(request: web.Request) -> web.Response:
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+    data = _serialize_assistant(persistence.assistant)
+    # Include computed modulation factors if PersonalityModulator is available.
+    modulator = request.app.get("personality_modulator")
+    if modulator is not None:
+        f = modulator.factors
+        data["modulation"] = {
+            "exploration_budget_multiplier": f.exploration_budget_multiplier,
+            "max_reasoning_depth_multiplier": f.max_reasoning_depth_multiplier,
+            "proactive_suggestion_threshold": f.proactive_suggestion_threshold,
+            "challenge_probability": f.challenge_probability,
+            "cortisol_decay_multiplier": f.cortisol_decay_multiplier,
+        }
+    return web.json_response(data)
+
+
+async def _put_entity_user(request: web.Request) -> web.Response:
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Request body must be a JSON object")
+    try:
+        persistence.update_user(**payload)
+    except (AttributeError, ValueError, TypeError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    return web.json_response(_serialize_user(persistence.user))
+
+
+async def _put_entity_assistant(request: web.Request) -> web.Response:
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Request body must be a JSON object")
+    try:
+        persistence.update_assistant(**payload)
+    except (AttributeError, ValueError, TypeError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    # Recalculate modulation factors if modulator is available.
+    modulator = request.app.get("personality_modulator")
+    if modulator is not None:
+        modulator.update(persistence.assistant)
+    return web.json_response(_serialize_assistant(persistence.assistant))
+
+
+async def _post_entity_user_reset(request: web.Request) -> web.Response:
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+    persistence.reset_to_seed()
+    return web.json_response(_serialize_user(persistence.user))
+
+
+async def _post_entity_assistant_reset(request: web.Request) -> web.Response:
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+    persistence.reset_to_seed()
+    modulator = request.app.get("personality_modulator")
+    if modulator is not None:
+        modulator.update(persistence.assistant)
+    return web.json_response(_serialize_assistant(persistence.assistant))
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -714,6 +808,12 @@ def create_app(
     app.router.add_get("/api/toolbelt", _get_toolbelt)
     app.router.add_put("/api/toolbelt/{role}", _put_toolbelt_role)
     app.router.add_delete("/api/toolbelt/{role}", _delete_toolbelt_role)
+    app.router.add_get("/api/entity/user", _get_entity_user)
+    app.router.add_put("/api/entity/user", _put_entity_user)
+    app.router.add_post("/api/entity/user/reset", _post_entity_user_reset)
+    app.router.add_get("/api/entity/assistant", _get_entity_assistant)
+    app.router.add_put("/api/entity/assistant", _put_entity_assistant)
+    app.router.add_post("/api/entity/assistant/reset", _post_entity_assistant_reset)
     # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
     app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_post(
