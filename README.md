@@ -92,8 +92,9 @@ If you need to rebuild the SvelteKit frontend (requires Node.js):
 make wui
 ```
 
-This runs `npm install && npm run build` in `wui-svelte/` and copies the
-output to `src/openbad/wui/build/` where the aiohttp server serves it.
+This increments the patch version, runs `npm install && npm run build` in
+`wui-svelte/`, and copies the output to `src/openbad/wui/build/` where the
+aiohttp server serves it.
 
 ### Development Mode (no systemd)
 

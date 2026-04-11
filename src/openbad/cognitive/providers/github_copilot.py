@@ -28,10 +28,27 @@ _COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 _RETRY_BACKOFF_S = 0.5
 
 _KNOWN_MODELS: list[dict[str, Any]] = [
+    {"id": "claude-opus-4.6", "context_window": 200_000},
+    {"id": "claude-sonnet-4.6", "context_window": 200_000},
+    {"id": "claude-haiku-4.5", "context_window": 200_000},
+    {"id": "claude-opus-4.5", "context_window": 200_000},
+    {"id": "claude-sonnet-4", "context_window": 200_000},
+    {"id": "claude-sonnet-4.5", "context_window": 200_000},
+    {"id": "gpt-5.3-codex", "context_window": 128_000},
+    {"id": "gpt-5.4", "context_window": 128_000},
+    {"id": "gpt-5.4-mini", "context_window": 128_000},
+    {"id": "gpt-5.2", "context_window": 128_000},
+    {"id": "gpt-5.2-codex", "context_window": 128_000},
+    {"id": "gpt-5.1", "context_window": 128_000},
+    {"id": "gpt-5-mini", "context_window": 128_000},
     {"id": "gpt-4o", "context_window": 128_000},
     {"id": "gpt-4o-mini", "context_window": 128_000},
-    {"id": "claude-sonnet-4-20250514", "context_window": 200_000},
-    {"id": "claude-3-5-haiku-20241022", "context_window": 200_000},
+    {"id": "gpt-4.1", "context_window": 128_000},
+    {"id": "gemini-2.5-pro", "context_window": 1_000_000},
+    {"id": "gemini-3.1-pro-preview", "context_window": 1_000_000},
+    {"id": "gemini-3-flash-preview", "context_window": 1_000_000},
+    {"id": "grok-code-fast-1", "context_window": 128_000},
+    {"id": "raptor-mini-preview", "context_window": 128_000},
 ]
 _MODEL_DISCOVERY_PATHS = ("/models", "/chat/models", "/v1/models")
 

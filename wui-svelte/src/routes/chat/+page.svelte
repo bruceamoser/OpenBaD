@@ -1,6 +1,17 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { post as apiPost } from '$lib/api/client';
+  import { get as apiGet } from '$lib/api/client';
+  import { marked } from 'marked';
+  import DOMPurify from 'dompurify';
+
+  // Configure marked for code-friendly output
+  marked.setOptions({ breaks: true, gfm: true });
+
+  function renderMarkdown(text: string): string {
+    if (!text) return '';
+    const raw = marked.parse(text) as string;
+    return DOMPurify.sanitize(raw);
+  }
 
   // ----------------------------------------------------------------
   // Types
@@ -24,6 +35,9 @@
   let streaming = $state(false);
   let tokensUsed = $state(0);
   let tokensMax = $state(8192);
+  let sessionId = $state('');
+
+  const CHAT_SESSION_STORAGE_KEY = 'openbad.chat.sessionId';
 
   // Scroll management
   let chatContainer: HTMLDivElement | undefined = $state();
@@ -41,6 +55,26 @@
     autoScroll = scrollHeight - scrollTop - clientHeight < 40;
   }
 
+  function persistSession(nextSessionId: string): void {
+    sessionId = nextSessionId;
+    localStorage.setItem(CHAT_SESSION_STORAGE_KEY, nextSessionId);
+  }
+
+  async function loadHistory(existingSessionId: string): Promise<void> {
+    if (!existingSessionId) return;
+
+    try {
+      const data = await apiGet<{ messages: ChatMessage[] }>(
+        `/api/chat/history?session_id=${encodeURIComponent(existingSessionId)}`,
+      );
+      messages = data.messages;
+      await tick();
+      scrollToBottom();
+    } catch {
+      messages = [];
+    }
+  }
+
   // ----------------------------------------------------------------
   // Send message
   // ----------------------------------------------------------------
@@ -48,6 +82,10 @@
   async function send(): Promise<void> {
     const text = inputText.trim();
     if (!text || streaming) return;
+
+    if (!sessionId) {
+      persistSession(crypto.randomUUID());
+    }
 
     const userMsg: ChatMessage = {
       role: 'user',
@@ -73,7 +111,7 @@
       const resp = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, system }),
+        body: JSON.stringify({ message: text, system, session_id: sessionId }),
       });
 
       if (!resp.ok) {
@@ -99,6 +137,9 @@
             if (raw === '[DONE]') break;
             try {
               const parsed = JSON.parse(raw);
+              if (parsed.session_id && parsed.session_id !== sessionId) {
+                persistSession(parsed.session_id);
+              }
               if (parsed.token) {
                 assistantMsg.content += parsed.token;
               }
@@ -144,7 +185,12 @@
   // Init
   // ----------------------------------------------------------------
 
-  onMount(() => {
+  onMount(async () => {
+    const storedSessionId = localStorage.getItem(CHAT_SESSION_STORAGE_KEY) ?? '';
+    if (storedSessionId) {
+      persistSession(storedSessionId);
+      await loadHistory(storedSessionId);
+    }
     scrollToBottom();
   });
 </script>
@@ -205,7 +251,7 @@
             <span class="role-label">{msg.role === 'user' ? 'You' : 'Assistant'}</span>
             <time class="ts">{new Date(msg.timestamp).toLocaleTimeString()}</time>
           </div>
-          <p class="content">{msg.content}</p>
+          <div class="content">{@html renderMarkdown(msg.content)}</div>
           {#if showCot && msg.reasoning}
             <details class="reasoning">
               <summary>Reasoning trace</summary>
@@ -361,12 +407,13 @@
   }
   .msg.user .bubble {
     background: var(--blue);
-    color: var(--text-on-color);
+    color: #08111f;
     border-bottom-right-radius: 4px;
   }
   .msg.assistant .bubble {
-    background: var(--bg-surface0);
+    background: var(--bg-surface1);
     border: 1px solid var(--border);
+    color: var(--text);
     border-bottom-left-radius: 4px;
   }
   .bubble-header {
@@ -384,7 +431,67 @@
     font-size: 0.65rem;
     opacity: 0.5;
   }
-  .content { margin: 0; white-space: pre-wrap; font-size: 0.9rem; line-height: 1.5; }
+  .content { margin: 0; font-size: 0.9rem; line-height: 1.6; }
+  .content :global(p) { margin: 0.3em 0; }
+  .content :global(p:first-child) { margin-top: 0; }
+  .content :global(p:last-child) { margin-bottom: 0; }
+  .content :global(code) {
+    background: var(--bg-surface2);
+    color: var(--peach);
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85em;
+  }
+  .content :global(pre) {
+    background: var(--bg-base);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem;
+    overflow-x: auto;
+    margin: 0.5em 0;
+  }
+  .content :global(pre code) {
+    background: none;
+    color: var(--text);
+    padding: 0;
+    font-size: 0.82em;
+  }
+  .content :global(a) {
+    color: var(--blue);
+    text-decoration: underline;
+  }
+  .content :global(strong) {
+    color: var(--text);
+    font-weight: 700;
+  }
+  .content :global(ul), .content :global(ol) {
+    padding-left: 1.4em;
+    margin: 0.4em 0;
+  }
+  .content :global(blockquote) {
+    border-left: 3px solid var(--mauve);
+    margin: 0.4em 0;
+    padding: 0.2em 0.8em;
+    color: var(--text-sub);
+  }
+  .msg.user .role-label,
+  .msg.user .ts,
+  .msg.user .content,
+  .msg.user .content :global(p),
+  .msg.user .content :global(li),
+  .msg.user .content :global(strong),
+  .msg.user .content :global(blockquote) {
+    color: inherit;
+    opacity: 1;
+  }
+  .msg.user .content :global(a) {
+    color: #10233f;
+  }
+  .msg.user .content :global(code) {
+    background: rgba(8, 17, 31, 0.12);
+    color: #08111f;
+  }
 
   .reasoning {
     margin-top: 0.5rem;

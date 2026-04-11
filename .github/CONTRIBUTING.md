@@ -62,6 +62,8 @@ GitHub Issue → Feature Branch → Pull Request → Review → Squash Merge
 
 7. **After review, squash and merge.** Delete the branch.
 
+8. **Move on to next issue.**
+
 ### Code Conventions
 
 - **Python ≥ 3.11** — type hints on all public functions.

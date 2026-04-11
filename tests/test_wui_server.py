@@ -841,3 +841,112 @@ async def test_entity_no_persistence_returns_503(aiohttp_client):
     client = await aiohttp_client(app)
     resp = await client.get("/api/entity/user")
     assert resp.status == 503
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_route_emits_session_id_and_tokens(aiohttp_client, monkeypatch):
+    import openbad.wui.server as srv
+    from openbad.cognitive.config import CognitiveConfig
+    from openbad.wui.chat_pipeline import StreamChunk
+
+    monkeypatch.setattr(srv, "_read_providers_config", lambda: (BUILD_DIR, CognitiveConfig()))
+    monkeypatch.setattr(
+        srv,
+        "_resolve_chat_adapter",
+        lambda _config, _system_name: (object(), "test-model", "test-provider"),
+    )
+
+    async def _fake_stream_chat(*args, **kwargs):
+        assert kwargs["provider_name"] == "test-provider"
+        assert args[3] == "session-123"
+        yield StreamChunk(token="hello", tokens_used=1)
+        yield StreamChunk(done=True, tokens_used=1)
+
+    monkeypatch.setattr(srv, "stream_chat", _fake_stream_chat)
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/api/chat/stream",
+        json={"message": "hi", "system": "CHAT", "session_id": "session-123"},
+    )
+
+    assert resp.status == 200
+    body = await resp.text()
+    assert "session-123" in body
+    assert "hello" in body
+    assert "[DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_chat_history_route_returns_serialized_messages(aiohttp_client, monkeypatch):
+    import openbad.wui.server as srv
+    from openbad.wui.chat_pipeline import ConversationTurn
+
+    monkeypatch.setattr(
+        srv,
+        "get_conversation_history",
+        lambda session_id, limit=50: [
+            ConversationTurn(role="user", content="hello", timestamp=1_700_000_000.0),
+            ConversationTurn(role="assistant", content="world", timestamp=1_700_000_001.0),
+        ] if session_id == "session-abc" and limit == 50 else [],
+    )
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/chat/history", params={"session_id": "session-abc"})
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["session_id"] == "session-abc"
+    assert data["messages"][0]["role"] == "user"
+    assert data["messages"][0]["timestamp"].endswith("+00:00")
+    assert data["messages"][1]["content"] == "world"
+
+
+@pytest.mark.asyncio
+async def test_get_usage_route_returns_usage_snapshot(aiohttp_client, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENBAD_USAGE_DB", str(tmp_path / "usage.db"))
+
+    app = create_app(enable_mqtt=False)
+    tracker = app["usage_tracker"]
+    tracker.record(
+        provider="openai",
+        model="gpt-4o",
+        system="chat",
+        tokens=320,
+        request_id="req-1",
+        session_id="sess-1",
+    )
+    tracker.record(
+        provider="anthropic",
+        model="claude-sonnet",
+        system="reasoning",
+        tokens=180,
+        request_id="req-2",
+        session_id="sess-2",
+    )
+
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/usage")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["summary"]["total_used"] == 500
+    assert data["summary"]["request_count"] == 2
+    assert data["by_provider_model"][0]["tokens"] == 320
+    assert {item["system"] for item in data["by_system"]} == {"chat", "reasoning"}
+    assert data["recent_events"][0]["tokens"] in {180, 320}
+
+
+@pytest.mark.asyncio
+async def test_get_version_route_returns_current_version(aiohttp_client):
+    import openbad
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/version")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["version"] == openbad.__version__
