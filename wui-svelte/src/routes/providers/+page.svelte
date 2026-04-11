@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { page } from '$app/stores';
   import Card from '$lib/components/Card.svelte';
   import { get as apiGet, put as apiPut, post as apiPost } from '$lib/api/client';
   import { endocrineLevels } from '$lib/stores/websocket';
@@ -13,8 +12,6 @@
     name: string;
     base_url: string;
     model: string;
-    api_key?: string;
-    has_api_key?: boolean;
     api_key_env: string;
     timeout_ms: number;
     enabled: boolean;
@@ -36,26 +33,6 @@
     enabled: boolean;
     default_provider: string;
     providers: ProviderEntry[];
-  }
-
-  interface SupportedProvider {
-    provider_type: string;
-    name: string;
-    label: string;
-    auth: 'api_key' | 'device_code' | 'local';
-    base_url: string;
-    api_key_env: string;
-    default_model: string;
-  }
-
-  interface SetupStatus {
-    first_run: boolean;
-    provider_ready: boolean;
-    chat_assignment_ready: boolean;
-    configured_provider_count: number;
-    missing: string[];
-    redirect_to: string;
-    supported_providers: SupportedProvider[];
   }
 
   interface SystemsData {
@@ -91,7 +68,15 @@
     models?: string[];
   }
 
-  type WizardStep = 'closed' | 'pick-type' | 'copilot-auth' | 'provider-form' | 'done';
+  interface SleepConfigData {
+    sleep_window_start: string;
+    sleep_window_duration_hours: number;
+    idle_timeout_minutes: number;
+    allow_daytime_naps: boolean;
+    enabled: boolean;
+  }
+
+  type WizardStep = 'closed' | 'pick-type' | 'copilot-auth' | 'local-form' | 'sleep-config' | 'done';
 
   // ----------------------------------------------------------------
   // State
@@ -108,15 +93,12 @@
   let statusMsg = $state('');
   let dragIdx: number | null = $state(null);
   let loading = $state(true);
-  let setupStatus = $state<SetupStatus | null>(null);
-  let supportedProviders = $state<SupportedProvider[]>([]);
 
   // Wizard state
   let wizStep: WizardStep = $state('closed');
   let wizMsg = $state('');
   let wizError = $state('');
   let wizBusy = $state(false);
-  let selectedProviderType = $state('');
 
   // Copilot wizard
   let copilotFlowId = $state('');
@@ -124,14 +106,20 @@
   let copilotVerifyUri = $state('');
   let copilotModels: string[] = $state([]);
 
-  // Generic provider wizard
-  let providerBaseUrl = $state('');
-  let providerModel = $state('');
-  let providerApiKey = $state('');
-  let providerApiKeyEnv = $state('');
-  let providerVerified = $state(false);
-  let providerModels: string[] = $state([]);
-  let providerLatency = $state(0);
+  // Local OpenAI wizard
+  let localBaseUrl = $state('http://localhost:11434/v1');
+  let localModel = $state('');
+  let localApiKeyEnv = $state('');
+  let localVerified = $state(false);
+  let localModels: string[] = $state([]);
+  let localLatency = $state(0);
+  let sleepConfig = $state<SleepConfigData>({
+    sleep_window_start: '02:00',
+    sleep_window_duration_hours: 3,
+    idle_timeout_minutes: 15,
+    allow_daytime_naps: true,
+    enabled: true,
+  });
 
   // Derived cortisol from WS
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
@@ -146,9 +134,6 @@
   async function load(): Promise<void> {
     loading = true;
     try {
-      setupStatus = await apiGet<SetupStatus>('/api/setup-status');
-      supportedProviders = setupStatus.supported_providers ?? [];
-
       const pData = await apiGet<ProvidersData>('/api/providers');
       providers = pData.providers ?? [];
       defaultProvider = pData.default_provider ?? '';
@@ -163,11 +148,6 @@
       );
       for (const pName of assignedProviders) {
         fetchModelsForProvider(pName);
-      }
-
-      const autoOpenWizard = $page.url.searchParams.get('wizard') === '1';
-      if ((autoOpenWizard || (setupStatus?.first_run ?? false)) && wizStep === 'closed') {
-        openWizard();
       }
     } catch (e) {
       statusMsg = `Load failed: ${e}`;
@@ -243,49 +223,61 @@
     wizError = '';
   }
 
-  function providerSpec(providerType: string): SupportedProvider | undefined {
-    return supportedProviders.find((entry) => entry.provider_type === providerType);
-  }
-
-  function beginProviderWizard(providerType: string): void {
-    selectedProviderType = providerType;
-    const spec = providerSpec(providerType);
-    providerBaseUrl = spec?.base_url ?? '';
-    providerModel = spec?.default_model ?? '';
-    providerApiKey = '';
-    providerApiKeyEnv = spec?.api_key_env ?? '';
-    providerVerified = false;
-    providerModels = [];
-    providerLatency = 0;
-    wizError = '';
-    wizMsg = '';
-
-    if (providerType === 'github-copilot') {
-      void startCopilotFlow();
-      return;
-    }
-
-    wizStep = 'provider-form';
-  }
-
   function closeWizard(): void {
     wizStep = 'closed';
     wizMsg = '';
     wizError = '';
     wizBusy = false;
-    selectedProviderType = '';
-    providerBaseUrl = '';
-    providerModel = '';
-    providerApiKey = '';
-    providerApiKeyEnv = '';
-    providerVerified = false;
-    providerModels = [];
-    providerLatency = 0;
+    // Reset local form
+    localBaseUrl = 'http://localhost:11434/v1';
+    localModel = '';
+    localApiKeyEnv = '';
+    localVerified = false;
+    localModels = [];
+    localLatency = 0;
+    sleepConfig = {
+      sleep_window_start: '02:00',
+      sleep_window_duration_hours: 3,
+      idle_timeout_minutes: 15,
+      allow_daytime_naps: true,
+      enabled: true,
+    };
     // Reset copilot
     copilotFlowId = '';
     copilotUserCode = '';
     copilotVerifyUri = '';
     copilotModels = [];
+  }
+
+  async function loadSleepConfig(): Promise<void> {
+    try {
+      const res = await apiGet<{ sleep?: SleepConfigData }>('/api/sleep/config');
+      if (res.sleep) {
+        sleepConfig = {
+          sleep_window_start: res.sleep.sleep_window_start || '02:00',
+          sleep_window_duration_hours: Number(res.sleep.sleep_window_duration_hours || 3),
+          idle_timeout_minutes: Number(res.sleep.idle_timeout_minutes || 15),
+          allow_daytime_naps: !!res.sleep.allow_daytime_naps,
+          enabled: res.sleep.enabled !== false,
+        };
+      }
+    } catch {
+      // Keep defaults if backend config is not available yet.
+    }
+  }
+
+  async function saveSleepConfig(): Promise<void> {
+    wizBusy = true;
+    wizError = '';
+    try {
+      await apiPut('/api/sleep/config', { sleep: sleepConfig });
+      wizStep = 'done';
+      wizMsg = 'Provider and sleep schedule saved.';
+    } catch (e) {
+      wizError = `Saving sleep settings failed: ${e}`;
+    } finally {
+      wizBusy = false;
+    }
   }
 
   // ----------------------------------------------------------------
@@ -331,16 +323,15 @@
         if (res.provider) {
           const entry: ProviderEntry = {
             ...res.provider,
-            api_key: '',
             verified: true,
             models: copilotModels,
           };
           providers = [...providers, entry];
           if (!defaultProvider) defaultProvider = entry.name;
           await persistProviders();
-          await ensureSuggestedAssignments();
         }
-        wizStep = 'done';
+        await loadSleepConfig();
+        wizStep = 'sleep-config';
         wizMsg = res.message;
       } else {
         wizError = res.message || 'Authorization failed.';
@@ -363,34 +354,28 @@
   }
 
   // ----------------------------------------------------------------
-  // Wizard: API-key or local provider verification
+  // Wizard: Local OpenAI-compatible
   // ----------------------------------------------------------------
 
-  async function verifyProvider(): Promise<void> {
-    if (!selectedProviderType) {
-      wizError = 'Choose a provider first.';
-      return;
-    }
-
+  async function verifyLocal(): Promise<void> {
     wizBusy = true;
     wizError = '';
-    providerVerified = false;
+    localVerified = false;
     try {
       const res = await apiPost<VerifyResult>('/api/providers/verify', {
-        provider_type: selectedProviderType,
-        base_url: providerBaseUrl,
-        model: providerModel,
-        api_key: providerApiKey,
-        api_key_env: providerApiKeyEnv,
+        provider_type: 'local-openai',
+        base_url: localBaseUrl,
+        model: localModel,
+        api_key_env: localApiKeyEnv,
         timeout_ms: 30000,
       });
       if (res.available) {
-        providerVerified = true;
-        providerModels = res.models ?? [];
-        providerLatency = res.latency_ms ?? 0;
+        localVerified = true;
+        localModels = res.models ?? [];
+        localLatency = res.latency_ms ?? 0;
         wizMsg = `Verified — ${res.models_available} model(s) available (${res.latency_ms?.toFixed(0)}ms)`;
-        if (!providerModel && providerModels.length > 0) {
-          providerModel = providerModels[0];
+        if (!localModel && localModels.length > 0) {
+          localModel = localModels[0];
         }
       } else {
         wizError = res.message || 'Verification failed';
@@ -402,31 +387,23 @@
     }
   }
 
-  async function addVerifiedProvider(): Promise<void> {
-    const spec = providerSpec(selectedProviderType);
-    if (!spec) {
-      wizError = 'Choose a provider first.';
-      return;
-    }
-
+  async function addLocalProvider(): Promise<void> {
     const entry: ProviderEntry = {
-      name: spec.name,
-      base_url: providerBaseUrl,
-      model: providerModel,
-      api_key: providerApiKey,
-      has_api_key: providerApiKey.length > 0,
-      api_key_env: providerApiKeyEnv,
+      name: 'custom',
+      base_url: localBaseUrl,
+      model: localModel,
+      api_key_env: localApiKeyEnv,
       timeout_ms: 30000,
       enabled: true,
-      verified: providerVerified,
-      models: providerModels,
+      verified: localVerified,
+      models: localModels,
     };
-    providers = [...providers.filter((provider) => provider.name !== entry.name), entry];
+    providers = [...providers, entry];
     if (!defaultProvider) defaultProvider = entry.name;
     await persistProviders();
-    await ensureSuggestedAssignments();
-    wizStep = 'done';
-    wizMsg = `Added ${spec.label} (${providerModel || 'default model'})`;
+    await loadSleepConfig();
+    wizStep = 'sleep-config';
+    wizMsg = `Added local provider (${localModel || 'custom'})`;
   }
 
   // ----------------------------------------------------------------
@@ -483,80 +460,6 @@
     await saveSystems();
   }
 
-  function modelsForEntry(entry: ProviderEntry): string[] {
-    const models = [...(entry.models ?? [])];
-    if (entry.model && !models.includes(entry.model)) {
-      models.unshift(entry.model);
-    }
-    return models.filter(Boolean);
-  }
-
-  function assignmentFromProvider(entry: ProviderEntry | undefined): SystemAssignment {
-    if (!entry) return { provider: '', model: '' };
-    const models = modelsForEntry(entry);
-    return {
-      provider: entry.name,
-      model: models[0] ?? '',
-    };
-  }
-
-  function modelScore(model: string): number {
-    const value = model.toLowerCase();
-    if (value.includes('opus') || value.includes('gpt-5') || value.includes('sonnet-4')) return 5;
-    if (value.includes('sonnet') || value.includes('gpt-4') || value.includes('large')) return 4;
-    if (value.includes('mini') || value.includes('haiku') || value.includes('small') || value.includes('8b') || value.includes('instant')) return 2;
-    if (value.includes('tiny') || value.includes('3b') || value.includes('1b')) return 1;
-    return 3;
-  }
-
-  function buildSuggestedAssignments(): Record<string, SystemAssignment> {
-    const enabled = providers.filter((provider) => provider.enabled);
-    const primary = enabled.find((provider) => !['ollama', 'custom'].includes(provider.name)) ?? enabled[0];
-    const mostCapable = [...enabled].sort((left, right) => {
-      return modelScore((modelsForEntry(right)[0] ?? right.model)) - modelScore((modelsForEntry(left)[0] ?? left.model));
-    })[0] ?? primary;
-    const fastest = [...enabled].sort((left, right) => {
-      return modelScore((modelsForEntry(left)[0] ?? left.model)) - modelScore((modelsForEntry(right)[0] ?? right.model));
-    })[0] ?? primary;
-    const local = enabled.find((provider) => provider.name === 'ollama')
-      ?? enabled.find((provider) => provider.name === 'custom' && provider.base_url.includes('localhost'))
-      ?? fastest
-      ?? primary;
-
-    return {
-      chat: assignmentFromProvider(primary),
-      reasoning: assignmentFromProvider(mostCapable),
-      reactions: assignmentFromProvider(fastest),
-      sleep: assignmentFromProvider(local),
-    };
-  }
-
-  async function ensureSuggestedAssignments(): Promise<void> {
-    const suggested = buildSuggestedAssignments();
-    let changed = false;
-
-    for (const systemName of COGNITIVE_SYSTEMS) {
-      const current = systems[systemName] ?? { provider: '', model: '' };
-      if (current.provider && current.model) continue;
-      const next = suggested[systemName];
-      if (!next?.provider || !next?.model) continue;
-      systems[systemName] = next;
-      changed = true;
-    }
-
-    if (fallbackChain.length === 0) {
-      fallbackChain = [suggested.sleep, suggested.reactions, suggested.chat]
-        .filter((entry): entry is SystemAssignment => Boolean(entry?.provider && entry?.model))
-        .map((entry) => ({ provider: entry.provider, model: entry.model }));
-      changed = changed || fallbackChain.length > 0;
-    }
-
-    if (changed) {
-      dirty = true;
-      await saveSystems();
-    }
-  }
-
   function modelsForProvider(providerName: string): string[] {
     if (!providerName) return [];
     // Kick off fetch if not cached yet
@@ -607,13 +510,6 @@
 
   function providerDisplayName(p: ProviderEntry): string {
     if (p.name === 'github-copilot') return 'GitHub Copilot';
-    if (p.name === 'openai') return 'OpenAI';
-    if (p.name === 'anthropic') return 'Anthropic';
-    if (p.name === 'openrouter') return 'OpenRouter';
-    if (p.name === 'groq') return 'Groq';
-    if (p.name === 'mistral') return 'Mistral';
-    if (p.name === 'xai') return 'xAI';
-    if (p.name === 'ollama') return 'Ollama';
     if (p.name === 'custom') {
       try { return `Custom (${new URL(p.base_url).hostname})`; } catch { return 'Custom'; }
     }
@@ -644,16 +540,24 @@
         <h3>Add a Provider</h3>
         <p class="wizard-subtitle">Choose the type of LLM provider to configure.</p>
         <div class="wizard-options">
-          {#each supportedProviders as provider}
-            <button class="wizard-option" onclick={() => beginProviderWizard(provider.provider_type)} disabled={wizBusy}>
-              <span class="wizard-option-label">{provider.label}</span>
-              <span class="wizard-option-desc">
-                {#if provider.auth === 'device_code'}Authenticate with your GitHub account via device code
-                {:else if provider.auth === 'local'}Verify a local endpoint and auto-discover models
-                {:else}Validate an API key and discover available models{/if}
-              </span>
-            </button>
-          {/each}
+          <button class="wizard-option" onclick={startCopilotFlow} disabled={wizBusy}>
+            <span class="wizard-option-icon">
+              <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor">
+                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
+              </svg>
+            </span>
+            <span class="wizard-option-label">GitHub Copilot</span>
+            <span class="wizard-option-desc">Authenticate with your GitHub account via device code</span>
+          </button>
+          <button class="wizard-option" onclick={() => { wizStep = 'local-form'; wizError = ''; wizMsg = ''; }}>
+            <span class="wizard-option-icon">
+              <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+              </svg>
+            </span>
+            <span class="wizard-option-label">Local / OpenAI-Compatible</span>
+            <span class="wizard-option-desc">Ollama, LM Studio, vLLM, or any OpenAI-compatible endpoint</span>
+          </button>
         </div>
 
       {:else if wizStep === 'copilot-auth'}
@@ -688,86 +592,115 @@
           {/if}
         </div>
 
-      {:else if wizStep === 'provider-form'}
-        {@const spec = providerSpec(selectedProviderType)}
-        <h3>{spec?.label ?? 'Provider Setup'}</h3>
-        <p class="wizard-subtitle">
-          {#if spec?.auth === 'local'}Verify a local endpoint and pull available models.
-          {:else}Validate the provider and choose a model before saving it.{/if}
-        </p>
+      {:else if wizStep === 'local-form'}
+        <!-- Step 2b: Local OpenAI form -->
+        <h3>Local / OpenAI-Compatible Provider</h3>
+        <p class="wizard-subtitle">Point to any OpenAI-compatible API endpoint.</p>
         <div class="local-form">
           <label for="wiz-base-url">
             Base URL
             <input
               id="wiz-base-url"
               type="url"
-              bind:value={providerBaseUrl}
-              placeholder={spec?.base_url ?? 'https://api.example.com'}
+              bind:value={localBaseUrl}
+              placeholder="http://localhost:11434/v1"
             />
           </label>
-          {#if spec?.auth === 'api_key'}
-            <label for="wiz-api-key">
-              API Key
-              <input
-                id="wiz-api-key"
-                type="password"
-                bind:value={providerApiKey}
-                placeholder="Paste API key"
-              />
-            </label>
-          {/if}
           <label for="wiz-model">
             Model
             <input
               id="wiz-model"
               type="text"
-              bind:value={providerModel}
-              placeholder={spec?.default_model || 'Leave blank to auto-detect'}
+              bind:value={localModel}
+              placeholder="llama3.2 (leave blank to auto-detect)"
             />
-            {#if providerModels.length > 0}
+            {#if localModels.length > 0}
               <div class="model-chips">
-                {#each providerModels as m}
+                {#each localModels as m}
                   <button
                     class="model-chip"
-                    class:selected={providerModel === m}
-                    onclick={() => { providerModel = m; }}
+                    class:selected={localModel === m}
+                    onclick={() => { localModel = m; }}
                   >{m}</button>
                 {/each}
               </div>
             {/if}
           </label>
           <label for="wiz-apikey">
-            API Key Env Var <span class="optional">(optional fallback)</span>
+            API Key Env Var <span class="optional">(optional)</span>
             <input
               id="wiz-apikey"
               type="text"
-              bind:value={providerApiKeyEnv}
-              placeholder={spec?.api_key_env || 'e.g. OPENAI_API_KEY'}
+              bind:value={localApiKeyEnv}
+              placeholder="e.g. OPENAI_API_KEY"
             />
           </label>
           <div class="local-form-actions">
-            <button onclick={verifyProvider} disabled={wizBusy || !providerBaseUrl}>
+            <button onclick={verifyLocal} disabled={wizBusy || !localBaseUrl}>
               {wizBusy ? 'Verifying…' : 'Verify Connection'}
             </button>
-            {#if providerVerified}
-              <button class="btn-primary" onclick={addVerifiedProvider}>
+            {#if localVerified}
+              <button class="btn-primary" onclick={addLocalProvider}>
                 Add Provider
               </button>
             {/if}
           </div>
-          {#if providerVerified}
-            <p class="wizard-subtitle">Latency: {providerLatency.toFixed(0)}ms</p>
-          {/if}
+        </div>
+
+      {:else if wizStep === 'sleep-config'}
+        <h3>Sleep Schedule</h3>
+        <p class="wizard-subtitle">Configure overnight consolidation and idle behavior.</p>
+        <div class="local-form">
+          <label for="wiz-sleep-start">
+            Sleep window start
+            <input id="wiz-sleep-start" type="time" bind:value={sleepConfig.sleep_window_start} />
+          </label>
+          <label for="wiz-sleep-duration">
+            Sleep duration (hours)
+            <input
+              id="wiz-sleep-duration"
+              type="number"
+              min="0.5"
+              max="12"
+              step="0.5"
+              bind:value={sleepConfig.sleep_window_duration_hours}
+            />
+          </label>
+          <label for="wiz-sleep-idle">
+            Idle timeout (minutes)
+            <input
+              id="wiz-sleep-idle"
+              type="number"
+              min="1"
+              max="180"
+              step="1"
+              bind:value={sleepConfig.idle_timeout_minutes}
+            />
+          </label>
+          <label class="checkbox-row" for="wiz-sleep-naps">
+            <input id="wiz-sleep-naps" type="checkbox" bind:checked={sleepConfig.allow_daytime_naps} />
+            Allow daytime naps when idle
+          </label>
+          <label class="checkbox-row" for="wiz-sleep-enabled">
+            <input id="wiz-sleep-enabled" type="checkbox" bind:checked={sleepConfig.enabled} />
+            Enable sleep scheduler
+          </label>
+          <div class="local-form-actions">
+            <button class="btn-ghost" onclick={() => { wizStep = 'done'; }}>Skip for now</button>
+            <button class="btn-primary" onclick={saveSleepConfig} disabled={wizBusy}>
+              {wizBusy ? 'Saving…' : 'Save Sleep Settings'}
+            </button>
+          </div>
         </div>
 
       {:else if wizStep === 'done'}
         <h3>Provider Added</h3>
         <p class="wizard-done-msg">{wizMsg}</p>
-        {#if copilotModels.length > 0 || providerModels.length > 0}
+        {#if copilotModels.length > 0 || localModels.length > 0}
           <div class="available-models">
             <span class="available-models-label">Available models:</span>
             <div class="model-chips">
-              {#each (copilotModels.length > 0 ? copilotModels : providerModels) as m}
+              {#each (copilotModels.length > 0 ? copilotModels : localModels) as m}
                 <span class="model-chip">{m}</span>
               {/each}
             </div>
@@ -837,7 +770,7 @@
     <Card label="Provider Stress (Cortisol)">
       <div class="cortisol-section">
         <div class="cortisol-header">
-          <span class="cortisol-title">Cortisol Level</span>
+          <span class="cortisol-label">Cortisol Level</span>
           <span class="cortisol-val" style="color:{cortisolColor(cortisol)}">{(cortisol * 100).toFixed(0)}%</span>
         </div>
         <div class="cortisol-bar-bg">
@@ -851,8 +784,6 @@
     <div class="full-width">
       <Card label="System Assignments">
         <p class="hint">Assign a provider and model to each cognitive system.</p>
-        <!-- placeholder="provider" -->
-        <!-- placeholder="model" -->
         <div class="systems-grid">
           {#each COGNITIVE_SYSTEMS as sys}
             {@const assignment = systems[sys] ?? { provider: '', model: '' }}
@@ -865,6 +796,7 @@
                 <span class="sys-label">{sys}</span>
               </div>
               <select
+                placeholder="provider"
                 value={assignment.provider}
                 onchange={(e: Event) => setSystemProvider(sys, (e.target as HTMLSelectElement).value)}
               >
@@ -874,6 +806,7 @@
                 {/each}
               </select>
               <select
+                placeholder="model"
                 value={assignment.model}
                 onchange={(e: Event) => setSystemModel(sys, (e.target as HTMLSelectElement).value)}
                 disabled={!assignment.provider}
@@ -964,7 +897,6 @@
   .provider-info { display: flex; flex-direction: column; flex: 1; }
   .provider-name { font-weight: 600; font-size: 0.9rem; }
   .provider-model { font-size: 0.8rem; color: var(--text-dim); }
-  .provider-status { font-size: 0.72rem; color: var(--text-sub); text-transform: uppercase; }
   .empty { color: var(--text-dim); font-size: 0.9rem; }
 
   .btn-add {
@@ -1001,7 +933,6 @@
   /* ---- Cortisol ---- */
   .cortisol-section { display: flex; flex-direction: column; gap: 0.6rem; }
   .cortisol-header { display: flex; align-items: center; gap: 0.5rem; }
-  .cortisol-title { font-size: 0.85rem; color: var(--text-sub); }
   .cortisol-val { font-size: 1.8rem; font-weight: 700; }
   .cortisol-bar-bg { height: 8px; background: var(--bg-surface1); border-radius: 4px; overflow: hidden; }
   .cortisol-fill { height: 100%; border-radius: 4px; transition: width 0.4s var(--ease); }
@@ -1122,6 +1053,17 @@
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.9rem;
   }
   .local-form input:focus { border-color: var(--accent); outline: none; }
+  .local-form .checkbox-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 500;
+  }
+  .local-form .checkbox-row input {
+    width: auto;
+    padding: 0;
+    border: 0;
+  }
   .optional { font-weight: 400; color: var(--text-dim); }
   .local-form-actions { display: flex; gap: 0.75rem; margin-top: 0.5rem; }
 

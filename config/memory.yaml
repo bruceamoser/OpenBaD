@@ -6,3 +6,9 @@ memory:
   pruning_interval_seconds: 3600.0
   forgetting_half_life_hours: 168.0
   episodic_retention_days: 7.0
+  sleep:
+    sleep_window_start: "02:00"
+    sleep_window_duration_hours: 3.0
+    idle_timeout_minutes: 15
+    allow_daytime_naps: true
+    enabled: true
