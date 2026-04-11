@@ -1,5 +1,6 @@
 """Task orchestration package."""
 
+from openbad.tasks.lease import Lease, LeaseError, LeaseStore
 from openbad.tasks.models import (
     NodeStatus,
     ResearchStatus,
@@ -15,6 +16,9 @@ from openbad.tasks.models import (
 from openbad.tasks.store import TaskStore
 
 __all__ = [
+    "Lease",
+    "LeaseError",
+    "LeaseStore",
     "NodeStatus",
     "ResearchStatus",
     "RunStatus",
