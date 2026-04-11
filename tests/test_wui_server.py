@@ -950,3 +950,208 @@ async def test_get_version_route_returns_current_version(aiohttp_client):
     assert resp.status == 200
     data = await resp.json()
     assert data["version"] == openbad.__version__
+
+
+# ── Onboarding endpoint tests ──────────────────────────────────────────
+
+
+
+# ── Onboarding endpoint tests ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_onboarding_status_with_default_profiles(aiohttp_client, tmp_path):
+    """GET /api/onboarding/status with default OpenBaD assistant."""
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "user": {"name": "User"},
+        "assistant": {"name": "OpenBaD"},
+    }))
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/onboarding/status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["assistant_identity_complete"] is False  # OpenBaD is default
+    assert data["user_profile_complete"] is False  # "User" is default
+
+
+@pytest.mark.asyncio
+async def test_get_onboarding_status_with_configured_profiles(aiohttp_client, tmp_path):
+    """GET /api/onboarding/status detects configured assistant and user."""
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "user": {
+            "name": "Bob",
+            "expertise_domains": ["Python"],
+        },
+        "assistant": {
+            "name": "Cortex",
+            "persona_summary": "A helpful assistant",
+        },
+    }))
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/onboarding/status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["assistant_identity_complete"] is True
+    assert data["user_profile_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_assistant_interview_complete_valid_json(aiohttp_client, tmp_path):
+    """POST /api/onboarding/assistant/complete extracts and persists profile."""
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "user": {"name": "User"},
+        "assistant": {"name": "OpenBaD"},
+    }))
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.identity.personality_modulator import PersonalityModulator
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+    modulator = PersonalityModulator(persistence.assistant)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    app["personality_modulator"] = modulator
+    client = await aiohttp_client(app)
+
+    interview_text = """Great! Here's your configuration:
+```json
+{
+  "name": "Athena",
+  "persona_summary": "A knowledge-focused assistant",
+  "learning_focus": ["AI", "Philosophy"],
+  "worldview": ["Clarity", "Precision"],
+  "openness": 0.9,
+  "conscientiousness": 0.8
+}
+```"""
+
+    resp = await client.post(
+        "/api/onboarding/assistant/complete",
+        json={"interview_text": interview_text}
+    )
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["success"] is True
+    assert data["profile"]["name"] == "Athena"
+    assert data["profile"]["persona_summary"] == "A knowledge-focused assistant"
+    assert "AI" in data["profile"]["learning_focus"]
+
+
+@pytest.mark.asyncio
+async def test_post_assistant_interview_complete_no_json_returns_error(aiohttp_client, tmp_path):
+    """POST /api/onboarding/assistant/complete returns 400 when no JSON found."""
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/onboarding/assistant/complete",
+        json={"interview_text": "Just some text without JSON"}
+    )
+
+    assert resp.status == 400
+    text = await resp.text()
+    assert "No valid profile JSON" in text
+
+
+@pytest.mark.asyncio
+async def test_post_user_interview_complete_valid_json(aiohttp_client, tmp_path):
+    """POST /api/onboarding/user/complete extracts and persists user profile."""
+    cfg_path = tmp_path / "identity.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "user": {"name": "User"},
+        "assistant": {"name": "OpenBaD"},
+    }))
+
+    from openbad.identity.persistence import IdentityPersistence
+    from openbad.memory.episodic import EpisodicMemory
+
+    ep = EpisodicMemory(tmp_path / "ep.json", auto_persist=True)
+    persistence = IdentityPersistence(cfg_path, ep)
+
+    app = create_app(enable_mqtt=False)
+    app["identity_persistence"] = persistence
+    client = await aiohttp_client(app)
+
+    interview_text = """Perfect! Here's what I learned:
+```json
+{
+  "name": "Bob",
+  "preferred_name": "Bobby",
+  "communication_style": "casual",
+  "expertise_domains": ["Backend", "Databases"],
+  "interests": ["Photography", "Hiking"],
+  "timezone": "America/Chicago",
+  "work_hours": [9, 17]
+}
+```"""
+
+    resp = await client.post(
+        "/api/onboarding/user/complete",
+        json={"interview_text": interview_text}
+    )
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["success"] is True
+    assert data["profile"]["name"] == "Bob"
+    assert data["profile"]["preferred_name"] == "Bobby"
+    assert "Backend" in data["profile"]["expertise_domains"]
+
+
+@pytest.mark.asyncio
+async def test_post_user_interview_complete_no_json_returns_error(aiohttp_client, tmp_path):
+    """POST /api/onboarding/user/complete returns 400 when no JSON found."""
+    app = _app_with_persistence(tmp_path)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/onboarding/user/complete",
+        json={"interview_text": "No JSON here"}
+    )
+
+    assert resp.status == 400
+    text = await resp.text()
+    assert "No valid profile JSON" in text
+
+
+@pytest.mark.asyncio
+async def test_post_onboarding_skip_returns_success(aiohttp_client):
+    """POST /api/onboarding/skip returns success."""
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.post("/api/onboarding/skip", json={})
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["success"] is True
+    assert data["skipped"] is True

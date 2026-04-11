@@ -6,11 +6,11 @@ Serves the static dashboard assets and hosts the MQTT->WebSocket bridge.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,17 +25,25 @@ from openbad.cognitive.config import (
     load_cognitive_config,
 )
 from openbad.cognitive.providers.github_copilot import (
+    _KNOWN_MODELS,
     CopilotAuthError,
     GitHubCopilotProvider,
-    _KNOWN_MODELS,
 )
 from openbad.cognitive.providers.openai_compat import custom_provider
+from openbad.identity.onboarding import (
+    apply_interview_result,
+    apply_user_interview_result,
+    extract_profile_from_json,
+    extract_user_profile_from_json,
+    is_assistant_configured,
+    is_user_configured,
+)
 from openbad.identity.persistence import IdentityPersistence
 from openbad.identity.personality_modulator import PersonalityModulator
 from openbad.memory.episodic import EpisodicMemory
 from openbad.sensory.config import load_sensory_config
-from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.bridge import MqttWebSocketBridge
+from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.usage_tracker import UsageTracker
 
 # SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
@@ -251,7 +259,13 @@ def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
         existing = yaml.safe_load(path.read_text()) or {}
         cognitive = existing.get("cognitive", {})
         if isinstance(cognitive, dict):
-            for key in ("context_budget", "reasoning", "systems", "default_fallback_chain", "fallback_cortisol"):
+            for key in (
+                "context_budget",
+                "reasoning",
+                "systems",
+                "default_fallback_chain",
+                "fallback_cortisol",
+            ):
                 if key in cognitive and key not in document["cognitive"]:
                     document["cognitive"][key] = cognitive[key]
 
@@ -622,7 +636,7 @@ def _serialize_chat_turn(turn) -> dict[str, object]:
         "content": turn.content,
         "timestamp": datetime.fromtimestamp(
             turn.timestamp,
-            tz=timezone.utc,
+            tz=UTC,
         ).isoformat(),
     }
 
@@ -756,7 +770,7 @@ async def _get_usage(request: web.Request) -> web.Response:
         raise web.HTTPServiceUnavailable(text="UsageTracker not available")
     return web.json_response(
         {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             **tracker.snapshot(),
         }
     )
@@ -1089,6 +1103,215 @@ async def _post_entity_assistant_reset(request: web.Request) -> web.Response:
     return web.json_response(_serialize_assistant(persistence.assistant))
 
 
+# ── Onboarding endpoints ─────────────────────────────────────────────────────
+
+
+def _resolve_memory_config_path() -> Path | None:
+    """Resolve path to memory.yaml config file."""
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    if config_dir:
+        candidate = Path(config_dir) / "memory.yaml"
+        if candidate.is_file():
+            return candidate
+
+    candidates = [
+        Path("/etc/openbad/memory.yaml"),
+        Path.home() / ".config" / "openbad" / "memory.yaml",
+        Path("config/memory.yaml"),
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def _read_sleep_config(path: Path) -> tuple[dict, dict]:
+    """Read minimal sleep config for onboarding status check.
+
+    Returns (full_doc, sleep_config) where sleep_config contains
+    idle_timeout_minutes and enabled fields if present.
+    """
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}, {}
+
+    # Check if sleep config is at top level or under memory.sleep
+    sleep_cfg = {}
+    if "idle_timeout_minutes" in doc:
+        sleep_cfg["idle_timeout_minutes"] = doc["idle_timeout_minutes"]
+        sleep_cfg["enabled"] = doc.get("enabled", True)
+    elif "memory" in doc and isinstance(doc["memory"], dict):
+        mem = doc["memory"]
+        if "sleep" in mem and isinstance(mem["sleep"], dict):
+            sleep = mem["sleep"]
+            if "idle_timeout_minutes" in sleep:
+                sleep_cfg["idle_timeout_minutes"] = sleep["idle_timeout_minutes"]
+                sleep_cfg["enabled"] = sleep.get("enabled", True)
+
+    return doc, sleep_cfg
+
+
+async def _get_onboarding_status(request: web.Request) -> web.Response:
+    """GET /api/onboarding/status - check completion of onboarding steps."""
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+
+    # Check provider configuration
+    providers_complete = False
+    try:
+        cfg_path = _resolve_cognitive_config_path()
+        if cfg_path and cfg_path.is_file():
+            cfg = load_cognitive_config(str(cfg_path))
+            # At least one provider configured with non-placeholder values
+            providers_complete = any(
+                p.api_base and p.api_base != "http://localhost:11434"
+                for p in cfg.providers
+            )
+    except Exception:
+        pass
+
+    # Check sleep configuration
+    sleep_complete = False
+    try:
+        mem_path = _resolve_memory_config_path()
+        if mem_path:
+            _, sleep_cfg = _read_sleep_config(mem_path)
+            # Sleep is configured if it differs from defaults (idle_timeout=15, enabled=True)
+            if sleep_cfg:
+                idle = sleep_cfg.get("idle_timeout_minutes", 15)
+                enabled = sleep_cfg.get("enabled", True)
+                sleep_complete = idle != 15 or not enabled
+    except Exception:
+        pass
+
+    # Check assistant identity
+    assistant_identity_complete = is_assistant_configured(persistence.assistant)
+
+    # Check user profile
+    user_profile_complete = is_user_configured(persistence.user)
+
+    # Overall onboarding complete if all steps done
+    onboarding_complete = (
+        providers_complete
+        and sleep_complete
+        and assistant_identity_complete
+        and user_profile_complete
+    )
+
+    return web.json_response(
+        {
+            "providers_complete": providers_complete,
+            "sleep_complete": sleep_complete,
+            "assistant_identity_complete": assistant_identity_complete,
+            "user_profile_complete": user_profile_complete,
+            "onboarding_complete": onboarding_complete,
+        }
+    )
+
+
+async def _post_assistant_interview_complete(request: web.Request) -> web.Response:
+    """POST /api/onboarding/assistant/complete - finalize assistant interview."""
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Request body must be a JSON object")
+
+    interview_text = payload.get("interview_text", "")
+    if not interview_text:
+        raise web.HTTPBadRequest(text="Missing interview_text field")
+
+    # Extract JSON profile from LLM response
+    extracted = extract_profile_from_json(interview_text)
+    if not extracted:
+        raise web.HTTPBadRequest(text="No valid profile JSON found in interview text")
+
+    # Apply to assistant profile
+    updated_profile = apply_interview_result(persistence.assistant, extracted)
+
+    # Persist changes
+    try:
+        persistence.update_assistant(
+            name=updated_profile.name,
+            persona_summary=updated_profile.persona_summary,
+            learning_focus=updated_profile.learning_focus,
+            worldview=updated_profile.worldview,
+            boundaries=updated_profile.boundaries,
+            rhetorical_style=updated_profile.rhetorical_style,
+            openness=updated_profile.openness,
+            conscientiousness=updated_profile.conscientiousness,
+            extraversion=updated_profile.extraversion,
+            agreeableness=updated_profile.agreeableness,
+            stability=updated_profile.stability,
+        )
+    except Exception as exc:
+        raise web.HTTPBadRequest(text=f"Failed to update assistant profile: {exc}") from exc
+
+    # Update personality modulator
+    modulator = request.app.get("personality_modulator")
+    if modulator is not None:
+        modulator.update(persistence.assistant)
+
+    return web.json_response(
+        {"success": True, "profile": _serialize_assistant(persistence.assistant)}
+    )
+
+
+async def _post_user_interview_complete(request: web.Request) -> web.Response:
+    """POST /api/onboarding/user/complete - finalize user profile interview."""
+    persistence = request.app.get("identity_persistence")
+    if persistence is None:
+        raise web.HTTPServiceUnavailable(text="IdentityPersistence not available")
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Request body must be a JSON object")
+
+    interview_text = payload.get("interview_text", "")
+    if not interview_text:
+        raise web.HTTPBadRequest(text="Missing interview_text field")
+
+    # Extract JSON profile from LLM response
+    extracted = extract_user_profile_from_json(interview_text)
+    if not extracted:
+        raise web.HTTPBadRequest(text="No valid profile JSON found in interview text")
+
+    # Apply to user profile
+    updated_profile = apply_user_interview_result(persistence.user, extracted)
+
+    # Persist changes
+    try:
+        persistence.update_user(
+            name=updated_profile.name,
+            preferred_name=updated_profile.preferred_name,
+            communication_style=updated_profile.communication_style.value,
+            expertise_domains=updated_profile.expertise_domains,
+            active_projects=updated_profile.active_projects,
+            interests=updated_profile.interests,
+            pet_peeves=updated_profile.pet_peeves,
+            worldview=updated_profile.worldview,
+            preferred_feedback_style=updated_profile.preferred_feedback_style,
+            timezone=updated_profile.timezone,
+            work_hours=list(updated_profile.work_hours),
+        )
+    except Exception as exc:
+        raise web.HTTPBadRequest(text=f"Failed to update user profile: {exc}") from exc
+
+    return web.json_response({"success": True, "profile": _serialize_user(persistence.user)})
+
+
+async def _post_onboarding_skip(request: web.Request) -> web.Response:
+    """POST /api/onboarding/skip - skip onboarding and use defaults."""
+    # For now, just return success. Skipping means using the default profiles
+    # which are already loaded. In the future, we might set a flag to prevent
+    # re-prompting for onboarding.
+    return web.json_response({"success": True, "skipped": True})
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -1152,6 +1375,10 @@ def create_app(
     app.router.add_get("/api/entity/assistant", _get_entity_assistant)
     app.router.add_put("/api/entity/assistant", _put_entity_assistant)
     app.router.add_post("/api/entity/assistant/reset", _post_entity_assistant_reset)
+    app.router.add_get("/api/onboarding/status", _get_onboarding_status)
+    app.router.add_post("/api/onboarding/assistant/complete", _post_assistant_interview_complete)
+    app.router.add_post("/api/onboarding/user/complete", _post_user_interview_complete)
+    app.router.add_post("/api/onboarding/skip", _post_onboarding_skip)
     # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
     app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_post(
