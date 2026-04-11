@@ -125,3 +125,45 @@ class TestSandboxEnv:
         assert "/usr/bin" in env["PATH"]
         # Should not inherit full parent env
         assert "EDITOR" not in env or env.get("EDITOR") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: async_execute (#410)
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncExecute:
+    @pytest.mark.asyncio
+    async def test_async_echo(self, adapter: CliToolAdapter) -> None:
+        result = await adapter.async_execute("echo", ["hello async"])
+        assert result.returncode == 0
+        assert "hello async" in result.stdout
+        assert not result.timed_out
+
+    @pytest.mark.asyncio
+    async def test_async_blocked_command(self, adapter: CliToolAdapter) -> None:
+        result = await adapter.async_execute("python3", ["-c", "print('x')"])
+        assert result.returncode == -1
+        assert "not in allowlist" in result.stderr
+
+    @pytest.mark.asyncio
+    async def test_async_path_escape_rejected(self, adapter: CliToolAdapter) -> None:
+        result = await adapter.async_execute("ls", cwd="../../../etc")
+        assert result.returncode == -1
+        assert "escapes sandbox" in result.stderr
+
+    @pytest.mark.asyncio
+    async def test_async_timeout(self, sandbox: Path) -> None:
+        config = CliToolConfig(
+            allowed_commands=["sleep"],
+            working_directory=str(sandbox),
+            timeout=0.1,
+        )
+        adapter = CliToolAdapter(config)
+        result = await adapter.async_execute("sleep", ["5"])
+        assert result.timed_out
+
+    @pytest.mark.asyncio
+    async def test_async_returncode_nonzero(self, adapter: CliToolAdapter) -> None:
+        result = await adapter.async_execute("ls", ["/no_such_dir_xyz"])
+        assert result.returncode != 0
