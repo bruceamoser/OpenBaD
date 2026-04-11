@@ -12,3 +12,11 @@ identity:
 
   # Path prefix for persisted marker files
   marker_path: "data/markers"
+
+# User profile — layer 1 (config-seeded)
+user:
+  name: "User"
+  preferred_name: ""
+  communication_style: "casual"
+  expertise_domains: []
+  interaction_history_summary: ""
