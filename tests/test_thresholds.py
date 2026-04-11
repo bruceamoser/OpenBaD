@@ -167,6 +167,6 @@ class TestPublishBreaches:
         breaches = [Breach("cpu_percent", 80.0, 75.0, 2)]
         publish_breaches(client, breaches)
         payload = client.publish.call_args.args[1]
-        msg = EndocrineEvent()
-        msg.ParseFromString(payload)
-        assert msg.hormone == "cortisol"
+        # publish_breaches passes an EndocrineEvent object (not serialized bytes)
+        assert isinstance(payload, EndocrineEvent)
+        assert payload.hormone == "cortisol"

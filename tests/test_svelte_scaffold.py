@@ -78,7 +78,7 @@ def test_layout_has_spa_mode():
 def test_makefile_targets():
     makefile = ROOT.parent / "Makefile"
     text = makefile.read_text(encoding="utf-8")
-    assert "wui-build" in text
+    assert "wui:" in text
     assert "wui-dev" in text
 
 
