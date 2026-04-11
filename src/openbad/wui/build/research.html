@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenBaD — Research &amp; Audit</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+      header { padding: 1rem 2rem; border-bottom: 1px solid #1e2433; display: flex; align-items: center; gap: 1rem; }
+      header h1 { font-size: 1.25rem; font-weight: 600; }
+      header a { color: #94a3b8; font-size: 0.875rem; text-decoration: none; }
+      header a:hover { color: #e2e8f0; }
+      main { padding: 2rem; max-width: 1100px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+      @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+      .panel { background: #1a1f2e; border: 1px solid #1e2433; border-radius: 0.5rem; padding: 1.5rem; }
+      .panel h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+      table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+      th { text-align: left; padding: 0.4rem 0.5rem; color: #64748b; border-bottom: 1px solid #1e2433; }
+      td { padding: 0.4rem 0.5rem; border-bottom: 1px solid #1a2035; word-break: break-all; }
+      tr:hover td { background: #1e2433; }
+      .empty { color: #475569; font-style: italic; }
+      .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 9999px; font-size: 0.75rem; }
+      .badge-pending { background: #334155; color: #94a3b8; }
+      .badge-dequeued { background: #14532d; color: #4ade80; }
+      .ok { color: #4ade80; }
+      .err { color: #f87171; }
+      input[type=text] { background: #1a1f2e; border: 1px solid #334155; color: #e2e8f0; padding: 0.25rem 0.5rem; border-radius: 0.25rem; width: 100%; margin-bottom: 0.5rem; font-size: 0.8125rem; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>OpenBaD</h1>
+      <a href="/">Dashboard</a>
+      <a href="/tasks.html">Tasks</a>
+      <a href="/research.html" style="color:#e2e8f0">Research &amp; Audit</a>
+    </header>
+    <main>
+
+      <!-- Research Queue Panel -->
+      <div class="panel" id="research-panel">
+        <h2>Research Queue</h2>
+        <div id="research-content"><p class="empty">Loading…</p></div>
+      </div>
+
+      <!-- MCP Audit Panel -->
+      <div class="panel" id="audit-panel">
+        <h2>MCP Audit
+        </h2>
+        <input type="text" id="audit-task-filter" placeholder="Filter by task_id…" oninput="loadAudit()" />
+        <div id="audit-content"><p class="empty">Loading…</p></div>
+      </div>
+
+      <!-- Capabilities Panel -->
+      <div class="panel" id="capabilities-panel">
+        <h2>Capabilities</h2>
+        <div id="capabilities-content"><p class="empty">Loading…</p></div>
+      </div>
+
+      <!-- Scheduler Panel -->
+      <div class="panel" id="scheduler-panel">
+        <h2>Scheduler State</h2>
+        <div id="scheduler-content"><p class="empty">Loading…</p></div>
+      </div>
+    </main>
+    <script>
+      const BASE = '';
+
+      function escHtml(s) {
+        return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      }
+
+      async function loadResearch() {
+        const el = document.getElementById('research-content');
+        try {
+          const res = await fetch(`${BASE}/api/research`);
+          if (!res.ok) { el.innerHTML = `<p class="empty">Error ${res.status}</p>`; return; }
+          const { nodes } = await res.json();
+          if (!nodes.length) {
+            el.innerHTML = '<p class="empty">Queue is empty.</p>';
+            return;
+          }
+          el.innerHTML = `<table>
+            <thead><tr><th>Title</th><th>Priority</th><th>Status</th></tr></thead>
+            <tbody>${nodes.map(n => `
+              <tr>
+                <td>${escHtml(n.title)}</td>
+                <td>${n.priority}</td>
+                <td><span class="badge badge-${n.status}">${n.status}</span></td>
+              </tr>`).join('')}
+            </tbody></table>`;
+        } catch { el.innerHTML = '<p class="empty">Failed to load.</p>'; }
+      }
+
+      async function loadAudit() {
+        const el = document.getElementById('audit-content');
+        const taskId = document.getElementById('audit-task-filter').value.trim();
+        const url = taskId ? `${BASE}/api/mcp/audit?task_id=${encodeURIComponent(taskId)}` : `${BASE}/api/mcp/audit`;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) { el.innerHTML = `<p class="empty">Error ${res.status}</p>`; return; }
+          const { records } = await res.json();
+          if (!records.length) {
+            el.innerHTML = '<p class="empty">No audit records.</p>';
+            return;
+          }
+          el.innerHTML = `<table>
+            <thead><tr><th>Tool</th><th>Session</th><th>OK</th></tr></thead>
+            <tbody>${records.map(r => `
+              <tr>
+                <td>${escHtml(r.tool_name)}</td>
+                <td>${escHtml(r.session_id)}</td>
+                <td class="${r.success ? 'ok' : 'err'}">${r.success ? '✓' : '✗'}</td>
+              </tr>`).join('')}
+            </tbody></table>`;
+        } catch { el.innerHTML = '<p class="empty">Failed to load.</p>'; }
+      }
+
+      async function loadCapabilities() {
+        const el = document.getElementById('capabilities-content');
+        try {
+          const res = await fetch(`${BASE}/api/capabilities`);
+          if (!res.ok) { el.innerHTML = `<p class="empty">Error ${res.status}</p>`; return; }
+          const { capabilities } = await res.json();
+          if (!capabilities.length) {
+            el.innerHTML = '<p class="empty">No capabilities registered.</p>';
+            return;
+          }
+          el.innerHTML = `<table>
+            <thead><tr><th>ID</th><th>S1</th><th>Permissions</th></tr></thead>
+            <tbody>${capabilities.map(c => `
+              <tr>
+                <td>${escHtml(c.capability_id)}</td>
+                <td>${c.system1 ? '✓' : ''}</td>
+                <td>${c.permissions.join(', ')}</td>
+              </tr>`).join('')}
+            </tbody></table>`;
+        } catch { el.innerHTML = '<p class="empty">Failed to load.</p>'; }
+      }
+
+      async function loadScheduler() {
+        const el = document.getElementById('scheduler-content');
+        try {
+          const res = await fetch(`${BASE}/api/scheduler/state`);
+          if (!res.ok) { el.innerHTML = `<p class="empty">Error ${res.status}</p>`; return; }
+          const s = await res.json();
+          el.innerHTML = `<table>
+            <tbody>
+              <tr><th>Quiet Hour Active</th><td>${s.quiet_hour_active ? '<span class="err">Yes</span>' : '<span class="ok">No</span>'}</td></tr>
+              <tr><th>Poll Limit</th><td>${s.poll_limit}</td></tr>
+              <tr><th>Lease TTL (s)</th><td>${s.lease_ttl_seconds}</td></tr>
+              <tr><th>Quiet Windows</th><td>${s.quiet_hours.length ? s.quiet_hours.map(w=>`${w.start_hour}–${w.end_hour}`).join(', ') : 'None'}</td></tr>
+            </tbody></table>`;
+        } catch { el.innerHTML = '<p class="empty">Failed to load.</p>'; }
+      }
+
+      loadResearch();
+      loadAudit();
+      loadCapabilities();
+      loadScheduler();
+    </script>
+  </body>
+</html>
