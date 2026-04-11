@@ -68,7 +68,15 @@
     models?: string[];
   }
 
-  type WizardStep = 'closed' | 'pick-type' | 'copilot-auth' | 'local-form' | 'done';
+  interface SleepConfigData {
+    sleep_window_start: string;
+    sleep_window_duration_hours: number;
+    idle_timeout_minutes: number;
+    allow_daytime_naps: boolean;
+    enabled: boolean;
+  }
+
+  type WizardStep = 'closed' | 'pick-type' | 'copilot-auth' | 'local-form' | 'sleep-config' | 'done';
 
   // ----------------------------------------------------------------
   // State
@@ -105,6 +113,13 @@
   let localVerified = $state(false);
   let localModels: string[] = $state([]);
   let localLatency = $state(0);
+  let sleepConfig = $state<SleepConfigData>({
+    sleep_window_start: '02:00',
+    sleep_window_duration_hours: 3,
+    idle_timeout_minutes: 15,
+    allow_daytime_naps: true,
+    enabled: true,
+  });
 
   // Derived cortisol from WS
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
@@ -220,11 +235,49 @@
     localVerified = false;
     localModels = [];
     localLatency = 0;
+    sleepConfig = {
+      sleep_window_start: '02:00',
+      sleep_window_duration_hours: 3,
+      idle_timeout_minutes: 15,
+      allow_daytime_naps: true,
+      enabled: true,
+    };
     // Reset copilot
     copilotFlowId = '';
     copilotUserCode = '';
     copilotVerifyUri = '';
     copilotModels = [];
+  }
+
+  async function loadSleepConfig(): Promise<void> {
+    try {
+      const res = await apiGet<{ sleep?: SleepConfigData }>('/api/sleep/config');
+      if (res.sleep) {
+        sleepConfig = {
+          sleep_window_start: res.sleep.sleep_window_start || '02:00',
+          sleep_window_duration_hours: Number(res.sleep.sleep_window_duration_hours || 3),
+          idle_timeout_minutes: Number(res.sleep.idle_timeout_minutes || 15),
+          allow_daytime_naps: !!res.sleep.allow_daytime_naps,
+          enabled: res.sleep.enabled !== false,
+        };
+      }
+    } catch {
+      // Keep defaults if backend config is not available yet.
+    }
+  }
+
+  async function saveSleepConfig(): Promise<void> {
+    wizBusy = true;
+    wizError = '';
+    try {
+      await apiPut('/api/sleep/config', { sleep: sleepConfig });
+      wizStep = 'done';
+      wizMsg = 'Provider and sleep schedule saved.';
+    } catch (e) {
+      wizError = `Saving sleep settings failed: ${e}`;
+    } finally {
+      wizBusy = false;
+    }
   }
 
   // ----------------------------------------------------------------
@@ -277,7 +330,8 @@
           if (!defaultProvider) defaultProvider = entry.name;
           await persistProviders();
         }
-        wizStep = 'done';
+        await loadSleepConfig();
+        wizStep = 'sleep-config';
         wizMsg = res.message;
       } else {
         wizError = res.message || 'Authorization failed.';
@@ -347,7 +401,8 @@
     providers = [...providers, entry];
     if (!defaultProvider) defaultProvider = entry.name;
     await persistProviders();
-    wizStep = 'done';
+    await loadSleepConfig();
+    wizStep = 'sleep-config';
     wizMsg = `Added local provider (${localModel || 'custom'})`;
   }
 
@@ -592,6 +647,52 @@
           </div>
         </div>
 
+      {:else if wizStep === 'sleep-config'}
+        <h3>Sleep Schedule</h3>
+        <p class="wizard-subtitle">Configure overnight consolidation and idle behavior.</p>
+        <div class="local-form">
+          <label for="wiz-sleep-start">
+            Sleep window start
+            <input id="wiz-sleep-start" type="time" bind:value={sleepConfig.sleep_window_start} />
+          </label>
+          <label for="wiz-sleep-duration">
+            Sleep duration (hours)
+            <input
+              id="wiz-sleep-duration"
+              type="number"
+              min="0.5"
+              max="12"
+              step="0.5"
+              bind:value={sleepConfig.sleep_window_duration_hours}
+            />
+          </label>
+          <label for="wiz-sleep-idle">
+            Idle timeout (minutes)
+            <input
+              id="wiz-sleep-idle"
+              type="number"
+              min="1"
+              max="180"
+              step="1"
+              bind:value={sleepConfig.idle_timeout_minutes}
+            />
+          </label>
+          <label class="checkbox-row" for="wiz-sleep-naps">
+            <input id="wiz-sleep-naps" type="checkbox" bind:checked={sleepConfig.allow_daytime_naps} />
+            Allow daytime naps when idle
+          </label>
+          <label class="checkbox-row" for="wiz-sleep-enabled">
+            <input id="wiz-sleep-enabled" type="checkbox" bind:checked={sleepConfig.enabled} />
+            Enable sleep scheduler
+          </label>
+          <div class="local-form-actions">
+            <button class="btn-ghost" onclick={() => { wizStep = 'done'; }}>Skip for now</button>
+            <button class="btn-primary" onclick={saveSleepConfig} disabled={wizBusy}>
+              {wizBusy ? 'Saving…' : 'Save Sleep Settings'}
+            </button>
+          </div>
+        </div>
+
       {:else if wizStep === 'done'}
         <h3>Provider Added</h3>
         <p class="wizard-done-msg">{wizMsg}</p>
@@ -655,6 +756,7 @@
               <div class="provider-info">
                 <span class="provider-name">{providerDisplayName(p)}</span>
                 <span class="provider-model">{p.model || '(auto)'}</span>
+                <span class="provider-status">{p.verified ? 'verified' : 'unverified'}</span>
               </div>
               <button class="btn-icon btn-remove" onclick={() => removeProvider(i)} aria-label="Remove provider" title="Remove provider">&times;</button>
             </div>
@@ -668,6 +770,7 @@
     <Card label="Provider Stress (Cortisol)">
       <div class="cortisol-section">
         <div class="cortisol-header">
+          <span class="cortisol-label">Cortisol Level</span>
           <span class="cortisol-val" style="color:{cortisolColor(cortisol)}">{(cortisol * 100).toFixed(0)}%</span>
         </div>
         <div class="cortisol-bar-bg">
@@ -693,6 +796,7 @@
                 <span class="sys-label">{sys}</span>
               </div>
               <select
+                placeholder="provider"
                 value={assignment.provider}
                 onchange={(e: Event) => setSystemProvider(sys, (e.target as HTMLSelectElement).value)}
               >
@@ -702,6 +806,7 @@
                 {/each}
               </select>
               <select
+                placeholder="model"
                 value={assignment.model}
                 onchange={(e: Event) => setSystemModel(sys, (e.target as HTMLSelectElement).value)}
                 disabled={!assignment.provider}
@@ -948,6 +1053,17 @@
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.9rem;
   }
   .local-form input:focus { border-color: var(--accent); outline: none; }
+  .local-form .checkbox-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 500;
+  }
+  .local-form .checkbox-row input {
+    width: auto;
+    padding: 0;
+    border: 0;
+  }
   .optional { font-weight: 400; color: var(--text-dim); }
   .local-form-actions { display: flex; gap: 0.75rem; margin-top: 0.5rem; }
 

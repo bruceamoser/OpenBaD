@@ -178,6 +178,7 @@ class TestMemoryConfig:
         assert cfg.pruning_interval_seconds == 3600.0
         assert cfg.forgetting_half_life_hours == 168.0
         assert cfg.episodic_retention_days == 7.0
+        assert cfg.sleep.idle_timeout_minutes == 15
 
     def test_from_yaml(self, tmp_path) -> None:
         from openbad.memory.config import MemoryConfig
@@ -189,6 +190,12 @@ class TestMemoryConfig:
                 "ltm_storage_dir": "/tmp/mem",  # noqa: S108
                 "pruning_interval_seconds": 600.0,
                 "forgetting_half_life_hours": 72.0,
+                "sleep": {
+                    "sleep_window_start": "01:30",
+                    "sleep_window_duration_hours": 2.5,
+                    "idle_timeout_minutes": 20,
+                    "allow_daytime_naps": False,
+                },
             },
         }
         yaml_file = tmp_path / "mem.yaml"
@@ -198,6 +205,8 @@ class TestMemoryConfig:
         assert cfg.stm_max_tokens == 16384
         assert cfg.ltm_backend == "sqlite"
         assert cfg.forgetting_half_life_hours == 72.0
+        assert cfg.sleep.sleep_window_start == "01:30"
+        assert cfg.sleep.allow_daytime_naps is False
 
     def test_to_dict(self) -> None:
         from openbad.memory.config import MemoryConfig

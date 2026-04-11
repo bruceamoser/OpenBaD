@@ -6,7 +6,7 @@ Serves the static dashboard assets and hosts the MQTT->WebSocket bridge.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -33,6 +33,7 @@ from openbad.cognitive.providers.openai_compat import custom_provider
 from openbad.identity.persistence import IdentityPersistence
 from openbad.identity.personality_modulator import PersonalityModulator
 from openbad.memory.episodic import EpisodicMemory
+from openbad.memory.sleep.schedule import SleepScheduleConfig
 from openbad.sensory.config import load_sensory_config
 from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.bridge import MqttWebSocketBridge
@@ -471,9 +472,11 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
 
     try:
         result = await provider.poll_for_token_once(str(flow["device_code"]))
-    except Exception:
+    except Exception as exc:
         log.exception("poll_for_token_once failed for flow %s", flow_id)
-        raise web.HTTPBadRequest(text="Failed to poll GitHub for authorization status")
+        raise web.HTTPBadRequest(
+            text="Failed to poll GitHub for authorization status"
+        ) from exc
     state = str(result.get("state", "error"))
     if state == "authorization_pending":
         return web.json_response(
@@ -830,6 +833,175 @@ def _resolve_senses_config_path() -> Path:
     return Path("config/senses.yaml")
 
 
+def _resolve_memory_config_path() -> Path:
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir) / "memory.yaml"
+    return Path("config/memory.yaml")
+
+
+def _read_memory_document(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _coerce_sleep_config(payload: object) -> SleepScheduleConfig:
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="sleep config must be an object")
+
+    raw = payload.get("sleep", payload)
+    if not isinstance(raw, dict):
+        raise web.HTTPBadRequest(text="sleep must be an object")
+
+    normalized: dict[str, object] = {}
+    if "sleep_window_start" in raw:
+        normalized["sleep_window_start"] = str(raw["sleep_window_start"])
+    if "sleep_window_duration_hours" in raw:
+        normalized["duration_hours"] = raw["sleep_window_duration_hours"]
+    if "idle_timeout_minutes" in raw:
+        normalized["idle_timeout_minutes"] = raw["idle_timeout_minutes"]
+    if "allow_daytime_naps" in raw:
+        normalized["allow_daytime_naps"] = raw["allow_daytime_naps"]
+    if "enabled" in raw:
+        normalized["enabled"] = raw["enabled"]
+
+    # Backward-compatible aliases.
+    if "start_hour" in raw and "sleep_window_start" not in raw:
+        normalized["start_hour"] = raw["start_hour"]
+    if "duration_hours" in raw and "sleep_window_duration_hours" not in raw:
+        normalized["duration_hours"] = raw["duration_hours"]
+
+    try:
+        return SleepScheduleConfig.from_dict(normalized)
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+
+
+def _sleep_config_to_dict(config: SleepScheduleConfig) -> dict[str, object]:
+    return {
+        "sleep_window_start": config.sleep_window_start,
+        "sleep_window_duration_hours": config.sleep_window_duration_hours,
+        "idle_timeout_minutes": config.idle_timeout_minutes,
+        "allow_daytime_naps": config.allow_daytime_naps,
+        "enabled": config.enabled,
+    }
+
+
+def _next_sleep_window_start(config: SleepScheduleConfig, now: datetime) -> datetime:
+    base = now.replace(
+        hour=config.start_hour,
+        minute=config.start_minute,
+        second=0,
+        microsecond=0,
+    )
+    if base <= now:
+        base += timedelta(days=1)
+    return base
+
+
+def _read_sleep_config(path: Path) -> tuple[dict[str, object], SleepScheduleConfig]:
+    document = _read_memory_document(path)
+    memory = document.get("memory")
+    sleep_raw: object = {}
+    if isinstance(memory, dict):
+        sleep_raw = memory.get("sleep", {})
+    return document, _coerce_sleep_config(sleep_raw)
+
+
+def _sleep_payload(
+    request: web.Request,
+    config: SleepScheduleConfig,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    ts = now or datetime.now(timezone.utc)
+
+    next_scheduled: str | None
+    if not config.enabled:
+        next_scheduled = None
+    elif config.is_in_window(ts):
+        next_scheduled = ts.isoformat()
+    else:
+        next_scheduled = _next_sleep_window_start(config, ts).isoformat()
+
+    return {
+        "sleep": _sleep_config_to_dict(config),
+        "next_scheduled_consolidation": next_scheduled,
+        "last_consolidation_summary": request.app.get("sleep_runtime", {}).get(
+            "last_summary"
+        ),
+    }
+
+
+async def _get_sleep_config(request: web.Request) -> web.Response:
+    path = _resolve_memory_config_path()
+    _, config = _read_sleep_config(path)
+    return web.json_response(_sleep_payload(request, config))
+
+
+async def _put_sleep_config(request: web.Request) -> web.Response:
+    payload = await request.json()
+    config = _coerce_sleep_config(payload)
+
+    path = _resolve_memory_config_path()
+    document = _read_memory_document(path)
+    memory = document.get("memory")
+    if not isinstance(memory, dict):
+        memory = {}
+    memory["sleep"] = _sleep_config_to_dict(config)
+    document["memory"] = memory
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    return web.json_response(_sleep_payload(request, config))
+
+
+def _publish_sleep_command(request: web.Request, command: str) -> None:
+    bridge = request.app.get("bridge")
+    mqtt_client = getattr(bridge, "_mqtt", None) if bridge is not None else None
+    if mqtt_client is None:
+        return
+    try:
+        mqtt_client.publish("openbad/sleep/command", command.encode("utf-8"))
+    except Exception:
+        log.exception("Failed to publish sleep command: %s", command)
+
+
+async def _post_sleep_trigger(request: web.Request) -> web.Response:
+    runtime = request.app.get("sleep_runtime")
+    if isinstance(runtime, dict):
+        runtime["last_summary"] = {
+            "state": "manual_sleep_requested",
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+    _publish_sleep_command(request, "sleep")
+    return web.json_response({"ok": True, "state": "sleep_requested"})
+
+
+async def _post_sleep_wake(request: web.Request) -> web.Response:
+    runtime = request.app.get("sleep_runtime")
+    if isinstance(runtime, dict):
+        runtime["last_summary"] = {
+            "state": "manual_wake_requested",
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+    _publish_sleep_command(request, "wake")
+    return web.json_response({"ok": True, "state": "wake_requested"})
+
+
+async def _post_sleep_trigger_legacy(request: web.Request) -> web.Response:
+    """Backwards-compatible alias for sleep trigger endpoint."""
+    return await _post_sleep_trigger(request)
+
+
+async def _post_sleep_wake_legacy(request: web.Request) -> web.Response:
+    """Backwards-compatible alias for sleep wake endpoint."""
+    return await _post_sleep_wake(request)
+
+
 def _serialize_senses(cfg: object) -> dict:
     """Convert a SensoryConfig to a JSON-safe dict."""
     h = cfg.hearing
@@ -1099,6 +1271,7 @@ def create_app(
     app = bridge.create_app()
     app["bridge"] = bridge
     app["copilot_device_flows"] = {}
+    app["sleep_runtime"] = {"last_summary": None}
     app["usage_tracker"] = UsageTracker(db_path=_resolve_usage_db_path())
 
     async def _cleanup_usage_tracker(app: web.Application) -> None:
@@ -1143,6 +1316,10 @@ def create_app(
     app.router.add_get("/api/version", _get_version)
     app.router.add_get("/api/senses", _get_senses)
     app.router.add_put("/api/senses", _put_senses)
+    app.router.add_get("/api/sleep/config", _get_sleep_config)
+    app.router.add_put("/api/sleep/config", _put_sleep_config)
+    app.router.add_post("/api/sleep/trigger", _post_sleep_trigger)
+    app.router.add_post("/api/sleep/wake", _post_sleep_wake)
     app.router.add_get("/api/toolbelt", _get_toolbelt)
     app.router.add_put("/api/toolbelt/{role}", _put_toolbelt_role)
     app.router.add_delete("/api/toolbelt/{role}", _delete_toolbelt_role)

@@ -613,6 +613,76 @@ async def test_put_senses_rejects_non_object(aiohttp_client, tmp_path, monkeypat
     assert resp.status == 400
 
 
+# ── Sleep config endpoint tests ─────────────────────────────────── #
+
+
+@pytest.mark.asyncio
+async def test_get_sleep_config_defaults(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/sleep/config")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["sleep"]["sleep_window_start"] == "02:00"
+    assert data["sleep"]["sleep_window_duration_hours"] == 3.0
+    assert data["sleep"]["idle_timeout_minutes"] == 15
+    assert data["sleep"]["allow_daytime_naps"] is True
+
+
+@pytest.mark.asyncio
+async def test_put_sleep_config_persists_memory_yaml(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "sleep": {
+            "sleep_window_start": "01:30",
+            "sleep_window_duration_hours": 2.5,
+            "idle_timeout_minutes": 20,
+            "allow_daytime_naps": False,
+            "enabled": True,
+        }
+    }
+    resp = await client.put("/api/sleep/config", json=payload)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["sleep"]["sleep_window_start"] == "01:30"
+    assert data["sleep"]["idle_timeout_minutes"] == 20
+    assert data["next_scheduled_consolidation"] is not None
+
+    saved = yaml.safe_load((config_dir / "memory.yaml").read_text())
+    assert saved["memory"]["sleep"]["sleep_window_start"] == "01:30"
+    assert saved["memory"]["sleep"]["sleep_window_duration_hours"] == 2.5
+    assert saved["memory"]["sleep"]["allow_daytime_naps"] is False
+
+
+@pytest.mark.asyncio
+async def test_sleep_trigger_and_wake_update_last_summary(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    trigger_resp = await client.post("/api/sleep/trigger")
+    assert trigger_resp.status == 200
+
+    wake_resp = await client.post("/api/sleep/wake")
+    assert wake_resp.status == 200
+
+    cfg = await client.get("/api/sleep/config")
+    data = await cfg.json()
+    assert data["last_consolidation_summary"]["state"] == "manual_wake_requested"
+
+
 # ---------------------------------------------------------------------------
 # Toolbelt API tests
 # ---------------------------------------------------------------------------
@@ -859,7 +929,7 @@ async def test_chat_stream_route_emits_session_id_and_tokens(aiohttp_client, mon
     async def _fake_stream_chat(*args, **kwargs):
         assert kwargs["provider_name"] == "test-provider"
         assert args[3] == "session-123"
-        yield StreamChunk(token="hello", tokens_used=1)
+        yield StreamChunk(token="hello", tokens_used=1)  # noqa: S106
         yield StreamChunk(done=True, tokens_used=1)
 
     monkeypatch.setattr(srv, "stream_chat", _fake_stream_chat)
