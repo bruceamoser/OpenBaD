@@ -15,6 +15,7 @@ def _entry(
     access_count: int = 0,
     accessed_at: float = 0.0,
     created_at: float | None = None,
+    metadata: dict | None = None,
 ) -> MemoryEntry:
     if created_at is None:
         created_at = time.time()
@@ -25,6 +26,7 @@ def _entry(
         created_at=created_at,
         accessed_at=accessed_at,
         access_count=access_count,
+        metadata=metadata or {},
     )
 
 
@@ -84,6 +86,78 @@ class TestRetentionScore:
         # ln(1+100) ≈ 4.62, so strength ≈ 168 * 5.62 ≈ 944h
         # R = e^(-168/944) ≈ 0.837
         assert score > 0.7
+
+
+# ------------------------------------------------------------------ #
+# importance integration
+# ------------------------------------------------------------------ #
+
+
+class TestImportanceIntegration:
+    def test_high_importance_extends_retention(self) -> None:
+        now = time.time()
+        old = now - 168 * 3600
+        low = _entry(key="lo", created_at=old, metadata={"importance": 0.0})
+        high = _entry(key="hi", created_at=old, metadata={"importance": 1.0})
+        s_low = retention_score(low, now=now)
+        s_high = retention_score(high, now=now)
+        assert s_high > s_low
+
+    def test_no_importance_is_neutral(self) -> None:
+        now = time.time()
+        old = now - 168 * 3600
+        without = _entry(key="no_imp", created_at=old)
+        with_half = _entry(
+            key="half", created_at=old, metadata={"importance": 0.5},
+        )
+        s_without = retention_score(without, now=now)
+        s_with_half = retention_score(with_half, now=now)
+        assert abs(s_without - s_with_half) < 0.01
+
+    def test_zero_importance_decays_faster(self) -> None:
+        now = time.time()
+        old = now - 168 * 3600
+        neutral = _entry(key="n", created_at=old)
+        zero = _entry(key="z", created_at=old, metadata={"importance": 0.0})
+        assert retention_score(zero, now=now) < retention_score(neutral, now=now)
+
+    def test_importance_clamped(self) -> None:
+        """Out-of-range importance values are clamped to [0, 1]."""
+        now = time.time()
+        old = now - 168 * 3600
+        over = _entry(key="over", created_at=old, metadata={"importance": 5.0})
+        one = _entry(key="one", created_at=old, metadata={"importance": 1.0})
+        assert retention_score(over, now=now) == retention_score(one, now=now)
+
+    def test_prune_respects_importance(self) -> None:
+        """Low-importance entries are pruned before high-importance ones."""
+        stm = ShortTermMemory(max_tokens=100000, default_ttl=None)
+        now = time.time()
+        old = now - 500 * 3600
+        stm.write(_entry(
+            key="unimportant", created_at=old,
+            metadata={"importance": 0.0},
+        ))
+        stm.write(_entry(
+            key="important", created_at=old,
+            metadata={"importance": 1.0},
+        ))
+        pruned = prune_store(stm, threshold=0.1, now=now)
+        assert "unimportant" in pruned
+        assert "important" not in pruned
+
+    def test_unparseable_importance_defaults_safe(self) -> None:
+        """Non-numeric importance in metadata defaults to neutral (1.0)."""
+        now = time.time()
+        e = _entry(
+            key="bad", created_at=now - 168 * 3600,
+            metadata={"importance": "not-a-number"},
+        )
+        # Should not crash — ValueError caught by float()
+        score = retention_score(e, now=now)
+        # Falls back to importance_factor=1.0 (neutral)
+        neutral = _entry(key="n", created_at=now - 168 * 3600)
+        assert abs(score - retention_score(neutral, now=now)) < 0.01
 
 
 # ------------------------------------------------------------------ #
