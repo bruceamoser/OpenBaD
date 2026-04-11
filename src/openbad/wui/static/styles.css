@@ -690,3 +690,48 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── System Assignments ──────────────────────────────────────────── */
+.system-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.system-row:last-child { border-bottom: none; }
+.system-row label { min-width: 6.5rem; font-weight: 600; text-transform: capitalize; }
+.system-row select, .system-row input { flex: 1; }
+.fallback-badge {
+  display: inline-block;
+  min-width: 1.6rem;
+  text-align: center;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: var(--surface);
+  color: var(--fg);
+}
+.fallback-badge.green  { background: #22c55e; color: #fff; }
+.fallback-badge.yellow { background: #eab308; color: #000; }
+.fallback-badge.red    { background: #ef4444; color: #fff; }
+
+.fallback-step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  margin-bottom: 0.35rem;
+  background: var(--surface);
+}
+.fallback-step-handle { cursor: grab; user-select: none; }
+.fallback-controls {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  align-items: center;
+}
+.fallback-controls select, .fallback-controls input { flex: 1; }

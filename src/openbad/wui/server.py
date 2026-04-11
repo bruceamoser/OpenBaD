@@ -14,7 +14,12 @@ from uuid import uuid4
 import yaml
 from aiohttp import web
 
-from openbad.cognitive.config import CognitiveConfig, ProviderConfig, load_cognitive_config
+from openbad.cognitive.config import (
+    CognitiveConfig,
+    CognitiveSystem,
+    ProviderConfig,
+    load_cognitive_config,
+)
 from openbad.cognitive.providers.github_copilot import CopilotAuthError, GitHubCopilotProvider
 from openbad.cognitive.providers.openai_compat import custom_provider
 from openbad.wui.bridge import MqttWebSocketBridge
@@ -420,6 +425,87 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
     )
 
 
+def _serialize_systems_config(config: CognitiveConfig) -> dict[str, object]:
+    systems = {}
+    for system, assignment in config.systems.items():
+        systems[system.value] = {
+            "provider": assignment.provider,
+            "model": assignment.model,
+        }
+    fallback_chain = [
+        {"provider": step.provider, "model": step.model}
+        for step in config.default_fallback_chain
+    ]
+    return {
+        "systems": systems,
+        "fallback_chain": fallback_chain,
+        "providers": [
+            {"name": p.name, "model": p.model}
+            for p in config.providers
+            if p.enabled
+        ],
+    }
+
+
+async def _get_systems(_request: web.Request) -> web.Response:
+    _path, config = _read_providers_config()
+    return web.json_response(_serialize_systems_config(config))
+
+
+async def _put_systems(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    systems_raw = payload.get("systems")
+    if not isinstance(systems_raw, dict):
+        raise web.HTTPBadRequest(text="systems must be an object")
+
+    chain_raw = payload.get("fallback_chain")
+    if not isinstance(chain_raw, list):
+        raise web.HTTPBadRequest(text="fallback_chain must be a list")
+
+    # Validate system names
+    systems: dict[str, dict[str, str]] = {}
+    for name, assignment in systems_raw.items():
+        try:
+            CognitiveSystem(name)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=f"unknown system: {name}") from exc
+        if not isinstance(assignment, dict):
+            raise web.HTTPBadRequest(text=f"assignment for {name} must be an object")
+        systems[name] = {
+            "provider": str(assignment.get("provider", "")).strip(),
+            "model": str(assignment.get("model", "")).strip(),
+        }
+
+    chain = []
+    for step in chain_raw:
+        if not isinstance(step, dict):
+            raise web.HTTPBadRequest(text="fallback chain entries must be objects")
+        chain.append({
+            "provider": str(step.get("provider", "")).strip(),
+            "model": str(step.get("model", "")).strip(),
+        })
+
+    path = _resolve_cognitive_config_path()
+    existing = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+
+    cognitive = existing.get("cognitive", {})
+    if not isinstance(cognitive, dict):
+        cognitive = {}
+
+    cognitive["systems"] = systems
+    cognitive["default_fallback_chain"] = chain
+    existing["cognitive"] = cognitive
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(existing, sort_keys=False), encoding="utf-8")
+
+    config = load_cognitive_config(path)
+    return web.json_response(_serialize_systems_config(config))
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -445,6 +531,8 @@ def create_app(
     app.router.add_post("/api/providers/copilot/complete", _post_copilot_complete)
     app.router.add_post("/api/providers/verify", _post_providers_verify)
     app.router.add_put("/api/providers", _put_providers)
+    app.router.add_get("/api/systems", _get_systems)
+    app.router.add_put("/api/systems", _put_systems)
     # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
     app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_post(
