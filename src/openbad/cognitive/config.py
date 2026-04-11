@@ -41,6 +41,7 @@ class ProviderConfig:
     name: str = ""
     base_url: str = ""
     model: str = ""
+    api_key: str = ""
     api_key_env: str = ""
     timeout_ms: int = 30_000
     enabled: bool = True
