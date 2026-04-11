@@ -7,12 +7,15 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.context_manager import ContextWindowManager
 from openbad.cognitive.model_router import ModelRouter, Priority
 from openbad.cognitive.reasoning.base import ReasoningStrategy
+
+if TYPE_CHECKING:
+    from openbad.memory.semantic import SemanticMemory
 
 log = logging.getLogger(__name__)
 
@@ -87,12 +90,16 @@ class CognitiveEventLoop:
         strategies: dict[Priority | CognitiveSystem, ReasoningStrategy],
         publish_fn: Any = None,
         validate_fn: Any = None,
+        semantic_memory: SemanticMemory | None = None,
+        memory_top_k: int = 3,
     ) -> None:
         self._router = model_router
         self._ctx = context_manager
         self._strategies = strategies
         self._publish = publish_fn or _noop_publish
         self._validate = validate_fn
+        self._semantic_memory = semantic_memory
+        self._memory_top_k = memory_top_k
         self._running = False
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -193,11 +200,16 @@ class CognitiveEventLoop:
             request.context, target_tokens=budget.context_tokens,
         )
 
+        # 2a. Prepend semantic memory recall (honours ContextWindowManager budget)
+        enriched_context = self._enrich_with_memory(
+            request.prompt, compressed.text, budget.context_tokens
+        )
+
         # 3. Select and execute reasoning strategy
         strategy = self._select_strategy(request)
         if strategy:
             result = await strategy.reason(
-                request.prompt, compressed.text, self._router,
+                request.prompt, enriched_context, self._router,
             )
             answer = result.final_answer
             tokens = result.total_tokens
@@ -205,7 +217,7 @@ class CognitiveEventLoop:
         else:
             # Direct single-pass call
             completion = await adapter.complete(
-                f"{compressed.text}\n\n{request.prompt}", model=model_id,
+                f"{enriched_context}\n\n{request.prompt}", model=model_id,
             )
             answer = completion.content
             tokens = completion.tokens_used
@@ -226,6 +238,44 @@ class CognitiveEventLoop:
             latency_ms=latency,
             strategy=strategy_name,
         )
+
+    def _enrich_with_memory(
+        self, prompt: str, context: str, budget_tokens: int
+    ) -> str:
+        """Prepend relevant semantic memory facts to *context*.
+
+        Queries :attr:`_semantic_memory` with *prompt* and prepends the top
+        results as a ``## Relevant Memory`` section, truncated so the total
+        remains within the token budget (rough estimate: 1 token ≈ 4 chars).
+        """
+        if self._semantic_memory is None:
+            return context
+
+        try:
+            hits = self._semantic_memory.search(prompt, top_k=self._memory_top_k)
+        except Exception:
+            log.debug("Semantic memory search failed; proceeding without recall")
+            return context
+
+        if not hits:
+            return context
+
+        # Build memory snippet
+        facts = "\n".join(
+            f"- {entry.value}" for entry, _score in hits if entry.value
+        )
+        if not facts:
+            return context
+
+        memory_block = f"## Relevant Memory\n{facts}\n\n"
+
+        # Rough budget check: ensure prepended block + context fits
+        approx_char_budget = budget_tokens * 4
+        if len(memory_block) + len(context) > approx_char_budget:
+            remaining = max(0, approx_char_budget - len(context))
+            memory_block = memory_block[:remaining]
+
+        return memory_block + context
 
     def _select_strategy(
         self,
