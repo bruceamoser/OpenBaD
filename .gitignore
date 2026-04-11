@@ -4,8 +4,14 @@ __pycache__/
 *$py.class
 
 # Distribution / packaging
-build/
+/build/
 dist/
+
+# SvelteKit dev build (wui-svelte/build is ephemeral)
+wui-svelte/build/
+
+# Keep the WUI build assets that ship with the package
+!src/openbad/wui/build/
 *.egg-info/
 *.egg
 

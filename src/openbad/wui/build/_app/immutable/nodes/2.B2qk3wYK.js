@@ -1,0 +1,1 @@
+import{a as t,f as m}from"../chunks/Dr8C4j4J.js";import{aj as o,ak as r}from"../chunks/BJcSsr70.js";o();var n=m("<h2>Health</h2> <p>Live runtime telemetry and subsystem health.</p>",1);function f(a){var e=n();r(2),t(a,e)}export{f as component};
