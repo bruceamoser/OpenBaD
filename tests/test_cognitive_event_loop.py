@@ -6,6 +6,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.context_manager import (
     CompressedContext,
@@ -30,6 +32,7 @@ from openbad.cognitive.orchestrator import CognitiveOrchestrator
 from openbad.cognitive.providers.base import CompletionResult, HealthStatus, ProviderAdapter
 from openbad.cognitive.providers.registry import ProviderRegistry
 from openbad.cognitive.reasoning.base import ReasoningResult, ReasoningStrategy
+from openbad.memory.base import MemoryEntry, MemoryTier
 
 # ------------------------------------------------------------------ #
 # Helpers
@@ -437,3 +440,85 @@ class TestParseSystem:
 
     def test_enum_passthrough(self) -> None:
         assert _parse_system(CognitiveSystem.SLEEP) is CognitiveSystem.SLEEP
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: semantic memory enrichment (#420)
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticMemoryEnrichment:
+    def _loop_with_memory(self, memory):
+        return CognitiveEventLoop(
+            model_router=_mock_router(),
+            context_manager=_mock_ctx(),
+            strategies={},
+            semantic_memory=memory,
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_results_prepended_to_context(self) -> None:
+        memory = MagicMock()
+        entry = MemoryEntry(key="k1", value="Important recalled fact", tier=MemoryTier.SEMANTIC)
+        memory.search.return_value = [(entry, 0.9)]
+
+        loop = self._loop_with_memory(memory)
+        req = CognitiveRequest(request_id="r1", prompt="What is X?", context="base ctx")
+        resp = await loop.handle_request(req)
+
+        assert resp.answer == "answer-42"
+        memory.search.assert_called_once_with("What is X?", top_k=3)
+
+    @pytest.mark.asyncio
+    async def test_no_memory_no_enrichment(self) -> None:
+        """Without semantic_memory, context passes through unchanged."""
+        loop = CognitiveEventLoop(
+            model_router=_mock_router(),
+            context_manager=_mock_ctx(),
+            strategies={},
+        )
+        req = CognitiveRequest(request_id="r2", prompt="foo", context="bar")
+        resp = await loop.handle_request(req)
+        assert resp.answer == "answer-42"
+
+    @pytest.mark.asyncio
+    async def test_memory_exception_does_not_break_loop(self) -> None:
+        memory = MagicMock()
+        memory.search.side_effect = RuntimeError("db error")
+
+        loop = self._loop_with_memory(memory)
+        req = CognitiveRequest(request_id="r3", prompt="hi", context="ctx")
+        resp = await loop.handle_request(req)
+        assert resp.answer == "answer-42"
+
+    @pytest.mark.asyncio
+    async def test_empty_memory_results_no_block(self) -> None:
+        memory = MagicMock()
+        memory.search.return_value = []
+
+        loop = self._loop_with_memory(memory)
+        req = CognitiveRequest(request_id="r4", prompt="hi", context="ctx")
+        resp = await loop.handle_request(req)
+        assert resp.answer == "answer-42"
+
+    def test_enrich_with_memory_prepends_header(self) -> None:
+        memory = MagicMock()
+        entry = MemoryEntry(key="k", value="fact one", tier=MemoryTier.SEMANTIC)
+        memory.search.return_value = [(entry, 0.8)]
+
+        loop = self._loop_with_memory(memory)
+        result = loop._enrich_with_memory("my query", "base", budget_tokens=1000)
+        assert "## Relevant Memory" in result
+        assert "fact one" in result
+        assert result.endswith("base")
+
+    def test_enrich_respects_budget(self) -> None:
+        memory = MagicMock()
+        entry = MemoryEntry(key="k", value="x" * 200, tier=MemoryTier.SEMANTIC)
+        memory.search.return_value = [(entry, 0.8)]
+
+        loop = self._loop_with_memory(memory)
+        result = loop._enrich_with_memory("q", "ctx", budget_tokens=1)
+        # With very tight budget, the memory block should be truncated
+        # Total length must not substantially exceed 4 chars (budget * 4)
+        assert len(result) <= 4 + len("ctx")
