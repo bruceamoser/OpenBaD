@@ -4,6 +4,9 @@
   import { post as apiPost } from '$lib/api/client';
   import {
     cpuTelemetry,
+    memoryTelemetry,
+    diskTelemetry,
+    networkTelemetry,
     endocrineLevels,
     fsmState,
   } from '$lib/stores/websocket';
@@ -19,12 +22,12 @@
   let prevFsm = '';
   const SPARKLINE_MAX = 300;
 
-  let currentFsm = $derived($fsmState?.state ?? 'IDLE');
-  let cpu = $derived($cpuTelemetry?.cpu_percent ?? 0);
-  let mem = $derived($cpuTelemetry?.memory_percent ?? 0);
-  let disk = $derived($cpuTelemetry?.disk_percent ?? 0);
-  let netTx = $derived($cpuTelemetry?.net_tx_bytes ?? 0);
-  let netRx = $derived($cpuTelemetry?.net_rx_bytes ?? 0);
+  let currentFsm = $derived($fsmState?.current_state?.toUpperCase() ?? 'IDLE');
+  let cpu = $derived($cpuTelemetry?.usage_percent ?? 0);
+  let mem = $derived($memoryTelemetry?.usage_percent ?? 0);
+  let disk = $derived($diskTelemetry?.usage_percent ?? 0);
+  let netTx = $derived($networkTelemetry?.bytes_sent ?? 0);
+  let netRx = $derived($networkTelemetry?.bytes_recv ?? 0);
   let dopamine = $derived($endocrineLevels?.dopamine ?? 0);
   let adrenaline = $derived($endocrineLevels?.adrenaline ?? 0);
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);

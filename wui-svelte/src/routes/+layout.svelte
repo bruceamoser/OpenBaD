@@ -27,7 +27,7 @@
   }
 
   let wsStatusVal = $derived($wsStatus);
-  let fsmVal = $derived($fsmState?.state ?? 'IDLE');
+  let fsmVal = $derived($fsmState?.current_state?.toUpperCase() ?? 'IDLE');
 
   function statusColor(s: string): string {
     if (s === 'connected') return 'var(--green)';

@@ -2,8 +2,9 @@
  * WebSocket store for real-time telemetry and event streaming.
  *
  * Auto-connects on mount, reconnects with exponential backoff (max 30 s).
- * Incoming messages are deserialized from a JSON envelope with topic + payload.
- * Derived stores expose per-topic typed state.
+ * The server sends JSON envelopes: { type, ts, topic, payload }.
+ * Topics match MQTT: agent/telemetry/cpu, agent/endocrine/dopamine, etc.
+ * Derived stores aggregate per-topic payloads for the UI.
  */
 
 import { writable, derived, type Readable } from 'svelte/store';
@@ -14,17 +15,42 @@ import { writable, derived, type Readable } from 'svelte/store';
 
 export type WsStatus = 'connecting' | 'connected' | 'disconnected';
 
-export interface Envelope {
-  topic: string;
-  payload: Record<string, unknown>;
+export interface ServerEnvelope {
+  type: string;
+  ts: string;
+  topic?: string;
+  payload?: Record<string, unknown>;
 }
 
-export interface VitalsPayload {
-  cpu_percent: number;
-  memory_percent: number;
-  disk_percent: number;
-  net_tx_bytes: number;
-  net_rx_bytes: number;
+export interface CpuPayload {
+  usage_percent: number;
+  system_percent: number;
+  user_percent: number;
+  core_count: number;
+  load_avg_1m: number;
+}
+
+export interface MemoryPayload {
+  usage_percent: number;
+  used_bytes: number;
+  total_bytes: number;
+  available_bytes: number;
+  swap_percent: number;
+}
+
+export interface DiskPayload {
+  usage_percent: number;
+  read_bytes: number;
+  write_bytes: number;
+  io_latency_ms: number;
+  free_bytes: number;
+}
+
+export interface NetworkPayload {
+  bytes_sent: number;
+  bytes_recv: number;
+  packets_sent: number;
+  packets_recv: number;
 }
 
 export interface EndocrinePayload {
@@ -35,7 +61,9 @@ export interface EndocrinePayload {
 }
 
 export interface FsmPayload {
-  state: string;
+  current_state: string;
+  previous_state: string;
+  trigger_event: string;
 }
 
 export interface ToolbeltPayload {
@@ -52,23 +80,46 @@ export const wsStatus = writable<WsStatus>('disconnected');
 /** Raw last-received message per topic. */
 const _messages = writable<Record<string, Record<string, unknown>>>({});
 
+/** Aggregated endocrine levels from individual hormone events. */
+const _endocrine = writable<EndocrinePayload>({
+  dopamine: 0,
+  adrenaline: 0,
+  cortisol: 0,
+  endorphin: 0,
+});
+
 // ------------------------------------------------------------------ //
 // Derived per-topic stores
 // ------------------------------------------------------------------ //
 
-export const cpuTelemetry: Readable<VitalsPayload | null> = derived(
+export const cpuTelemetry: Readable<CpuPayload | null> = derived(
   _messages,
-  ($m) => ($m['agent/telemetry/vitals'] as unknown as VitalsPayload) ?? null,
+  ($m) => ($m['agent/telemetry/cpu'] as unknown as CpuPayload) ?? null,
 );
 
-export const endocrineLevels: Readable<EndocrinePayload | null> = derived(
+export const memoryTelemetry: Readable<MemoryPayload | null> = derived(
   _messages,
-  ($m) => ($m['agent/telemetry/endocrine'] as unknown as EndocrinePayload) ?? null,
+  ($m) => ($m['agent/telemetry/memory'] as unknown as MemoryPayload) ?? null,
+);
+
+export const diskTelemetry: Readable<DiskPayload | null> = derived(
+  _messages,
+  ($m) => ($m['agent/telemetry/disk'] as unknown as DiskPayload) ?? null,
+);
+
+export const networkTelemetry: Readable<NetworkPayload | null> = derived(
+  _messages,
+  ($m) => ($m['agent/telemetry/network'] as unknown as NetworkPayload) ?? null,
+);
+
+export const endocrineLevels: Readable<EndocrinePayload> = derived(
+  _endocrine,
+  ($e) => $e,
 );
 
 export const fsmState: Readable<FsmPayload | null> = derived(
   _messages,
-  ($m) => ($m['agent/fsm/state'] as unknown as FsmPayload) ?? null,
+  ($m) => ($m['agent/reflex/state'] as unknown as FsmPayload) ?? null,
 );
 
 export const toolbeltHealth: Readable<ToolbeltPayload | null> = derived(
@@ -100,9 +151,24 @@ function _buildUrl(): string {
 /** Process an incoming WebSocket message. */
 export function _handleMessage(raw: string): void {
   try {
-    const envelope: Envelope = JSON.parse(raw);
-    if (typeof envelope.topic !== 'string' || !envelope.payload) return;
-    _messages.update((m) => ({ ...m, [envelope.topic]: envelope.payload }));
+    const envelope: ServerEnvelope = JSON.parse(raw);
+    // Skip non-event messages (hello, etc.)
+    if (!envelope.topic || !envelope.payload) return;
+
+    const { topic, payload } = envelope;
+
+    // Endocrine events arrive per-hormone: agent/endocrine/{hormone}
+    if (topic.startsWith('agent/endocrine/')) {
+      const hormone = (payload.hormone as string)?.toLowerCase();
+      const level = (payload.level as number) ?? 0;
+      if (hormone && ['dopamine', 'adrenaline', 'cortisol', 'endorphin'].includes(hormone)) {
+        _endocrine.update((e) => ({ ...e, [hormone]: level }));
+      }
+      return;
+    }
+
+    // All other topics: store payload keyed by topic
+    _messages.update((m) => ({ ...m, [topic]: payload }));
   } catch {
     // Ignore non-JSON or malformed messages
   }
