@@ -600,3 +600,94 @@ async def test_put_senses_rejects_non_object(aiohttp_client, tmp_path, monkeypat
 
     resp = await client.put("/api/senses", json="bad")
     assert resp.status == 400
+
+
+# ---------------------------------------------------------------------------
+# Toolbelt API tests
+# ---------------------------------------------------------------------------
+
+
+def _app_with_registry():
+    """Create an app with an in-memory ToolRegistry attached."""
+    from openbad.proprioception.registry import ToolRegistry, ToolRole
+
+    app = create_app(enable_mqtt=False)
+    registry = ToolRegistry(timeout=30.0)
+    registry.register("cli-tool", role=ToolRole.CLI)
+    registry.register("web-search", role=ToolRole.WEB_SEARCH)
+    registry.register("alt-search", role=ToolRole.WEB_SEARCH)
+    app["registry"] = registry
+    return app
+
+
+@pytest.mark.asyncio
+async def test_get_toolbelt_no_registry(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/toolbelt")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data == {"cabinet": {}, "belt": {}}
+
+
+@pytest.mark.asyncio
+async def test_get_toolbelt_with_registry(aiohttp_client):
+    app = _app_with_registry()
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/toolbelt")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "cabinet" in data
+    assert "belt" in data
+    assert "cli" in data["cabinet"]
+    assert "web_search" in data["cabinet"]
+
+
+@pytest.mark.asyncio
+async def test_put_toolbelt_equip(aiohttp_client):
+    app = _app_with_registry()
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/api/toolbelt/cli",
+        json={"tool": "cli-tool"},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["belt"].get("cli") == "cli-tool"
+
+
+@pytest.mark.asyncio
+async def test_put_toolbelt_bad_role(aiohttp_client):
+    app = _app_with_registry()
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/api/toolbelt/nonexistent_role",
+        json={"tool": "cli-tool"},
+    )
+    assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_put_toolbelt_missing_tool_field(aiohttp_client):
+    app = _app_with_registry()
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/api/toolbelt/cli",
+        json={},
+    )
+    assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_delete_toolbelt_unequip(aiohttp_client):
+    app = _app_with_registry()
+    # First equip
+    registry = app["registry"]
+    from openbad.proprioception.registry import ToolRole
+    registry.equip(ToolRole.CLI, "cli-tool")
+
+    client = await aiohttp_client(app)
+    resp = await client.delete("/api/toolbelt/cli")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["belt"].get("cli") is None

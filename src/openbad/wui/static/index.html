@@ -23,6 +23,7 @@
         <button type="button" class="nav-link" data-view-target="chat">Chat</button>
         <button type="button" class="nav-link" data-view-target="providers">Providers</button>
         <button type="button" class="nav-link" data-view-target="senses">Senses</button>
+        <button type="button" class="nav-link" data-view-target="toolbelt">Toolbelt</button>
         <button type="button" class="nav-link" data-view-target="models">Models <span class="nav-chip">next</span></button>
       </nav>
       <div class="nav-status">
@@ -392,6 +393,32 @@
           <article class="card section-card">
             <button type="button" id="senses-save-btn" class="btn primary">Save Senses</button>
             <p id="senses-save-status" class="inline-status"></p>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-toolbelt" class="view-panel reveal hidden" data-view="toolbelt">
+        <div class="panel-grid single-column">
+          <!-- Cabinet Inventory -->
+          <article class="card section-card collapsible" id="toolbelt-cabinet-card">
+            <div class="section-head" data-collapse-toggle="toolbelt-cabinet-body">
+              <h3>Cabinet</h3>
+              <span class="collapse-icon">▾</span>
+            </div>
+            <div id="toolbelt-cabinet-body" class="collapse-body">
+              <div id="toolbelt-cabinet-list"></div>
+            </div>
+          </article>
+
+          <!-- Auto-swap Log -->
+          <article class="card section-card collapsible" id="toolbelt-swap-card">
+            <div class="section-head" data-collapse-toggle="toolbelt-swap-body">
+              <h3>Auto-swap Log</h3>
+              <span class="collapse-icon">▾</span>
+            </div>
+            <div id="toolbelt-swap-body" class="collapse-body">
+              <ul id="toolbelt-swap-log" class="swap-log"></ul>
+            </div>
           </article>
         </div>
       </section>
