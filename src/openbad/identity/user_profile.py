@@ -9,10 +9,27 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+def _list_of_str(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
+
+
+def _coerce_work_hours(value: Any) -> tuple[int, int]:
+    if isinstance(value, tuple) and len(value) == 2:
+        return int(value[0]), int(value[1])
+    if isinstance(value, list) and len(value) == 2:
+        return int(value[0]), int(value[1])
+    return 9, 17
 
 
 class CommunicationStyle(Enum):
@@ -36,6 +53,13 @@ class UserProfile:
     communication_style: CommunicationStyle = CommunicationStyle.CASUAL
     expertise_domains: list[str] = field(default_factory=list)
     interaction_history_summary: str = ""
+    worldview: list[str] = field(default_factory=list)
+    interests: list[str] = field(default_factory=list)
+    pet_peeves: list[str] = field(default_factory=list)
+    preferred_feedback_style: str = "balanced"
+    active_projects: list[str] = field(default_factory=list)
+    timezone: str = ""
+    work_hours: tuple[int, int] = (9, 17)
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -45,6 +69,16 @@ class UserProfile:
             self.communication_style = CommunicationStyle(
                 self.communication_style.lower(),
             )
+        self.expertise_domains = _list_of_str(self.expertise_domains)
+        self.worldview = _list_of_str(self.worldview)
+        self.interests = _list_of_str(self.interests)
+        self.pet_peeves = _list_of_str(self.pet_peeves)
+        self.active_projects = _list_of_str(self.active_projects)
+        self.preferred_feedback_style = str(
+            self.preferred_feedback_style or "balanced",
+        )
+        self.timezone = str(self.timezone or "")
+        self.work_hours = _coerce_work_hours(self.work_hours)
 
 
 def load_user_profile(path: str | Path) -> UserProfile:
@@ -71,6 +105,17 @@ def load_user_profile(path: str | Path) -> UserProfile:
         communication_style=style,
         expertise_domains=user_data.get("expertise_domains", []),
         interaction_history_summary=user_data.get(
-            "interaction_history_summary", "",
+            "interaction_history_summary",
+            "",
         ),
+        worldview=user_data.get("worldview", []),
+        interests=user_data.get("interests", []),
+        pet_peeves=user_data.get("pet_peeves", []),
+        preferred_feedback_style=user_data.get(
+            "preferred_feedback_style",
+            "balanced",
+        ),
+        active_projects=user_data.get("active_projects", []),
+        timezone=user_data.get("timezone", ""),
+        work_hours=user_data.get("work_hours", [9, 17]),
     )
