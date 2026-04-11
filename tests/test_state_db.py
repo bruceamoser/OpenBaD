@@ -113,3 +113,16 @@ def test_connection_pragmas_applied(tmp_path: Path) -> None:
 
     assert journal_mode == "wal"
     assert fk_enabled == 1
+
+
+def test_migration_schema_version_is_persisted(tmp_path: Path) -> None:
+    db_path = tmp_path / "version_test.db"
+    conn = initialize_state_db(db_path)
+
+    applied = {
+        row[0]
+        for row in conn.execute("SELECT name FROM schema_migrations").fetchall()
+    }
+    conn.close()
+
+    assert "0001_initial" in applied
