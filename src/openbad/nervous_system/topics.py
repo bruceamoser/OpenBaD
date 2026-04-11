@@ -177,6 +177,19 @@ SCHEDULER_MAINTENANCE = "agent/scheduler/maintenance"
 # Wildcard: all scheduler events
 SCHEDULER_ALL = "agent/scheduler/+"
 
+# ---------------------------------------------------------------------------
+# Agent chat / user escalation (Phase 10)
+# ---------------------------------------------------------------------------
+
+#: Questions published by the agent for the active user session.
+AGENT_CHAT_RESPONSE = "agent/chat/response"
+
+#: Inbound user replies to agent questions.
+AGENT_CHAT_INBOUND = "agent/chat/inbound"
+
+#: Escalation topic for blocked-on-user or unresolvable asks.
+AGENT_ESCALATION = "agent/escalation"
+
 
 # ---------------------------------------------------------------------------
 # Helper: resolve topic templates
@@ -220,6 +233,10 @@ STATIC_TOPICS: tuple[str, ...] = (
     SCHEDULER_WINDOW_START,
     SCHEDULER_WINDOW_END,
     SCHEDULER_DISPATCH,
+    # Phase 10
+    AGENT_CHAT_RESPONSE,
+    AGENT_CHAT_INBOUND,
+    AGENT_ESCALATION,
 )
 
 TEMPLATE_TOPICS: tuple[str, ...] = (
