@@ -1186,6 +1186,56 @@ async def _get_version(_request: web.Request) -> web.Response:
     return web.json_response({"version": openbad.__version__})
 
 
+async def _get_insights(request: web.Request) -> web.Response:
+    """Get pending proactive insights."""
+    insight_queue = request.app.get("insight_queue")
+    if insight_queue is None:
+        return web.json_response({"insights": []})
+
+    limit = 10
+    try:
+        limit_param = request.rel_url.query.get("limit")
+        if limit_param:
+            limit = max(1, min(int(limit_param), 100))
+    except (TypeError, ValueError):
+        pass
+
+    insights = await insight_queue.get_pending(limit=limit)
+    return web.json_response(
+        {
+            "insights": [
+                {
+                    "id": i.id,
+                    "source": i.source,
+                    "summary": i.summary,
+                    "details": i.details,
+                    "priority": i.priority,
+                    "timestamp": i.timestamp.isoformat(),
+                }
+                for i in insights
+            ]
+        }
+    )
+
+
+async def _post_insights_dismiss(request: web.Request) -> web.Response:
+    """Dismiss a proactive insight."""
+    insight_queue = request.app.get("insight_queue")
+    if insight_queue is None:
+        raise web.HTTPServiceUnavailable(text="Insight queue not available")
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    insight_id = payload.get("insight_id")
+    if not isinstance(insight_id, str):
+        raise web.HTTPBadRequest(text="insight_id must be a string")
+
+    dismissed = await insight_queue.dismiss(insight_id)
+    return web.json_response({"dismissed": dismissed})
+
+
 async def _put_systems(request: web.Request) -> web.Response:
     payload = await request.json()
     if not isinstance(payload, dict):
@@ -1945,6 +1995,8 @@ def create_app(
     app.router.add_post("/api/chat/stream", _post_chat_stream)
     app.router.add_get("/api/usage", _get_usage)
     app.router.add_get("/api/version", _get_version)
+    app.router.add_get("/api/insights", _get_insights)
+    app.router.add_post("/api/insights/dismiss", _post_insights_dismiss)
     app.router.add_get("/api/senses", _get_senses)
     app.router.add_put("/api/senses", _put_senses)
     app.router.add_get("/api/sleep/config", _get_sleep_config)
