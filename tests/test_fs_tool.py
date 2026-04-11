@@ -9,7 +9,16 @@ import pytest
 
 import openbad.toolbelt.fs_tool as fs_tool
 from openbad.immune_system.rules_engine import FileOperationRule, is_restricted_path
-from openbad.toolbelt.fs_tool import read_file, write_file
+from openbad.toolbelt.fs_tool import (
+    CORTISOL_HIGH_THRESHOLD,
+    DISK_FREE_BYTES_MIN,
+    DISK_LATENCY_SATURATION_MS,
+    LARGE_OP_THRESHOLD_BYTES,
+    ResourceDeferredError,
+    read_file,
+    should_defer,
+    write_file,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -183,3 +192,88 @@ class TestWriteFileImmuneGate:
         dest = tmp_path / "output.txt"
         write_file(str(dest), "hello")
         assert dest.read_text() == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: endocrine throttling (#409)
+# ---------------------------------------------------------------------------
+
+
+def _disk(latency_ms: float = 0.0, free_bytes: int = 500 * 1024 * 1024) -> MagicMock:
+    snap = MagicMock()
+    snap.io_latency_ms = latency_ms
+    snap.free_bytes = free_bytes
+    return snap
+
+
+def _endocrine(cortisol: float = 0.0) -> MagicMock:
+    ec = MagicMock()
+    ec.level.return_value = cortisol
+    return ec
+
+
+class TestShouldDefer:
+    def test_small_op_never_defers(self) -> None:
+        disk = _disk(latency_ms=9999.0, free_bytes=0)
+        ec = _endocrine(cortisol=1.0)
+        assert should_defer(100, disk_snapshot=disk, endocrine=ec) is False
+
+    def test_no_disk_snapshot_no_defer(self) -> None:
+        result = should_defer(
+            LARGE_OP_THRESHOLD_BYTES + 1, disk_snapshot=None, endocrine=_endocrine(1.0)
+        )
+        assert result is False
+
+    def test_no_endocrine_no_defer(self) -> None:
+        disk = _disk(latency_ms=DISK_LATENCY_SATURATION_MS + 1)
+        result = should_defer(
+            LARGE_OP_THRESHOLD_BYTES + 1, disk_snapshot=disk, endocrine=None
+        )
+        assert result is False
+
+    def test_healthy_disk_no_defer(self) -> None:
+        disk = _disk(latency_ms=10.0, free_bytes=DISK_FREE_BYTES_MIN + 1)
+        ec = _endocrine(cortisol=1.0)
+        result = should_defer(
+            LARGE_OP_THRESHOLD_BYTES + 1, disk_snapshot=disk, endocrine=ec
+        )
+        assert result is False
+
+    def test_saturated_disk_high_cortisol_defers(self) -> None:
+        disk = _disk(latency_ms=DISK_LATENCY_SATURATION_MS + 1)
+        ec = _endocrine(cortisol=CORTISOL_HIGH_THRESHOLD)
+        result = should_defer(
+            LARGE_OP_THRESHOLD_BYTES + 1, disk_snapshot=disk, endocrine=ec
+        )
+        assert result is True
+
+    def test_low_free_bytes_high_cortisol_defers(self) -> None:
+        disk = _disk(free_bytes=DISK_FREE_BYTES_MIN - 1)
+        ec = _endocrine(cortisol=CORTISOL_HIGH_THRESHOLD)
+        result = should_defer(
+            LARGE_OP_THRESHOLD_BYTES + 1, disk_snapshot=disk, endocrine=ec
+        )
+        assert result is True
+
+    def test_saturated_disk_low_cortisol_no_defer(self) -> None:
+        disk = _disk(latency_ms=DISK_LATENCY_SATURATION_MS + 1)
+        ec = _endocrine(cortisol=CORTISOL_HIGH_THRESHOLD - 0.01)
+        result = should_defer(LARGE_OP_THRESHOLD_BYTES + 1, disk_snapshot=disk, endocrine=ec)
+        assert result is False
+
+
+class TestWriteFileDeferral:
+    def test_large_saturated_write_defers(self, tmp_path: Path) -> None:
+        disk = _disk(latency_ms=DISK_LATENCY_SATURATION_MS + 1)
+        ec = _endocrine(cortisol=CORTISOL_HIGH_THRESHOLD)
+        big = "x" * (LARGE_OP_THRESHOLD_BYTES + 1)
+        with pytest.raises(ResourceDeferredError):
+            write_file(str(tmp_path / "big.txt"), big, disk_snapshot=disk, endocrine=ec)
+
+    def test_normal_write_passes(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out.txt"
+        disk = _disk(latency_ms=DISK_LATENCY_SATURATION_MS + 1)
+        ec = _endocrine(cortisol=CORTISOL_HIGH_THRESHOLD)
+        # Small content should not trigger deferral regardless of disk state
+        write_file(str(dest), "small content", disk_snapshot=disk, endocrine=ec)
+        assert dest.read_text() == "small content"
