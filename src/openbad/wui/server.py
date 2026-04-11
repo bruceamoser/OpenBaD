@@ -25,7 +25,8 @@ from openbad.cognitive.providers.openai_compat import custom_provider
 from openbad.sensory.config import load_sensory_config
 from openbad.wui.bridge import MqttWebSocketBridge
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+# SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
+BUILD_DIR = Path(__file__).resolve().parent / "build"
 
 
 def _candidate_cognitive_config_paths() -> list[Path]:
@@ -792,10 +793,22 @@ def create_app(
         app.on_startup.clear()
         app.on_shutdown.clear()
 
-    async def index(_request: web.Request) -> web.FileResponse:
-        return web.FileResponse(STATIC_DIR / "index.html")
+    # --- SvelteKit SPA serving ---------------------------------------------------
 
-    app.router.add_get("/", index)
+    async def _spa_index(_request: web.Request) -> web.FileResponse:
+        return web.FileResponse(BUILD_DIR / "index.html")
+
+    async def _spa_fallback(request: web.Request) -> web.StreamResponse:
+        """Serve static file if it exists, otherwise return index.html for client-side routing."""
+        rel = request.match_info.get("path", "")
+        candidate = BUILD_DIR / rel
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+        return web.FileResponse(BUILD_DIR / "index.html")
+
+    app.router.add_get("/", _spa_index)
+
+    # All API routes
     app.router.add_get("/api/providers", _get_providers)
     app.router.add_post("/api/providers/copilot/device-code", _post_copilot_device_code)
     app.router.add_post("/api/providers/copilot/complete", _post_copilot_complete)
@@ -824,7 +837,12 @@ def create_app(
     )
     app.router.add_post("/api/wiring/providers/verify", _redirect_legacy_wiring_providers)
     app.router.add_put("/api/wiring/providers", _redirect_legacy_wiring_providers)
-    app.router.add_static("/static", STATIC_DIR)
+
+    # SvelteKit static assets + SPA fallback for client-side routing
+    _app_dir = BUILD_DIR / "_app"
+    if _app_dir.is_dir():
+        app.router.add_static("/_app", _app_dir)
+    app.router.add_get("/{path:.*}", _spa_fallback)
     return app
 
 

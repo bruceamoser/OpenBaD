@@ -1,59 +1,30 @@
-"""Tests for the WUI control-surface assets."""
+"""Tests for the SvelteKit WUI assets (replaced legacy static/ tests)."""
 
 from __future__ import annotations
 
-from openbad.wui.server import STATIC_DIR
+from pathlib import Path
+
+_WUI = Path(__file__).resolve().parent.parent / "wui-svelte"
+LAYOUT = _WUI / "src" / "routes" / "+layout.svelte"
 
 
-def test_index_contains_left_nav_shell():
-    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+def test_layout_exists():
+    assert LAYOUT.exists()
+
+
+def test_layout_contains_nav():
+    html = LAYOUT.read_text(encoding="utf-8")
     assert "side-nav" in html
-    assert 'data-view-target="health"' in html
-    assert 'data-view-target="chat"' in html
-    assert 'data-view-target="providers"' in html
-    assert 'data-view-target="models"' in html
+    assert "Health" in html
+    assert "Chat" in html
+    assert "Providers" in html
 
 
-def test_js_contains_view_and_provider_logic():
-    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    assert "function setView" in js
-    assert "loadProvidersConfig" in js
-    assert "verifyWizardProvider" in js
-    assert "saveWizardProvider" in js
-    assert "/api/providers" in js
-    assert "/api/providers/verify" in js
-
-
-def test_css_contains_nav_and_provider_styles():
-    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
-    assert ".side-nav" in css
-    assert ".provider-card" in css
-    assert ".metric-cell.flash" in css
-
-
-def test_index_uses_neutral_health_placeholder():
-    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert 'id="i-health">--<' in html
-    assert 'id="providers-config-path"' in html
-    assert 'id="provider-wizard"' in html
-    assert 'id="copilot-user-code"' in html
-    assert 'id="copilot-start-auth"' in html
-
-
-def test_index_contains_plain_language_hormone_labels():
-    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert "<span class=\"label-title\">Dopamine</span>" in html
-    assert "<span class=\"label-note\">reward and motivation</span>" in html
-    assert "<span class=\"label-title\">Adrenaline</span>" in html
-    assert "<span class=\"label-note\">fight-or-flight energy</span>" in html
-    assert "<span class=\"label-title\">Cortisol</span>" in html
-    assert "<span class=\"label-note\">stress load</span>" in html
-    assert "<span class=\"label-title\">Endorphin</span>" in html
-    assert "<span class=\"label-note\">calm and relief</span>" in html
-
-
-def test_css_contains_hormone_label_layout():
-    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
-    assert ".hormone-row" in css
-    assert ".label-block" in css
-    assert ".label-note" in css
+def test_layout_contains_hormone_refs():
+    """The health dashboard (not layout) now owns hormone display."""
+    health = _WUI / "src" / "routes" / "health" / "+page.svelte"
+    html = health.read_text(encoding="utf-8")
+    assert "Dopamine" in html
+    assert "Adrenaline" in html
+    assert "Cortisol" in html
+    assert "Endorphin" in html
