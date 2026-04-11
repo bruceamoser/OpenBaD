@@ -8,35 +8,46 @@ import pytest
 import yaml
 
 from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
-from openbad.wui.server import STATIC_DIR, create_app
+from openbad.wui.server import BUILD_DIR, create_app
 
 
-def test_static_assets_exist():
-    assert (STATIC_DIR / "index.html").exists()
-    assert (STATIC_DIR / "styles.css").exists()
-    assert (STATIC_DIR / "app.js").exists()
+def test_build_dir_defined():
+    """BUILD_DIR points to the expected wui/build path."""
+    assert BUILD_DIR.name == "build"
+    assert BUILD_DIR.parent.name == "wui"
 
 
 @pytest.mark.asyncio
-async def test_index_route(aiohttp_client):
+async def test_index_route(aiohttp_client, tmp_path, monkeypatch):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "index.html").write_text(
+        "<html><body>OpenBaD SvelteKit</body></html>"
+    )
+    import openbad.wui.server as srv
+    monkeypatch.setattr(srv, "BUILD_DIR", build_dir)
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
     resp = await client.get("/")
     assert resp.status == 200
     html = await resp.text()
-    assert "OpenBaD Control Surface" in html
-    assert "/static/app.js" in html
-    assert "Providers" in html
+    assert "OpenBaD" in html
 
 
 @pytest.mark.asyncio
-async def test_static_css_route(aiohttp_client):
+async def test_spa_fallback_route(aiohttp_client, tmp_path, monkeypatch):
+    """Non-API routes fall back to index.html for client-side routing."""
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "index.html").write_text("<html>SPA</html>")
+    import openbad.wui.server as srv
+    monkeypatch.setattr(srv, "BUILD_DIR", build_dir)
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
-    resp = await client.get("/static/styles.css")
+    resp = await client.get("/chat")
     assert resp.status == 200
-    css = await resp.text()
-    assert ":root" in css
+    html = await resp.text()
+    assert "SPA" in html
 
 
 @pytest.mark.asyncio
