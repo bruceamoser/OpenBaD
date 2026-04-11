@@ -596,6 +596,92 @@ async def _put_senses(request: web.Request) -> web.Response:
     return web.json_response(_serialize_senses(cfg))
 
 
+# ---------------------------------------------------------------------------
+# Toolbelt API — GET / PUT / DELETE on in-memory ToolRegistry
+# ---------------------------------------------------------------------------
+
+
+def _serialize_toolbelt(registry) -> dict:
+    """Serialize ToolRegistry state for JSON response."""
+    cabinet: dict[str, list[dict]] = {}
+    for role, tools in registry.cabinet.items():
+        role_name = role.value.lower() if hasattr(role, "value") else str(role).lower()
+        cabinet[role_name] = [
+            {
+                "name": t.name,
+                "status": (
+                    t.status.value.lower()
+                    if hasattr(t.status, "value")
+                    else str(t.status).lower()
+                ),
+                "role": role_name,
+            }
+            for t in tools
+        ]
+
+    belt: dict[str, str | None] = {}
+    for role, tool in registry.get_belt().items():
+        role_name = role.value.lower() if hasattr(role, "value") else str(role).lower()
+        belt[role_name] = tool.name if tool else None
+
+    return {"cabinet": cabinet, "belt": belt}
+
+
+async def _get_toolbelt(request: web.Request) -> web.Response:
+    registry = request.app.get("registry")
+    if registry is None:
+        return web.json_response({"cabinet": {}, "belt": {}})
+    return web.json_response(_serialize_toolbelt(registry))
+
+
+async def _put_toolbelt_role(request: web.Request) -> web.Response:
+    registry = request.app.get("registry")
+    if registry is None:
+        raise web.HTTPServiceUnavailable(text="ToolRegistry not available")
+
+    role_str = request.match_info["role"].upper()
+
+    # Resolve ToolRole enum from string
+    from openbad.proprioception.registry import ToolRole
+    try:
+        role = ToolRole(role_str)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=f"Unknown role: {role_str}") from exc
+
+    payload = await request.json()
+    tool_name = payload.get("tool") if isinstance(payload, dict) else None
+    if not tool_name:
+        raise web.HTTPBadRequest(text="'tool' field required")
+
+    try:
+        registry.equip(role, tool_name)
+    except (KeyError, ValueError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    return web.json_response(_serialize_toolbelt(registry))
+
+
+async def _delete_toolbelt_role(request: web.Request) -> web.Response:
+    registry = request.app.get("registry")
+    if registry is None:
+        raise web.HTTPServiceUnavailable(text="ToolRegistry not available")
+
+    role_str = request.match_info["role"].upper()
+
+    from openbad.proprioception.registry import ToolRole
+    try:
+        role = ToolRole(role_str)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=f"Unknown role: {role_str}") from exc
+
+    try:
+        registry.unequip(role)
+    except (KeyError, ValueError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    return web.json_response(_serialize_toolbelt(registry))
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -625,6 +711,9 @@ def create_app(
     app.router.add_put("/api/systems", _put_systems)
     app.router.add_get("/api/senses", _get_senses)
     app.router.add_put("/api/senses", _put_senses)
+    app.router.add_get("/api/toolbelt", _get_toolbelt)
+    app.router.add_put("/api/toolbelt/{role}", _put_toolbelt_role)
+    app.router.add_delete("/api/toolbelt/{role}", _delete_toolbelt_role)
     # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
     app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_post(

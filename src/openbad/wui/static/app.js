@@ -130,6 +130,10 @@ const viewMeta = {
     title: 'Senses',
     subtitle: 'Configure vision, hearing, and speech modalities.',
   },
+  toolbelt: {
+    title: 'Toolbelt',
+    subtitle: 'Cabinet inventory, equipped tools, and health status.',
+  },
   models: {
     title: 'Models',
     subtitle: 'Reserved for the upcoming model surface.',
@@ -204,6 +208,9 @@ function setView(name) {
   }
   if (name === 'senses') {
     loadSensesConfig();
+  }
+  if (name === 'toolbelt') {
+    loadToolbelt();
   }
 }
 
@@ -338,6 +345,11 @@ function updateFromEvent(topic, payload) {
         else badge.classList.add('green');
       }
     }
+  }
+
+  if (topic === 'agent/telemetry/toolbelt') {
+    renderToolbeltFromEvent(payload);
+    return;
   }
 }
 
@@ -1116,6 +1128,110 @@ async function saveSensesConfig() {
     if (els.senses.saveStatus) els.senses.saveStatus.textContent = 'Saved.';
   } catch (err) {
     if (els.senses.saveStatus) els.senses.saveStatus.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Toolbelt panel
+// ---------------------------------------------------------------------------
+
+const swapLog = [];
+const MAX_SWAP_LOG = 50;
+
+async function loadToolbelt() {
+  try {
+    const resp = await fetch('/api/toolbelt');
+    const data = await resp.json();
+    renderToolbeltCabinet(data);
+  } catch (err) {
+    logLine(`toolbelt load failed: ${err.message}`);
+  }
+}
+
+function renderToolbeltCabinet(data) {
+  const container = document.getElementById('toolbelt-cabinet-list');
+  if (!container) return;
+  const cabinet = data.cabinet || {};
+  const belt = data.belt || {};
+  let html = '';
+  for (const [role, tools] of Object.entries(cabinet)) {
+    const equipped = belt[role] || null;
+    html += `<div class="toolbelt-role-group" data-role="${escapeHtml(role)}">`;
+    html += `<h4 class="role-heading">${escapeHtml(role)}</h4>`;
+    for (const tool of tools) {
+      const isEquipped = tool.name === equipped;
+      const healthClass = tool.status === 'available' ? 'green' : tool.status === 'degraded' ? 'yellow' : 'red';
+      html += `<div class="tool-row${isEquipped ? ' equipped' : ''}" data-tool="${escapeHtml(tool.name)}">`;
+      html += `<span class="health-dot ${healthClass}"></span>`;
+      html += `<span class="tool-name">${escapeHtml(tool.name)}</span>`;
+      if (isEquipped) {
+        html += `<button type="button" class="btn small unequip-btn" data-role="${escapeHtml(role)}">Unequip</button>`;
+      } else {
+        html += `<button type="button" class="btn small equip-btn" data-role="${escapeHtml(role)}" data-tool="${escapeHtml(tool.name)}">Equip</button>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  container.innerHTML = html || '<p>No tools registered.</p>';
+  bindToolbeltButtons();
+}
+
+function renderToolbeltFromEvent(payload) {
+  renderToolbeltCabinet(payload);
+  if (payload.swap_event) {
+    addSwapLogEntry(payload.swap_event);
+  }
+}
+
+function addSwapLogEntry(evt) {
+  const ts = new Date().toLocaleTimeString();
+  const reason = evt.reason || 'unknown';
+  const from = evt.from || '—';
+  const to = evt.to || '—';
+  const role = evt.role || '?';
+  swapLog.unshift({ts, role, from, to, reason});
+  if (swapLog.length > MAX_SWAP_LOG) swapLog.length = MAX_SWAP_LOG;
+  renderSwapLog();
+}
+
+function renderSwapLog() {
+  const ul = document.getElementById('toolbelt-swap-log');
+  if (!ul) return;
+  ul.innerHTML = swapLog.map(e =>
+    `<li><code>${escapeHtml(e.ts)}</code> <strong>${escapeHtml(e.role)}</strong>: ${escapeHtml(e.from)} → ${escapeHtml(e.to)} (${escapeHtml(e.reason)})</li>`
+  ).join('');
+}
+
+function bindToolbeltButtons() {
+  for (const btn of document.querySelectorAll('.equip-btn')) {
+    btn.addEventListener('click', async () => {
+      const role = btn.dataset.role;
+      const tool = btn.dataset.tool;
+      try {
+        const resp = await fetch(`/api/toolbelt/${encodeURIComponent(role)}`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({tool}),
+        });
+        const data = await resp.json();
+        renderToolbeltCabinet(data);
+      } catch (err) {
+        logLine(`equip failed: ${err.message}`);
+      }
+    });
+  }
+  for (const btn of document.querySelectorAll('.unequip-btn')) {
+    btn.addEventListener('click', async () => {
+      const role = btn.dataset.role;
+      try {
+        const resp = await fetch(`/api/toolbelt/${encodeURIComponent(role)}`, {method: 'DELETE'});
+        const data = await resp.json();
+        renderToolbeltCabinet(data);
+      } catch (err) {
+        logLine(`unequip failed: ${err.message}`);
+      }
+    });
   }
 }
 
