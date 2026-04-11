@@ -30,6 +30,7 @@ STATE_TOPIC = "agent/proprioception/state"
 
 class HealthStatus(Enum):
     AVAILABLE = "AVAILABLE"
+    DEGRADED = "DEGRADED"
     UNAVAILABLE = "UNAVAILABLE"
 
 
@@ -41,6 +42,7 @@ class ToolStatus:
     status: HealthStatus = HealthStatus.AVAILABLE
     last_heartbeat: float = field(default_factory=time.time)
     metadata: dict[str, str] = field(default_factory=dict)
+    health_check: Callable[[], bool] | None = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,7 @@ class ToolRegistry:
         self,
         name: str,
         metadata: dict[str, str] | None = None,
+        health_check: Callable[[], bool] | None = None,
     ) -> ToolStatus:
         """Register a tool/subsystem.  Idempotent for the same *name*."""
         with self._lock:
@@ -85,10 +88,13 @@ class ToolRegistry:
                 entry.last_heartbeat = time.time()
                 if metadata:
                     entry.metadata.update(metadata)
+                if health_check is not None:
+                    entry.health_check = health_check
             else:
                 entry = ToolStatus(
                     name=name,
                     metadata=metadata or {},
+                    health_check=health_check,
                 )
                 self._tools[name] = entry
         self._emit_snapshot()
@@ -121,6 +127,59 @@ class ToolRegistry:
                 changed = True
         if changed:
             self._emit_snapshot()
+
+    def mark_degraded(self, name: str, reason: str = "") -> bool:
+        """Transition a tool to DEGRADED status.
+
+        Returns ``True`` if the status actually changed.
+        """
+        changed = False
+        with self._lock:
+            entry = self._tools.get(name)
+            if entry is None:
+                return False
+            if entry.status is not HealthStatus.DEGRADED:
+                entry.status = HealthStatus.DEGRADED
+                if reason:
+                    entry.metadata["degraded_reason"] = reason
+                changed = True
+        if changed:
+            self._emit_snapshot()
+        return changed
+
+    def run_health_checks(self) -> list[str]:
+        """Run registered health checks and mark failing tools DEGRADED.
+
+        Returns list of tool names that transitioned to DEGRADED.
+        """
+        degraded: list[str] = []
+        with self._lock:
+            tools_to_check = [
+                (t.name, t.health_check)
+                for t in self._tools.values()
+                if t.health_check is not None and t.status is not HealthStatus.UNAVAILABLE
+            ]
+        for name, check in tools_to_check:
+            try:
+                healthy = check()
+            except Exception:
+                logger.exception("Health check failed for %s", name)
+                healthy = False
+            if not healthy:
+                if self.mark_degraded(name, reason="health check failed"):
+                    degraded.append(name)
+            else:
+                # Recover from DEGRADED if check passes
+                with self._lock:
+                    entry = self._tools.get(name)
+                    if entry and entry.status is HealthStatus.DEGRADED:
+                        entry.status = HealthStatus.AVAILABLE
+                        degraded_cleared = True
+                    else:
+                        degraded_cleared = False
+                if degraded_cleared:
+                    self._emit_snapshot()
+        return degraded
 
     # -- querying -----------------------------------------------------------
 
