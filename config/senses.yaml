@@ -26,6 +26,12 @@ vision:
   max_width: 1920
   max_height: 1080
   portal_backend: ""
+  capture_region: active-window
+  capture_interval_s: 1.0
+  max_resolution: [1920, 1080]
+  compression:
+    format: jpeg
+    quality: 85
   attention:
     ssim_threshold: 0.05
     cooldown_ms: 500

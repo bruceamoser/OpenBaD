@@ -14,7 +14,7 @@ from openbad.sensory.vision.capture import (
     CapturedFrame,
     ScreenCastPortal,
 )
-from openbad.sensory.vision.config import VisionConfig
+from openbad.sensory.vision.config import CaptureRegion, CompressionConfig, VisionConfig
 
 # ---------------------------------------------------------------------------
 # CapturedFrame tests
@@ -266,3 +266,51 @@ class TestScreenCastPortalContextManager:
         portal = ScreenCastPortal()
         await portal.stop()
         await portal.stop()  # Should not raise
+
+
+# ── Capture scope properties (#227) ──────────────────────────────── #
+
+
+class TestCaptureScope:
+    def test_capture_region_property(self) -> None:
+        cfg = VisionConfig(capture_region="full-screen")
+        portal = ScreenCastPortal(config=cfg)
+        assert portal.capture_region == CaptureRegion.FULL_SCREEN
+
+    def test_capture_interval_property(self) -> None:
+        cfg = VisionConfig(capture_interval_s=0.5)
+        portal = ScreenCastPortal(config=cfg)
+        assert portal.capture_interval_s == 0.5
+
+    def test_max_resolution_property(self) -> None:
+        cfg = VisionConfig(max_resolution=(1280, 720))
+        portal = ScreenCastPortal(config=cfg)
+        assert portal.max_resolution == (1280, 720)
+
+
+class TestReloadConfig:
+    def test_reload_updates_capture_region(self) -> None:
+        portal = ScreenCastPortal(config=VisionConfig())
+        assert portal.capture_region == CaptureRegion.ACTIVE_WINDOW
+        portal.reload_config(VisionConfig(capture_region="full-screen"))
+        assert portal.capture_region == CaptureRegion.FULL_SCREEN
+
+    def test_reload_updates_interval(self) -> None:
+        portal = ScreenCastPortal(config=VisionConfig())
+        assert portal.capture_interval_s == 1.0
+        portal.reload_config(VisionConfig(capture_interval_s=0.25))
+        assert portal.capture_interval_s == 0.25
+
+    def test_reload_updates_max_resolution(self) -> None:
+        portal = ScreenCastPortal(config=VisionConfig())
+        portal.reload_config(VisionConfig(max_resolution=(640, 480)))
+        assert portal.max_resolution == (640, 480)
+
+    def test_reload_updates_compression(self) -> None:
+        portal = ScreenCastPortal(config=VisionConfig())
+        new_cfg = VisionConfig(
+            compression=CompressionConfig(format="png", quality=100),
+        )
+        portal.reload_config(new_cfg)
+        assert portal._compression_format == "png"
+        assert portal._compression_quality == 100

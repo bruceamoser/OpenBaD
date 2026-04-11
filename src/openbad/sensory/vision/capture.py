@@ -24,7 +24,7 @@ from typing import Any
 from openbad.nervous_system.schemas import Header, VisionFrame
 from openbad.nervous_system.schemas.sensory_pb2 import FrameFormat
 from openbad.nervous_system.topics import SENSORY_VISION, topic_for
-from openbad.sensory.vision.config import VisionConfig
+from openbad.sensory.vision.config import CaptureRegion, VisionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,11 @@ class ScreenCastPortal:
         self._frame_format = _FORMAT_MAP.get(
             self._config.output_format, FrameFormat.JPEG
         )
+        self._capture_region = CaptureRegion(self._config.capture_region)
+        self._capture_interval_s = self._config.capture_interval_s
+        self._max_resolution = self._config.max_resolution
+        self._compression_format = self._config.compression.format
+        self._compression_quality = self._config.compression.quality
 
     @property
     def running(self) -> bool:
@@ -125,6 +130,35 @@ class ScreenCastPortal:
     @property
     def current_fps(self) -> float:
         return self._active_fps
+
+    @property
+    def capture_region(self) -> CaptureRegion:
+        return self._capture_region
+
+    @property
+    def capture_interval_s(self) -> float:
+        return self._capture_interval_s
+
+    @property
+    def max_resolution(self) -> tuple[int, int]:
+        return self._max_resolution
+
+    def reload_config(self, config: VisionConfig) -> None:
+        """Hot-reload configuration without restarting the capture session."""
+        self._config = config
+        was_active = self._active_fps == self._config.fps_active
+        self._active_fps = config.fps_active if was_active else config.fps_idle
+        self._frame_format = _FORMAT_MAP.get(config.output_format, FrameFormat.JPEG)
+        self._capture_region = CaptureRegion(config.capture_region)
+        self._capture_interval_s = config.capture_interval_s
+        self._max_resolution = config.max_resolution
+        self._compression_format = config.compression.format
+        self._compression_quality = config.compression.quality
+        logger.info(
+            "Vision config reloaded: region=%s interval=%ss",
+            self._capture_region.value,
+            self._capture_interval_s,
+        )
 
     def set_active(self, active: bool) -> None:
         """Switch between idle and active FPS."""
@@ -179,11 +213,16 @@ class ScreenCastPortal:
         )
         self._session_handle = session_result
 
-        # SelectSources — request WINDOW only
+        # SelectSources — request based on capture_region
+        source_type = (
+            SOURCE_TYPE_MONITOR
+            if self._capture_region == CaptureRegion.FULL_SCREEN
+            else SOURCE_TYPE_WINDOW
+        )
         await self._portal.call_select_sources(
             self._session_handle,
             {
-                "types": ("u", SOURCE_TYPE_WINDOW),
+                "types": ("u", source_type),
                 "multiple": ("b", False),
             },
         )
@@ -301,9 +340,11 @@ class ScreenCastPortal:
                     topic = frame.mqtt_topic()
                     await self._publish(topic, proto.SerializeToString())
 
-                # Throttle to configured FPS
+                # Throttle to configured interval / FPS
+                interval = self._capture_interval_s
                 if self._active_fps > 0:
-                    await asyncio.sleep(1.0 / self._active_fps)
+                    interval = min(interval, 1.0 / self._active_fps)
+                await asyncio.sleep(interval)
         finally:
             self._running = False
 

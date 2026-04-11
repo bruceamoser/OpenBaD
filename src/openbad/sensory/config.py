@@ -16,7 +16,11 @@ from openbad.sensory.audio.config import (
     TTSConfig,
     WakeWordConfig,
 )
-from openbad.sensory.vision.config import AttentionConfig, VisionConfig
+from openbad.sensory.vision.config import (
+    AttentionConfig,
+    CompressionConfig,
+    VisionConfig,
+)
 
 # ── Speech section (wraps TTSConfig) ─────────────────────────────── #
 
@@ -78,11 +82,20 @@ def _parse_hearing(raw: dict[str, Any]) -> HearingConfig:
 def _parse_vision(raw: dict[str, Any]) -> VisionConfig:
     attention_raw = raw.pop("attention", {})
     attention = AttentionConfig(**_filter_fields(AttentionConfig, attention_raw))
+    compression_raw = raw.pop("compression", {})
+    compression = CompressionConfig(**_filter_fields(CompressionConfig, compression_raw))
+    max_res = raw.pop("max_resolution", None)
+    if isinstance(max_res, list) and len(max_res) == 2:
+        max_res = tuple(max_res)
+    skip = {"attention", "compression", "max_resolution"}
     fields = {
         k: v for k, v in raw.items()
-        if k in VisionConfig.__dataclass_fields__ and k != "attention"
+        if k in VisionConfig.__dataclass_fields__ and k not in skip
     }
-    return VisionConfig(**fields, attention=attention)
+    kwargs: dict[str, Any] = {**fields, "attention": attention, "compression": compression}
+    if max_res is not None:
+        kwargs["max_resolution"] = max_res
+    return VisionConfig(**kwargs)
 
 
 def _parse_speech(raw: dict[str, Any]) -> SpeechConfig:
