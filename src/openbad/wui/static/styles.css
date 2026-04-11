@@ -734,4 +734,29 @@ textarea {
   margin-top: 0.5rem;
   align-items: center;
 }
+
+/* ── Senses panel ──────────────────────────────────────────────── */
+.collapsible .section-head { cursor: pointer; user-select: none; }
+.collapse-icon { float: right; font-size: 0.9rem; }
+.collapse-body { padding: 0.5rem 0; }
+.collapse-body.collapsed { display: none; }
+.collapse-body label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+}
+.collapse-body input[type="number"],
+.collapse-body input[type="text"],
+.collapse-body select {
+  width: 180px;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  background: var(--surface);
+  color: var(--fg);
+}
+.collapse-body input[type="checkbox"] { width: auto; }
+.inline-error { color: var(--red); font-size: 0.85rem; min-height: 1.2em; }
 .fallback-controls select, .fallback-controls input { flex: 1; }

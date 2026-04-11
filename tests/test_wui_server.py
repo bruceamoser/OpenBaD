@@ -488,3 +488,115 @@ async def test_put_systems_rejects_invalid_body(aiohttp_client, tmp_path, monkey
 
     resp = await client.put("/api/systems", json={"systems": "bad", "fallback_chain": []})
     assert resp.status == 400
+
+
+# ── Senses endpoint tests ──────────────────────────────────────── #
+
+
+def _senses_yaml(tmp_path, monkeypatch):
+    """Create a temporary senses.yaml and point env there."""
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir(exist_ok=True)
+    data = {
+        "hearing": {
+            "capture": {"sample_rate": 16000},
+            "asr": {"default_engine": "vosk", "vad_sensitivity": 0.5},
+            "wake_word": {"phrases": ["hey agent"], "threshold": 0.5},
+        },
+        "vision": {
+            "fps_idle": 1.0,
+            "fps_active": 5.0,
+            "capture_region": "active-window",
+            "capture_interval_s": 1.0,
+            "max_resolution": [1920, 1080],
+            "compression": {"format": "jpeg", "quality": 85},
+            "attention": {"ssim_threshold": 0.05, "cooldown_ms": 500, "roi_enabled": False},
+        },
+        "speech": {
+            "tts": {"engine": "piper", "speaking_rate": 1.0, "volume": 1.0},
+        },
+    }
+    (config_dir / "senses.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+    return config_dir
+
+
+@pytest.mark.asyncio
+async def test_get_senses(aiohttp_client, tmp_path, monkeypatch):
+    _senses_yaml(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/api/senses")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "hearing" in data
+    assert "vision" in data
+    assert "speech" in data
+    assert data["hearing"]["asr"]["default_engine"] == "vosk"
+    assert data["vision"]["capture_region"] == "active-window"
+    assert data["speech"]["tts"]["engine"] == "piper"
+
+
+@pytest.mark.asyncio
+async def test_put_senses_valid(aiohttp_client, tmp_path, monkeypatch):
+    config_dir = _senses_yaml(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "hearing": {
+            "capture": {"sample_rate": 22050},
+            "asr": {"default_engine": "whisper", "vad_sensitivity": 0.7},
+            "wake_word": {"phrases": ["computer"], "threshold": 0.6},
+        },
+        "vision": {
+            "fps_idle": 2.0,
+            "fps_active": 10.0,
+            "capture_region": "full-screen",
+            "capture_interval_s": 0.5,
+            "max_resolution": [3840, 2160],
+            "compression": {"format": "png", "quality": 100},
+            "attention": {"ssim_threshold": 0.1, "cooldown_ms": 1000, "roi_enabled": True},
+        },
+        "speech": {
+            "tts": {"engine": "espeak", "speaking_rate": 1.5, "volume": 0.8},
+        },
+    }
+    resp = await client.put("/api/senses", json=payload)
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["hearing"]["asr"]["default_engine"] == "whisper"
+    assert data["vision"]["capture_region"] == "full-screen"
+    assert data["speech"]["tts"]["engine"] == "espeak"
+
+    # Verify file was written
+    saved = yaml.safe_load((config_dir / "senses.yaml").read_text())
+    assert saved["hearing"]["asr"]["default_engine"] == "whisper"
+
+
+@pytest.mark.asyncio
+async def test_put_senses_validation_error(aiohttp_client, tmp_path, monkeypatch):
+    _senses_yaml(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    payload = {
+        "hearing": {
+            "asr": {"default_engine": "invalid-engine"},
+            "wake_word": {"phrases": ["hey"], "threshold": 0.5},
+        },
+    }
+    resp = await client.put("/api/senses", json=payload)
+    assert resp.status == 400
+    text = await resp.text()
+    assert "default_engine" in text
+
+
+@pytest.mark.asyncio
+async def test_put_senses_rejects_non_object(aiohttp_client, tmp_path, monkeypatch):
+    _senses_yaml(tmp_path, monkeypatch)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.put("/api/senses", json="bad")
+    assert resp.status == 400

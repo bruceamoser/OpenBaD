@@ -22,6 +22,7 @@ from openbad.cognitive.config import (
 )
 from openbad.cognitive.providers.github_copilot import CopilotAuthError, GitHubCopilotProvider
 from openbad.cognitive.providers.openai_compat import custom_provider
+from openbad.sensory.config import load_sensory_config
 from openbad.wui.bridge import MqttWebSocketBridge
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -506,6 +507,95 @@ async def _put_systems(request: web.Request) -> web.Response:
     return web.json_response(_serialize_systems_config(config))
 
 
+# ── Senses config endpoints ──────────────────────────────────────── #
+
+
+def _resolve_senses_config_path() -> Path:
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir) / "senses.yaml"
+    return Path("config/senses.yaml")
+
+
+def _serialize_senses(cfg: object) -> dict:
+    """Convert a SensoryConfig to a JSON-safe dict."""
+    h = cfg.hearing
+    v = cfg.vision
+    s = cfg.speech
+    return {
+        "hearing": {
+            "capture": {
+                "sample_rate": h.capture.sample_rate,
+                "channels": h.capture.channels,
+                "sample_format": h.capture.sample_format,
+                "chunk_duration_ms": h.capture.chunk_duration_ms,
+                "device": h.capture.device,
+                "passive": h.capture.passive,
+            },
+            "asr": {
+                "default_engine": h.asr.default_engine,
+                "vosk_model_path": h.asr.vosk_model_path,
+                "whisper_model": h.asr.whisper_model,
+                "vad_sensitivity": h.asr.vad_sensitivity,
+            },
+            "wake_word": {
+                "phrases": list(h.wake_word.phrases),
+                "threshold": h.wake_word.threshold,
+            },
+        },
+        "vision": {
+            "fps_idle": v.fps_idle,
+            "fps_active": v.fps_active,
+            "capture_region": str(v.capture_region),
+            "capture_interval_s": v.capture_interval_s,
+            "max_resolution": list(v.max_resolution) if v.max_resolution else None,
+            "compression": {
+                "format": v.compression.format,
+                "quality": v.compression.quality,
+            },
+            "attention": {
+                "ssim_threshold": v.attention.ssim_threshold,
+                "cooldown_ms": v.attention.cooldown_ms,
+                "roi_enabled": v.attention.roi_enabled,
+            },
+        },
+        "speech": {
+            "tts": {
+                "engine": s.tts.engine,
+                "voice_model": s.tts.voice_model,
+                "model_path": s.tts.model_path,
+                "speaking_rate": s.tts.speaking_rate,
+                "volume": s.tts.volume,
+                "output_device": s.tts.output_device,
+            },
+        },
+    }
+
+
+async def _get_senses(_request: web.Request) -> web.Response:
+    path = _resolve_senses_config_path()
+    cfg = load_sensory_config(path)
+    return web.json_response(_serialize_senses(cfg))
+
+
+async def _put_senses(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    # Write the raw payload as YAML — validation happens via load_sensory_config
+    path = _resolve_senses_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        cfg = load_sensory_config(path)
+    except (ValueError, TypeError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    return web.json_response(_serialize_senses(cfg))
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -533,6 +623,8 @@ def create_app(
     app.router.add_put("/api/providers", _put_providers)
     app.router.add_get("/api/systems", _get_systems)
     app.router.add_put("/api/systems", _put_systems)
+    app.router.add_get("/api/senses", _get_senses)
+    app.router.add_put("/api/senses", _put_senses)
     # TODO: Remove after v1.0 once external consumers have migrated to /api/providers/*.
     app.router.add_get("/api/wiring/providers", _redirect_legacy_wiring_providers)
     app.router.add_post(

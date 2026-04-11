@@ -22,6 +22,7 @@
         <button type="button" class="nav-link active" data-view-target="health">Health</button>
         <button type="button" class="nav-link" data-view-target="chat">Chat</button>
         <button type="button" class="nav-link" data-view-target="providers">Providers</button>
+        <button type="button" class="nav-link" data-view-target="senses">Senses</button>
         <button type="button" class="nav-link" data-view-target="models">Models <span class="nav-chip">next</span></button>
       </nav>
       <div class="nav-status">
@@ -297,6 +298,100 @@
               <button id="save-systems" type="button" class="primary-button">Save assignments</button>
             </div>
             <p id="systems-save-status" class="inline-status"></p>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-senses" class="view-panel reveal hidden" data-view="senses">
+        <div class="panel-grid single-column">
+          <!-- Vision -->
+          <article class="card section-card collapsible" id="senses-vision-card">
+            <div class="section-head" data-collapse-toggle="senses-vision-body">
+              <h3>Vision</h3>
+              <span class="collapse-icon">▾</span>
+            </div>
+            <div id="senses-vision-body" class="collapse-body">
+              <label>FPS (idle) <input type="number" id="sens-vision-fps-idle" min="0.1" max="30" step="0.1"></label>
+              <label>FPS (active) <input type="number" id="sens-vision-fps-active" min="0.1" max="60" step="0.1"></label>
+              <label>Capture region
+                <select id="sens-vision-capture-region">
+                  <option value="full-screen">full-screen</option>
+                  <option value="active-window">active-window</option>
+                  <option value="custom-rect">custom-rect</option>
+                </select>
+              </label>
+              <label>Capture interval (s) <input type="number" id="sens-vision-interval" min="0.1" max="60" step="0.1"></label>
+              <label>Max width <input type="number" id="sens-vision-max-w" min="1" max="7680"></label>
+              <label>Max height <input type="number" id="sens-vision-max-h" min="1" max="4320"></label>
+              <label>Compression format
+                <select id="sens-vision-comp-format">
+                  <option value="jpeg">jpeg</option>
+                  <option value="png">png</option>
+                </select>
+              </label>
+              <label>Compression quality <input type="number" id="sens-vision-comp-quality" min="1" max="100"></label>
+              <label>SSIM threshold <input type="number" id="sens-vision-ssim" min="0" max="1" step="0.01"></label>
+              <label>Cooldown (ms) <input type="number" id="sens-vision-cooldown" min="0" max="10000"></label>
+              <label>ROI enabled <input type="checkbox" id="sens-vision-roi"></label>
+              <p id="sens-vision-error" class="inline-error"></p>
+            </div>
+          </article>
+
+          <!-- Hearing -->
+          <article class="card section-card collapsible" id="senses-hearing-card">
+            <div class="section-head" data-collapse-toggle="senses-hearing-body">
+              <h3>Hearing</h3>
+              <span class="collapse-icon">▾</span>
+            </div>
+            <div id="senses-hearing-body" class="collapse-body">
+              <label>Sample rate <input type="number" id="sens-hearing-sample-rate" min="8000" max="48000"></label>
+              <label>Channels <input type="number" id="sens-hearing-channels" min="1" max="2"></label>
+              <label>Sample format <input type="text" id="sens-hearing-format" placeholder="s16le"></label>
+              <label>Chunk duration (ms) <input type="number" id="sens-hearing-chunk-ms" min="10" max="1000"></label>
+              <label>Device <input type="text" id="sens-hearing-device" placeholder="default"></label>
+              <label>Passive <input type="checkbox" id="sens-hearing-passive"></label>
+              <label>ASR engine
+                <select id="sens-hearing-asr-engine">
+                  <option value="vosk">vosk</option>
+                  <option value="whisper">whisper</option>
+                </select>
+              </label>
+              <label>Vosk model path <input type="text" id="sens-hearing-vosk-path"></label>
+              <label>Whisper model <input type="text" id="sens-hearing-whisper-model" placeholder="base"></label>
+              <label>VAD sensitivity <input type="number" id="sens-hearing-vad" min="0" max="1" step="0.1"></label>
+              <label>Wake phrases <input type="text" id="sens-hearing-phrases" placeholder="hey agent"></label>
+              <label>Wake threshold <input type="number" id="sens-hearing-threshold" min="0" max="1" step="0.05"></label>
+              <p id="sens-hearing-error" class="inline-error"></p>
+            </div>
+          </article>
+
+          <!-- Speech -->
+          <article class="card section-card collapsible" id="senses-speech-card">
+            <div class="section-head" data-collapse-toggle="senses-speech-body">
+              <h3>Speech</h3>
+              <span class="collapse-icon">▾</span>
+            </div>
+            <div id="senses-speech-body" class="collapse-body">
+              <label>TTS engine
+                <select id="sens-speech-engine">
+                  <option value="piper">piper</option>
+                  <option value="espeak">espeak</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </label>
+              <label>Voice model <input type="text" id="sens-speech-voice-model"></label>
+              <label>Model path <input type="text" id="sens-speech-model-path"></label>
+              <label>Speaking rate <input type="number" id="sens-speech-rate" min="0.25" max="4" step="0.05"></label>
+              <label>Volume <input type="number" id="sens-speech-volume" min="0" max="1" step="0.05"></label>
+              <label>Output device <input type="text" id="sens-speech-output-device" placeholder="default"></label>
+              <p id="sens-speech-error" class="inline-error"></p>
+            </div>
+          </article>
+
+          <!-- Save -->
+          <article class="card section-card">
+            <button type="button" id="senses-save-btn" class="btn primary">Save Senses</button>
+            <p id="senses-save-status" class="inline-status"></p>
           </article>
         </div>
       </section>
