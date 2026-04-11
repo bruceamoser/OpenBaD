@@ -474,7 +474,17 @@ validate_installation() {
         failures=1
     fi
 
-    if ! "$OPENBAD_BIN" health >/dev/null 2>&1; then
+    # Services may need a moment to become ready after systemctl start.
+    local health_ok=false
+    for attempt in 1 2 3 4 5; do
+        if "$OPENBAD_BIN" health >/dev/null 2>&1; then
+            health_ok=true
+            break
+        fi
+        info "  Waiting for services to stabilize (attempt $attempt/5)..."
+        sleep 2
+    done
+    if [[ "$health_ok" != "true" ]]; then
         error "openbad health reported an unhealthy stack"
         "$OPENBAD_BIN" health || true
         failures=1
