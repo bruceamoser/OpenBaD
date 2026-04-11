@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from openbad.state.db import DEFAULT_STATE_DB_PATH, StateDatabase, initialize_state_db
 
 REQUIRED_TABLES = {
@@ -126,3 +128,70 @@ def test_migration_schema_version_is_persisted(tmp_path: Path) -> None:
     conn.close()
 
     assert "0001_initial" in applied
+
+
+# ---------------------------------------------------------------------------
+# Issue #337: migration runner idempotency, failure handling, ordering
+# ---------------------------------------------------------------------------
+
+
+def test_migration_runner_ordered_application(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "0001_first.sql").write_text(
+        "CREATE TABLE first_table (id INTEGER PRIMARY KEY);"
+    )
+    (mig_dir / "0002_second.sql").write_text(
+        "CREATE TABLE second_table (id INTEGER PRIMARY KEY);"
+    )
+
+    db_path = tmp_path / "ordered.db"
+    conn = initialize_state_db(db_path, migrations_dir=mig_dir)
+
+    applied = [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM schema_migrations ORDER BY applied_at ASC"
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert applied == ["0001_first", "0002_second"]
+
+
+def test_migration_runner_failure_includes_identifier(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "0001_bad.sql").write_text("NOT VALID SQL !!!")
+
+    db_path = tmp_path / "fail.db"
+
+    with pytest.raises(RuntimeError, match="0001_bad"):
+        initialize_state_db(db_path, migrations_dir=mig_dir)
+
+
+def test_migration_runner_failure_leaves_no_partial_state(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "0001_good.sql").write_text(
+        "CREATE TABLE good_table (id INTEGER PRIMARY KEY);"
+    )
+    (mig_dir / "0002_bad.sql").write_text("NOT VALID SQL !!!")
+
+    db_path = tmp_path / "partial.db"
+
+    with pytest.raises(RuntimeError):
+        initialize_state_db(db_path, migrations_dir=mig_dir)
+
+    # DB file may exist but schema_migrations should not record a partial run
+    verify = sqlite3.connect(str(db_path))
+    try:
+        applied = [
+            row[0]
+            for row in verify.execute("SELECT name FROM schema_migrations").fetchall()
+        ]
+    except sqlite3.OperationalError:
+        applied = []
+    verify.close()
+
+    assert "0002_bad" not in applied
