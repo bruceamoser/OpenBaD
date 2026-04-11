@@ -1,9 +1,9 @@
 <script lang="ts">
   import '../app.css';
   import type { Snippet } from 'svelte';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
-  import { wsStatus, fsmState } from '$lib/stores/websocket';
+  import { wsStatus, fsmState, connect, disconnect } from '$lib/stores/websocket';
   import { get as apiGet, post as apiPost } from '$lib/api/client';
 
   let { children }: { children: Snippet } = $props();
@@ -79,7 +79,12 @@
   }
   function prevStep(): void { if (wizardStep > 0) wizardStep -= 1; }
 
-  onMount(() => { checkFirstRun(); });
+  onMount(() => {
+    connect();
+    checkFirstRun();
+  });
+
+  onDestroy(() => { disconnect(); });
 </script>
 
 <!-- First-run wizard overlay -->
