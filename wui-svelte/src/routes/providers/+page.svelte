@@ -16,6 +16,7 @@
     timeout_ms: number;
     enabled: boolean;
     verified?: boolean;
+    models?: string[];
   }
 
   interface SystemAssignment {
@@ -36,7 +37,8 @@
 
   interface SystemsData {
     systems: Record<string, SystemAssignment>;
-    default_fallback_chain: FallbackEntry[];
+    fallback_chain: FallbackEntry[];
+    providers: { name: string; model: string }[];
   }
 
   interface VerifyResult {
@@ -64,12 +66,9 @@
     message: string;
     provider?: ProviderEntry;
     models?: string[];
-    latency_ms?: number;
-    models_available?: number;
-    interval?: number;
   }
 
-  type WizardStep = 'closed' | 'pick-type' | 'copilot-auth' | 'local-form' | 'verifying' | 'done';
+  type WizardStep = 'closed' | 'pick-type' | 'copilot-auth' | 'local-form' | 'done';
 
   // ----------------------------------------------------------------
   // State
@@ -97,8 +96,6 @@
   let copilotFlowId = $state('');
   let copilotUserCode = $state('');
   let copilotVerifyUri = $state('');
-  let copilotInterval = $state(5);
-  let copilotPollTimer: ReturnType<typeof setInterval> | null = $state(null);
   let copilotModels: string[] = $state([]);
 
   // Local OpenAI wizard
@@ -128,7 +125,15 @@
 
       const sData = await apiGet<SystemsData>('/api/systems');
       systems = sData.systems ?? {};
-      fallbackChain = sData.default_fallback_chain ?? [];
+      fallbackChain = sData.fallback_chain ?? [];
+
+      // Pre-fetch models for any providers already assigned to systems
+      const assignedProviders = new Set(
+        Object.values(systems).map(a => a.provider).filter(Boolean)
+      );
+      for (const pName of assignedProviders) {
+        fetchModelsForProvider(pName);
+      }
     } catch (e) {
       statusMsg = `Load failed: ${e}`;
     } finally {
@@ -136,30 +141,41 @@
     }
   }
 
-  onMount(() => {
-    load();
-    return () => { stopCopilotPoll(); };
-  });
+  onMount(() => { load(); });
 
   // ----------------------------------------------------------------
-  // Save providers + systems
+  // Persist providers to backend
   // ----------------------------------------------------------------
 
-  async function saveAll(): Promise<void> {
-    saving = true;
-    statusMsg = '';
+  async function persistProviders(): Promise<void> {
     try {
-      await apiPut('/api/providers', {
+      const result = await apiPut<ProvidersData>('/api/providers', {
         enabled: true,
         default_provider: defaultProvider || (providers[0]?.name ?? ''),
         providers,
       });
+      providers = result.providers ?? providers;
+      defaultProvider = result.default_provider ?? defaultProvider;
+    } catch (e) {
+      statusMsg = `Save failed: ${e}`;
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Save systems + fallback
+  // ----------------------------------------------------------------
+
+  async function saveSystems(): Promise<void> {
+    saving = true;
+    statusMsg = '';
+    try {
       await apiPut('/api/systems', {
         systems,
-        default_fallback_chain: fallbackChain,
+        fallback_chain: fallbackChain,
       });
       dirty = false;
-      statusMsg = 'Saved';
+      statusMsg = 'Saved.';
+      setTimeout(() => { if (statusMsg === 'Saved.') statusMsg = ''; }, 2000);
     } catch (e) {
       statusMsg = `Save failed: ${e}`;
     } finally {
@@ -171,7 +187,7 @@
   // Remove provider
   // ----------------------------------------------------------------
 
-  function removeProvider(idx: number): void {
+  async function removeProvider(idx: number): Promise<void> {
     const removed = providers[idx];
     providers = providers.filter((_, i) => i !== idx);
     if (defaultProvider === removed.name && providers.length > 0) {
@@ -179,7 +195,7 @@
     } else if (providers.length === 0) {
       defaultProvider = '';
     }
-    dirty = true;
+    await persistProviders();
   }
 
   // ----------------------------------------------------------------
@@ -193,7 +209,6 @@
   }
 
   function closeWizard(): void {
-    stopCopilotPoll();
     wizStep = 'closed';
     wizMsg = '';
     wizError = '';
@@ -224,10 +239,8 @@
       copilotFlowId = res.flow_id;
       copilotUserCode = res.user_code;
       copilotVerifyUri = res.verification_uri;
-      copilotInterval = res.interval || 5;
       wizStep = 'copilot-auth';
       wizMsg = res.message;
-      startCopilotPoll();
     } catch (e) {
       wizError = `Failed to start Copilot auth: ${e}`;
     } finally {
@@ -235,44 +248,54 @@
     }
   }
 
-  function startCopilotPoll(): void {
-    stopCopilotPoll();
-    copilotPollTimer = setInterval(pollCopilotComplete, copilotInterval * 1000);
-  }
-
-  function stopCopilotPoll(): void {
-    if (copilotPollTimer !== null) {
-      clearInterval(copilotPollTimer);
-      copilotPollTimer = null;
+  async function completeCopilotAuth(): Promise<void> {
+    if (!copilotFlowId) {
+      wizError = 'Start GitHub sign-in first.';
+      return;
     }
-  }
-
-  async function pollCopilotComplete(): Promise<void> {
-    if (!copilotFlowId) return;
+    wizBusy = true;
+    wizError = '';
+    wizMsg = 'Checking GitHub authorization state…';
     try {
       const res = await apiPost<CopilotCompleteResult>('/api/providers/copilot/complete', {
         flow_id: copilotFlowId,
       });
+      if (res.pending) {
+        wizMsg = res.message;
+        wizBusy = false;
+        return;
+      }
       if (res.authorized) {
-        stopCopilotPoll();
         copilotModels = res.models ?? [];
         if (res.provider) {
-          providers = [...providers, { ...res.provider, verified: true }];
-          if (!defaultProvider) defaultProvider = res.provider.name;
-          dirty = true;
+          const entry: ProviderEntry = {
+            ...res.provider,
+            verified: true,
+            models: copilotModels,
+          };
+          providers = [...providers, entry];
+          if (!defaultProvider) defaultProvider = entry.name;
+          await persistProviders();
         }
         wizStep = 'done';
         wizMsg = res.message;
-      } else if (res.pending) {
-        wizMsg = res.message;
-        if (res.interval) copilotInterval = res.interval;
       } else {
-        stopCopilotPoll();
-        wizError = res.message;
+        wizError = res.message || 'Authorization failed.';
       }
     } catch (e) {
-      stopCopilotPoll();
-      wizError = `Polling failed: ${e}`;
+      wizError = `Authorization check failed: ${e}`;
+    } finally {
+      wizBusy = false;
+    }
+  }
+
+  async function copyCopilotCode(): Promise<void> {
+    if (!copilotUserCode) return;
+    try {
+      await navigator.clipboard.writeText(copilotUserCode);
+      wizMsg = 'Code copied to clipboard.';
+    } catch {
+      wizMsg = 'Clipboard copy failed. Copy the code manually.';
     }
   }
 
@@ -310,7 +333,7 @@
     }
   }
 
-  function addLocalProvider(): void {
+  async function addLocalProvider(): Promise<void> {
     const entry: ProviderEntry = {
       name: 'custom',
       base_url: localBaseUrl,
@@ -319,10 +342,11 @@
       timeout_ms: 30000,
       enabled: true,
       verified: localVerified,
+      models: localModels,
     };
     providers = [...providers, entry];
     if (!defaultProvider) defaultProvider = entry.name;
-    dirty = true;
+    await persistProviders();
     wizStep = 'done';
     wizMsg = `Added local provider (${localModel || 'custom'})`;
   }
@@ -331,10 +355,63 @@
   // System assignment helpers
   // ----------------------------------------------------------------
 
-  function setSystem(sys: string, field: 'provider' | 'model', val: string): void {
+  // Cache of fetched models per provider name
+  let providerModelsCache: Record<string, string[]> = $state({});
+  let modelsFetching: Record<string, boolean> = $state({});
+
+  async function fetchModelsForProvider(providerName: string): Promise<void> {
+    if (!providerName || providerModelsCache[providerName] || modelsFetching[providerName]) return;
+    modelsFetching = { ...modelsFetching, [providerName]: true };
+    try {
+      const res = await apiGet<{ provider: string; models: { model_id: string }[] }>(
+        `/api/providers/${encodeURIComponent(providerName)}/models`
+      );
+      providerModelsCache = {
+        ...providerModelsCache,
+        [providerName]: res.models.map(m => m.model_id),
+      };
+    } catch {
+      // Fallback to local data if endpoint fails
+      const p = providers.find(pp => pp.name === providerName);
+      const fallback: string[] = [];
+      if (p?.models && p.models.length > 0) fallback.push(...p.models);
+      if (p?.model && !fallback.includes(p.model)) fallback.push(p.model);
+      providerModelsCache = { ...providerModelsCache, [providerName]: fallback };
+    } finally {
+      modelsFetching = { ...modelsFetching, [providerName]: false };
+    }
+  }
+
+  async function setSystemProvider(sys: string, providerName: string): Promise<void> {
     if (!systems[sys]) systems[sys] = { provider: '', model: '' };
-    systems[sys][field] = val;
+    systems[sys].provider = providerName;
+    systems[sys].model = '';
     dirty = true;
+    if (providerName) {
+      await fetchModelsForProvider(providerName);
+      // Auto-select first model
+      const models = providerModelsCache[providerName] ?? [];
+      if (models.length > 0) {
+        systems[sys].model = models[0];
+      }
+    }
+    await saveSystems();
+  }
+
+  async function setSystemModel(sys: string, model: string): Promise<void> {
+    if (!systems[sys]) systems[sys] = { provider: '', model: '' };
+    systems[sys].model = model;
+    dirty = true;
+    await saveSystems();
+  }
+
+  function modelsForProvider(providerName: string): string[] {
+    if (!providerName) return [];
+    // Kick off fetch if not cached yet
+    if (!providerModelsCache[providerName] && !modelsFetching[providerName]) {
+      fetchModelsForProvider(providerName);
+    }
+    return providerModelsCache[providerName] ?? [];
   }
 
   // ----------------------------------------------------------------
@@ -349,7 +426,7 @@
     e.preventDefault();
   }
 
-  function drop(targetIdx: number): void {
+  async function drop(targetIdx: number): Promise<void> {
     if (dragIdx === null || dragIdx === targetIdx) return;
     const item = fallbackChain[dragIdx];
     const updated = [...fallbackChain];
@@ -358,6 +435,7 @@
     fallbackChain = updated;
     dragIdx = null;
     dirty = true;
+    await saveSystems();
   }
 
   // ----------------------------------------------------------------
@@ -366,7 +444,7 @@
 
   function healthColor(entry: ProviderEntry): string {
     if (entry.verified) return 'var(--green)';
-    return 'var(--red)';
+    return 'var(--yellow)';
   }
 
   function cortisolColor(level: number): string {
@@ -433,20 +511,30 @@
         <p class="wizard-subtitle">Complete these steps to link your Copilot subscription.</p>
         <div class="copilot-steps">
           <div class="copilot-code-box">
-            <span class="copilot-code-label">Your code</span>
+            <span class="copilot-code-label">Verification code</span>
             <span class="copilot-code">{copilotUserCode}</span>
           </div>
           <ol class="copilot-instructions">
             <li>
-              Open <a href={copilotVerifyUri} target="_blank" rel="noopener noreferrer">{copilotVerifyUri}</a>
+              Open
+              <a href={copilotVerifyUri} target="_blank" rel="noopener noreferrer">{copilotVerifyUri}</a>
             </li>
             <li>Enter the code above</li>
             <li>Authorize the application</li>
+            <li>Return here and click the button below</li>
           </ol>
-          <div class="copilot-status">
-            <span class="spinner"></span>
-            <span>Waiting for authorization…</span>
+          <div class="copilot-actions">
+            <button class="btn-ghost" onclick={copyCopilotCode}>Copy code</button>
+            <button class="btn-ghost" onclick={() => window.open(copilotVerifyUri, '_blank', 'noopener,noreferrer')}>
+              Open GitHub
+            </button>
+            <button class="btn-primary" onclick={completeCopilotAuth} disabled={wizBusy}>
+              {wizBusy ? 'Checking…' : 'I entered the code'}
+            </button>
           </div>
+          {#if wizMsg && !wizError}
+            <p class="copilot-auth-msg">{wizMsg}</p>
+          {/if}
         </div>
 
       {:else if wizStep === 'local-form'}
@@ -504,10 +592,6 @@
           </div>
         </div>
 
-      {:else if wizStep === 'verifying'}
-        <h3>Verifying…</h3>
-        <div class="verify-spinner"><span class="spinner"></span></div>
-
       {:else if wizStep === 'done'}
         <h3>Provider Added</h3>
         <p class="wizard-done-msg">{wizMsg}</p>
@@ -522,8 +606,7 @@
           </div>
         {/if}
         <div class="wizard-done-actions">
-          <button onclick={closeWizard}>Close</button>
-          <button class="btn-primary" onclick={() => { closeWizard(); saveAll(); }}>Save &amp; Close</button>
+          <button class="btn-primary" onclick={closeWizard}>Done</button>
         </div>
       {/if}
 
@@ -573,7 +656,6 @@
                 <span class="provider-name">{providerDisplayName(p)}</span>
                 <span class="provider-model">{p.model || '(auto)'}</span>
               </div>
-              <span class="badge" class:verified={p.verified}>{p.verified ? '✓ Verified' : '? Unverified'}</span>
               <button class="btn-icon btn-remove" onclick={() => removeProvider(i)} aria-label="Remove provider" title="Remove provider">&times;</button>
             </div>
           {/each}
@@ -598,8 +680,11 @@
     <!-- System assignments -->
     <div class="full-width">
       <Card label="System Assignments">
+        <p class="hint">Assign a provider and model to each cognitive system.</p>
         <div class="systems-grid">
           {#each COGNITIVE_SYSTEMS as sys}
+            {@const assignment = systems[sys] ?? { provider: '', model: '' }}
+            {@const availableModels = modelsForProvider(assignment.provider)}
             <div class="sys-row">
               <div class="sys-label-wrap">
                 <span class="sys-icon">
@@ -607,18 +692,25 @@
                 </span>
                 <span class="sys-label">{sys}</span>
               </div>
-              <input
-                type="text"
-                placeholder="Provider name"
-                value={systems[sys]?.provider ?? ''}
-                oninput={(e: Event) => setSystem(sys, 'provider', (e.target as HTMLInputElement).value)}
-              />
-              <input
-                type="text"
-                placeholder="Model name"
-                value={systems[sys]?.model ?? ''}
-                oninput={(e: Event) => setSystem(sys, 'model', (e.target as HTMLInputElement).value)}
-              />
+              <select
+                value={assignment.provider}
+                onchange={(e: Event) => setSystemProvider(sys, (e.target as HTMLSelectElement).value)}
+              >
+                <option value="">— provider —</option>
+                {#each providers as p}
+                  <option value={p.name}>{providerDisplayName(p)}</option>
+                {/each}
+              </select>
+              <select
+                value={assignment.model}
+                onchange={(e: Event) => setSystemModel(sys, (e.target as HTMLSelectElement).value)}
+                disabled={!assignment.provider}
+              >
+                <option value="">— model —</option>
+                {#each availableModels as m}
+                  <option value={m}>{m}</option>
+                {/each}
+              </select>
             </div>
           {/each}
         </div>
@@ -655,15 +747,11 @@
     </div>
   </div>
 
-  <!-- Actions -->
-  <div class="actions-bar">
-    <button class="btn-primary" onclick={saveAll} disabled={!dirty || saving}>
-      {saving ? 'Saving…' : 'Save Changes'}
-    </button>
-    {#if statusMsg}
+  {#if statusMsg}
+    <div class="actions-bar">
       <span class="status-msg">{statusMsg}</span>
-    {/if}
-  </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -704,11 +792,6 @@
   .provider-info { display: flex; flex-direction: column; flex: 1; }
   .provider-name { font-weight: 600; font-size: 0.9rem; }
   .provider-model { font-size: 0.8rem; color: var(--text-dim); }
-  .badge {
-    font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: var(--radius-sm);
-    background: rgba(243, 139, 168, 0.15); color: var(--red); white-space: nowrap;
-  }
-  .badge.verified { background: rgba(166, 227, 161, 0.15); color: var(--green); }
   .empty { color: var(--text-dim); font-size: 0.9rem; }
 
   .btn-add {
@@ -735,6 +818,13 @@
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-lg { padding: 0.75rem 2rem; font-size: 1rem; }
 
+  .btn-ghost {
+    background: transparent; border: 1px solid var(--border); color: var(--text-sub);
+    padding: 0.4rem 0.9rem; border-radius: var(--radius-sm); cursor: pointer;
+    font-size: 0.85rem; transition: all 0.15s var(--ease);
+  }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
   /* ---- Cortisol ---- */
   .cortisol-section { display: flex; flex-direction: column; gap: 0.6rem; }
   .cortisol-header { display: flex; align-items: center; gap: 0.5rem; }
@@ -743,7 +833,7 @@
   .cortisol-fill { height: 100%; border-radius: 4px; transition: width 0.4s var(--ease); }
 
   /* ---- Systems ---- */
-  .systems-grid { display: flex; flex-direction: column; gap: 0.6rem; }
+  .systems-grid { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 0.5rem; }
   .sys-row {
     display: flex; gap: 0.75rem; align-items: center;
     padding: 0.5rem 0.75rem; background: var(--bg-surface1); border-radius: var(--radius-sm);
@@ -751,7 +841,13 @@
   .sys-label-wrap { display: flex; align-items: center; gap: 0.4rem; width: 8rem; flex-shrink: 0; }
   .sys-icon { font-size: 1rem; }
   .sys-label { font-weight: 600; font-size: 0.85rem; text-transform: capitalize; }
-  .sys-row input { flex: 1; min-width: 0; }
+  .sys-row select {
+    flex: 1; min-width: 0; padding: 0.4rem 0.5rem;
+    background: var(--bg-surface0); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); color: var(--text); font-size: 0.85rem;
+  }
+  .sys-row select:disabled { opacity: 0.4; }
+  .sys-row select:focus { border-color: var(--accent); outline: none; }
 
   /* ---- Fallback ---- */
   .fallback-list { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.5rem; }
@@ -770,7 +866,7 @@
   .fallback-name { font-weight: 600; }
   .fallback-model { color: var(--text-dim); font-size: 0.85rem; }
 
-  .hint { font-size: 0.8rem; color: var(--text-dim); }
+  .hint { font-size: 0.8rem; color: var(--text-dim); margin: 0 0 0.25rem; }
 
   /* ---- Actions bar ---- */
   .actions-bar {
@@ -837,9 +933,11 @@
     display: flex; flex-direction: column; gap: 0.4rem;
   }
   .copilot-instructions a { color: var(--accent); text-decoration: underline; }
-  .copilot-status {
-    display: flex; align-items: center; gap: 0.6rem;
-    font-size: 0.85rem; color: var(--text-dim);
+  .copilot-actions {
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  }
+  .copilot-auth-msg {
+    font-size: 0.85rem; color: var(--text-dim); margin: 0;
   }
 
   /* ---- Wizard: Local form ---- */
@@ -875,6 +973,7 @@
     border-top-color: var(--accent); border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
-  .verify-spinner { display: flex; justify-content: center; padding: 2rem; }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  .verify-spinner { display: flex; justify-content: center; padding: 2rem; }
 </style>

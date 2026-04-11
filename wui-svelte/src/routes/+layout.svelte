@@ -11,6 +11,7 @@
   const NAV_ITEMS = [
     { href: '/',          label: 'Health',    icon: '❤' },
     { href: '/chat',      label: 'Chat',      icon: '💬' },
+    { href: '/usage',     label: 'Usage',     icon: '◔' },
     { href: '/providers', label: 'Providers', icon: '⚙' },
     { href: '/senses',    label: 'Senses',    icon: '👁' },
     { href: '/toolbelt',  label: 'Toolbelt',  icon: '🔧' },
@@ -18,6 +19,7 @@
   ];
 
   let sidebarOpen = $state(true);
+  let appVersion = $state('0.1.0');
   function toggleSidebar(): void { sidebarOpen = !sidebarOpen; }
 
   let pathname = $derived($page.url.pathname);
@@ -64,6 +66,14 @@
       showWizard = res.first_run;
     } catch { }
   }
+
+  async function loadVersion(): Promise<void> {
+    try {
+      const res = await apiGet<{ version: string }>('/api/version');
+      appVersion = res.version;
+    } catch { }
+  }
+
   async function finishWizard(): Promise<void> {
     try {
       await apiPost('/api/setup', {
@@ -82,6 +92,7 @@
   onMount(() => {
     connect();
     checkFirstRun();
+    loadVersion();
   });
 
   onDestroy(() => { disconnect(); });
@@ -92,7 +103,7 @@
   <div class="wizard-overlay">
     <div class="wizard-card">
       <div class="wizard-header">
-        <span class="wizard-logo">OB</span>
+        <img class="wizard-logo" src="/logo.png" alt="OpenBaD" />
         <div>
           <h2>OpenBaD Setup</h2>
           <p class="wizard-progress">Step {wizardStep + 1} of {WIZARD_STEPS.length} — {WIZARD_STEPS[wizardStep]}</p>
@@ -167,7 +178,7 @@
           <rect y="15" width="20" height="2" rx="1" fill="currentColor"/>
         </svg>
       </button>
-      <span class="app-title">Open<strong>BaD</strong></span>
+      <img class="app-logo topbar-logo" src="/logo.png" alt="OpenBaD" />
     </div>
     <div class="top-right">
       <div class="indicator" title="WebSocket: {wsStatusVal}">
@@ -183,8 +194,7 @@
   <!-- Sidebar -->
   <nav class="side-nav" class:open={sidebarOpen}>
     <div class="nav-brand">
-      <div class="brand-logo">OB</div>
-      <span class="brand-text">OpenBaD</span>
+      <img class="app-logo sidebar-logo" src="/logo.png" alt="OpenBaD" />
     </div>
     <ul class="nav-list">
       {#each NAV_ITEMS as item}
@@ -198,7 +208,7 @@
     </ul>
     <div class="nav-footer">
       <div class="nav-divider"></div>
-      <span class="nav-version">v0.1.0</span>
+      <span class="nav-version">v{appVersion}</span>
     </div>
   </nav>
 
@@ -265,13 +275,14 @@
     background: var(--bg-surface1);
     color: var(--text);
   }
-  .app-title {
-    font-size: 1rem;
-    color: var(--text-sub);
-    letter-spacing: 0.02em;
+  .app-logo {
+    display: block;
+    height: auto;
+    object-fit: contain;
   }
-  .app-title strong {
-    color: var(--text);
+  .topbar-logo {
+    width: 8.75rem;
+    max-width: 38vw;
   }
 
   .top-right {
@@ -326,28 +337,13 @@
   .nav-brand {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    justify-content: center;
     padding: 1rem 1.25rem;
     border-bottom: 1px solid var(--border);
   }
-  .brand-logo {
-    width: 2.25rem;
-    height: 2.25rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-    font-size: 0.85rem;
-    background: linear-gradient(135deg, var(--blue), var(--mauve));
-    color: var(--text-on-color);
-    border-radius: var(--radius-md);
-    flex-shrink: 0;
-  }
-  .brand-text {
-    font-weight: 700;
-    font-size: 1.05rem;
-    color: var(--text);
-    white-space: nowrap;
+  .sidebar-logo {
+    width: 10.5rem;
+    max-width: 100%;
   }
 
   .nav-list {
@@ -484,17 +480,10 @@
     gap: 1rem;
   }
   .wizard-logo {
-    width: 2.5rem;
-    height: 2.5rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-    font-size: 0.9rem;
-    background: linear-gradient(135deg, var(--blue), var(--mauve));
-    color: var(--text-on-color);
-    border-radius: var(--radius-md);
+    width: 5.5rem;
+    height: auto;
     flex-shrink: 0;
+    object-fit: contain;
   }
   .wizard-header h2 {
     font-size: 1.2rem;

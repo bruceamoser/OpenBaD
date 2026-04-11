@@ -6,6 +6,9 @@ Serves the static dashboard assets and hosts the MQTT->WebSocket bridge.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -14,19 +17,56 @@ from uuid import uuid4
 import yaml
 from aiohttp import web
 
+import openbad
 from openbad.cognitive.config import (
     CognitiveConfig,
     CognitiveSystem,
     ProviderConfig,
     load_cognitive_config,
 )
-from openbad.cognitive.providers.github_copilot import CopilotAuthError, GitHubCopilotProvider
+from openbad.cognitive.providers.github_copilot import (
+    CopilotAuthError,
+    GitHubCopilotProvider,
+    _KNOWN_MODELS,
+)
 from openbad.cognitive.providers.openai_compat import custom_provider
+from openbad.identity.persistence import IdentityPersistence
+from openbad.identity.personality_modulator import PersonalityModulator
+from openbad.memory.episodic import EpisodicMemory
 from openbad.sensory.config import load_sensory_config
+from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.bridge import MqttWebSocketBridge
+from openbad.wui.usage_tracker import UsageTracker
 
 # SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
 BUILD_DIR = Path(__file__).resolve().parent / "build"
+
+log = logging.getLogger(__name__)
+
+
+def _resolve_usage_db_path() -> Path:
+    configured = os.environ.get("OPENBAD_USAGE_DB", "").strip()
+    if configured:
+        return Path(configured)
+
+    preferred_dir = Path("/var/lib/openbad/state")
+    try:
+        if preferred_dir.is_dir() and os.access(preferred_dir, os.W_OK):
+            return preferred_dir / "usage.db"
+    except PermissionError:
+        pass
+
+    preferred_parent = preferred_dir.parent
+    try:
+        if preferred_parent.is_dir() and os.access(preferred_parent, os.W_OK):
+            return preferred_dir / "usage.db"
+    except PermissionError:
+        pass
+
+    state_home = Path(
+        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    )
+    return state_home / "openbad" / "usage.db"
 
 
 def _candidate_cognitive_config_paths() -> list[Path]:
@@ -62,6 +102,56 @@ def _resolve_cognitive_config_path() -> Path:
         if path.exists():
             return path
     return candidates[0]
+
+
+def _candidate_identity_config_paths() -> list[Path]:
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    candidates: list[Path] = []
+    if config_dir:
+        candidates.append(Path(config_dir) / "identity.yaml")
+    candidates.extend(
+        [
+            Path("/etc/openbad/identity.yaml"),
+            Path.home() / ".config" / "openbad" / "identity.yaml",
+            Path("config/identity.yaml"),
+        ]
+    )
+
+    unique_candidates: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        unique_candidates.append(path)
+        seen.add(path)
+    return unique_candidates
+
+
+def _resolve_identity_config_path() -> Path:
+    candidates = _candidate_identity_config_paths()
+    config_dir = os.environ.get("OPENBAD_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir) / "identity.yaml"
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def _initialize_identity_state(app: web.Application) -> None:
+    config_path = _resolve_identity_config_path()
+    if not config_path.exists():
+        log.warning("identity config not found at %s; identity context disabled", config_path)
+        return
+
+    episodic_path = Path("/var/lib/openbad/memory/identity.json")
+    persistence = IdentityPersistence(
+        config_path,
+        EpisodicMemory(storage_path=episodic_path),
+    )
+    app["identity_persistence"] = persistence
+    app["personality_modulator"] = PersonalityModulator(persistence.assistant)
 
 
 def _serialize_cognitive_config(config: CognitiveConfig, path: Path) -> dict[str, object]:
@@ -161,7 +251,7 @@ def _save_providers_config(path: Path, payload: dict[str, object]) -> None:
         existing = yaml.safe_load(path.read_text()) or {}
         cognitive = existing.get("cognitive", {})
         if isinstance(cognitive, dict):
-            for key in ("context_budget", "reasoning"):
+            for key in ("context_budget", "reasoning", "systems", "default_fallback_chain", "fallback_cortisol"):
                 if key in cognitive and key not in document["cognitive"]:
                     document["cognitive"][key] = cognitive[key]
 
@@ -238,7 +328,13 @@ def _build_wizard_adapter(provider: ProviderConfig):
 
 async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]:
     adapter = _build_wizard_adapter(provider)
-    status = await adapter.health_check()
+    log.info("Verifying provider %s (%s)", provider.name, provider.base_url)
+    try:
+        status = await adapter.health_check()
+    except Exception:
+        log.exception("Health check failed for %s", provider.name)
+        status = type("HS", (), {"available": False, "latency_ms": 0, "models_available": 0})()
+    log.info("Provider %s available=%s latency=%.0fms", provider.name, status.available, status.latency_ms)
     models: list[str] = []
     if status.available:
         try:
@@ -356,17 +452,28 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
     if not flow_id:
         raise web.HTTPBadRequest(text="flow_id is required")
 
+    log.debug("Copilot complete poll for flow %s", flow_id)
     _cleanup_copilot_flows(request.app)
     flow = request.app["copilot_device_flows"].get(flow_id)
     if flow is None:
         raise web.HTTPBadRequest(text="Copilot authorization flow expired or was not found")
+
+    # Guard against concurrent polls processing the same authorization
+    if flow.get("completing"):
+        return web.json_response(
+            {"authorized": False, "pending": True, "message": "Processing authorization..."}
+        )
 
     provider = GitHubCopilotProvider(
         default_model=str(flow["default_model"]),
         timeout_s=max(1.0, int(flow["timeout_ms"]) / 1000),
     )
 
-    result = await provider.poll_for_token_once(str(flow["device_code"]))
+    try:
+        result = await provider.poll_for_token_once(str(flow["device_code"]))
+    except Exception:
+        log.exception("poll_for_token_once failed for flow %s", flow_id)
+        raise web.HTTPBadRequest(text="Failed to poll GitHub for authorization status")
     state = str(result.get("state", "error"))
     if state == "authorization_pending":
         return web.json_response(
@@ -399,30 +506,26 @@ async def _post_copilot_complete(request: web.Request) -> web.Response:
             status=400,
         )
 
+    flow["completing"] = True
     request.app["copilot_device_flows"].pop(flow_id, None)
-    provider_config = ProviderConfig(
-        name="github-copilot",
-        base_url="https://api.githubcopilot.com",
-        model=str(flow["default_model"]),
-        api_key_env="GITHUB_COPILOT_TOKEN",
-        timeout_ms=int(flow["timeout_ms"]),
-        enabled=True,
-    )
-    verified = await _verify_wizard_provider(provider_config)
+    log.info("Copilot device-flow authorized for flow %s", flow_id)
+    provider_dict = {
+        "name": "github-copilot",
+        "base_url": "https://api.githubcopilot.com",
+        "model": str(flow["default_model"]),
+        "api_key_env": "GITHUB_COPILOT_TOKEN",
+        "timeout_ms": int(flow["timeout_ms"]),
+        "enabled": True,
+    }
 
+    # Return immediately — health check is done separately via /api/providers/verify
     return web.json_response(
         {
-            "authorized": bool(verified["available"]),
+            "authorized": True,
             "pending": False,
-            "message": (
-                "Copilot authorization complete."
-                if bool(verified["available"])
-                else "Copilot token stored, but provider verification failed."
-            ),
-            "provider": verified["provider"],
-            "models": verified["models"],
-            "latency_ms": verified["latency_ms"],
-            "models_available": verified["models_available"],
+            "message": "Copilot authorization complete.",
+            "provider": provider_dict,
+            "models": [m["id"] for m in _KNOWN_MODELS],
         }
     )
 
@@ -452,6 +555,215 @@ def _serialize_systems_config(config: CognitiveConfig) -> dict[str, object]:
 async def _get_systems(_request: web.Request) -> web.Response:
     _path, config = _read_providers_config()
     return web.json_response(_serialize_systems_config(config))
+
+
+async def _get_provider_models(request: web.Request) -> web.Response:
+    """Return the list of models available from a registered provider.
+
+    Uses the ProviderAdapter.list_models() interface method so each provider
+    implementation controls its own discovery logic.
+    """
+    provider_name = request.match_info["name"]
+    _path, config = _read_providers_config()
+
+    provider_cfg = None
+    for p in config.providers:
+        if p.name == provider_name and p.enabled:
+            provider_cfg = p
+            break
+    if provider_cfg is None:
+        raise web.HTTPNotFound(text=f"provider not found: {provider_name}")
+
+    adapter = _build_wizard_adapter(provider_cfg)
+    try:
+        model_infos = await adapter.list_models()
+    except Exception:
+        log.exception("list_models failed for %s", provider_name)
+        model_infos = []
+
+    return web.json_response({
+        "provider": provider_name,
+        "models": [
+            {
+                "model_id": m.model_id,
+                "provider": m.provider,
+                "context_window": m.context_window,
+            }
+            for m in model_infos
+        ],
+    })
+
+
+# ── Chat streaming endpoint ──────────────────────────────────────── #
+
+
+def _resolve_chat_adapter(config: CognitiveConfig, system_name: str):
+    """Build a ProviderAdapter for the given cognitive system."""
+    try:
+        system = CognitiveSystem(system_name.lower())
+    except ValueError:
+        system = CognitiveSystem.CHAT
+
+    assignment = config.systems.get(system)
+    if not assignment or not assignment.provider:
+        return None, None
+
+    for p in config.providers:
+        if p.name == assignment.provider and p.enabled:
+            adapter = _build_wizard_adapter(p)
+            model = assignment.model or p.model
+            return adapter, model, p.name
+    return None, None, None
+
+
+def _serialize_chat_turn(turn) -> dict[str, object]:
+    return {
+        "role": turn.role,
+        "content": turn.content,
+        "timestamp": datetime.fromtimestamp(
+            turn.timestamp,
+            tz=timezone.utc,
+        ).isoformat(),
+    }
+
+
+async def _get_chat_history(request: web.Request) -> web.Response:
+    session_id = str(request.query.get("session_id", "")).strip()
+    if not session_id:
+        raise web.HTTPBadRequest(text="session_id is required")
+
+    limit_raw = request.query.get("limit")
+    limit = 50
+    if limit_raw not in (None, ""):
+        try:
+            limit = max(1, min(int(limit_raw), 200))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="limit must be an integer") from exc
+
+    history = get_conversation_history(session_id, limit=limit)
+    return web.json_response(
+        {
+            "session_id": session_id,
+            "messages": [_serialize_chat_turn(turn) for turn in history],
+        }
+    )
+
+
+async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    message = str(payload.get("message", "")).strip()
+    if not message:
+        raise web.HTTPBadRequest(text="message is required")
+
+    system_name = str(payload.get("system", "chat")).strip()
+    session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
+    _path, config = _read_providers_config()
+    adapter, model, provider_name = _resolve_chat_adapter(config, system_name)
+
+    if adapter is None:
+        raise web.HTTPBadRequest(
+            text=f"No provider configured for system '{system_name}'. "
+            "Assign a provider on the Providers page."
+        )
+
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await resp.prepare(request)
+
+    try:
+        await resp.write(
+            (
+                "data: "
+                + json.dumps({"session_id": session_id, "tokens_used": 0})
+                + "\n\n"
+            ).encode()
+        )
+
+        try:
+            system = CognitiveSystem(system_name.lower())
+        except ValueError:
+            system = CognitiveSystem.CHAT
+
+        persistence = request.app.get("identity_persistence")
+        modulator = request.app.get("personality_modulator")
+
+        async for chunk in stream_chat(
+            adapter,
+            model,
+            message,
+            session_id,
+            system=system,
+            provider_name=provider_name or "",
+            user_profile=getattr(persistence, "user", None),
+            assistant_profile=getattr(persistence, "assistant", None),
+            modulation=getattr(modulator, "factors", None),
+            usage_tracker=request.app.get("usage_tracker"),
+        ):
+            if chunk.error:
+                data = json.dumps(
+                    {
+                        "session_id": session_id,
+                        "token": f"\n\n[Error: {chunk.error}]",
+                        "tokens_used": chunk.tokens_used,
+                    }
+                )
+                await resp.write(f"data: {data}\n\n".encode())
+                break
+            if chunk.done:
+                break
+            data = json.dumps(
+                {
+                    "session_id": session_id,
+                    "token": chunk.token,
+                    "reasoning": chunk.reasoning,
+                    "tokens_used": chunk.tokens_used,
+                }
+            )
+            await resp.write(f"data: {data}\n\n".encode())
+        await resp.write(b"data: [DONE]\n\n")
+    except Exception:
+        log.exception(
+            "Chat stream error for system=%s provider=%s model=%s",
+            system_name,
+            provider_name,
+            model,
+        )
+        error_data = json.dumps(
+            {
+                "session_id": session_id,
+                "token": "\n\n[Error: provider request failed]",
+                "tokens_used": 0,
+            }
+        )
+        await resp.write(f"data: {error_data}\n\n".encode())
+        await resp.write(b"data: [DONE]\n\n")
+
+    return resp
+
+
+async def _get_usage(request: web.Request) -> web.Response:
+    tracker = request.app.get("usage_tracker")
+    if tracker is None:
+        raise web.HTTPServiceUnavailable(text="UsageTracker not available")
+    return web.json_response(
+        {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            **tracker.snapshot(),
+        }
+    )
+
+
+async def _get_version(_request: web.Request) -> web.Response:
+    return web.json_response({"version": openbad.__version__})
 
 
 async def _put_systems(request: web.Request) -> web.Response:
@@ -787,6 +1099,14 @@ def create_app(
     app = bridge.create_app()
     app["bridge"] = bridge
     app["copilot_device_flows"] = {}
+    app["usage_tracker"] = UsageTracker(db_path=_resolve_usage_db_path())
+
+    async def _cleanup_usage_tracker(app: web.Application) -> None:
+        tracker = app.get("usage_tracker")
+        if tracker is not None:
+            tracker.close()
+
+    app.on_cleanup.append(_cleanup_usage_tracker)
 
     if not enable_mqtt:
         # Tests can disable external broker dependency by skipping startup/shutdown hooks.
@@ -816,6 +1136,11 @@ def create_app(
     app.router.add_put("/api/providers", _put_providers)
     app.router.add_get("/api/systems", _get_systems)
     app.router.add_put("/api/systems", _put_systems)
+    app.router.add_get("/api/providers/{name}/models", _get_provider_models)
+    app.router.add_get("/api/chat/history", _get_chat_history)
+    app.router.add_post("/api/chat/stream", _post_chat_stream)
+    app.router.add_get("/api/usage", _get_usage)
+    app.router.add_get("/api/version", _get_version)
     app.router.add_get("/api/senses", _get_senses)
     app.router.add_put("/api/senses", _put_senses)
     app.router.add_get("/api/toolbelt", _get_toolbelt)
@@ -853,6 +1178,7 @@ async def run_server(
     mqtt_port: int = 1883,
 ) -> None:
     app = create_app(mqtt_host=mqtt_host, mqtt_port=mqtt_port, enable_mqtt=True)
+    _initialize_identity_state(app)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)

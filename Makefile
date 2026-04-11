@@ -1,4 +1,4 @@
-.PHONY: install lint format test check proto wui wui-dev
+.PHONY: install lint format test check proto bump-patch wui wui-dev
 
 PROTO_SRC := src/openbad/nervous_system/schemas
 PROTO_FILES := $(wildcard $(PROTO_SRC)/*.proto)
@@ -30,7 +30,11 @@ test:
 test-all:
 	pytest
 
+bump-patch:
+	python scripts/bump_patch_version.py
+
 wui:
+	$(MAKE) bump-patch
 	cd wui-svelte && npm install && npm run build
 	rm -rf src/openbad/wui/build
 	cp -r wui-svelte/build src/openbad/wui/build
