@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from openbad.immune_system.rules_engine import DestructiveCommandRule, is_destructive_command
 from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.toolbelt.cli_tool import CliToolAdapter, CliToolConfig, CommandResult
 
@@ -48,7 +50,8 @@ class TestBlockedCommand:
     def test_blocked_command(self, adapter: CliToolAdapter) -> None:
         result = adapter.execute("rm", ["-rf", "/"])
         assert result.returncode == -1
-        assert "not in allowlist" in result.stderr
+        # rm -rf / is now caught by the immune gate before the allowlist check
+        assert result.returncode == -1
 
     def test_python_blocked(self, adapter: CliToolAdapter) -> None:
         result = adapter.execute("python3", ["-c", "print('pwned')"])
@@ -167,3 +170,81 @@ class TestAsyncExecute:
     async def test_async_returncode_nonzero(self, adapter: CliToolAdapter) -> None:
         result = await adapter.async_execute("ls", ["/no_such_dir_xyz"])
         assert result.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: destructive CLI quarantine gate (#411)
+# ---------------------------------------------------------------------------
+
+
+class TestIsDestructiveCommand:
+    def test_rm_rf_slash_is_destructive(self) -> None:
+        assert is_destructive_command("rm", ["-rf", "/"]) is True
+
+    def test_rm_rf_tilde_is_destructive(self) -> None:
+        assert is_destructive_command("rm", ["-rf", "~"]) is True
+
+    def test_mkfs_is_destructive(self) -> None:
+        assert is_destructive_command("mkfs.ext4", ["/dev/sda1"]) is True
+
+    def test_chmod_777_root_is_destructive(self) -> None:
+        assert is_destructive_command("chmod", ["-R", "777", "/"]) is True
+
+    def test_dd_if_is_destructive(self) -> None:
+        assert is_destructive_command("dd", ["if=/dev/zero", "of=/dev/sda"]) is True
+
+    def test_ls_is_safe(self) -> None:
+        assert is_destructive_command("ls", ["-la"]) is False
+
+    def test_echo_is_safe(self) -> None:
+        assert is_destructive_command("echo", ["hello"]) is False
+
+
+class TestDestructiveCommandRule:
+    def test_destructive_raises(self) -> None:
+        rule = DestructiveCommandRule()
+        with pytest.raises(PermissionError, match="destructive pattern"):
+            rule.check("rm", ["-rf", "/"])
+
+    def test_safe_passes(self) -> None:
+        rule = DestructiveCommandRule()
+        rule.check("ls", ["-la"])  # should not raise
+
+    def test_destructive_publishes_alert_and_quarantine(self) -> None:
+        ns = MagicMock()
+        rule = DestructiveCommandRule(ns)
+        with pytest.raises(PermissionError):
+            rule.check("mkfs", ["/dev/sda"])
+        assert ns.publish.call_count == 2
+        topics = {call[0][0] for call in ns.publish.call_args_list}
+        assert "agent/immune/alert" in topics
+        assert "agent/immune/quarantine" in topics
+
+    def test_no_ns_no_crash(self) -> None:
+        rule = DestructiveCommandRule(nervous_system=None)
+        with pytest.raises(PermissionError):
+            rule.check("rm", ["-rf", "/"])
+
+
+class TestCliAdapterQuarantine:
+    """Verify cli_tool.py wires the immune gate for sync and async paths."""
+
+    def test_sync_destructive_blocked(self, adapter: CliToolAdapter) -> None:
+        result = adapter.execute("rm", ["-rf", "/"])
+        assert result.returncode == -1
+        assert "destructive" in result.stderr.lower()
+
+    @pytest.mark.asyncio
+    async def test_async_destructive_blocked(self, adapter: CliToolAdapter) -> None:
+        result = await adapter.async_execute("rm", ["-rf", "/"])
+        assert result.returncode == -1
+        assert "destructive" in result.stderr.lower()
+
+    def test_sync_safe_command_proceeds(self, adapter: CliToolAdapter) -> None:
+        result = adapter.execute("ls", ["-la"])
+        assert result.returncode == 0
+
+    @pytest.mark.asyncio
+    async def test_async_safe_command_proceeds(self, adapter: CliToolAdapter) -> None:
+        result = await adapter.async_execute("echo", ["hi"])
+        assert result.returncode == 0

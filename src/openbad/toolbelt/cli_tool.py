@@ -19,7 +19,13 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openbad.immune_system.rules_engine import DestructiveCommandRule
+
 logger = logging.getLogger(__name__)
+
+# Module-level quarantine rule.  Replace with a wired instance to enable
+# IMMUNE_ALERT + IMMUNE_QUARANTINE publishing.
+_DESTRUCTIVE_RULE: DestructiveCommandRule = DestructiveCommandRule()
 
 
 @dataclass
@@ -88,6 +94,17 @@ class CliToolAdapter:
         -------
         CommandResult with stdout, stderr, returncode, and timeout flag.
         """
+        # Immune gate: block destructive commands BEFORE allowlist check.
+        try:
+            _DESTRUCTIVE_RULE.check(command, args)
+        except PermissionError as exc:
+            return CommandResult(
+                command=command,
+                returncode=-1,
+                stdout="",
+                stderr=str(exc),
+            )
+
         if command not in self._config.allowed_commands:
             return CommandResult(
                 command=command,
@@ -174,6 +191,17 @@ class CliToolAdapter:
         -------
         CommandResult with stdout, stderr, returncode, and timeout flag.
         """
+        # Immune gate: block destructive commands BEFORE allowlist check.
+        try:
+            _DESTRUCTIVE_RULE.check(command, args)
+        except PermissionError as exc:
+            return CommandResult(
+                command=command,
+                returncode=-1,
+                stdout="",
+                stderr=str(exc),
+            )
+
         if command not in self._config.allowed_commands:
             return CommandResult(
                 command=command,
