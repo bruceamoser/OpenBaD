@@ -139,6 +139,9 @@ TASK_STATUS = "agent/task/{task_id}/status"
 TASK_NODE_STATUS = "agent/task/{task_id}/node/{node_id}/status"
 TASK_COMPLETED = "agent/task/{task_id}/completed"
 TASK_FAILED = "agent/task/{task_id}/failed"
+TASK_CONTEXT_REQUIRED = "agent/tasks/context_required"
+TASK_ISOLATED = "agent/tasks/isolated"
+TASK_EVENTS = "agent/tasks/events"
 
 # Wildcard: all task events
 TASK_ALL = "agent/task/#"
@@ -150,6 +153,7 @@ RESEARCH_QUEUED = "agent/research/queued"
 RESEARCH_STARTED = "agent/research/{research_id}/started"
 RESEARCH_COMPLETED = "agent/research/{research_id}/completed"
 RESEARCH_FINDING = "agent/research/{research_id}/finding"
+RESEARCH_DEEP_DIVE = "agent/research/deep_dive"
 
 # Wildcard: all research events
 RESEARCH_ALL = "agent/research/#"
@@ -161,6 +165,9 @@ SCHEDULER_TICK = "agent/scheduler/tick"
 SCHEDULER_WINDOW_START = "agent/scheduler/window/start"
 SCHEDULER_WINDOW_END = "agent/scheduler/window/end"
 SCHEDULER_DISPATCH = "agent/scheduler/dispatch"
+SCHEDULER_WAKE = "agent/scheduler/wake"
+SCHEDULER_SLEEP_WINDOW = "agent/scheduler/sleep_window"
+SCHEDULER_MAINTENANCE = "agent/scheduler/maintenance"
 
 # Wildcard: all scheduler events
 SCHEDULER_ALL = "agent/scheduler/+"
