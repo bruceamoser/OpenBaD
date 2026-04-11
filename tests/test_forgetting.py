@@ -6,7 +6,13 @@ import math
 import time
 
 from openbad.memory.base import MemoryEntry, MemoryTier
-from openbad.memory.forgetting import prune_store, rank_by_retention, retention_score
+from openbad.memory.episodic import EpisodicMemory
+from openbad.memory.forgetting import (
+    prune_consolidated_episodic,
+    prune_store,
+    rank_by_retention,
+    retention_score,
+)
 from openbad.memory.stm import ShortTermMemory
 
 
@@ -232,6 +238,87 @@ class TestRankByRetention:
         ranked = rank_by_retention(stm, now=now)
         scores = [s for _, s in ranked]
         assert scores == sorted(scores)
+
+
+# ------------------------------------------------------------------ #
+# prune_consolidated_episodic
+# ------------------------------------------------------------------ #
+
+
+class TestPruneConsolidatedEpisodic:
+    def test_consolidated_within_window_survives(self) -> None:
+        store = EpisodicMemory()
+        now = time.time()
+        # 3 days old, consolidated — within default 7-day window
+        store.write(_entry(
+            key="recent",
+            created_at=now - 3 * 86400,
+            metadata={"consolidated": True},
+        ))
+        pruned = prune_consolidated_episodic(store, retention_days=7.0, now=now)
+        assert pruned == []
+        assert store.size() == 1
+
+    def test_consolidated_past_window_deleted(self) -> None:
+        store = EpisodicMemory()
+        now = time.time()
+        # 10 days old, consolidated — past 7-day window
+        store.write(_entry(
+            key="old",
+            created_at=now - 10 * 86400,
+            metadata={"consolidated": True},
+        ))
+        pruned = prune_consolidated_episodic(store, retention_days=7.0, now=now)
+        assert "old" in pruned
+        assert store.size() == 0
+
+    def test_unconsolidated_old_entry_untouched(self) -> None:
+        store = EpisodicMemory()
+        now = time.time()
+        # 10 days old but NOT consolidated — must survive
+        store.write(_entry(
+            key="not_consolidated",
+            created_at=now - 10 * 86400,
+        ))
+        pruned = prune_consolidated_episodic(store, retention_days=7.0, now=now)
+        assert pruned == []
+        assert store.size() == 1
+
+    def test_custom_retention_period(self) -> None:
+        store = EpisodicMemory()
+        now = time.time()
+        # 2 days old, consolidated — survives with 7-day window
+        store.write(_entry(
+            key="a",
+            created_at=now - 2 * 86400,
+            metadata={"consolidated": True},
+        ))
+        assert prune_consolidated_episodic(store, retention_days=7.0, now=now) == []
+        # But NOT with 1-day window
+        pruned = prune_consolidated_episodic(store, retention_days=1.0, now=now)
+        assert "a" in pruned
+
+    def test_mixed_entries(self) -> None:
+        store = EpisodicMemory()
+        now = time.time()
+        old = now - 10 * 86400
+        store.write(_entry(
+            key="old_consolidated",
+            created_at=old,
+            metadata={"consolidated": True},
+        ))
+        store.write(_entry(
+            key="old_raw",
+            created_at=old,
+        ))
+        store.write(_entry(
+            key="fresh_consolidated",
+            created_at=now,
+            metadata={"consolidated": True},
+        ))
+        pruned = prune_consolidated_episodic(store, retention_days=7.0, now=now)
+        assert pruned == ["old_consolidated"]
+        assert store.size() == 2
 
     def test_empty_store_ranks_empty(self) -> None:
         stm = ShortTermMemory(max_tokens=100000, default_ttl=None)

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.event_loop import CognitiveEventLoop, CognitiveRequest
 from openbad.cognitive.model_router import Priority
-from openbad.memory.forgetting import prune_store
+from openbad.memory.forgetting import prune_consolidated_episodic, prune_store
 from openbad.memory.sleep.prompts import (
     EXTRACT_TAGS,
     SCORE_IMPORTANCE,
@@ -50,6 +50,7 @@ class MemoryPruner:
     memory_controller: MemoryController
     threshold: float = 0.1
     half_life_hours: float = 168.0
+    episodic_retention_days: float = 7.0
 
     def run(self) -> int:
         """Prune decayed entries from episodic and semantic stores.
@@ -71,6 +72,13 @@ class MemoryPruner:
                 self.memory_controller.semantic,
                 threshold=self.threshold,
                 half_life_hours=self.half_life_hours,
+                now=now,
+            )
+        )
+        total += len(
+            prune_consolidated_episodic(
+                self.memory_controller.episodic,
+                retention_days=self.episodic_retention_days,
                 now=now,
             )
         )

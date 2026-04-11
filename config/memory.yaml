@@ -5,3 +5,4 @@ memory:
   ltm_storage_dir: data/memory
   pruning_interval_seconds: 3600.0
   forgetting_half_life_hours: 168.0
+  episodic_retention_days: 7.0
