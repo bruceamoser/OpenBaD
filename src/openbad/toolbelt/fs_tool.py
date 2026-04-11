@@ -24,6 +24,8 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from openbad.immune_system.rules_engine import FileOperationRule
+
 # ---------------------------------------------------------------------------
 # Allowed roots
 # ---------------------------------------------------------------------------
@@ -34,6 +36,10 @@ ALLOWED_ROOTS: list[str] = [
     tempfile.gettempdir(),
     str(Path.cwd()),
 ]
+
+# Module-level rule instance.  Replace with a wired instance (passing a
+# NervousSystemClient) to enable IMMUNE_ALERT publishing.
+_FILE_OP_RULE: FileOperationRule = FileOperationRule()
 
 
 def _is_safe_path(resolved: str) -> bool:
@@ -119,6 +125,8 @@ def write_file(path: str, content: str, *, encoding: str = "utf-8") -> None:
         If the parent directory does not exist.
     """
     resolved = _validate(path)
+    # Immune gate: block writes to restricted system paths before any I/O.
+    _FILE_OP_RULE.check_write(resolved)
     parent = Path(resolved).parent
     if not parent.exists():
         raise FileNotFoundError(f"Parent directory does not exist: {parent}")

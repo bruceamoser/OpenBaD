@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import openbad.toolbelt.fs_tool as fs_tool
+from openbad.immune_system.rules_engine import FileOperationRule, is_restricted_path
 from openbad.toolbelt.fs_tool import read_file, write_file
 
 # ---------------------------------------------------------------------------
@@ -109,3 +111,75 @@ class TestSymlinkEscape:
         link = tmp_path / "link.txt"
         link.symlink_to(target)
         assert read_file(str(link)) == "real content"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: FileOperationRule immune gate (#408)
+# ---------------------------------------------------------------------------
+
+
+class TestIsRestrictedPath:
+    def test_etc_passwd_is_restricted(self) -> None:
+        assert is_restricted_path("/etc/passwd") is True
+
+    def test_ssh_authorized_keys_is_restricted(self) -> None:
+        assert is_restricted_path("/home/user/.ssh/authorized_keys") is True
+
+    def test_proc_is_restricted(self) -> None:
+        assert is_restricted_path("/proc/1/maps") is True
+
+    def test_usr_bin_is_restricted(self) -> None:
+        assert is_restricted_path("/usr/bin/python3") is True
+
+    def test_tmp_dir_not_restricted(self, tmp_path: Path) -> None:
+        assert is_restricted_path(str(tmp_path / "safe.txt")) is False
+
+
+class TestFileOperationRule:
+    def test_restricted_write_raises(self) -> None:
+        rule = FileOperationRule()
+        with pytest.raises(PermissionError, match="restricted path"):
+            rule.check_write("/etc/passwd")
+
+    def test_safe_write_passes(self, tmp_path: Path) -> None:
+        rule = FileOperationRule()
+        # Should not raise for a safe temp path
+        rule.check_write(str(tmp_path / "safe.txt"))
+
+    def test_restricted_write_publishes_alert(self) -> None:
+        ns = MagicMock()
+        rule = FileOperationRule(ns)
+        with pytest.raises(PermissionError):
+            rule.check_write("/etc/hosts")
+        ns.publish.assert_called_once()
+        call_args = ns.publish.call_args[0]
+        assert "agent/immune/alert" in call_args[0]
+
+    def test_no_ns_no_crash_on_restricted(self) -> None:
+        rule = FileOperationRule(nervous_system=None)
+        with pytest.raises(PermissionError):
+            rule.check_write("/sys/kernel/notes")
+
+
+class TestWriteFileImmuneGate:
+    def test_write_to_etc_blocked_via_fs_tool(self, tmp_path: Path) -> None:
+        """write_file should be blocked when target resolves to a restricted path."""
+        # We override ALLOWED_ROOTS to include /etc so the path-safety check passes,
+        # but the immune gate should still block it.
+        with (
+            patch.object(fs_tool, "ALLOWED_ROOTS", ["/etc", str(tmp_path)]),
+            patch.object(
+                fs_tool._FILE_OP_RULE,
+                "check_write",
+                side_effect=PermissionError("blocked"),
+            ) as mock_check,
+        ):
+            with pytest.raises(PermissionError):
+                write_file("/etc/passwd", "hacked")
+            mock_check.assert_called_once()
+
+    def test_safe_write_not_blocked(self, tmp_path: Path) -> None:
+        """write_file succeeds for a safe path without triggering the immune gate."""
+        dest = tmp_path / "output.txt"
+        write_file(str(dest), "hello")
+        assert dest.read_text() == "hello"

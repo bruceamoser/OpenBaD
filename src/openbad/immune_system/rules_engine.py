@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -12,6 +14,8 @@ import yaml
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -233,3 +237,93 @@ class RulesEngine:
                 )
         elapsed = (time.monotonic() - t0) * 1000
         return ScanReport(matches=matches, scan_ms=elapsed)
+
+
+# ---------------------------------------------------------------------------
+# File operation immune gate
+# ---------------------------------------------------------------------------
+
+# Canonical restricted path prefixes.  Checked after realpath resolution.
+_RESTRICTED_PREFIXES: tuple[str, ...] = (
+    "/etc/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/sbin/",
+    "/bin/",
+    "/proc/",
+    "/sys/",
+    "/boot/",
+    "/dev/",
+)
+
+
+def _restricted_ssh_path(resolved: str) -> bool:
+    """Return True if *resolved* is inside any user's .ssh directory."""
+    parts = Path(resolved).parts
+    return ".ssh" in parts
+
+
+def is_restricted_path(path: str) -> bool:
+    """Return True if *path* (after realpath resolution) is a restricted location."""
+    resolved = os.path.realpath(os.path.abspath(path))
+    for prefix in _RESTRICTED_PREFIXES:
+        if resolved.startswith(prefix) or resolved == prefix.rstrip("/"):
+            return True
+    return bool(_restricted_ssh_path(resolved))
+
+
+class FileOperationRule:
+    """Immune rule that blocks file writes targeting restricted system paths.
+
+    Usage::
+
+        rule = FileOperationRule(nervous_system_client)
+        rule.check_write("/etc/passwd")   # raises PermissionError + publishes alert
+        rule.check_write("/tmp/safe.txt") # passes silently
+    """
+
+    def __init__(self, nervous_system: object | None = None) -> None:
+        self._ns = nervous_system
+
+    def check_write(self, path: str) -> None:
+        """Raise :exc:`PermissionError` and announce an immune alert if *path* is restricted.
+
+        Parameters
+        ----------
+        path:
+            Destination path to evaluate.  May be relative.
+
+        Raises
+        ------
+        PermissionError
+            When *path* resolves to a restricted location.
+        """
+        if not is_restricted_path(path):
+            return
+
+        resolved = os.path.realpath(os.path.abspath(path))
+        log.warning("FileOperationRule: blocked write to restricted path %r", resolved)
+        self._publish_alert(resolved)
+        raise PermissionError(
+            f"FileOperationRule: write to restricted path {resolved!r} is not allowed."
+        )
+
+    def _publish_alert(self, resolved_path: str) -> None:
+        """Publish an IMMUNE_ALERT to the nervous system if one is attached."""
+        if self._ns is None:
+            return
+        try:
+            import json as _json
+
+            from openbad.nervous_system.topics import IMMUNE_ALERT
+
+            payload = _json.dumps(
+                {
+                    "rule": "file_operation_rule",
+                    "severity": "high",
+                    "blocked_path": resolved_path,
+                }
+            )
+            self._ns.publish(IMMUNE_ALERT, payload)
+        except Exception:
+            log.debug("FileOperationRule: could not publish immune alert", exc_info=True)
