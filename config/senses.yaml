@@ -1,0 +1,38 @@
+# Unified sensory configuration — replaces sensory_audio.yaml + sensory_vision.yaml.
+
+hearing:
+  capture:
+    sample_rate: 16000
+    channels: 1
+    sample_format: "s16le"
+    chunk_duration_ms: 100
+    device: ""
+    passive: true
+  asr:
+    vosk_model_path: ""
+    whisper_model: "base"
+    default_engine: "vosk"
+  wake_word:
+    phrases:
+      - "hey agent"
+    threshold: 0.5
+
+vision:
+  fps_idle: 1.0
+  fps_active: 5.0
+  output_format: jpeg
+  jpeg_quality: 85
+  match_source_resolution: true
+  max_width: 1920
+  max_height: 1080
+  portal_backend: ""
+  attention:
+    ssim_threshold: 0.05
+    cooldown_ms: 500
+    roi_enabled: false
+
+speech:
+  tts:
+    engine: "piper"
+    model_path: ""
+    output_device: ""
