@@ -78,13 +78,28 @@ class ToolRegistry:
         self,
         timeout: float = 10.0,
         publish_fn: Callable[[str, bytes], None] | None = None,
+        *,
+        auto_reequip_on_recovery: bool = True,
+        swap_cortisol_increment: float = 0.15,
+        empty_role_cortisol_spike: float = 0.4,
     ) -> None:
         self._timeout = timeout
         self._publish_fn = publish_fn
+        self._auto_reequip = auto_reequip_on_recovery
+        self._swap_cortisol = swap_cortisol_increment
+        self._empty_cortisol = empty_role_cortisol_spike
         self._lock = threading.Lock()
         self._tools: dict[str, ToolStatus] = {}
         self._belt: dict[ToolRole, str] = {}
+        self._original_belt: dict[ToolRole, str] = {}
+        self._cortisol_hook: Callable[[str, str, float], None] | None = None
         self._reaper: _ReaperThread | None = None
+
+    def set_cortisol_hook(
+        self, hook: Callable[[str, str, float], None] | None
+    ) -> None:
+        """Set a cortisol callback ``(tool_name, reason, delta)``."""
+        self._cortisol_hook = hook
 
     # -- registration -------------------------------------------------------
 
@@ -262,6 +277,116 @@ class ToolRegistry:
     def get_belt(self) -> dict[ToolRole, ToolStatus]:
         """Return the active tool set for prompt injection."""
         return self.belt
+
+    def handle_tool_failure(self, tool_name: str, reason: str = "") -> str | None:
+        """Auto-swap to the next healthy tool when *tool_name* fails.
+
+        Returns the name of the replacement tool, or ``None`` if the role
+        went empty.
+        """
+        with self._lock:
+            entry = self._tools.get(tool_name)
+            if entry is None or entry.role is None:
+                return None
+            role = entry.role
+            current = self._belt.get(role)
+            if current != tool_name:
+                return None  # not the equipped tool
+
+            # Remember original for potential recovery
+            if role not in self._original_belt:
+                self._original_belt[role] = tool_name
+
+            # Find next healthy tool in cabinet for same role
+            candidates = [
+                t for t in self._tools.values()
+                if t.role is role
+                and t.name != tool_name
+                and t.status is HealthStatus.AVAILABLE
+            ]
+
+        replacement: str | None = None
+        if candidates:
+            replacement = candidates[0].name
+            with self._lock:
+                self._belt[role] = replacement
+            self._fire_cortisol(
+                replacement, f"auto-swap from {tool_name}", self._swap_cortisol
+            )
+            self._publish_toolbelt_event(
+                "swap", role, tool_name, replacement, reason
+            )
+        else:
+            with self._lock:
+                self._belt.pop(role, None)
+            self._fire_cortisol(
+                tool_name, f"no fallback for role {role.value}", self._empty_cortisol
+            )
+            self._publish_toolbelt_event(
+                "empty", role, tool_name, None, reason
+            )
+
+        self._emit_snapshot()
+        return replacement
+
+    def try_reequip_on_recovery(self, tool_name: str) -> bool:
+        """Re-equip the original tool for its role if it has recovered.
+
+        Only acts if ``auto_reequip_on_recovery`` is enabled and the tool
+        was previously swapped out.  Returns ``True`` if re-equipped.
+        """
+        if not self._auto_reequip:
+            return False
+        with self._lock:
+            entry = self._tools.get(tool_name)
+            if entry is None or entry.role is None:
+                return False
+            if entry.status is not HealthStatus.AVAILABLE:
+                return False
+            role = entry.role
+            original = self._original_belt.get(role)
+            if original != tool_name:
+                return False
+            self._belt[role] = tool_name
+            del self._original_belt[role]
+        self._publish_toolbelt_event(
+            "recovery", role, tool_name, tool_name, "original tool recovered"
+        )
+        self._emit_snapshot()
+        return True
+
+    def _fire_cortisol(
+        self, tool_name: str, reason: str, delta: float
+    ) -> None:
+        if self._cortisol_hook is not None:
+            try:
+                self._cortisol_hook(tool_name, reason, delta)
+            except Exception:
+                logger.exception("Cortisol hook failed for %s", tool_name)
+
+    def _publish_toolbelt_event(
+        self,
+        event_type: str,
+        role: ToolRole,
+        old_tool: str,
+        new_tool: str | None,
+        reason: str,
+    ) -> None:
+        if self._publish_fn is None:
+            return
+        from openbad.nervous_system.topics import TELEMETRY_TOOLBELT
+
+        payload = json.dumps({
+            "event": event_type,
+            "role": role.value,
+            "old_tool": old_tool,
+            "new_tool": new_tool,
+            "reason": reason,
+        }).encode()
+        try:
+            self._publish_fn(TELEMETRY_TOOLBELT, payload)
+        except Exception:
+            logger.exception("Failed to publish toolbelt event")
 
     # -- staleness reaper ---------------------------------------------------
 
