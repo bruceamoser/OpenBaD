@@ -13,6 +13,7 @@ from openbad.tasks.models import (
     is_valid_node_transition,
     is_valid_task_transition,
 )
+from openbad.tasks.service import TaskService
 from openbad.tasks.store import TaskStore
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "RunStatus",
     "TaskKind",
     "TaskPriority",
+    "TaskService",
     "TaskStatus",
     "TaskStore",
     "assert_valid_node_transition",
