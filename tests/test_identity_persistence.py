@@ -25,11 +25,32 @@ def _write_config(tmp: Path) -> Path:
                     "communication_style": "formal",
                     "expertise_domains": ["python"],
                     "interaction_history_summary": "",
+                    "worldview": ["Evidence first"],
+                    "interests": ["systems"],
+                    "pet_peeves": [],
+                    "preferred_feedback_style": "balanced",
+                    "active_projects": [],
+                    "timezone": "UTC",
+                    "work_hours": [9, 17],
                 },
                 "assistant": {
                     "name": "OpenBaD",
                     "persona_summary": "Helpful agent",
                     "learning_focus": [],
+                    "worldview": ["Favor evidence"],
+                    "boundaries": ["Do not guess"],
+                    "opinions": {"code": ["Readable first"]},
+                    "vocabulary": {"AIF": "active inference"},
+                    "rhetorical_style": {
+                        "tone": "direct",
+                        "sentence_pattern": "concise",
+                        "challenge_mode": "steel-man first",
+                        "explanation_depth": "balanced",
+                    },
+                    "influences": ["systems thinking"],
+                    "anti_patterns": ["Avoid flattery"],
+                    "current_focus": ["identity"],
+                    "continuity_log": [],
                     "ocean": {
                         "openness": 0.7,
                         "conscientiousness": 0.8,
@@ -69,6 +90,8 @@ class TestStartupOverlay:
         assert ip.user.name == "Alice"
         assert ip.user.communication_style == CommunicationStyle.FORMAL
         assert ip.assistant.openness == pytest.approx(0.7)
+        assert ip.user.worldview == ["Evidence first"]
+        assert ip.assistant.boundaries == ["Do not guess"]
 
     def test_overlays_shadow_on_startup(self, tmp_path: Path) -> None:
         cfg = _write_config(tmp_path)
@@ -95,19 +118,26 @@ class TestStartupOverlay:
 class TestRuntimeUpdates:
     def test_update_user_stores_in_ltm(self, env) -> None:
         _, ep, ip = env
-        ip.update_user(preferred_name="Bob")
+        ip.update_user(preferred_name="Bob", work_hours=(8, 16))
         assert ip.user.preferred_name == "Bob"
+        assert ip.user.work_hours == (8, 16)
         entry = ep.read("identity/user_shadow")
         assert entry is not None
         assert entry.value["preferred_name"] == "Bob"
+        assert entry.value["work_hours"] == [8, 16]
 
     def test_update_assistant_stores_in_ltm(self, env) -> None:
         _, ep, ip = env
-        ip.update_assistant(stability=0.9)
+        ip.update_assistant(
+            stability=0.9,
+            boundaries=["Do not guess", "Do not bluff"],
+        )
         assert ip.assistant.stability == pytest.approx(0.9)
+        assert ip.assistant.boundaries[-1] == "Do not bluff"
         entry = ep.read("identity/assistant_shadow")
         assert entry is not None
         assert entry.value["stability"] == pytest.approx(0.9)
+        assert entry.value["boundaries"][-1] == "Do not bluff"
 
     def test_update_user_bad_field_raises(self, env) -> None:
         _, _, ip = env
@@ -143,6 +173,8 @@ class TestConsolidation:
         raw = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         assert raw["user"]["preferred_name"] == "Consolidated"
         assert raw["assistant"]["ocean"]["openness"] == pytest.approx(0.1)
+        assert raw["user"]["work_hours"] == [9, 17]
+        assert raw["assistant"]["boundaries"] == ["Do not guess"]
 
     def test_consolidate_preserves_identity_section(self, env) -> None:
         cfg, _, ip = env

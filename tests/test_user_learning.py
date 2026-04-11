@@ -27,11 +27,32 @@ def _make_config(tmp: Path) -> Path:
                     "communication_style": "casual",
                     "expertise_domains": [],
                     "interaction_history_summary": "",
+                    "worldview": [],
+                    "interests": [],
+                    "pet_peeves": [],
+                    "preferred_feedback_style": "balanced",
+                    "active_projects": [],
+                    "timezone": "",
+                    "work_hours": [9, 17],
                 },
                 "assistant": {
                     "name": "OpenBaD",
                     "persona_summary": "",
                     "learning_focus": [],
+                    "worldview": [],
+                    "boundaries": [],
+                    "opinions": {},
+                    "vocabulary": {},
+                    "rhetorical_style": {
+                        "tone": "direct",
+                        "sentence_pattern": "concise",
+                        "challenge_mode": "steel-man first",
+                        "explanation_depth": "balanced",
+                    },
+                    "influences": [],
+                    "anti_patterns": [],
+                    "current_focus": [],
+                    "continuity_log": [],
                     "ocean": {
                         "openness": 0.7,
                         "conscientiousness": 0.8,
@@ -145,6 +166,7 @@ class TestTopicTracking:
         domains = result["updates"]["expertise_domains"]
         assert "python" in domains
         assert "rust" in domains
+        assert result["updates"]["active_projects"] == ["python", "rust"]
 
     def test_topics_preserve_existing(self, env) -> None:
         ip, _ = env
@@ -175,6 +197,20 @@ class TestCorrectionTracking:
         summary = result["updates"]["interaction_history_summary"]
         assert "corrections=1" in summary
 
+    def test_repeated_corrections_infer_pet_peeve(self, env) -> None:
+        ip, _ = env
+        pipeline = UserLearningPipeline(ip, batch_size=100)
+        pipeline.observe(
+            InteractionRecord(message="No, that is too verbose", is_correction=True),
+        )
+        pipeline.observe(
+            InteractionRecord(message="You repeated the same mistake", is_correction=True),
+        )
+        result = pipeline.flush()
+        assert result["updates"]["pet_peeves"] == [
+            "Dislikes avoidable misunderstandings and repeats",
+        ]
+
 
 # ------------------------------------------------------------------ #
 # Activity time tracking
@@ -194,6 +230,27 @@ class TestActivityTime:
         result = pipeline.flush()
         summary = result["updates"]["interaction_history_summary"]
         assert "peak_hour=14" in summary
+        assert result["updates"]["work_hours"] == (14, 14)
+
+
+class TestFeedbackStyle:
+    def test_direct_feedback_style_inferred(self, env) -> None:
+        ip, _ = env
+        pipeline = UserLearningPipeline(ip, batch_size=100)
+        pipeline.observe(
+            InteractionRecord(message="Be direct and concise with me"),
+        )
+        result = pipeline.flush()
+        assert result["updates"]["preferred_feedback_style"] == "direct"
+
+    def test_challenge_feedback_style_inferred(self, env) -> None:
+        ip, _ = env
+        pipeline = UserLearningPipeline(ip, batch_size=100)
+        pipeline.observe(
+            InteractionRecord(message="Please challenge me and push back"),
+        )
+        result = pipeline.flush()
+        assert result["updates"]["preferred_feedback_style"] == "challenge me"
 
 
 # ------------------------------------------------------------------ #

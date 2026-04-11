@@ -39,6 +39,7 @@ _ASSISTANT_SHADOW_KEY = "identity/assistant_shadow"
 def _user_to_dict(profile: UserProfile) -> dict[str, Any]:
     d = asdict(profile)
     d["communication_style"] = profile.communication_style.value
+    d["work_hours"] = list(profile.work_hours)
     return d
 
 
@@ -52,8 +53,19 @@ def _dict_to_user(data: dict[str, Any]) -> UserProfile:
         communication_style=style,
         expertise_domains=data.get("expertise_domains", []),
         interaction_history_summary=data.get(
-            "interaction_history_summary", "",
+            "interaction_history_summary",
+            "",
         ),
+        worldview=data.get("worldview", []),
+        interests=data.get("interests", []),
+        pet_peeves=data.get("pet_peeves", []),
+        preferred_feedback_style=data.get(
+            "preferred_feedback_style",
+            "balanced",
+        ),
+        active_projects=data.get("active_projects", []),
+        timezone=data.get("timezone", ""),
+        work_hours=data.get("work_hours", [9, 17]),
     )
 
 
@@ -176,7 +188,8 @@ class IdentityPersistence:
 
         assistant_entry = self._episodic.read(_ASSISTANT_SHADOW_KEY)
         if assistant_entry is not None and isinstance(
-            assistant_entry.value, dict,
+            assistant_entry.value,
+            dict,
         ):
             self._assistant = _dict_to_assistant(assistant_entry.value)
 
@@ -196,9 +209,12 @@ class IdentityPersistence:
         return backup
 
     def _write_config(self) -> None:
-        raw = yaml.safe_load(
-            self._config_path.read_text(encoding="utf-8"),
-        ) or {}
+        raw = (
+            yaml.safe_load(
+                self._config_path.read_text(encoding="utf-8"),
+            )
+            or {}
+        )
 
         raw["user"] = _user_to_dict(self._user)
 
@@ -207,6 +223,15 @@ class IdentityPersistence:
             "name": assistant_d.pop("name"),
             "persona_summary": assistant_d.pop("persona_summary"),
             "learning_focus": assistant_d.pop("learning_focus"),
+            "worldview": assistant_d.pop("worldview"),
+            "boundaries": assistant_d.pop("boundaries"),
+            "opinions": assistant_d.pop("opinions"),
+            "vocabulary": assistant_d.pop("vocabulary"),
+            "rhetorical_style": assistant_d.pop("rhetorical_style"),
+            "influences": assistant_d.pop("influences"),
+            "anti_patterns": assistant_d.pop("anti_patterns"),
+            "current_focus": assistant_d.pop("current_focus"),
+            "continuity_log": assistant_d.pop("continuity_log"),
             "ocean": {
                 "openness": assistant_d.pop("openness"),
                 "conscientiousness": assistant_d.pop("conscientiousness"),

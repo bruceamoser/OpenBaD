@@ -20,6 +20,10 @@ class ModulationFactors:
     proactive_suggestion_threshold: float
     challenge_probability: float
     cortisol_decay_multiplier: float
+    response_tone: str
+    explanation_depth: str
+    disagreement_style: str
+    anti_pattern_guard: list[str]
 
 
 class PersonalityModulator:
@@ -55,4 +59,8 @@ class PersonalityModulator:
             proactive_suggestion_threshold=1.0 - profile.extraversion,
             challenge_probability=1.0 - profile.agreeableness,
             cortisol_decay_multiplier=0.5 + profile.stability,
+            response_tone=profile.rhetorical_style.tone,
+            explanation_depth=profile.rhetorical_style.explanation_depth,
+            disagreement_style=profile.rhetorical_style.challenge_mode,
+            anti_pattern_guard=list(profile.anti_patterns),
         )

@@ -20,6 +20,9 @@ class TestUserProfile:
         assert p.communication_style is CommunicationStyle.CASUAL
         assert p.expertise_domains == []
         assert p.interaction_history_summary == ""
+        assert p.worldview == []
+        assert p.preferred_feedback_style == "balanced"
+        assert p.work_hours == (9, 17)
 
     def test_all_fields(self) -> None:
         p = UserProfile(
@@ -32,6 +35,25 @@ class TestUserProfile:
         assert p.preferred_name == "Bobby"
         assert p.communication_style is CommunicationStyle.FORMAL
         assert p.expertise_domains == ["python", "ML"]
+
+    def test_enriched_fields(self) -> None:
+        p = UserProfile(
+            name="Bob",
+            worldview=["Evidence matters"],
+            interests=["robotics"],
+            pet_peeves=["verbosity"],
+            preferred_feedback_style="direct",
+            active_projects=["OpenBaD"],
+            timezone="UTC",
+            work_hours=[8, 16],  # type: ignore[arg-type]
+        )
+        assert p.worldview == ["Evidence matters"]
+        assert p.interests == ["robotics"]
+        assert p.pet_peeves == ["verbosity"]
+        assert p.preferred_feedback_style == "direct"
+        assert p.active_projects == ["OpenBaD"]
+        assert p.timezone == "UTC"
+        assert p.work_hours == (8, 16)
 
     def test_name_required(self) -> None:
         with pytest.raises(ValueError, match="name is required"):
@@ -56,20 +78,51 @@ class TestCommunicationStyle:
 class TestLoadUserProfile:
     def test_load_valid(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"
-        cfg.write_text(yaml.safe_dump({
-            "user": {
-                "name": "Jane",
-                "preferred_name": "J",
-                "communication_style": "formal",
-                "expertise_domains": ["devops"],
-                "interaction_history_summary": "New user",
-            },
-        }))
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "user": {
+                        "name": "Jane",
+                        "preferred_name": "J",
+                        "communication_style": "formal",
+                        "expertise_domains": ["devops"],
+                        "interaction_history_summary": "New user",
+                    },
+                }
+            )
+        )
         p = load_user_profile(cfg)
         assert p.name == "Jane"
         assert p.preferred_name == "J"
         assert p.communication_style is CommunicationStyle.FORMAL
         assert p.expertise_domains == ["devops"]
+
+    def test_load_enriched_fields(self, tmp_path) -> None:
+        cfg = tmp_path / "identity.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "user": {
+                        "name": "Jane",
+                        "worldview": ["Measure outcomes"],
+                        "interests": ["systems"],
+                        "pet_peeves": ["verbosity"],
+                        "preferred_feedback_style": "challenge me",
+                        "active_projects": ["OpenBaD"],
+                        "timezone": "UTC",
+                        "work_hours": [7, 15],
+                    },
+                }
+            )
+        )
+        p = load_user_profile(cfg)
+        assert p.worldview == ["Measure outcomes"]
+        assert p.interests == ["systems"]
+        assert p.pet_peeves == ["verbosity"]
+        assert p.preferred_feedback_style == "challenge me"
+        assert p.active_projects == ["OpenBaD"]
+        assert p.timezone == "UTC"
+        assert p.work_hours == (7, 15)
 
     def test_load_defaults(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"
@@ -86,9 +139,13 @@ class TestLoadUserProfile:
 
     def test_load_invalid_style(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"
-        cfg.write_text(yaml.safe_dump({
-            "user": {"name": "X", "communication_style": "aggressive"},
-        }))
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "user": {"name": "X", "communication_style": "aggressive"},
+                }
+            )
+        )
         with pytest.raises(ValueError, match="Invalid communication_style"):
             load_user_profile(cfg)
 

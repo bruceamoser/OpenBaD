@@ -21,6 +21,10 @@ class TestModulationFactors:
         assert f.proactive_suggestion_threshold == pytest.approx(0.5)
         assert f.challenge_probability == pytest.approx(0.6)
         assert f.cortisol_decay_multiplier == pytest.approx(1.1)
+        assert f.response_tone == "direct"
+        assert f.explanation_depth == "balanced"
+        assert f.disagreement_style == "steel-man first"
+        assert f.anti_pattern_guard == []
 
     def test_openness_zero(self) -> None:
         p = AssistantProfile(openness=0.0)
@@ -108,6 +112,22 @@ class TestUpdate:
         f = m.update(p2)
         assert f.exploration_budget_multiplier == pytest.approx(1.4)
         assert m.factors.exploration_budget_multiplier == pytest.approx(1.4)
+
+    def test_update_reflects_rhetorical_style(self) -> None:
+        p = AssistantProfile(
+            anti_patterns=["Avoid flattery"],
+            rhetorical_style={
+                "tone": "warm",
+                "sentence_pattern": "mixed",
+                "challenge_mode": "socratic",
+                "explanation_depth": "thorough",
+            },
+        )
+        f = PersonalityModulator(p).factors
+        assert f.response_tone == "warm"
+        assert f.explanation_depth == "thorough"
+        assert f.disagreement_style == "socratic"
+        assert f.anti_pattern_guard == ["Avoid flattery"]
 
 
 class TestCortisolIntegration:

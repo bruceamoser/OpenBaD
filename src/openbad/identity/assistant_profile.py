@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -21,6 +22,87 @@ logger = logging.getLogger(__name__)
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def _list_of_str(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
+
+
+def _dict_of_str(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if str(key).strip() and str(item).strip()
+    }
+
+
+def _dict_of_str_list(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): _list_of_str(item) for key, item in value.items() if str(key).strip()}
+
+
+@dataclass
+class RhetoricalStyle:
+    """Structured communication style directives for the assistant."""
+
+    tone: str = "direct"
+    sentence_pattern: str = "concise"
+    challenge_mode: str = "steel-man first"
+    explanation_depth: str = "balanced"
+
+
+@dataclass
+class ContinuityEntry:
+    """A durable cross-session identity event or decision."""
+
+    summary: str
+    timestamp: float = 0.0
+    source: str = ""
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.summary = str(self.summary).strip()
+        self.source = str(self.source).strip()
+        self.timestamp = float(self.timestamp or 0.0)
+        self.tags = _list_of_str(self.tags)
+
+
+def _coerce_rhetorical_style(value: Any) -> RhetoricalStyle:
+    if isinstance(value, RhetoricalStyle):
+        return value
+    if isinstance(value, dict):
+        return RhetoricalStyle(
+            tone=str(value.get("tone", "direct")),
+            sentence_pattern=str(
+                value.get("sentence_pattern", "concise"),
+            ),
+            challenge_mode=str(
+                value.get("challenge_mode", "steel-man first"),
+            ),
+            explanation_depth=str(
+                value.get("explanation_depth", "balanced"),
+            ),
+        )
+    return RhetoricalStyle()
+
+
+def _coerce_continuity_entries(value: Any) -> list[ContinuityEntry]:
+    if not isinstance(value, list):
+        return []
+    entries: list[ContinuityEntry] = []
+    for item in value:
+        if isinstance(item, ContinuityEntry):
+            entries.append(item)
+        elif isinstance(item, dict) and item.get("summary"):
+            entries.append(ContinuityEntry(**item))
+    return entries
 
 
 @dataclass
@@ -33,6 +115,15 @@ class AssistantProfile:
     name: str = "OpenBaD"
     persona_summary: str = ""
     learning_focus: list[str] = field(default_factory=list)
+    worldview: list[str] = field(default_factory=list)
+    boundaries: list[str] = field(default_factory=list)
+    opinions: dict[str, list[str]] = field(default_factory=dict)
+    vocabulary: dict[str, str] = field(default_factory=dict)
+    rhetorical_style: RhetoricalStyle = field(default_factory=RhetoricalStyle)
+    influences: list[str] = field(default_factory=list)
+    anti_patterns: list[str] = field(default_factory=list)
+    current_focus: list[str] = field(default_factory=list)
+    continuity_log: list[ContinuityEntry] = field(default_factory=list)
     openness: float = 0.7
     conscientiousness: float = 0.8
     extraversion: float = 0.5
@@ -40,6 +131,17 @@ class AssistantProfile:
     stability: float = 0.6
 
     def __post_init__(self) -> None:
+        self.persona_summary = str(self.persona_summary)
+        self.learning_focus = _list_of_str(self.learning_focus)
+        self.worldview = _list_of_str(self.worldview)
+        self.boundaries = _list_of_str(self.boundaries)
+        self.opinions = _dict_of_str_list(self.opinions)
+        self.vocabulary = _dict_of_str(self.vocabulary)
+        self.rhetorical_style = _coerce_rhetorical_style(self.rhetorical_style)
+        self.influences = _list_of_str(self.influences)
+        self.anti_patterns = _list_of_str(self.anti_patterns)
+        self.current_focus = _list_of_str(self.current_focus)
+        self.continuity_log = _coerce_continuity_entries(self.continuity_log)
         self.openness = _clamp(self.openness)
         self.conscientiousness = _clamp(self.conscientiousness)
         self.extraversion = _clamp(self.extraversion)
@@ -66,6 +168,15 @@ def load_assistant_profile(path: str | Path) -> AssistantProfile:
         name=data.get("name", "OpenBaD"),
         persona_summary=data.get("persona_summary", ""),
         learning_focus=data.get("learning_focus", []),
+        worldview=data.get("worldview", []),
+        boundaries=data.get("boundaries", []),
+        opinions=data.get("opinions", {}),
+        vocabulary=data.get("vocabulary", {}),
+        rhetorical_style=data.get("rhetorical_style", {}),
+        influences=data.get("influences", []),
+        anti_patterns=data.get("anti_patterns", []),
+        current_focus=data.get("current_focus", []),
+        continuity_log=data.get("continuity_log", []),
         openness=ocean.get("openness", 0.7),
         conscientiousness=ocean.get("conscientiousness", 0.8),
         extraversion=ocean.get("extraversion", 0.5),
