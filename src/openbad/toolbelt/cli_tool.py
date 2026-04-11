@@ -3,10 +3,16 @@
 Registers under ``ToolRole.CLI`` and provides command execution with
 allowlist, working-directory restriction, timeout, and optional cgroup
 resource limits.
+
+Provides both synchronous (:meth:`CliToolAdapter.execute`) and
+asynchronous (:meth:`CliToolAdapter.async_execute`) execution paths.
+The async variant is a non-blocking coroutine built on
+:mod:`asyncio.subprocess`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -143,6 +149,88 @@ class CliToolAdapter:
         except ValueError:
             return None
         return resolved
+
+    async def async_execute(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        cwd: str | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        """Execute *command* asynchronously with sandboxing.
+
+        Parameters
+        ----------
+        command:
+            The base command to run (must be in allowlist).
+        args:
+            Optional arguments to pass to the command.
+        cwd:
+            Optional working directory (must be within the sandbox root).
+        timeout:
+            Override for this call; defaults to ``config.timeout``.
+
+        Returns
+        -------
+        CommandResult with stdout, stderr, returncode, and timeout flag.
+        """
+        if command not in self._config.allowed_commands:
+            return CommandResult(
+                command=command,
+                returncode=-1,
+                stdout="",
+                stderr=f"Command {command!r} not in allowlist",
+            )
+
+        work_dir = self._resolve_cwd(cwd)
+        if work_dir is None:
+            return CommandResult(
+                command=command,
+                returncode=-1,
+                stdout="",
+                stderr=f"Working directory escapes sandbox root {self._root}",
+            )
+
+        deadline = timeout if timeout is not None else self._config.timeout
+        cmd_list = [command] + (args or [])
+        env = self._sandbox_env()
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_list,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(work_dir),
+                env=env,
+            )
+            try:
+                raw_out, raw_err = await asyncio.wait_for(
+                    proc.communicate(), timeout=deadline
+                )
+            except TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return CommandResult(
+                    command=command,
+                    returncode=-1,
+                    stdout="",
+                    stderr=f"Command timed out after {deadline}s",
+                    timed_out=True,
+                )
+            return CommandResult(
+                command=command,
+                returncode=proc.returncode or 0,
+                stdout=raw_out.decode(errors="replace")[: self._config.max_output_bytes],
+                stderr=raw_err.decode(errors="replace")[: self._config.max_output_bytes],
+            )
+        except Exception as exc:
+            logger.exception("Async CLI execution failed: %s", command)
+            return CommandResult(
+                command=command,
+                returncode=-1,
+                stdout="",
+                stderr=str(exc),
+            )
 
     def _sandbox_env(self) -> dict[str, str]:
         """Build a restricted environment for subprocess execution."""
