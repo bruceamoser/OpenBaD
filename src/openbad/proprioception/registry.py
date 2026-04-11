@@ -83,6 +83,7 @@ class ToolRegistry:
         self._publish_fn = publish_fn
         self._lock = threading.Lock()
         self._tools: dict[str, ToolStatus] = {}
+        self._belt: dict[ToolRole, str] = {}
         self._reaper: _ReaperThread | None = None
 
     # -- registration -------------------------------------------------------
@@ -209,6 +210,58 @@ class ToolRegistry:
         """Return all registered tools regardless of status."""
         with self._lock:
             return list(self._tools.values())
+
+    # -- cabinet / belt -----------------------------------------------------
+
+    @property
+    def cabinet(self) -> dict[ToolRole, list[ToolStatus]]:
+        """All registered tools grouped by role."""
+        result: dict[ToolRole, list[ToolStatus]] = {}
+        with self._lock:
+            for t in self._tools.values():
+                if t.role is not None:
+                    result.setdefault(t.role, []).append(t)
+        return result
+
+    @property
+    def belt(self) -> dict[ToolRole, ToolStatus]:
+        """Currently equipped tool per role."""
+        with self._lock:
+            result: dict[ToolRole, ToolStatus] = {}
+            for role, name in self._belt.items():
+                entry = self._tools.get(name)
+                if entry is not None:
+                    result[role] = entry
+            return result
+
+    def equip(self, role: ToolRole, tool_name: str) -> ToolStatus:
+        """Equip a cabinet tool onto the belt for *role*.
+
+        Raises ``KeyError`` if *tool_name* is not registered or its role
+        does not match *role*.
+        """
+        with self._lock:
+            entry = self._tools.get(tool_name)
+            if entry is None:
+                msg = f"Tool {tool_name!r} not found in cabinet"
+                raise KeyError(msg)
+            if entry.role is not role:
+                msg = f"Tool {tool_name!r} has role {entry.role}, expected {role}"
+                raise KeyError(msg)
+            self._belt[role] = tool_name
+        self._emit_snapshot()
+        return entry
+
+    def unequip(self, role: ToolRole) -> None:
+        """Remove the belt entry for *role* (no error if empty)."""
+        with self._lock:
+            removed = self._belt.pop(role, None) is not None
+        if removed:
+            self._emit_snapshot()
+
+    def get_belt(self) -> dict[ToolRole, ToolStatus]:
+        """Return the active tool set for prompt injection."""
+        return self.belt
 
     # -- staleness reaper ---------------------------------------------------
 
