@@ -12,6 +12,7 @@ hearing:
     vosk_model_path: ""
     whisper_model: "base"
     default_engine: "vosk"
+    vad_sensitivity: 0.5
   wake_word:
     phrases:
       - "hey agent"
