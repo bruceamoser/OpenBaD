@@ -1077,6 +1077,16 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
                 await resp.write(f"data: {data}\n\n".encode())
                 break
             if chunk.done:
+                done_data = json.dumps(
+                    {
+                        "session_id": session_id,
+                        "tokens_used": chunk.tokens_used,
+                        "provider": chunk.provider,
+                        "model": chunk.model,
+                        "done": True,
+                    }
+                )
+                await resp.write(f"data: {done_data}\n\n".encode())
                 break
             data = json.dumps(
                 {

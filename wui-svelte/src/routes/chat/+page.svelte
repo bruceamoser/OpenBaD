@@ -25,6 +25,8 @@
     content: string;
     timestamp: string;
     reasoning?: string;
+    provider?: string;
+    model?: string;
   }
 
   // ----------------------------------------------------------------
@@ -271,6 +273,12 @@
               if (parsed.tokens_max !== undefined) {
                 tokensMax = parsed.tokens_max;
               }
+              if (parsed.done && parsed.provider) {
+                assistantMsg.provider = parsed.provider;
+              }
+              if (parsed.done && parsed.model) {
+                assistantMsg.model = parsed.model;
+              }
             } catch {
               // non-JSON SSE line, ignore
             }
@@ -436,6 +444,9 @@
           <div class="bubble-header">
             <span class="role-label">{msg.role === 'user' ? 'You' : assistantName}</span>
             <time class="ts">{new Date(msg.timestamp).toLocaleTimeString()}</time>
+            {#if msg.role === 'assistant' && (msg.provider || msg.model)}
+              <span class="model-tag">{[msg.provider, msg.model].filter(Boolean).join(' · ')}</span>
+            {/if}
           </div>
           <div class="content">{@html renderMarkdown(msg.content)}</div>
           {#if showCot && msg.reasoning}
@@ -638,6 +649,15 @@
   .ts {
     font-size: 0.65rem;
     opacity: 0.5;
+  }
+  .model-tag {
+    font-size: 0.65rem;
+    opacity: 0.55;
+    background: var(--bg-surface2);
+    border-radius: 3px;
+    padding: 0.05em 0.4em;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
   }
   .content { margin: 0; font-size: 0.9rem; line-height: 1.6; }
   .content :global(p) { margin: 0.3em 0; }

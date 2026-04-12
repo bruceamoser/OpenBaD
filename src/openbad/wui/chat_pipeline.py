@@ -119,6 +119,8 @@ class StreamChunk:
     tokens_used: int = 0
     error: str = ""
     done: bool = False
+    provider: str = ""
+    model: str = ""
 
 
 # ── Pipeline singleton state ──────────────────────────────────────── #
@@ -869,7 +871,7 @@ async def stream_chat(
         request_id, tokens_used, latency_ms,
     )
 
-    yield StreamChunk(done=True, tokens_used=tokens_used)
+    yield StreamChunk(done=True, tokens_used=tokens_used, provider=provider_name, model=model_id)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
