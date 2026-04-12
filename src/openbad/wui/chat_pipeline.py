@@ -80,20 +80,11 @@ _TOOLBELT_BLURB = (
     " the appropriate tool with immune-system and interoceptive gating applied."
 )
 
-# Base prompts intentionally omit an identity line — the assistant name and
-# persona are injected dynamically by _build_identity_prompt() from the
-# persisted AssistantProfile, so the LLM always gets the configured identity.
-_SYSTEM_PROMPT_CHAT = (
-    "You are an AI assistant running on the local machine inside the OpenBaD"
-    " agent daemon. Answer clearly and concisely."
-    " Use markdown formatting when helpful.\n\n"
-    + _TOOLBELT_BLURB
+_REASONING_SUFFIX = (
+    "\n\nThink step-by-step. Show your reasoning before giving a final answer."
 )
-_SYSTEM_PROMPT_REASONING = (
-    "You are an AI assistant running on the local machine inside the OpenBaD"
-    " agent daemon. Think step-by-step."
-    " Show your reasoning process before giving a final answer.\n\n"
-    + _TOOLBELT_BLURB
+_CHAT_SUFFIX = (
+    "\n\nAnswer clearly and concisely. Use markdown formatting when helpful."
 )
 
 
@@ -369,19 +360,60 @@ def _get_semantic_context(session_id: str, query: str) -> str:
     return "Relevant prior memories:\n" + "\n".join(lines)
 
 
+def _ocean_label(trait: str, value: float) -> str:
+    """Translate a numeric OCEAN value into a behavioural instruction."""
+    labels: dict[str, list[tuple[float, str]]] = {
+        "openness": [
+            (0.3, "Conventional — prefer established patterns; low appetite for novelty."),
+            (0.6, "Moderately open — balance established approaches with selective innovation."),
+            (0.8, "Exploratory — actively seek out novel angles; embrace intellectual risk."),
+            (1.1, "Highly exploratory — compulsively pursue unconventional and frontier ideas."),
+        ],
+        "conscientiousness": [
+            (0.3, "Flexible — prefer rough outlines over exhaustive plans; bias for action."),
+            (0.6, "Moderately methodical — balance structure with adaptability."),
+            (0.8, "Methodical — prioritise completeness, precision, and documented reasoning."),
+            (1.1, "Highly methodical — exhaustive rigour; never sacrifice thoroughness"
+                  " for speed."),
+        ],
+        "extraversion": [
+            (0.3, "Reserved — respond when asked; keep answers dense and minimal."),
+            (0.6, "Balanced — volunteer context when it clearly adds value."),
+            (0.8, "Proactive — surface related context, caveats, and suggestions unprompted."),
+            (1.1, "Highly proactive — lead with observations and drive the conversation forward."),
+        ],
+        "agreeableness": [
+            (0.3, "Challenging — actively question assumptions and dispute incorrect claims."),
+            (0.6, "Balanced — agree and disagree as the evidence warrants; not sycophantic."),
+            (0.8, "Supportive — frame feedback constructively; avoid unnecessary friction."),
+            (1.1, "Highly agreeable — prioritise harmony; avoid confrontation."),
+        ],
+        "stability": [
+            (0.3, "Reactive — surface concerns readily; escalate ambiguity quickly."),
+            (0.6, "Moderate — flag uncertainty without dwelling on it."),
+            (0.8, "Steady — handle complexity calmly; maintain composure under pressure."),
+            (1.1, "Unflappable — project confidence and stability regardless of circumstances."),
+        ],
+    }
+    for threshold, description in labels.get(trait, []):
+        if value <= threshold:
+            return description
+    return ""
+
+
 def _build_identity_prompt(
     user_profile: Any | None,
     assistant_profile: Any | None,
     modulation: Any | None,
 ) -> str:
-    """Render user and assistant identity state into the system prompt.
+    """Render the full assistant and user identity into the system prompt.
 
-    Returns a string that begins with the assistant's own identity statement
-    so it leads the system prompt rather than appending generic boilerplate.
+    Identity leads the prompt so the LLM internalises it before anything else.
+    Every field from AssistantProfile that has a value is rendered.
     """
     parts: list[str] = []
 
-    # ── Assistant identity (opening statement) ─────────────────────────────
+    # ── Assistant identity ──────────────────────────────────────────────────
     if assistant_profile is not None:
         assistant_name = getattr(assistant_profile, "name", "") or "OpenBaD"
         persona_summary = getattr(assistant_profile, "persona_summary", "")
@@ -390,47 +422,110 @@ def _build_identity_prompt(
         boundaries = getattr(assistant_profile, "boundaries", []) or []
         anti_patterns = getattr(assistant_profile, "anti_patterns", []) or []
         current_focus = getattr(assistant_profile, "current_focus", []) or []
+        influences = getattr(assistant_profile, "influences", []) or []
+        opinions = getattr(assistant_profile, "opinions", {}) or {}
+        vocabulary = getattr(assistant_profile, "vocabulary", {}) or {}
+        continuity_log = getattr(assistant_profile, "continuity_log", []) or []
         rhetorical_style = getattr(assistant_profile, "rhetorical_style", None)
 
+        # Opening identity statement
         opening = f"Your name is {assistant_name}."
         if persona_summary:
             opening += f" {persona_summary}"
         parts.append(opening)
 
-        if rhetorical_style is not None:
-            tone = getattr(rhetorical_style, "tone", "")
-            sentence_pattern = getattr(rhetorical_style, "sentence_pattern", "")
-            challenge_mode = getattr(rhetorical_style, "challenge_mode", "")
-            explanation_depth = getattr(rhetorical_style, "explanation_depth", "")
-            style_parts = []
-            if tone:
-                style_parts.append(f"tone: {tone}")
-            if sentence_pattern:
-                style_parts.append(f"style: {sentence_pattern}")
-            if challenge_mode:
-                style_parts.append(f"challenge mode: {challenge_mode}")
-            if explanation_depth:
-                style_parts.append(f"explanation depth: {explanation_depth}")
-            if style_parts:
-                parts.append("Rhetorical style — " + ", ".join(style_parts) + ".")
+        # OCEAN personality → behavioural instructions
+        ocean_traits = {
+            "openness": getattr(assistant_profile, "openness", None),
+            "conscientiousness": getattr(assistant_profile, "conscientiousness", None),
+            "extraversion": getattr(assistant_profile, "extraversion", None),
+            "agreeableness": getattr(assistant_profile, "agreeableness", None),
+            "stability": getattr(assistant_profile, "stability", None),
+        }
+        ocean_labels = {
+            "openness": "Exploration drive",
+            "conscientiousness": "Research rigour",
+            "extraversion": "Engagement style",
+            "agreeableness": "Challenge posture",
+            "stability": "Stress tolerance",
+        }
+        ocean_lines = []
+        for trait, value in ocean_traits.items():
+            if value is not None:
+                desc = _ocean_label(trait, value)
+                if desc:
+                    ocean_lines.append(
+                        f"- {ocean_labels[trait]} ({value:.2f}): {desc}"
+                    )
+        if ocean_lines:
+            parts.append("Personality (OCEAN):\n" + "\n".join(ocean_lines))
 
+        # Rhetorical style
+        if rhetorical_style is not None:
+            style_lines = []
+            for attr, label in (
+                ("tone", "Tone"),
+                ("sentence_pattern", "Sentence style"),
+                ("challenge_mode", "Challenge mode"),
+                ("explanation_depth", "Explanation depth"),
+            ):
+                val = getattr(rhetorical_style, attr, "")
+                if val:
+                    style_lines.append(f"- {label}: {val}")
+            if style_lines:
+                parts.append("Rhetorical style:\n" + "\n".join(style_lines))
+
+        # Focus and direction
         if learning_focus:
             parts.append(
-                "Current learning focus: " + ", ".join(str(i) for i in learning_focus) + "."
+                "Learning focus: " + ", ".join(str(i) for i in learning_focus) + "."
             )
         if current_focus:
-            parts.append("Current focus areas: " + ", ".join(str(i) for i in current_focus) + ".")
-        if worldview:
-            parts.append("Worldview: " + "; ".join(str(i) for i in worldview) + ".")
-        if boundaries:
-            parts.append("Boundaries: " + "; ".join(str(i) for i in boundaries) + ".")
-        if anti_patterns:
             parts.append(
-                "Avoid these patterns: " + "; ".join(str(i) for i in anti_patterns) + "."
+                "Current focus: " + ", ".join(str(i) for i in current_focus) + "."
             )
 
+        # Worldview, influences, and boundaries
+        if worldview:
+            parts.append("Worldview:\n" + "\n".join(f"- {i}" for i in worldview))
+        if influences:
+            parts.append(
+                "Intellectual influences: " + ", ".join(str(i) for i in influences) + "."
+            )
+        if boundaries:
+            parts.append("Boundaries:\n" + "\n".join(f"- {i}" for i in boundaries))
+        if anti_patterns:
+            parts.append(
+                "Avoid these patterns:\n" + "\n".join(f"- {i}" for i in anti_patterns)
+            )
+
+        # Opinions
+        if opinions:
+            opinion_lines = []
+            for topic, stances in opinions.items():
+                if stances:
+                    opinion_lines.append(
+                        f"- {topic}: " + "; ".join(str(s) for s in stances)
+                    )
+            if opinion_lines:
+                parts.append("Opinions and stances:\n" + "\n".join(opinion_lines))
+
+        # Vocabulary overrides
+        if vocabulary:
+            vocab_lines = [
+                f"- prefer '{preferred}' over '{avoid}'"
+                for avoid, preferred in vocabulary.items()
+            ]
+            if vocab_lines:
+                parts.append("Vocabulary preferences:\n" + "\n".join(vocab_lines))
+
+        # Continuity log — last 3 entries for cross-session context
+        recent_log = [e for e in continuity_log if getattr(e, "summary", "")][-3:]
+        if recent_log:
+            log_lines = [f"- {getattr(e, 'summary', '')}" for e in recent_log]
+            parts.append("Continuity (recent identity events):\n" + "\n".join(log_lines))
+
     # ── User context ────────────────────────────────────────────────────────
-    user_lines: list[str] = []
     if user_profile is not None:
         user_name = (
             getattr(user_profile, "preferred_name", "")
@@ -439,6 +534,11 @@ def _build_identity_prompt(
         communication_style = getattr(user_profile, "communication_style", "")
         expertise_domains = getattr(user_profile, "expertise_domains", []) or []
         interaction_history_summary = getattr(user_profile, "interaction_history_summary", "")
+        active_projects = getattr(user_profile, "active_projects", []) or []
+        interests = getattr(user_profile, "interests", []) or []
+        preferred_feedback_style = getattr(user_profile, "preferred_feedback_style", "")
+
+        user_lines = []
         if user_name:
             user_lines.append(f"The user's name is {user_name}.")
         if communication_style:
@@ -448,27 +548,20 @@ def _build_identity_prompt(
             user_lines.append(
                 "User expertise: " + ", ".join(str(i) for i in expertise_domains) + "."
             )
+        if active_projects:
+            user_lines.append(
+                "Active projects: " + ", ".join(str(i) for i in active_projects) + "."
+            )
+        if interests:
+            user_lines.append(
+                "Interests: " + ", ".join(str(i) for i in interests) + "."
+            )
+        if preferred_feedback_style:
+            user_lines.append(f"Preferred feedback style: {preferred_feedback_style}.")
         if interaction_history_summary:
             user_lines.append(f"User history: {interaction_history_summary}")
-    if user_lines:
-        parts.append("\n".join(user_lines))
-
-    # ── Endocrine modulation ────────────────────────────────────────────────
-    if modulation is not None:
-        modulation_fields = [
-            ("exploration_budget_multiplier", "Exploration budget multiplier"),
-            ("max_reasoning_depth_multiplier", "Reasoning depth multiplier"),
-            ("proactive_suggestion_threshold", "Proactive suggestion threshold"),
-            ("challenge_probability", "Challenge probability"),
-            ("cortisol_decay_multiplier", "Cortisol decay multiplier"),
-        ]
-        rendered = []
-        for field_name, label in modulation_fields:
-            value = getattr(modulation, field_name, None)
-            if value is not None:
-                rendered.append(f"{label}: {value:.2f}")
-        if rendered:
-            parts.append("Behaviour modulation: " + "; ".join(rendered) + ".")
+        if user_lines:
+            parts.append("About the user:\n" + "\n".join(user_lines))
 
     return "\n\n".join(parts)
 
@@ -509,15 +602,13 @@ def assemble_context(
     else:
         # Normal mode: identity leads, then toolbelt, then reasoning instruction
         identity_block = _build_identity_prompt(user_profile, assistant_profile, modulation)
-        reasoning_suffix = (
-            "\n\nThink step-by-step. Show your reasoning before giving a final answer."
-            if system == CognitiveSystem.REASONING
-            else "\n\nAnswer clearly and concisely. Use markdown formatting when helpful."
+        suffix = (
+            _REASONING_SUFFIX if system == CognitiveSystem.REASONING else _CHAT_SUFFIX
         )
         if identity_block:
-            system_prompt = identity_block + "\n\n" + _TOOLBELT_BLURB + reasoning_suffix
+            system_prompt = identity_block + "\n\n" + _TOOLBELT_BLURB + suffix
         else:
-            system_prompt = _TOOLBELT_BLURB + reasoning_suffix
+            system_prompt = _TOOLBELT_BLURB + suffix
 
     onboarding_mode = assistant_needs_config or user_needs_config
 
