@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,6 +105,11 @@ class MqttWebSocketBridge:
         init=False,
         repr=False,
     )
+    _mqtt_log: deque[dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=300),
+        init=False,
+        repr=False,
+    )
     _event_clients: dict[web.StreamResponse, asyncio.Lock] = field(
         default_factory=dict,
         init=False,
@@ -146,6 +152,19 @@ class MqttWebSocketBridge:
 
         for topic, proto_type in TOPIC_PROTO_MAP.items():
             self._mqtt.subscribe(topic, proto_type, self._on_mqtt)
+
+        # Subscribe to raw JSON topics (tasks, research, scheduler) using paho directly
+        _raw_topics = [
+            topics.TASK_ALL,
+            topics.RESEARCH_ALL,
+            topics.SCHEDULER_TICK,
+        ]
+        for raw_topic in _raw_topics:
+            try:
+                self._mqtt._mqtt.subscribe(raw_topic)  # noqa: SLF001
+                self._mqtt._mqtt.message_callback_add(raw_topic, self._on_raw_mqtt)  # noqa: SLF001
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not subscribe to raw topic %s", raw_topic)
 
     async def _on_shutdown(self, _app: web.Application) -> None:
         for ws in list(self._clients):
@@ -287,6 +306,41 @@ class MqttWebSocketBridge:
             except Exception:
                 logger.debug("Could not publish WUI_PRESENCE, MQTT not ready")
 
+    @property
+    def mqtt_log(self) -> deque[dict[str, Any]]:
+        """Return the ring buffer of recent MQTT messages."""
+        return self._mqtt_log
+
+    def _on_raw_mqtt(
+        self,
+        _client: object,
+        _userdata: object,
+        msg: object,
+    ) -> None:
+        """Callback for raw (non-protobuf) MQTT topics."""
+        try:
+            payload_bytes: bytes = getattr(msg, "payload", b"")
+            topic: str = getattr(msg, "topic", "")
+            try:
+                payload_data = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload_data = payload_bytes.decode("utf-8", errors="replace")
+            message = {
+                "type": "event",
+                "ts": _now_iso(),
+                "topic": topic,
+                "payload": payload_data,
+            }
+            self._mqtt_log.appendleft(message)
+            self._latest_messages[topic] = message
+            if self._loop is not None:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._broadcast(message), self._loop
+                )
+                future.add_done_callback(self._log_broadcast_result)
+        except Exception:  # noqa: BLE001
+            logger.debug("Raw MQTT callback failed")
+
     def _on_mqtt(self, topic: str, payload: Any) -> None:
         """MQTT callback: schedule async fanout onto the aiohttp event loop."""
         message = {
@@ -296,6 +350,7 @@ class MqttWebSocketBridge:
             "payload": self._payload_to_jsonable(topic, payload),
         }
         self._latest_messages[topic] = message
+        self._mqtt_log.appendleft(message)
         if self._loop is None:
             logger.debug("No aiohttp event loop available for MQTT fanout")
             return

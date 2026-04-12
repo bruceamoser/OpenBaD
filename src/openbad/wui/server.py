@@ -12,6 +12,7 @@ import logging
 import os
 import stat
 import time
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -64,6 +65,45 @@ from openbad.wui.usage_tracker import UsageTracker
 BUILD_DIR = Path(__file__).resolve().parent / "build"
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# In-memory log ring buffer — captures recent log lines per subsystem
+# ---------------------------------------------------------------------------
+
+_LOG_BUFFER: deque[dict[str, str]] = deque(maxlen=500)
+
+_HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
+_HEARTBEAT_CONFIG_DEFAULT = {"interval_seconds": 60}
+
+
+class _RingBufferHandler(logging.Handler):
+    """Logging handler that appends records to :data:`_LOG_BUFFER`."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            _LOG_BUFFER.append({
+                "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": self.format(record),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_ring_handler = _RingBufferHandler()
+_ring_handler.setLevel(logging.DEBUG)
+_ring_handler.setFormatter(logging.Formatter("%(message)s"))
+
+for _log_name in [
+    "openbad.tasks",
+    "openbad.endocrine",
+    "openbad.reflex_arc",
+    "openbad.active_inference",
+    "openbad.immune_system",
+    "openbad.wui",
+]:
+    logging.getLogger(_log_name).addHandler(_ring_handler)
 
 _RESTRICTED_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
 _SETUP_REDIRECT = "/providers?wizard=1"
@@ -1943,6 +1983,229 @@ async def _post_onboarding_skip(request: web.Request) -> web.Response:
     return web.json_response({"success": True, "skipped": True})
 
 
+# ---------------------------------------------------------------------------
+# Heartbeat config
+# ---------------------------------------------------------------------------
+
+def _read_heartbeat_config() -> dict[str, object]:
+    if _HEARTBEAT_CONFIG_PATH.exists():
+        try:
+            return dict(yaml.safe_load(_HEARTBEAT_CONFIG_PATH.read_text()) or {})
+        except Exception:  # noqa: BLE001
+            pass
+    return dict(_HEARTBEAT_CONFIG_DEFAULT)
+
+
+async def _get_heartbeat_config(_request: web.Request) -> web.Response:
+    return web.json_response(_read_heartbeat_config())
+
+
+async def _put_heartbeat_config(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="body must be an object")
+    interval = payload.get("interval_seconds")
+    try:
+        interval_int = max(5, int(interval))  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="interval_seconds must be an integer") from exc
+    cfg = {"interval_seconds": interval_int}
+    try:
+        _HEARTBEAT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _HEARTBEAT_CONFIG_PATH.write_text(yaml.dump(cfg))
+    except OSError as exc:
+        raise web.HTTPInternalServerError(text=f"Could not save: {exc}") from exc
+    return web.json_response(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+
+async def _get_tasks(_request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.store import TaskStore  # noqa: PLC0415
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        store = TaskStore(conn)
+        tasks = store.list_tasks(limit=100)
+        return web.json_response({
+            "tasks": [
+                {
+                    "task_id": t.task_id,
+                    "title": t.title,
+                    "description": t.description,
+                    "status": t.status,
+                    "kind": t.kind,
+                    "horizon": t.horizon,
+                    "priority": t.priority,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                }
+                for t in tasks
+            ]
+        })
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"tasks": [], "error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Research
+# ---------------------------------------------------------------------------
+
+async def _get_research(_request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.research_queue import ResearchQueue, initialize_research_db  # noqa: PLC0415
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        initialize_research_db(conn)
+        queue = ResearchQueue(conn)
+        nodes = queue.list_pending()
+        return web.json_response({
+            "nodes": [
+                {
+                    "node_id": n.node_id,
+                    "title": n.title,
+                    "description": n.description,
+                    "priority": n.priority,
+                    "source_task_id": n.source_task_id,
+                    "enqueued_at": n.enqueued_at.isoformat() if n.enqueued_at else None,
+                    "status": "pending",
+                }
+                for n in nodes
+            ]
+        })
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"nodes": [], "error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# MQTT message log
+# ---------------------------------------------------------------------------
+
+async def _get_mqtt_log(request: web.Request) -> web.Response:
+    bridge: MqttWebSocketBridge = request.app["bridge"]
+    limit = int(request.rel_url.query.get("limit", "100"))
+    entries = list(bridge.mqtt_log)[-limit:]
+    return web.json_response({"messages": entries})
+
+
+# ---------------------------------------------------------------------------
+# Debug logs
+# ---------------------------------------------------------------------------
+
+async def _get_debug_logs(request: web.Request) -> web.Response:
+    system = request.rel_url.query.get("system", "")
+    limit = int(request.rel_url.query.get("limit", "200"))
+    entries = list(_LOG_BUFFER)
+    if system:
+        entries = [e for e in entries if system in e.get("logger", "")]
+    return web.json_response({"logs": entries[-limit:]})
+
+
+# ---------------------------------------------------------------------------
+# Built-in capabilities catalog
+# ---------------------------------------------------------------------------
+
+_CAPABILITIES_CATALOG = [
+    {
+        "id": "fs",
+        "label": "File System",
+        "icon": "📁",
+        "level": 1,
+        "module": "openbad.toolbelt.fs_tool",
+        "description": "Read and write files within permitted paths, governed by immune-system path rules and disk I/O interoception.",
+        "tools": [
+            {"name": "read_file", "signature": "read_file(path: str) -> str", "description": "Read a file and return its contents as text."},
+            {"name": "write_file", "signature": "write_file(path: str, content: str) -> None", "description": "Write content to a file. Blocked for restricted paths (/etc/, ~/.ssh/, system binaries)."},
+        ],
+        "gates": ["immune: FileOperationRule blocks restricted paths", "endocrine: defers under high cortisol / disk saturation"],
+    },
+    {
+        "id": "cli",
+        "label": "Command Line",
+        "icon": "💻",
+        "level": 1,
+        "module": "openbad.toolbelt.cli_tool",
+        "description": "Execute shell commands asynchronously within quarantine boundaries. Destructive commands are intercepted.",
+        "tools": [
+            {"name": "exec_command", "signature": "exec_command(cmd: str, timeout_s: float = 30) -> ExecResult", "description": "Run a shell command. Uses asyncio.create_subprocess_shell, never blocks the event loop."},
+        ],
+        "gates": ["immune: blocks rm -rf, mkfs, chmod 777", "quarantine: sets node to QUARANTINED and publishes agent/immune/alert"],
+    },
+    {
+        "id": "web",
+        "label": "Web Information",
+        "icon": "🌐",
+        "level": 1,
+        "module": "openbad.toolbelt.web_search",
+        "description": "Fast, stateless external data gathering. Feeds active inference to reduce surprise. Failed fetches auto-escalate to research queue.",
+        "tools": [
+            {"name": "web_search", "signature": "web_search(query: str, n: int = 5) -> list[SearchResult]", "description": "Search the web and return result summaries."},
+            {"name": "web_fetch", "signature": "web_fetch(url: str) -> str", "description": "Fetch a URL and return its Markdown content. 404/403/timeout suspends node and queues ResearchNode."},
+        ],
+        "gates": ["research escalation on fetch errors", "rate-limited by cortisol level"],
+    },
+    {
+        "id": "ask_user",
+        "label": "Ask User",
+        "icon": "🙋",
+        "level": 1,
+        "module": "openbad.toolbelt.ask_user",
+        "description": "Dual-mode communication. Synchronous when user is present in WUI; asynchronous via MQTT when offline.",
+        "tools": [
+            {"name": "ask_user", "signature": "ask_user(question: str, timeout_s: float = 30) -> str | None", "description": "Mode A (active): publishes to agent/chat/response and awaits reply. Mode B (inactive): sets node to BLOCKED_ON_USER, yields lease."},
+        ],
+        "gates": ["presence-aware: reads system/wui/presence", "re-engagement: pending questions surface on reconnect"],
+    },
+    {
+        "id": "mcp_browser",
+        "label": "Browser (MCP)",
+        "icon": "🌍",
+        "level": 2,
+        "module": "openbad.toolbelt.mcp_bridge.mcp_runner",
+        "description": "Isolated MCP bridge for browser automation via Playwright. Spins up only for explicitly tagged task nodes and tears down when the node completes.",
+        "tools": [
+            {"name": "browser_navigate", "signature": "browser_navigate(url: str) -> str", "description": "Navigate to a URL and return page content."},
+            {"name": "browser_click", "signature": "browser_click(selector: str) -> None", "description": "Click an element on the page."},
+            {"name": "browser_fill", "signature": "browser_fill(selector: str, value: str) -> None", "description": "Fill a form field."},
+            {"name": "browser_screenshot", "signature": "browser_screenshot() -> bytes", "description": "Capture the current page as PNG."},
+        ],
+        "gates": ["task-scoped: created per task run, torn down after", "interoception: refuses launch if RAM/thermal limits breached", "audit: every call logged to mcp_audit table"],
+    },
+    {
+        "id": "mcp_github",
+        "label": "GitHub (MCP)",
+        "icon": "🐙",
+        "level": 2,
+        "module": "openbad.toolbelt.mcp_bridge.mcp_runner",
+        "description": "Isolated MCP bridge for GitHub API operations. Bound to one task run, audited per call.",
+        "tools": [
+            {"name": "gh_list_issues", "signature": "gh_list_issues(repo: str) -> list[Issue]", "description": "List open issues for a repository."},
+            {"name": "gh_create_pr", "signature": "gh_create_pr(repo: str, title: str, body: str, head: str, base: str) -> PR", "description": "Create a pull request."},
+            {"name": "gh_get_file", "signature": "gh_get_file(repo: str, path: str, ref: str) -> str", "description": "Fetch file contents from a repository."},
+        ],
+        "gates": ["task-scoped only", "policy: MCPPolicy.allowed_servers must include 'github'", "audit: every call logged to mcp_audit table"],
+    },
+    {
+        "id": "memory",
+        "label": "Memory (Autonomic)",
+        "icon": "🧠",
+        "level": 1,
+        "module": "openbad.cognitive.event_loop",
+        "description": "Memory is injected automatically into context — no explicit tool call needed. The event loop queries semantic and episodic memory before routing to the model.",
+        "tools": [
+            {"name": "(autonomic)", "signature": "Injected by cognitive event loop", "description": "Semantic memory is queried by intent vector and facts prepended to context. No token budget allocated to a tool call."},
+        ],
+        "gates": ["deprecated as explicit tool — now autonomic", "context enrichment via openbad.memory.semantic"],
+    },
+]
+
+
+async def _get_capabilities(_request: web.Request) -> web.Response:
+    return web.json_response({"capabilities": _CAPABILITIES_CATALOG})
+
+
 def create_app(
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
@@ -2019,6 +2282,13 @@ def create_app(
     app.router.add_post("/api/onboarding/assistant/complete", _post_assistant_interview_complete)
     app.router.add_post("/api/onboarding/user/complete", _post_user_interview_complete)
     app.router.add_post("/api/onboarding/skip", _post_onboarding_skip)
+    app.router.add_get("/api/heartbeat/config", _get_heartbeat_config)
+    app.router.add_put("/api/heartbeat/config", _put_heartbeat_config)
+    app.router.add_get("/api/tasks", _get_tasks)
+    app.router.add_get("/api/research", _get_research)
+    app.router.add_get("/api/mqtt/log", _get_mqtt_log)
+    app.router.add_get("/api/debug/logs", _get_debug_logs)
+    app.router.add_get("/api/capabilities", _get_capabilities)
 
     # SvelteKit static assets + SPA fallback for client-side routing
     _app_dir = BUILD_DIR / "_app"

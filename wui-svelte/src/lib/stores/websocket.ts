@@ -71,6 +71,23 @@ export interface ToolbeltPayload {
   belt: Record<string, unknown>;
 }
 
+export interface MqttLogEntry {
+  ts: string;
+  topic: string;
+  payload: Record<string, unknown> | string;
+}
+
+export interface TaskEventEntry {
+  ts: string;
+  topic: string;
+  payload: Record<string, unknown> | string;
+}
+
+export interface HeartbeatTickEntry {
+  ts: string;
+  payload: Record<string, unknown> | string;
+}
+
 // ------------------------------------------------------------------ //
 // Core stores
 // ------------------------------------------------------------------ //
@@ -87,6 +104,15 @@ const _endocrine = writable<EndocrinePayload>({
   cortisol: 0,
   endorphin: 0,
 });
+
+/** Ring buffer of last 200 MQTT messages received via WebSocket. */
+export const mqttLiveLog = writable<MqttLogEntry[]>([]);
+
+/** Ring buffer of last 100 task/research/scheduler events. */
+export const taskLiveLog = writable<TaskEventEntry[]>([]);
+
+/** Most recent heartbeat tick. */
+export const heartbeatTick = writable<HeartbeatTickEntry | null>(null);
 
 // ------------------------------------------------------------------ //
 // Derived per-topic stores
@@ -156,6 +182,29 @@ export function _handleMessage(raw: string): void {
     if (!envelope.topic || !envelope.payload) return;
 
     const { topic, payload } = envelope;
+
+    // Append every event to the live MQTT log (capped at 200)
+    mqttLiveLog.update((log) => {
+      const entry: MqttLogEntry = { ts: envelope.ts, topic, payload: payload as Record<string, unknown> };
+      const next = [entry, ...log];
+      return next.length > 200 ? next.slice(0, 200) : next;
+    });
+
+    // Task / research / scheduler events
+    if (
+      topic.startsWith('agent/task') ||
+      topic.startsWith('agent/research') ||
+      topic.startsWith('agent/scheduler')
+    ) {
+      taskLiveLog.update((log) => {
+        const entry: TaskEventEntry = { ts: envelope.ts, topic, payload: payload as Record<string, unknown> };
+        const next = [entry, ...log];
+        return next.length > 100 ? next.slice(0, 100) : next;
+      });
+      if (topic === 'agent/scheduler/tick') {
+        heartbeatTick.set({ ts: envelope.ts, payload: payload as Record<string, unknown> });
+      }
+    }
 
     // Endocrine events arrive per-hormone: agent/endocrine/{hormone}
     if (topic.startsWith('agent/endocrine/')) {

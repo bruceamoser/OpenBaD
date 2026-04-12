@@ -12,6 +12,7 @@
     networkTelemetry,
     endocrineLevels,
     fsmState,
+    heartbeatTick,
   } from '$lib/stores/websocket';
 
   interface Transition { from: string; to: string; ts: string; }
@@ -36,6 +37,8 @@
   let memHistory: number[] = $state([]);
   let statusMsg = $state('');
   let sleepSaveMsg = $state('');
+  let hbSaveMsg = $state('');
+  let hbInterval = $state(60);
   let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
   let sleepConfig = $state<SleepConfig>({
     sleep_window_start: '02:00',
@@ -69,6 +72,25 @@
   });
 
   let historyInterval: ReturnType<typeof setInterval> | undefined;
+
+  async function loadHeartbeatConfig(): Promise<void> {
+    try {
+      const res = await apiGet<{ interval_seconds: number }>('/api/heartbeat/config');
+      hbInterval = res.interval_seconds ?? 60;
+    } catch {
+      // use default
+    }
+  }
+
+  async function saveHeartbeatConfig(): Promise<void> {
+    try {
+      await apiPut<{ interval_seconds: number }>('/api/heartbeat/config', { interval_seconds: hbInterval });
+      hbSaveMsg = 'Saved';
+      setTimeout(() => { hbSaveMsg = ''; }, 2000);
+    } catch (e) {
+      hbSaveMsg = `Save failed: ${e}`;
+    }
+  }
 
   async function loadSleepConfig(): Promise<void> {
     try {
@@ -116,6 +138,7 @@
 
   onMount(() => {
     loadSleepConfig();
+    loadHeartbeatConfig();
     historyInterval = setInterval(() => {
       cpuHistory = [...cpuHistory, cpu].slice(-SPARKLINE_MAX);
       memHistory = [...memHistory, mem].slice(-SPARKLINE_MAX);
@@ -345,6 +368,31 @@
       {/if}
     </div>
   </Card>
+
+  <Card label="Heartbeat">
+    <div class="sleep-section">
+      <p class="muted">How often the scheduler runs a heartbeat cycle and checks for pending tasks.</p>
+      {#if $heartbeatTick}
+        <div class="hb-last">
+          <span class="hb-dot">●</span>
+          Last tick: <strong>{new Date($heartbeatTick.ts).toLocaleTimeString()}</strong>
+        </div>
+      {:else}
+        <div class="hb-last muted">No heartbeat received yet</div>
+      {/if}
+      <div class="sleep-config-grid">
+        <label>
+          Interval (seconds)
+          <input type="number" min="5" max="3600" step="1" bind:value={hbInterval} />
+        </label>
+      </div>
+      <input class="hb-range" type="range" min="5" max="600" step="5" bind:value={hbInterval} />
+      <div class="sleep-actions">
+        <button class="secondary" onclick={saveHeartbeatConfig}>Save Interval</button>
+        {#if hbSaveMsg}<span class="status-msg">{hbSaveMsg}</span>{/if}
+      </div>
+    </div>
+  </Card>
 </div>
 
 <style>
@@ -501,7 +549,10 @@
     flex-direction: column;
     gap: 0.25rem;
   }
-  .sleep-actions { display: flex; gap: 0.5rem; }
+  .sleep-actions { display: flex; gap: 0.5rem; align-items: center; }
+  .hb-last { margin-bottom: 0.75rem; font-size: 0.9rem; }
+  .hb-dot { color: var(--green); margin-right: 0.25rem; }
+  .hb-range { width: 100%; margin: 0.5rem 0; }
   .status-msg { font-size: 0.85rem; color: var(--text-sub); }
 
   @media (max-width: 900px) {

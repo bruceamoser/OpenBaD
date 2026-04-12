@@ -13,11 +13,16 @@
   const NAV_ITEMS = [
     { href: '/',          label: 'Health',    icon: '❤' },
     { href: '/chat',      label: 'Chat',      icon: '💬' },
+    { href: '/mqtt',      label: 'MQTT',      icon: '📡' },
+    { href: '/tasks',     label: 'Tasks',     icon: '📋' },
+    { href: '/research',  label: 'Research',  icon: '🔬' },
     { href: '/usage',     label: 'Usage',     icon: '◔' },
     { href: '/providers', label: 'Providers', icon: '⚙' },
     { href: '/senses',    label: 'Senses',    icon: '👁' },
     { href: '/toolbelt',  label: 'Toolbelt',  icon: '🔧' },
+    { href: '/skills',    label: 'Skills',    icon: '🛠' },
     { href: '/entity',    label: 'Entity',    icon: '👤' },
+    { href: '/debug',     label: 'Debug',     icon: '🐛' },
   ];
 
   let sidebarOpen = $state(true);
