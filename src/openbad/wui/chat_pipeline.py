@@ -58,13 +58,37 @@ _DATA_DIR = Path("/var/lib/openbad")
 _MEMORY_DIR = _DATA_DIR / "memory"
 _MAX_CONVERSATION_TURNS = 50  # max turns to keep in STM
 _SEMANTIC_TOP_K = 3  # top-k results from semantic search
+_TOOLBELT_BLURB = (
+    "You are running inside the OpenBaD agent daemon and have the following"
+    " built-in tools available:\n\n"
+    "- **read_file(path)** — Read a file from the local filesystem."
+    " Governed by immune-system path rules.\n"
+    "- **write_file(path, content)** — Write content to a file."
+    " Blocked on restricted paths (/etc/, ~/.ssh/, etc.).\n"
+    "- **exec_command(command)** — Run a shell command asynchronously."
+    " Destructive commands are quarantined before execution.\n"
+    "- **web_search(query)** — Search the web and return a summary of results.\n"
+    "- **web_fetch(url)** — Fetch the raw content of a URL."
+    " Failed fetches are escalated to the autonomous research queue.\n"
+    "- **ask_user(question)** — Ask the user a question."
+    " Awaits an answer inline if the user is present; otherwise suspends"
+    " the task until they reconnect.\n"
+    "- **mcp_bridge** — Dynamically loads an MCP server schema (e.g. browser"
+    " via CDP, GitHub) as a transient session scoped to the current task node.\n\n"
+    "These tools are invoked by the daemon's task engine."
+    " Describe what you want to do and the agent will route it through"
+    " the appropriate tool with immune-system and interoceptive gating applied."
+)
+
 _SYSTEM_PROMPT_CHAT = (
-    "You are OpenBaD, a helpful AI assistant. "
-    "Answer clearly and concisely. Use markdown formatting when helpful."
+    "You are OpenBaD, a helpful AI assistant running on the local machine. "
+    "Answer clearly and concisely. Use markdown formatting when helpful.\n\n"
+    + _TOOLBELT_BLURB
 )
 _SYSTEM_PROMPT_REASONING = (
-    "You are OpenBaD, an analytical reasoning assistant. "
-    "Think step-by-step. Show your reasoning process before giving a final answer."
+    "You are OpenBaD, an analytical reasoning assistant running on the local machine. "
+    "Think step-by-step. Show your reasoning process before giving a final answer.\n\n"
+    + _TOOLBELT_BLURB
 )
 
 
