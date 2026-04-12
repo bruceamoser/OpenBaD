@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch OpenBaD heartbeat config for changes
+Documentation=https://github.com/bruceamoser/OpenBaD
+
+[Path]
+# Fire openbad-heartbeat-apply.service whenever the WUI writes a new interval.
+PathModified=/var/lib/openbad/heartbeat.yaml
+Unit=openbad-heartbeat-apply.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,22 +1,66 @@
 #!/usr/bin/env bash
-# openbad-apply-heartbeat-interval <interval_seconds>
+# openbad-apply-heartbeat-interval [interval_seconds]
 #
-# Writes a systemd drop-in that overrides the heartbeat timer's
-# OnUnitActiveSec to the requested interval, then reloads and
-# restarts the timer so the change takes effect immediately.
+# Writes a systemd drop-in to set the heartbeat timer's OnUnitActiveSec,
+# then reloads and restarts the timer so the change takes effect immediately.
 #
-# This script is installed to /usr/local/bin/ and is intended to be
-# called via sudo by the openbad WUI service (non-root).  A narrow
-# sudoers rule installed by scripts/install.sh grants exactly this.
+# Called as root via:
+#   - openbad-heartbeat-apply.service  (triggered by systemd path watcher or
+#     as a Wants= dep of openbad-wui.service and openbad.service)
+#   - directly from openbad CLI commands (start/restart/update) which run as root
+#
+# When no argument is supplied, the interval is read from
+# /var/lib/openbad/heartbeat.yaml.  An explicit argument overrides the file.
 set -euo pipefail
 
-INTERVAL="${1:-60}"
+YAML_PATH="/var/lib/openbad/heartbeat.yaml"
+DEFAULT_INTERVAL=60
+
+# Resolve interval: explicit arg > YAML > default
+if [[ $# -ge 1 ]]; then
+    INTERVAL="$1"
+else
+    # Parse interval_seconds from YAML without a full YAML parser
+    INTERVAL="$DEFAULT_INTERVAL"
+    if [[ -f "$YAML_PATH" ]]; then
+        parsed=$(grep -E '^interval_seconds:' "$YAML_PATH" | head -1 | sed 's/interval_seconds:[[:space:]]*//')
+        if [[ -n "$parsed" ]] && [[ "$parsed" =~ ^[0-9]+$ ]]; then
+            INTERVAL="$parsed"
+        fi
+    fi
+fi
 
 # Validate: must be a positive integer >= 5
 if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [[ "$INTERVAL" -lt 5 ]]; then
-    echo "Usage: openbad-apply-heartbeat-interval <interval_seconds (>= 5)>" >&2
+    echo "interval_seconds must be an integer >= 5 (got: '$INTERVAL')" >&2
     exit 1
 fi
+
+DROPIN_DIR="/etc/systemd/system/openbad-heartbeat.timer.d"
+DROPIN_FILE="$DROPIN_DIR/interval.conf"
+
+mkdir -p "$DROPIN_DIR"
+
+# Empty assignments clear the base unit's values before setting the new ones.
+cat > "$DROPIN_FILE" <<EOF
+# Managed by openbad — do not edit by hand.
+# Updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+[Timer]
+OnActiveSec=
+OnUnitActiveSec=
+OnActiveSec=${INTERVAL}s
+OnUnitActiveSec=${INTERVAL}s
+EOF
+
+systemctl daemon-reload
+if systemctl is-active --quiet openbad-heartbeat.timer 2>/dev/null; then
+    systemctl restart openbad-heartbeat.timer
+else
+    systemctl start openbad-heartbeat.timer
+fi
+
+echo "openbad-heartbeat.timer set to ${INTERVAL}s and started."
+
 
 DROPIN_DIR="/etc/systemd/system/openbad-heartbeat.timer.d"
 DROPIN_FILE="$DROPIN_DIR/interval.conf"

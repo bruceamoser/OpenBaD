@@ -33,47 +33,32 @@ CORE_SERVICE_UNITS = (
 BROKER_SERVICE_UNIT = "openbad-broker.service"
 
 _HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
-_HEARTBEAT_APPLY_SCRIPT = Path("/usr/local/bin/openbad-apply-heartbeat-interval")
 
 
 def _ensure_heartbeat_timer() -> None:
     """Ensure the heartbeat timer is running at the configured interval.
 
-    Called after start/restart/update so the timer is always consistent
-    with the persisted config, regardless of how services were started.
-    Does nothing if systemctl or the helper script are unavailable.
+    Called after start/restart/update (all run as root via sudo) so the
+    timer is always consistent with the persisted config.
+    Uses ``systemctl start openbad-heartbeat-apply.service`` which runs the
+    apply script as root without needing sudo inside the process.
+    Does nothing if systemctl is unavailable (dev/test environments).
     """
     systemctl = shutil.which("systemctl")
-    if not systemctl or not _HEARTBEAT_APPLY_SCRIPT.is_file():
+    if not systemctl:
         return
 
-    # Read configured interval (default 60 s)
-    interval = 60
-    if _HEARTBEAT_CONFIG_PATH.exists():
-        try:
-            import yaml  # noqa: PLC0415
-            data = yaml.safe_load(_HEARTBEAT_CONFIG_PATH.read_text()) or {}
-            interval = max(5, int(data.get("interval_seconds", 60)))
-        except Exception:  # noqa: BLE001, S110
-            pass  # malformed config — use default
-
-    # Check whether the timer is active
-    result = subprocess.run(  # noqa: S603
+    # Check timer and drop-in state
+    timer_active = subprocess.run(  # noqa: S603
         [systemctl, "is-active", "openbad-heartbeat.timer"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    timer_active = result.stdout.strip() == "active"
+        capture_output=True, text=True, check=False,
+    ).stdout.strip() == "active"
 
     dropin = Path("/etc/systemd/system/openbad-heartbeat.timer.d/interval.conf")
 
     if not timer_active or not dropin.exists():
-        sudo = shutil.which("sudo")
-        if not sudo:
-            return
         subprocess.run(  # noqa: S603
-            [sudo, str(_HEARTBEAT_APPLY_SCRIPT), str(interval)],
+            [systemctl, "start", "openbad-heartbeat-apply.service"],
             check=False,
         )
 
