@@ -22,6 +22,7 @@
   --text-on-color: #11111b;
 
   /* Accent */
+  --accent:        #89b4fa;
   --blue:          #89b4fa;
   --blue-dim:      rgba(137, 180, 250, 0.15);
   --lavender:      #b4befe;

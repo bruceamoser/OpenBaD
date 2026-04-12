@@ -277,6 +277,22 @@ def _provider_has_secret(provider: ProviderConfig) -> bool:
 def _provider_is_valid(provider: ProviderConfig) -> bool:
     if not provider.enabled:
         return False
+    if provider.name == "github-copilot":
+        # Also check token is not expired
+        env_token = os.environ.get("GITHUB_COPILOT_TOKEN", "")
+        if env_token:
+            return True
+        token_path = _TOKEN_FILE
+        if token_path.exists():
+            try:
+                data = json.loads(token_path.read_text())
+                # Token valid OR we have a refresh_token to renew it with
+                has_refresh = bool(data.get("refresh_token", ""))
+                not_expired = time.time() < data.get("expires_at", 0)
+                return not_expired or has_refresh
+            except (OSError, ValueError):
+                pass
+        return False
     if _provider_uses_local_endpoint(provider):
         return bool(provider.base_url)
     return _provider_has_secret(provider)
@@ -407,6 +423,7 @@ def _serialize_cognitive_config(config: CognitiveConfig, path: Path) -> dict[str
                 "api_key_env": provider.api_key_env,
                 "timeout_ms": provider.timeout_ms,
                 "enabled": provider.enabled,
+                "verified": _provider_is_valid(provider),
             }
             for provider in config.providers
         ],

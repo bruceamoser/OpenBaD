@@ -753,7 +753,7 @@
               <div class="provider-info">
                 <span class="provider-name">{providerDisplayName(p)}</span>
                 <span class="provider-model">{p.base_url || 'Configured connection'}</span>
-                <span class="provider-status">{p.verified ? 'verified' : 'unverified'}</span>
+                <span class="provider-status" class:verified={p.verified} class:unverified={!p.verified}>{p.verified ? 'verified' : 'unverified'}</span>
               </div>
               <button class="btn-icon btn-remove" onclick={() => removeProvider(i)} aria-label="Remove provider" title="Remove provider">&times;</button>
             </div>
@@ -894,6 +894,9 @@
   .provider-info { display: flex; flex-direction: column; flex: 1; }
   .provider-name { font-weight: 600; font-size: 0.9rem; }
   .provider-model { font-size: 0.8rem; color: var(--text-dim); }
+  .provider-status { font-size: 0.75rem; font-weight: 500; }
+  .provider-status.verified { color: var(--green); }
+  .provider-status.unverified { color: var(--yellow); }
   .empty { color: var(--text-dim); font-size: 0.9rem; }
 
   .btn-add {
