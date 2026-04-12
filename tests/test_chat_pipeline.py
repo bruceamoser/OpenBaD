@@ -127,7 +127,7 @@ async def test_stream_chat_uses_persistent_history_and_no_duplicate_current_mess
     assert adapter.prompts
     prompt = adapter.prompts[0]
     assert prompt.count("What should I remember about Friday?") == 1
-    assert "Your name is OpenBaD" in prompt
+    assert "You are OpenBaD" in prompt
     assert "Preferred communication style: terse" in prompt
     assert "Relevant prior memories:" in prompt
 

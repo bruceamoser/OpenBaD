@@ -428,10 +428,15 @@ def _build_identity_prompt(
         continuity_log = getattr(assistant_profile, "continuity_log", []) or []
         rhetorical_style = getattr(assistant_profile, "rhetorical_style", None)
 
-        # Opening identity statement
-        opening = f"Your name is {assistant_name}."
+        # Opening persona embodiment — imperative, not descriptive
+        opening = (
+            f"You are {assistant_name}. Fully embody this persona in every response."
+            " Speak and think as this person naturally would."
+            " Never describe yourself as 'configured as' or narrate your own settings;"
+            " simply be this person."
+        )
         if persona_summary:
-            opening += f" {persona_summary}"
+            opening += f"\n\n{persona_summary}"
         parts.append(opening)
 
         # OCEAN personality → behavioural instructions

@@ -39,6 +39,7 @@
   let tokensUsed = $state(0);
   let tokensMax = $state(8192);
   let sessionId = $state('');
+  let assistantName = $state('Assistant');
   let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
   let onboardingTransition = $state(false);
 
@@ -340,6 +341,13 @@
       await loadHistory(storedSessionId);
     }
     scrollToBottom();
+
+    try {
+      const assistant = await apiGet<{ name?: string }>('/api/entity/assistant');
+      if (assistant?.name) assistantName = assistant.name;
+    } catch {
+      // leave default
+    }
   });
 </script>
 
@@ -400,7 +408,7 @@
         </div>
         <div class="bubble">
           <div class="bubble-header">
-            <span class="role-label">{msg.role === 'user' ? 'You' : 'Assistant'}</span>
+            <span class="role-label">{msg.role === 'user' ? 'You' : assistantName}</span>
             <time class="ts">{new Date(msg.timestamp).toLocaleTimeString()}</time>
           </div>
           <div class="content">{@html renderMarkdown(msg.content)}</div>
