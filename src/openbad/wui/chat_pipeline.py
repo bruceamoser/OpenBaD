@@ -374,22 +374,63 @@ def _build_identity_prompt(
     assistant_profile: Any | None,
     modulation: Any | None,
 ) -> str:
-    """Render user and assistant identity state into the system prompt."""
-    lines: list[str] = []
+    """Render user and assistant identity state into the system prompt.
 
+    Returns a string that begins with the assistant's own identity statement
+    so it leads the system prompt rather than appending generic boilerplate.
+    """
+    parts: list[str] = []
+
+    # ── Assistant identity (opening statement) ─────────────────────────────
     if assistant_profile is not None:
-        assistant_name = getattr(assistant_profile, "name", "")
+        assistant_name = getattr(assistant_profile, "name", "") or "OpenBaD"
         persona_summary = getattr(assistant_profile, "persona_summary", "")
         learning_focus = getattr(assistant_profile, "learning_focus", []) or []
-        if assistant_name:
-            lines.append(f"Assistant identity: {assistant_name}")
+        worldview = getattr(assistant_profile, "worldview", []) or []
+        boundaries = getattr(assistant_profile, "boundaries", []) or []
+        anti_patterns = getattr(assistant_profile, "anti_patterns", []) or []
+        current_focus = getattr(assistant_profile, "current_focus", []) or []
+        rhetorical_style = getattr(assistant_profile, "rhetorical_style", None)
+
+        opening = f"Your name is {assistant_name}."
         if persona_summary:
-            lines.append(f"Assistant persona: {persona_summary}")
+            opening += f" {persona_summary}"
+        parts.append(opening)
+
+        if rhetorical_style is not None:
+            tone = getattr(rhetorical_style, "tone", "")
+            sentence_pattern = getattr(rhetorical_style, "sentence_pattern", "")
+            challenge_mode = getattr(rhetorical_style, "challenge_mode", "")
+            explanation_depth = getattr(rhetorical_style, "explanation_depth", "")
+            style_parts = []
+            if tone:
+                style_parts.append(f"tone: {tone}")
+            if sentence_pattern:
+                style_parts.append(f"style: {sentence_pattern}")
+            if challenge_mode:
+                style_parts.append(f"challenge mode: {challenge_mode}")
+            if explanation_depth:
+                style_parts.append(f"explanation depth: {explanation_depth}")
+            if style_parts:
+                parts.append("Rhetorical style — " + ", ".join(style_parts) + ".")
+
         if learning_focus:
-            lines.append(
-                "Assistant learning focus: " + ", ".join(str(item) for item in learning_focus)
+            parts.append(
+                "Current learning focus: " + ", ".join(str(i) for i in learning_focus) + "."
+            )
+        if current_focus:
+            parts.append("Current focus areas: " + ", ".join(str(i) for i in current_focus) + ".")
+        if worldview:
+            parts.append("Worldview: " + "; ".join(str(i) for i in worldview) + ".")
+        if boundaries:
+            parts.append("Boundaries: " + "; ".join(str(i) for i in boundaries) + ".")
+        if anti_patterns:
+            parts.append(
+                "Avoid these patterns: " + "; ".join(str(i) for i in anti_patterns) + "."
             )
 
+    # ── User context ────────────────────────────────────────────────────────
+    user_lines: list[str] = []
     if user_profile is not None:
         user_name = (
             getattr(user_profile, "preferred_name", "")
@@ -399,17 +440,20 @@ def _build_identity_prompt(
         expertise_domains = getattr(user_profile, "expertise_domains", []) or []
         interaction_history_summary = getattr(user_profile, "interaction_history_summary", "")
         if user_name:
-            lines.append(f"User identity: {user_name}")
+            user_lines.append(f"The user's name is {user_name}.")
         if communication_style:
             style_value = getattr(communication_style, "value", communication_style)
-            lines.append(f"Preferred communication style: {style_value}")
+            user_lines.append(f"Preferred communication style: {style_value}.")
         if expertise_domains:
-            lines.append(
-                "User expertise domains: " + ", ".join(str(item) for item in expertise_domains)
+            user_lines.append(
+                "User expertise: " + ", ".join(str(i) for i in expertise_domains) + "."
             )
         if interaction_history_summary:
-            lines.append(f"User history summary: {interaction_history_summary}")
+            user_lines.append(f"User history: {interaction_history_summary}")
+    if user_lines:
+        parts.append("\n".join(user_lines))
 
+    # ── Endocrine modulation ────────────────────────────────────────────────
     if modulation is not None:
         modulation_fields = [
             ("exploration_budget_multiplier", "Exploration budget multiplier"),
@@ -424,11 +468,9 @@ def _build_identity_prompt(
             if value is not None:
                 rendered.append(f"{label}: {value:.2f}")
         if rendered:
-            lines.append("Behavior modulation: " + "; ".join(rendered))
+            parts.append("Behaviour modulation: " + "; ".join(rendered) + ".")
 
-    if not lines:
-        return ""
-    return "\n\nIdentity context:\n" + "\n".join(lines)
+    return "\n\n".join(parts)
 
 
 # ── Context assembly ──────────────────────────────────────────────── #
@@ -465,16 +507,17 @@ def assemble_context(
         # User profile interview mode (second priority, after assistant)
         system_prompt = USER_INTERVIEW_SYSTEM_PROMPT
     else:
-        # Normal mode: use chat or reasoning prompt
-        base_system_prompt = (
-            _SYSTEM_PROMPT_REASONING
+        # Normal mode: identity leads, then toolbelt, then reasoning instruction
+        identity_block = _build_identity_prompt(user_profile, assistant_profile, modulation)
+        reasoning_suffix = (
+            "\n\nThink step-by-step. Show your reasoning before giving a final answer."
             if system == CognitiveSystem.REASONING
-            else _SYSTEM_PROMPT_CHAT
+            else "\n\nAnswer clearly and concisely. Use markdown formatting when helpful."
         )
-        system_prompt = (
-            base_system_prompt
-            + _build_identity_prompt(user_profile, assistant_profile, modulation)
-        )
+        if identity_block:
+            system_prompt = identity_block + "\n\n" + _TOOLBELT_BLURB + reasoning_suffix
+        else:
+            system_prompt = _TOOLBELT_BLURB + reasoning_suffix
 
     onboarding_mode = assistant_needs_config or user_needs_config
 
