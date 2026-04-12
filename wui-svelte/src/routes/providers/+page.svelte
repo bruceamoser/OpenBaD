@@ -904,7 +904,7 @@
     color: var(--text-sub); padding: 0.5rem; border-radius: var(--radius-sm);
     cursor: pointer; width: 100%; transition: all 0.15s var(--ease);
   }
-  .btn-add:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-add:hover { border-color: var(--blue); color: var(--blue); }
 
   .btn-icon {
     background: transparent; border: none; cursor: pointer; font-size: 1.2rem;
@@ -915,7 +915,7 @@
 
   /* ---- Buttons ---- */
   .btn-primary {
-    background: var(--accent); color: var(--bg-base); font-weight: 600;
+    background: var(--blue); color: var(--bg-base); font-weight: 600;
     border: none; border-radius: var(--radius-sm); padding: 0.5rem 1.25rem;
     cursor: pointer; transition: opacity 0.15s;
   }
@@ -928,7 +928,7 @@
     padding: 0.4rem 0.9rem; border-radius: var(--radius-sm); cursor: pointer;
     font-size: 0.85rem; transition: all 0.15s var(--ease);
   }
-  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
 
   /* ---- Cortisol ---- */
   .cortisol-section { display: flex; flex-direction: column; gap: 0.6rem; }
@@ -952,7 +952,7 @@
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.85rem;
   }
   .sys-row select:disabled { opacity: 0.4; }
-  .sys-row select:focus { border-color: var(--accent); outline: none; }
+  .sys-row select:focus { border-color: var(--blue); outline: none; }
 
   /* ---- Fallback ---- */
   .fallback-list { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.5rem; }
@@ -1018,7 +1018,7 @@
     border-radius: var(--radius-sm); cursor: pointer; text-align: left;
     transition: all 0.15s var(--ease); color: var(--text);
   }
-  .wizard-option:hover:not(:disabled) { border-color: var(--accent); background: var(--bg-surface2); }
+  .wizard-option:hover:not(:disabled) { border-color: var(--blue); background: var(--bg-surface2); }
   .wizard-option:disabled { opacity: 0.5; cursor: wait; }
   .wizard-option-icon { flex-shrink: 0; color: var(--text-sub); }
   .wizard-option-label { font-weight: 600; font-size: 0.95rem; display: block; }
@@ -1032,12 +1032,12 @@
     border: 1px solid var(--border);
   }
   .copilot-code-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
-  .copilot-code { font-size: 2rem; font-weight: 700; font-family: monospace; letter-spacing: 0.15em; color: var(--accent); }
+  .copilot-code { font-size: 2rem; font-weight: 700; font-family: monospace; letter-spacing: 0.15em; color: var(--blue); }
   .copilot-instructions {
     margin: 0; padding-left: 1.5rem; font-size: 0.9rem; color: var(--text-sub);
     display: flex; flex-direction: column; gap: 0.4rem;
   }
-  .copilot-instructions a { color: var(--accent); text-decoration: underline; }
+  .copilot-instructions a { color: var(--blue); text-decoration: underline; }
   .copilot-actions {
     display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
   }
@@ -1052,7 +1052,7 @@
     padding: 0.5rem 0.65rem; background: var(--bg-surface1); border: 1px solid var(--border);
     border-radius: var(--radius-sm); color: var(--text); font-size: 0.9rem;
   }
-  .local-form input:focus { border-color: var(--accent); outline: none; }
+  .local-form input:focus { border-color: var(--blue); outline: none; }
   .local-form .checkbox-row {
     flex-direction: row;
     align-items: center;
@@ -1074,7 +1074,7 @@
     background: var(--bg-surface2); color: var(--text-sub); border: 1px solid var(--border);
     cursor: pointer; transition: all 0.15s var(--ease);
   }
-  .model-chip:hover { border-color: var(--accent); color: var(--accent); background: rgba(137, 180, 250, 0.1); }
+  .model-chip:hover { border-color: var(--blue); color: var(--blue); background: rgba(137, 180, 250, 0.1); }
 
   .available-models { margin-top: 1rem; }
   .available-models-label { font-size: 0.8rem; color: var(--text-dim); display: block; margin-bottom: 0.35rem; }
@@ -1086,7 +1086,7 @@
   /* ---- Spinner ---- */
   .spinner {
     display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border);
-    border-top-color: var(--accent); border-radius: 50%;
+    border-top-color: var(--blue); border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
