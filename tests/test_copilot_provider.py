@@ -107,8 +107,9 @@ class TestTokenManagement:
         token_file = tmp_path / "token.json"
         p = GitHubCopilotProvider(token_file=token_file)
         p._save_token("ghp-saved", 3600)  # noqa: S106
-        loaded = p._load_token()
-        assert loaded == "ghp-saved"  # noqa: S105
+        token, refresh = p._load_token()
+        assert token == "ghp-saved"  # noqa: S105
+        assert refresh == ""
 
     def test_expired_token_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -119,7 +120,9 @@ class TestTokenManagement:
             json.dumps({"access_token": "ghp-old", "expires_at": 0})
         )
         p = GitHubCopilotProvider(token_file=token_file)
-        assert p._load_token() is None
+        token, refresh = p._load_token()
+        assert token is None
+        assert refresh == ""
 
 
 # ------------------------------------------------------------------ #

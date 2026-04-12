@@ -54,6 +54,7 @@ _MODEL_DISCOVERY_PATHS = ("/models", "/chat/models", "/v1/models")
 
 _TOKEN_DIR = Path.home() / ".openbad"
 _TOKEN_FILE = _TOKEN_DIR / "copilot_token.json"
+_GITHUB_REFRESH_TOKEN_URL = "https://github.com/login/oauth/access_token"  # noqa: S105
 
 
 @dataclass
@@ -100,48 +101,133 @@ class GitHubCopilotProvider(ProviderAdapter):
         self._token_file = token_file
         self._cached_token: str = ""
         self._token_expires_at: float = 0
+        self._cached_refresh_token: str = ""
 
     # ------------------------------------------------------------------ #
     # Token management
     # ------------------------------------------------------------------ #
 
-    def _load_token(self) -> str | None:
-        """Load token from disk."""
+    def _load_token(self) -> tuple[str | None, str]:
+        """Load token from disk. Returns (access_token_or_None, refresh_token)."""
         if not self._token_file.exists():
-            return None
+            return None, ""
         data = json.loads(self._token_file.read_text())
+        refresh_token = data.get("refresh_token", "")
         expires_at = data.get("expires_at", 0)
         if time.time() >= expires_at:
-            return None
+            # Access token expired but return refresh_token so caller can renew
+            return None, refresh_token
         self._token_expires_at = expires_at
-        return data.get("access_token", "")
+        return data.get("access_token", ""), refresh_token
 
-    def _save_token(self, access_token: str, expires_in: int) -> None:
+    def _save_token(
+        self,
+        access_token: str,
+        expires_in: int,
+        refresh_token: str = "",
+    ) -> None:
         """Save token to disk with restricted permissions."""
         self._token_file.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        data: dict[str, object] = {
             "access_token": access_token,
             "expires_at": time.time() + expires_in,
         }
+        if refresh_token:
+            data["refresh_token"] = refresh_token
+        elif self._token_file.exists():
+            # Preserve existing refresh_token if we have one
+            try:
+                existing = json.loads(self._token_file.read_text())
+                if existing.get("refresh_token"):
+                    data["refresh_token"] = existing["refresh_token"]
+            except (OSError, json.JSONDecodeError):
+                pass
         self._token_file.write_text(json.dumps(data))
         with contextlib.suppress(OSError):
             self._token_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
-    def _get_token(self) -> str:
-        """Return a valid token or raise."""
-        # Check env var first
+    async def _refresh_access_token(self, refresh_token: str) -> str:
+        """Exchange a refresh token for a new access token and persist it."""
+        payload = {
+            "client_id": _COPILOT_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        async with aiohttp.ClientSession(timeout=self._timeout) as session, session.post(
+            _GITHUB_REFRESH_TOKEN_URL,
+            data=payload,
+            headers={"Accept": "application/json"},
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json(content_type=None)
+
+        if "error" in data:
+            msg = (
+                f"Token refresh failed: {data.get('error')} — "
+                f"{data.get('error_description', '')}"
+            )
+            raise CopilotAuthError(msg)
+
+        new_token = data.get("access_token", "")
+        if not new_token:
+            raise CopilotAuthError("Token refresh returned no access_token")
+
+        expires_in = int(data.get("expires_in", 28800))
+        new_refresh = data.get("refresh_token", refresh_token)  # GitHub may rotate it
+        self._save_token(new_token, expires_in, new_refresh)
+        self._cached_token = new_token
+        self._cached_refresh_token = new_refresh
+        self._token_expires_at = time.time() + expires_in
+        return new_token
+
+    async def _get_token_async(self) -> str:
+        """Return a valid token, auto-refreshing if expired."""
+        # Env var always wins
         env_token = os.environ.get("GITHUB_COPILOT_TOKEN", "")
         if env_token:
             return env_token
 
+        # In-memory cache still valid
         if self._cached_token and time.time() < self._token_expires_at:
             return self._cached_token
 
-        token = self._load_token()
+        # Try loading from disk
+        token, refresh_token = self._load_token()
         if token:
             self._cached_token = token
+            if refresh_token:
+                self._cached_refresh_token = refresh_token
             return token
 
+        # Token expired — attempt refresh if we have a refresh_token
+        if not refresh_token:
+            refresh_token = self._cached_refresh_token
+
+        if refresh_token:
+            try:
+                return await self._refresh_access_token(refresh_token)
+            except (aiohttp.ClientError, CopilotAuthError):
+                pass  # fall through to hard error
+
+        msg = (
+            "No Copilot token available. Set GITHUB_COPILOT_TOKEN env var "
+            "or run device-flow authentication."
+        )
+        raise CopilotAuthError(msg)
+
+    def _get_token(self) -> str:
+        """Sync token accessor — only valid when token is cached/env-var."""
+        env_token = os.environ.get("GITHUB_COPILOT_TOKEN", "")
+        if env_token:
+            return env_token
+        if self._cached_token and time.time() < self._token_expires_at:
+            return self._cached_token
+        token, refresh_token = self._load_token()
+        if token:
+            self._cached_token = token
+            if refresh_token:
+                self._cached_refresh_token = refresh_token
+            return token
         msg = (
             "No Copilot token available. Set GITHUB_COPILOT_TOKEN env var "
             "or run device-flow authentication."
@@ -150,6 +236,14 @@ class GitHubCopilotProvider(ProviderAdapter):
 
     def _headers(self) -> dict[str, str]:
         token = self._get_token()
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Editor-Version": "openbad/0.1.0",
+        }
+
+    async def _headers_async(self) -> dict[str, str]:
+        token = await self._get_token_async()
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
@@ -223,8 +317,10 @@ class GitHubCopilotProvider(ProviderAdapter):
         if "access_token" in data:
             token = data["access_token"]
             expires_in = data.get("expires_in", 28800)
-            self._save_token(token, expires_in)
+            refresh_token = data.get("refresh_token", "")
+            self._save_token(token, expires_in, refresh_token)
             self._cached_token = token
+            self._cached_refresh_token = refresh_token
             self._token_expires_at = time.time() + expires_in
             return {
                 "state": "authorized",
@@ -294,7 +390,7 @@ class GitHubCopilotProvider(ProviderAdapter):
             **kwargs,
         }
         url = f"{_COPILOT_API_URL}/chat/completions"
-        headers = self._headers()
+        headers = await self._headers_async()
         try:
             async with (
                 aiohttp.ClientSession(timeout=self._timeout) as session,
@@ -344,7 +440,7 @@ class GitHubCopilotProvider(ProviderAdapter):
     async def health_check(self) -> HealthStatus:
         t0 = time.monotonic()
         try:
-            self._get_token()
+            await self._get_token_async()
             # Lightweight completion to verify connectivity
             payload: dict[str, Any] = {
                 "model": self._default_model,
@@ -416,7 +512,7 @@ class GitHubCopilotProvider(ProviderAdapter):
 
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{_COPILOT_API_URL}{path}"
-        headers = self._headers()
+        headers = await self._headers_async()
         last_exc: BaseException | None = None
         for attempt in range(1, self._max_retries + 2):
             try:
@@ -436,7 +532,7 @@ class GitHubCopilotProvider(ProviderAdapter):
 
     async def _get(self, path: str) -> dict[str, Any]:
         url = f"{_COPILOT_API_URL}{path}"
-        headers = self._headers()
+        headers = await self._headers_async()
         last_exc: BaseException | None = None
         for attempt in range(1, self._max_retries + 2):
             try:
