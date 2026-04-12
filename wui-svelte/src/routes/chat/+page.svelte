@@ -40,6 +40,7 @@
   let tokensMax = $state(8192);
   let sessionId = $state('');
   let assistantName = $state('Assistant');
+  let copiedMsgTimestamp = $state<string | null>(null);
   let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
   let onboardingTransition = $state(false);
 
@@ -308,6 +309,25 @@
     }
   }
 
+  async function copyMessage(content: string, timestamp: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(content);
+      copiedMsgTimestamp = timestamp;
+      setTimeout(() => { copiedMsgTimestamp = null; }, 1500);
+    } catch {
+      // clipboard not available
+    }
+  }
+
+  async function newChat(): Promise<void> {
+    if (streaming) return;
+    clearSession();
+    messages = [];
+    tokensUsed = 0;
+    tokensMax = 8192;
+    await tick();
+  }
+
   function handleKeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -370,6 +390,12 @@
         <input type="checkbox" bind:checked={showCot} />
         <span>Chain of Thought</span>
       </label>
+      <button
+        class="new-chat-btn"
+        onclick={newChat}
+        disabled={streaming}
+        title="Start a new conversation"
+      >New chat</button>
     </div>
   </div>
 
@@ -418,6 +444,13 @@
               <pre>{msg.reasoning}</pre>
             </details>
           {/if}
+          <div class="bubble-actions">
+            <button
+              class="copy-btn"
+              onclick={() => copyMessage(msg.content, msg.timestamp)}
+              title="Copy message"
+            >{copiedMsgTimestamp === msg.timestamp ? '✓ Copied' : 'Copy'}</button>
+          </div>
         </div>
       </div>
     {/each}
@@ -492,6 +525,21 @@
     color: var(--text-sub);
     cursor: pointer;
   }
+  .new-chat-btn {
+    padding: 0.3rem 0.75rem;
+    font-size: 0.8rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-sub);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .new-chat-btn:hover:not(:disabled) {
+    border-color: var(--blue);
+    color: var(--blue);
+  }
+  .new-chat-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .budget-bar {
     position: relative;
@@ -669,6 +717,25 @@
     opacity: 0.7;
     margin: 0.25rem 0 0 0;
     font-family: 'JetBrains Mono', monospace;
+  }
+  .bubble-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.35rem;
+  }
+  .copy-btn {
+    background: transparent;
+    border: none;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .copy-btn:hover {
+    color: var(--text-sub);
+    background: var(--bg-surface2);
   }
 
   .streaming-indicator {
