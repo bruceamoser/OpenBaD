@@ -343,7 +343,8 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     # -- eligibility check ----------------------------------------------
     now = time.time()
     state = hb_store.load()
-    if state.last_heartbeat_at > 0 and (now - state.last_heartbeat_at) < interval:
+    last_heartbeat_at = float(state.last_heartbeat_at or 0.0)
+    if last_heartbeat_at > 0 and (now - last_heartbeat_at) < interval:
         hb_store.increment_silent_skip()
         return  # not due yet — exit silently so the timer isn't marked failed
 

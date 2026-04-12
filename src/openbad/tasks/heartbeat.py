@@ -45,6 +45,26 @@ class HeartbeatStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    @staticmethod
+    def _as_float(value: object, default: float = 0.0) -> float:
+        """Coerce DB values to float, tolerating legacy NULL rows."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _as_int(value: object, default: int = 0) -> int:
+        """Coerce DB values to int, tolerating legacy NULL rows."""
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
@@ -87,14 +107,17 @@ class HeartbeatStore:
             FROM heartbeat_state WHERE id = 1
             """
         ).fetchone()
+
+        # Older installs may contain NULLs from pre-constraint rows.
+        # Coerce them to safe defaults so heartbeat ticks keep running.
         return HeartbeatState(
-            last_heartbeat_at=row[0],
-            last_triage_at=row[1],
-            last_context_required_dispatch_at=row[2],
-            last_research_review_at=row[3],
-            last_sleep_cycle_at=row[4],
-            last_maintenance_at=row[5],
-            silent_skip_count=row[6],
+            last_heartbeat_at=self._as_float(row[0]),
+            last_triage_at=self._as_float(row[1]),
+            last_context_required_dispatch_at=self._as_float(row[2]),
+            last_research_review_at=self._as_float(row[3]),
+            last_sleep_cycle_at=self._as_float(row[4]),
+            last_maintenance_at=self._as_float(row[5]),
+            silent_skip_count=self._as_int(row[6]),
         )
 
     # ------------------------------------------------------------------
