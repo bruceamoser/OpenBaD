@@ -20,6 +20,7 @@
     { href: '/providers', label: 'Providers', icon: '⚙' },
     { href: '/senses',    label: 'Senses',    icon: '👁' },
     { href: '/toolbelt',  label: 'Toolbelt',  icon: '🔧' },
+    { href: '/immune',    label: 'Immune',    icon: '🛡' },
     { href: '/skills',    label: 'Skills',    icon: '🛠' },
     { href: '/entity',    label: 'Entity',    icon: '👤' },
     { href: '/debug',     label: 'Debug',     icon: '🐛' },

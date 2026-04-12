@@ -16,6 +16,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -197,6 +198,8 @@ def _semantic_key(session_id: str, turn_idx: int) -> str:
 
 def _next_turn_idx(session_id: str) -> int:
     episodic = _get_episodic()
+    with suppress(Exception):
+        episodic.reload()
     entries = episodic.query(f"{_SESSION_PREFIX}{session_id}:")
     if not entries:
         return 0
@@ -276,6 +279,8 @@ def _write_turn(
 def _get_conversation_history(session_id: str) -> list[ConversationTurn]:
     """Retrieve recent conversation from persisted episodic memory."""
     episodic = _get_episodic()
+    with suppress(Exception):
+        episodic.reload()
     entries = episodic.query(f"{_SESSION_PREFIX}{session_id}:")
 
     # Sort by turn index
@@ -303,6 +308,27 @@ def get_conversation_history(
     if limit <= 0:
         return []
     return _get_conversation_history(session_id)[-limit:]
+
+
+def append_assistant_message(session_id: str, content: str) -> None:
+    """Append an assistant-authored message directly to a chat session.
+
+    Used by autonomous subsystems (heartbeat, research, immune monitoring)
+    to report work into regular chat sessions without requiring an active
+    streaming HTTP request.
+    """
+    text = content.strip()
+    if not text:
+        return
+    _write_turn(
+        session_id,
+        ConversationTurn(
+            role="assistant",
+            content=text,
+            timestamp=time.time(),
+        ),
+        onboarding_mode=False,
+    )
 
 
 def _get_episodic_context(session_id: str, query: str) -> str:

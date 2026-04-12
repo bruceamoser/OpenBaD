@@ -29,6 +29,12 @@
     model?: string;
   }
 
+  interface SessionOption {
+    key: string;
+    session_id: string;
+    label: string;
+  }
+
   // ----------------------------------------------------------------
   // State
   // ----------------------------------------------------------------
@@ -41,6 +47,8 @@
   let tokensUsed = $state(0);
   let tokensMax = $state(8192);
   let sessionId = $state('');
+  let sessionOptions: SessionOption[] = $state([]);
+  let selectedSessionId = $state('chat-main');
   let assistantName = $state('Assistant');
   let copiedMsgTimestamp = $state<string | null>(null);
   let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
@@ -74,9 +82,10 @@
   }
 
   function currentSessionStorageKey(): string {
+    const sessionScope = selectedSessionId || 'chat-main';
     return onboardingHint
-      ? `${CHAT_SESSION_STORAGE_KEY}.${onboardingHint}`
-      : CHAT_SESSION_STORAGE_KEY;
+      ? `${CHAT_SESSION_STORAGE_KEY}.${sessionScope}.${onboardingHint}`
+      : `${CHAT_SESSION_STORAGE_KEY}.${sessionScope}`;
   }
 
   function clearSession(): void {
@@ -193,6 +202,38 @@
     } catch {
       messages = [];
     }
+  }
+
+  async function loadSessions(): Promise<void> {
+    try {
+      const data = await apiGet<{ sessions: SessionOption[] }>('/api/sessions');
+      const sessions = data.sessions ?? [];
+      sessionOptions = sessions.length > 0
+        ? sessions
+        : [{ key: 'chat', session_id: 'chat-main', label: 'Chat' }];
+
+      if (!sessionOptions.some((s) => s.session_id === selectedSessionId)) {
+        selectedSessionId = sessionOptions[0].session_id;
+      }
+    } catch {
+      sessionOptions = [{ key: 'chat', session_id: 'chat-main', label: 'Chat' }];
+      selectedSessionId = 'chat-main';
+    }
+  }
+
+  async function switchSession(nextSessionId: string): Promise<void> {
+    if (streaming) return;
+    selectedSessionId = nextSessionId;
+    const storedSessionId = localStorage.getItem(currentSessionStorageKey()) ?? '';
+    if (storedSessionId) {
+      persistSession(storedSessionId);
+      await loadHistory(storedSessionId);
+      return;
+    }
+    sessionId = '';
+    messages = [];
+    tokensUsed = 0;
+    tokensMax = 8192;
   }
 
   // ----------------------------------------------------------------
@@ -359,6 +400,8 @@
       console.error('Failed to check onboarding status:', err);
     }
 
+    await loadSessions();
+
     if (onboardingHint) {
       localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
     }
@@ -392,6 +435,18 @@
         <select bind:value={system}>
           <option value="CHAT">CHAT</option>
           <option value="REASONING">REASONING</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <span class="control-label">Session</span>
+        <select
+          bind:value={selectedSessionId}
+          onchange={(e) => switchSession((e.currentTarget as HTMLSelectElement).value)}
+          disabled={streaming}
+        >
+          {#each sessionOptions as s}
+            <option value={s.session_id}>{s.label}</option>
+          {/each}
         </select>
       </div>
       <label class="cot-toggle">

@@ -120,6 +120,16 @@ class EpisodicMemory(MemoryStore):
         """Explicitly persist to disk."""
         self._save()
 
+    def reload(self) -> None:
+        """Reload entries from disk.
+
+        Useful when multiple OpenBaD processes write to the same episodic
+        store (e.g., WUI process + heartbeat timer process).
+        """
+        self._entries = {}
+        self._timeline = []
+        self._load()
+
     # ------------------------------------------------------------------ #
     # Persistence
     # ------------------------------------------------------------------ #

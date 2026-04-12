@@ -312,15 +312,23 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     NOT returned — the timer must not be considered failed on a skip).
     """
     import time
+    from contextlib import suppress
 
     import yaml
 
+    from openbad.autonomy.session_policy import (
+        is_destructive_request,
+        load_session_policy,
+        session_allows,
+        session_id_for,
+    )
     from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
     from openbad.tasks.heartbeat import HeartbeatStore
     from openbad.tasks.models import TaskKind, TaskModel, TaskPriority, TaskStatus
-    from openbad.tasks.research_queue import initialize_research_db
-    from openbad.tasks.scheduler import SchedulerConfig, TaskScheduler
+    from openbad.tasks.research_queue import ResearchQueue, initialize_research_db
     from openbad.tasks.store import TaskStore
+    from openbad.wui.chat_pipeline import append_assistant_message
+    from openbad.wui.server import _read_providers_config, _resolve_chat_adapter
 
     # -- read interval config -------------------------------------------
     cfg_path = Path("/var/lib/openbad/heartbeat.yaml")
@@ -351,6 +359,11 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     hb_store.reset_silent_skip()
     hb_store.record_heartbeat(now)
 
+    policy = load_session_policy()
+    chat_session_id = session_id_for(policy, "chat")
+    task_session_id = session_id_for(policy, "tasks")
+    research_session_id = session_id_for(policy, "research")
+
     # -- create a heartbeat-spawned task --------------------------------
     task_store = TaskStore(conn)
     task = TaskModel.new(
@@ -362,23 +375,227 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     )
     task_store.create_task(task)
 
-    # -- dispatch pending work ------------------------------------------
+    # -- autonomous work selection/execution -----------------------------
     dispatched: list[str] = []
+    executed_task_id: str | None = None
+    executed_research_id: str | None = None
 
-    def _on_dispatch(t: TaskModel, lease_id: str) -> None:  # noqa: ARG001
+    def _post_session(session_id: str, content: str) -> None:
+        with suppress(Exception):
+            append_assistant_message(session_id, content)
+
+    def _pending_questions_count() -> int:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM tasks
+            WHERE status IN ('pending', 'blocked_on_user')
+              AND title LIKE 'Question:%'
+            """
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def _run_llm(prompt: str, *, system_name: str) -> tuple[str, str, str] | None:
         try:
-            task_store.update_task_status(t.task_id, TaskStatus.RUNNING)
-            dispatched.append(t.task_id)
+            _cfg_path, cfg = _read_providers_config()
+            adapter, model, provider_name = _resolve_chat_adapter(cfg, system_name)
+            if adapter is None or model is None:
+                return None
+            result = asyncio.run(adapter.complete(prompt, model))
+            return result.content.strip(), (provider_name or ""), result.model_id
         except Exception:  # noqa: BLE001, S110
-            pass  # status update best-effort
+            return None
 
-    scheduler = TaskScheduler(
-        conn=conn,
-        worker_id="heartbeat-cron",
-        callback=_on_dispatch,
-        config=SchedulerConfig(),
-    )
-    scheduler.tick()
+    def _top_pending_task() -> TaskModel | None:
+        row = conn.execute(
+            """
+            SELECT task_id
+            FROM tasks
+            WHERE status = 'pending'
+              AND kind != 'scheduled'
+              AND title NOT LIKE 'Question:%'
+            ORDER BY priority DESC, created_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        return task_store.get_task(str(row[0]))
+
+    def _create_question_task(source_task: TaskModel, question: str) -> TaskModel:
+        q = TaskModel.new(
+            title=f"Question: Approval required for task {source_task.task_id[:8]}",
+            description=question,
+            kind=TaskKind.SYSTEM,
+            priority=int(TaskPriority.HIGH),
+            owner="heartbeat-approval",
+        )
+        return task_store.create_task(q)
+
+    def _process_task(task_to_run: TaskModel) -> None:
+        nonlocal executed_task_id
+        combined = f"{task_to_run.title}\n\n{task_to_run.description}".strip()
+        allow_destructive = session_allows(
+            policy,
+            "tasks",
+            "allow_destructive",
+            False,
+        )
+        if is_destructive_request(combined) and not allow_destructive:
+            task_store.update_task_status(task_to_run.task_id, TaskStatus.BLOCKED_ON_USER)
+            question = (
+                "Approve destructive action for task "
+                f"{task_to_run.task_id}: {task_to_run.title}. "
+                "Reply in regular chat with explicit approval details."
+            )
+            _create_question_task(task_to_run, question)
+            pending_q = _pending_questions_count()
+            _post_session(
+                chat_session_id,
+                (
+                    f"I deferred task '{task_to_run.title}' because it may be destructive. "
+                    f"I also have {pending_q} question{'s' if pending_q != 1 else ''} "
+                    "for you when you're ready."
+                ),
+            )
+            _post_session(
+                task_session_id,
+                f"Deferred task {task_to_run.task_id} pending user approval.",
+            )
+            executed_task_id = task_to_run.task_id
+            return
+
+        task_store.update_task_status(task_to_run.task_id, TaskStatus.RUNNING)
+        llm = _run_llm(
+            (
+                "You are the autonomous OpenBaD task worker. "
+                "Complete the task in a non-destructive way and return a concise "
+                "status summary.\n\n"
+                f"Task: {task_to_run.title}\nDescription: {task_to_run.description}"
+            ),
+            system_name="reasoning",
+        )
+        if llm is None:
+            task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
+            _post_session(
+                task_session_id,
+                f"Task {task_to_run.task_id} failed: no provider available.",
+            )
+            return
+
+        summary, provider_name, model_id = llm
+        task_store.update_task_status(task_to_run.task_id, TaskStatus.DONE)
+        task_store.append_event(
+            task_to_run.task_id,
+            "autonomy_completed",
+            payload={
+                "summary": summary,
+                "provider": provider_name,
+                "model": model_id,
+            },
+        )
+        _post_session(task_session_id, f"Completed task '{task_to_run.title}': {summary}")
+        _post_session(chat_session_id, f"Autonomous task update: completed '{task_to_run.title}'.")
+        executed_task_id = task_to_run.task_id
+        dispatched.append(task_to_run.task_id)
+
+    def _process_research() -> None:
+        nonlocal executed_research_id
+        queue = ResearchQueue(conn)
+        node = queue.dequeue()
+        if node is None:
+            return
+
+        llm = _run_llm(
+            (
+                "You are the OpenBaD research worker. "
+                "Produce a concise research result with actionable next steps.\n\n"
+                f"Research title: {node.title}\nDescription: {node.description}"
+            ),
+            system_name="reasoning",
+        )
+        if llm is None:
+            _post_session(
+                research_session_id,
+                f"Research node {node.node_id} dequeued but provider was unavailable.",
+            )
+            return
+
+        summary, provider_name, model_id = llm
+        _post_session(
+            research_session_id,
+            (
+                f"Research complete: {node.title}\n\n"
+                f"{summary}\n\n"
+                f"Provider: {provider_name} / {model_id}"
+            ),
+        )
+        _post_session(chat_session_id, f"Autonomous research update: completed '{node.title}'.")
+        executed_research_id = node.node_id
+        dispatched.append(node.node_id)
+
+    def _monitor_nominal_state() -> None:
+        # Lightweight anomaly rule: if many recent failures accumulate,
+        # enqueue research for root-cause triage.
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM tasks
+            WHERE status = 'failed'
+              AND updated_at >= ?
+            """,
+            (now - 900,),
+        ).fetchone()
+        recent_failed = int(row[0]) if row else 0
+        if recent_failed >= 3:
+            rq = ResearchQueue(conn)
+            rq.enqueue(
+                title="Investigate recent task failure spike",
+                description=(
+                    f"Detected {recent_failed} failed tasks in the last 15 minutes. "
+                    "Review logs, endocrine levels, and provider health."
+                ),
+                priority=-5,
+                source_task_id=task.task_id,
+            )
+            _post_session(
+                chat_session_id,
+                "Anomaly detected: failure spike. Added a research item for triage.",
+            )
+
+        # Provider availability monitoring (limits/health guardrail).
+        try:
+            _cfg_path, cfg = _read_providers_config()
+            adapter, _model, provider_name = _resolve_chat_adapter(cfg, "chat")
+            if adapter is not None:
+                status = asyncio.run(adapter.health_check())
+                if not status.available:
+                    rq = ResearchQueue(conn)
+                    rq.enqueue(
+                        title="Investigate provider availability degradation",
+                        description=(
+                            "Primary chat provider health check failed during heartbeat. "
+                            f"Provider={provider_name or 'unknown'}."
+                        ),
+                        priority=-4,
+                        source_task_id=task.task_id,
+                    )
+                    _post_session(
+                        chat_session_id,
+                        "Provider health anomaly detected. Added a research item.",
+                    )
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    if session_allows(policy, "tasks", "allow_task_autonomy", True):
+        top_task = _top_pending_task()
+        if top_task is not None:
+            _process_task(top_task)
+
+    if session_allows(policy, "research", "allow_research_autonomy", True):
+        _process_research()
+
+    _monitor_nominal_state()
 
     # -- publish MQTT tick ----------------------------------------------
     from openbad.nervous_system import topics
@@ -389,6 +606,8 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
         "interval_seconds": interval,
         "dispatched_count": len(dispatched),
         "dispatched_task_ids": dispatched,
+        "executed_task_id": executed_task_id,
+        "executed_research_id": executed_research_id,
         "silent_skip_count": 0,
     }).encode()
 

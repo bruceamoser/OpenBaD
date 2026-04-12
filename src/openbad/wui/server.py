@@ -23,6 +23,13 @@ import yaml
 from aiohttp import web
 
 import openbad
+from openbad.autonomy.session_policy import (
+    DEFAULT_SESSION_POLICY,
+    SESSION_POLICY_PATH,
+    list_sessions,
+    load_session_policy,
+    save_session_policy,
+)
 from openbad.cognitive.config import (
     CognitiveConfig,
     CognitiveSystem,
@@ -2045,6 +2052,68 @@ async def _put_heartbeat_config(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Sessions / immune policy
+# ---------------------------------------------------------------------------
+
+def _sanitize_session_policy(payload: dict[str, object]) -> dict[str, object]:
+    """Normalize and sanitize session policy payload from the UI."""
+    sessions = payload.get("sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+
+    sanitized_sessions: dict[str, dict[str, object]] = {}
+    defaults = DEFAULT_SESSION_POLICY.get("sessions", {})
+    if not isinstance(defaults, dict):
+        defaults = {}
+
+    merged_keys = set(defaults.keys()) | set(str(k) for k in sessions)
+    for key in sorted(merged_keys):
+        default_raw = defaults.get(key, {})
+        src_raw = sessions.get(key, {})
+        default_obj = default_raw if isinstance(default_raw, dict) else {}
+        src_obj = src_raw if isinstance(src_raw, dict) else {}
+
+        session_id = (
+            str(src_obj.get("session_id", default_obj.get("session_id", key))).strip()
+            or key
+        )
+        label = str(src_obj.get("label", default_obj.get("label", key))).strip() or key.title()
+
+        sanitized_sessions[key] = {
+            "session_id": session_id,
+            "label": label,
+            "allow_task_autonomy": bool(src_obj.get("allow_task_autonomy", default_obj.get("allow_task_autonomy", False))),
+            "allow_research_autonomy": bool(src_obj.get("allow_research_autonomy", default_obj.get("allow_research_autonomy", False))),
+            "allow_destructive": bool(src_obj.get("allow_destructive", default_obj.get("allow_destructive", False))),
+        }
+
+    return {"sessions": sanitized_sessions}
+
+
+async def _get_sessions(_request: web.Request) -> web.Response:
+    policy = load_session_policy(SESSION_POLICY_PATH)
+    return web.json_response({"sessions": list_sessions(policy)})
+
+
+async def _get_immune_policy(_request: web.Request) -> web.Response:
+    policy = load_session_policy(SESSION_POLICY_PATH)
+    return web.json_response(_sanitize_session_policy(policy))
+
+
+async def _put_immune_policy(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    policy = _sanitize_session_policy(payload)
+    try:
+        save_session_policy(policy, SESSION_POLICY_PATH)
+        _restrict_permissions(SESSION_POLICY_PATH)
+    except OSError as exc:
+        raise web.HTTPInternalServerError(text=f"Could not save policy: {exc}") from exc
+    return web.json_response(policy)
+
+
+# ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
 
@@ -2310,6 +2379,9 @@ def create_app(
     app.router.add_post("/api/onboarding/skip", _post_onboarding_skip)
     app.router.add_get("/api/heartbeat/config", _get_heartbeat_config)
     app.router.add_put("/api/heartbeat/config", _put_heartbeat_config)
+    app.router.add_get("/api/sessions", _get_sessions)
+    app.router.add_get("/api/immune/policy", _get_immune_policy)
+    app.router.add_put("/api/immune/policy", _put_immune_policy)
     app.router.add_get("/api/tasks", _get_tasks)
     app.router.add_get("/api/research", _get_research)
     app.router.add_get("/api/mqtt/log", _get_mqtt_log)
