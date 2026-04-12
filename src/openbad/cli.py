@@ -32,6 +32,51 @@ CORE_SERVICE_UNITS = (
 )
 BROKER_SERVICE_UNIT = "openbad-broker.service"
 
+_HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
+_HEARTBEAT_APPLY_SCRIPT = Path("/usr/local/bin/openbad-apply-heartbeat-interval")
+
+
+def _ensure_heartbeat_timer() -> None:
+    """Ensure the heartbeat timer is running at the configured interval.
+
+    Called after start/restart/update so the timer is always consistent
+    with the persisted config, regardless of how services were started.
+    Does nothing if systemctl or the helper script are unavailable.
+    """
+    systemctl = shutil.which("systemctl")
+    if not systemctl or not _HEARTBEAT_APPLY_SCRIPT.is_file():
+        return
+
+    # Read configured interval (default 60 s)
+    interval = 60
+    if _HEARTBEAT_CONFIG_PATH.exists():
+        try:
+            import yaml  # noqa: PLC0415
+            data = yaml.safe_load(_HEARTBEAT_CONFIG_PATH.read_text()) or {}
+            interval = max(5, int(data.get("interval_seconds", 60)))
+        except Exception:  # noqa: BLE001, S110
+            pass  # malformed config — use default
+
+    # Check whether the timer is active
+    result = subprocess.run(  # noqa: S603
+        [systemctl, "is-active", "openbad-heartbeat.timer"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    timer_active = result.stdout.strip() == "active"
+
+    dropin = Path("/etc/systemd/system/openbad-heartbeat.timer.d/interval.conf")
+
+    if not timer_active or not dropin.exists():
+        sudo = shutil.which("sudo")
+        if not sudo:
+            return
+        subprocess.run(  # noqa: S603
+            [sudo, str(_HEARTBEAT_APPLY_SCRIPT), str(interval)],
+            check=False,
+        )
+
 
 @click.group(invoke_without_command=True)
 @click.pass_context
@@ -64,6 +109,7 @@ def start() -> None:
     """Start all OpenBaD services and return immediately."""
     units = _managed_service_units()
     _systemctl("start", *units)
+    _ensure_heartbeat_timer()
     click.echo("Started: " + ", ".join(units))
 
 
@@ -80,6 +126,7 @@ def restart() -> None:
     """Restart all OpenBaD services and return immediately."""
     units = _managed_service_units()
     _systemctl("restart", *units)
+    _ensure_heartbeat_timer()
     click.echo("Restarted: " + ", ".join(units))
 
 
@@ -143,6 +190,7 @@ def update(skip_services: bool) -> None:
         ) from exc
 
     click.echo("Update complete.")
+    _ensure_heartbeat_timer()
 
 
 @main.command(name="health")
