@@ -10,7 +10,9 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import stat
+import subprocess
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -74,6 +76,106 @@ _LOG_BUFFER: deque[dict[str, str]] = deque(maxlen=500)
 
 _HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
 _HEARTBEAT_CONFIG_DEFAULT = {"interval_seconds": 60}
+_HEARTBEAT_APPLY_SCRIPT = Path("/usr/local/bin/openbad-apply-heartbeat-interval")
+
+
+def _heartbeat_timer_status() -> str:
+    """Return the systemd timer active-state string (e.g. 'active', 'inactive')."""
+    systemctl = shutil.which("systemctl", path="/bin:/usr/bin:/usr/local/bin")
+    if not systemctl:
+        return "systemctl-unavailable"
+    try:
+        result = subprocess.run(  # noqa: S603
+            [systemctl, "is-active", "openbad-heartbeat.timer"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        return result.stdout.strip() or result.stderr.strip() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _apply_heartbeat_timer(interval_seconds: int) -> None:
+    """Call the privileged helper (via sudo) to set the timer interval.
+
+    Logs a warning and does not raise if the helper is unavailable or fails.
+    This allows the WUI to run in dev mode without systemd.
+    """
+    sudo = shutil.which("sudo", path="/bin:/usr/bin:/usr/local/bin")
+    if not sudo or not _HEARTBEAT_APPLY_SCRIPT.is_file():
+        log.debug(
+            "openbad-apply-heartbeat-interval not found — timer interval not updated"
+        )
+        return
+    try:
+        result = subprocess.run(  # noqa: S603
+            [sudo, str(_HEARTBEAT_APPLY_SCRIPT), str(interval_seconds)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            log.info("Heartbeat timer set to %ds", interval_seconds)
+        else:
+            log.warning(
+                "Failed to update heartbeat timer interval: %s",
+                result.stderr.strip() or result.stdout.strip(),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not apply heartbeat timer interval: %s", exc)
+_HEARTBEAT_APPLY_SCRIPT = Path("/usr/local/bin/openbad-apply-heartbeat-interval")
+
+
+def _heartbeat_timer_status() -> str:
+    """Return the systemd timer active-state string (e.g. 'active', 'inactive')."""
+    systemctl = shutil.which("systemctl", path="/bin:/usr/bin:/usr/local/bin")
+    if not systemctl:
+        return "systemctl-unavailable"
+    try:
+        result = subprocess.run(  # noqa: S603
+            [systemctl, "is-active", "openbad-heartbeat.timer"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        return result.stdout.strip() or result.stderr.strip() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _apply_heartbeat_timer(interval_seconds: int) -> None:
+    """Call the privileged helper (via sudo) to set the timer interval.
+
+    Logs a warning and does not raise if the helper is unavailable or fails.
+    This allows the WUI to run in dev mode without systemd.
+    """
+    sudo = shutil.which("sudo", path="/bin:/usr/bin:/usr/local/bin")
+    if not sudo or not _HEARTBEAT_APPLY_SCRIPT.is_file():
+        log.debug(
+            "openbad-apply-heartbeat-interval not found — timer interval not updated"
+        )
+        return
+    try:
+        result = subprocess.run(  # noqa: S603
+            [sudo, str(_HEARTBEAT_APPLY_SCRIPT), str(interval_seconds)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            log.info("Heartbeat timer set to %ds", interval_seconds)
+        else:
+            log.warning(
+                "Failed to update heartbeat timer interval: %s",
+                result.stderr.strip() or result.stdout.strip(),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not apply heartbeat timer interval: %s", exc)
 
 
 class _RingBufferHandler(logging.Handler):
@@ -1997,7 +2099,9 @@ def _read_heartbeat_config() -> dict[str, object]:
 
 
 async def _get_heartbeat_config(_request: web.Request) -> web.Response:
-    return web.json_response(_read_heartbeat_config())
+    cfg = _read_heartbeat_config()
+    cfg["timer_status"] = _heartbeat_timer_status()
+    return web.json_response(cfg)
 
 
 async def _put_heartbeat_config(request: web.Request) -> web.Response:
@@ -2015,6 +2119,8 @@ async def _put_heartbeat_config(request: web.Request) -> web.Response:
         _HEARTBEAT_CONFIG_PATH.write_text(yaml.dump(cfg))
     except OSError as exc:
         raise web.HTTPInternalServerError(text=f"Could not save: {exc}") from exc
+    _apply_heartbeat_timer(interval_int)
+    cfg["timer_status"] = _heartbeat_timer_status()
     return web.json_response(cfg)
 
 
@@ -2310,6 +2416,30 @@ async def run_server(
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
     await site.start()
+
+    # -- Heartbeat timer startup check -----------------------------------
+    # Read the persisted interval and ensure the timer is running at that
+    # interval.  If the timer is not active we start it; if the interval
+    # in the config file doesn't match the timer's drop-in we re-apply it.
+    cfg = _read_heartbeat_config()
+    interval = int(cfg.get("interval_seconds", 60))
+    timer_status = _heartbeat_timer_status()
+    if timer_status not in {"active", "systemctl-unavailable"}:
+        log.info(
+            "Heartbeat timer is '%s' — applying interval %ds and starting",
+            timer_status, interval,
+        )
+        _apply_heartbeat_timer(interval)
+    else:
+        # Timer is active; ensure the drop-in matches the configured interval
+        # (it may have been reset by a package reinstall or first-run install).
+        dropin = Path("/etc/systemd/system/openbad-heartbeat.timer.d/interval.conf")
+        if not dropin.exists():
+            log.info("Heartbeat timer drop-in missing — applying interval %ds", interval)
+            _apply_heartbeat_timer(interval)
+        else:
+            log.debug("Heartbeat timer active at interval %ds", interval)
+    # --------------------------------------------------------------------
 
     try:
         # Keep running until cancelled.

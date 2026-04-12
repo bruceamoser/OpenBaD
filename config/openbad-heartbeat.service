@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenBaD Heartbeat Tick (one-shot, driven by openbad-heartbeat.timer)
+Documentation=https://github.com/bruceamoser/OpenBaD
+After=openbad.service network-online.target
+Wants=openbad.service
+
+[Service]
+Type=oneshot
+User=openbad
+Group=openbad
+ExecStart=/usr/local/bin/openbad heartbeat
+WorkingDirectory=/var/lib/openbad
+
+# Environment
+Environment=OPENBAD_CONFIG_DIR=/etc/openbad
+
+# Security hardening (same as openbad.service)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/openbad /var/log/openbad
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

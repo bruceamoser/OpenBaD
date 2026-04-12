@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# openbad-apply-heartbeat-interval <interval_seconds>
+#
+# Writes a systemd drop-in that overrides the heartbeat timer's
+# OnUnitActiveSec to the requested interval, then reloads and
+# restarts the timer so the change takes effect immediately.
+#
+# This script is installed to /usr/local/bin/ and is intended to be
+# called via sudo by the openbad WUI service (non-root).  A narrow
+# sudoers rule installed by scripts/install.sh grants exactly this.
+set -euo pipefail
+
+INTERVAL="${1:-60}"
+
+# Validate: must be a positive integer >= 5
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [[ "$INTERVAL" -lt 5 ]]; then
+    echo "Usage: openbad-apply-heartbeat-interval <interval_seconds (>= 5)>" >&2
+    exit 1
+fi
+
+DROPIN_DIR="/etc/systemd/system/openbad-heartbeat.timer.d"
+DROPIN_FILE="$DROPIN_DIR/interval.conf"
+
+mkdir -p "$DROPIN_DIR"
+
+# Empty assignments clear the base unit's values before setting the new ones.
+cat > "$DROPIN_FILE" <<EOF
+# Managed by openbad — do not edit by hand.
+# Updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+[Timer]
+OnActiveSec=
+OnUnitActiveSec=
+OnActiveSec=${INTERVAL}s
+OnUnitActiveSec=${INTERVAL}s
+EOF
+
+systemctl daemon-reload
+# Restart (not just reload) so the new interval takes effect on the next run.
+if systemctl is-active --quiet openbad-heartbeat.timer 2>/dev/null; then
+    systemctl restart openbad-heartbeat.timer
+else
+    systemctl start openbad-heartbeat.timer
+fi
+
+echo "openbad-heartbeat.timer set to ${INTERVAL}s and started."

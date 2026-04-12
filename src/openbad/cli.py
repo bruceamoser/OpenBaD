@@ -265,6 +265,111 @@ def tui(host: str, port: int) -> None:
     app.run()
 
 
+@main.command()
+@click.option("--mqtt-host", default="localhost", help="MQTT broker host.")
+@click.option("--mqtt-port", default=1883, type=int, help="MQTT broker port.")
+@click.option("--db-path", default=None, type=click.Path(), help="State DB path.")
+def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
+    """Run one heartbeat tick (called by systemd timer, not directly).
+
+    Checks whether the configured interval has elapsed since the last tick.
+    If so, creates a scheduled heartbeat task, dispatches pending work, and
+    publishes ``agent/scheduler/tick`` to the MQTT nervous system.
+    If the interval has not elapsed the command exits silently (non-zero is
+    NOT returned — the timer must not be considered failed on a skip).
+    """
+    import time
+
+    import yaml
+
+    from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
+    from openbad.tasks.heartbeat import HeartbeatStore
+    from openbad.tasks.models import TaskKind, TaskModel, TaskPriority, TaskStatus
+    from openbad.tasks.research_queue import initialize_research_db
+    from openbad.tasks.scheduler import SchedulerConfig, TaskScheduler
+    from openbad.tasks.store import TaskStore
+
+    # -- read interval config -------------------------------------------
+    cfg_path = Path("/var/lib/openbad/heartbeat.yaml")
+    interval: int = 60
+    if cfg_path.exists():
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+            interval = max(5, int(data.get("interval_seconds", 60)))
+        except Exception:  # noqa: BLE001, S110
+            pass  # malformed config — use default
+
+    # -- open DB --------------------------------------------------------
+    resolved_db_path = Path(db_path) if db_path else DEFAULT_STATE_DB_PATH
+    conn = initialize_state_db(resolved_db_path)
+    initialize_research_db(conn)
+
+    hb_store = HeartbeatStore(conn)
+    hb_store.initialize()
+
+    # -- eligibility check ----------------------------------------------
+    now = time.time()
+    state = hb_store.load()
+    if state.last_heartbeat_at > 0 and (now - state.last_heartbeat_at) < interval:
+        hb_store.increment_silent_skip()
+        return  # not due yet — exit silently so the timer isn't marked failed
+
+    hb_store.reset_silent_skip()
+    hb_store.record_heartbeat(now)
+
+    # -- create a heartbeat-spawned task --------------------------------
+    task_store = TaskStore(conn)
+    task = TaskModel.new(
+        "Heartbeat",
+        description=f"Scheduled heartbeat tick at {now:.0f}",
+        kind=TaskKind.SCHEDULED,
+        priority=int(TaskPriority.LOW),
+        owner="heartbeat-timer",
+    )
+    task_store.create_task(task)
+
+    # -- dispatch pending work ------------------------------------------
+    dispatched: list[str] = []
+
+    def _on_dispatch(t: TaskModel, lease_id: str) -> None:  # noqa: ARG001
+        try:
+            task_store.update_task_status(t.task_id, TaskStatus.RUNNING)
+            dispatched.append(t.task_id)
+        except Exception:  # noqa: BLE001, S110
+            pass  # status update best-effort
+
+    scheduler = TaskScheduler(
+        conn=conn,
+        worker_id="heartbeat-cron",
+        callback=_on_dispatch,
+        config=SchedulerConfig(),
+    )
+    scheduler.tick()
+
+    # -- publish MQTT tick ----------------------------------------------
+    from openbad.nervous_system import topics
+    from openbad.nervous_system.client import NervousSystemClient
+
+    tick_payload = json.dumps({
+        "ts": now,
+        "interval_seconds": interval,
+        "dispatched_count": len(dispatched),
+        "dispatched_task_ids": dispatched,
+        "silent_skip_count": 0,
+    }).encode()
+
+    try:
+        client = NervousSystemClient.get_instance(host=mqtt_host, port=mqtt_port)
+        client.connect(timeout=3.0)
+        client.publish_bytes(topics.SCHEDULER_TICK, tick_payload)
+        import time as _time  # already imported above but explicit for clarity
+        _time.sleep(0.2)  # allow paho to flush the outbound queue
+        client.disconnect()
+        NervousSystemClient.reset_instance()
+    except Exception:  # noqa: BLE001, S110
+        pass  # MQTT unavailable — task still created; do not fail the timer
+
+
 @main.command(hidden=True)
 @click.option("--host", default="127.0.0.1", help="Web UI bind host.")
 @click.option("--port", default=9200, type=int, help="Web UI bind port.")

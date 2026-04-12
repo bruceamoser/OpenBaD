@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenBaD Heartbeat Timer
+Documentation=https://github.com/bruceamoser/OpenBaD
+After=openbad.service
+
+[Timer]
+# Fire 30 s after the timer is started (initial boot delay).
+OnActiveSec=30s
+# Fire again every 30 s thereafter.  The heartbeat command itself checks
+# whether the user-configured interval_seconds has elapsed and skips cheaply
+# when it has not — so this is just the polling granularity, not the actual
+# heartbeat rate.  Minimum observable heartbeat rate is therefore 30 s.
+# To get finer granularity, write a drop-in:
+#   /etc/systemd/system/openbad-heartbeat.timer.d/interval.conf
+#   [Timer]
+#   OnActiveSec=10s
+#   OnUnitActiveSec=10s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=openbad-heartbeat.service
+
+[Install]
+WantedBy=timers.target
