@@ -571,8 +571,9 @@ async def stream_chat(
 
     # ── 1. Immune scan ──
     report = scan_input(message)
-    if report.is_threat:
-        threat_names = ", ".join(m.rule_name for m in report.matches)
+    _blocking = [m for m in report.matches if m.severity in {"critical", "high"}]
+    if _blocking:
+        threat_names = ", ".join(m.rule_name for m in _blocking)
         log.warning("Immune scan blocked message (request=%s): %s", request_id, threat_names)
         _publish_error(
             nervous_system_client,
@@ -586,6 +587,14 @@ async def stream_chat(
             done=True,
         )
         return
+    elif report.is_threat:
+        # Medium/low severity — flag but allow
+        threat_names = ", ".join(m.rule_name for m in report.matches)
+        log.info(
+            "Immune scan flagged message (non-blocking, request=%s): %s",
+            request_id,
+            threat_names,
+        )
 
     # ── 2. Assemble context ──
     context = assemble_context(
