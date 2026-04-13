@@ -812,6 +812,12 @@ def _build_litellm_adapter(
     default_model = litellm_model_name(provider.name, model) if model else ""
     api_base = provider.base_url or ""
 
+    # LiteLLM's OpenAI codepath requires *some* api_key even for local
+    # servers that don't check it (llama.cpp, vLLM, etc.).  Supply a
+    # placeholder so the request isn't rejected before it leaves the SDK.
+    if not api_key and api_base:
+        api_key = "not-needed"
+
     return LiteLLMAdapter(
         provider_name=provider.name,
         default_model=default_model,

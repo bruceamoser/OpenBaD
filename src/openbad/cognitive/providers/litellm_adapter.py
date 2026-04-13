@@ -49,10 +49,15 @@ def litellm_model_name(provider: str, model: str) -> str:
 
     If the model already contains a ``/`` prefix (e.g. ``ollama/llama3.2``),
     it is returned as-is.
+
+    Unknown provider names (e.g. ``custom``) are mapped to ``openai`` so
+    LiteLLM routes them through its OpenAI-compatible codepath — this is
+    the correct behaviour for llama.cpp, vLLM, and similar servers that
+    expose an ``/v1/chat/completions`` endpoint.
     """
     if "/" in model:
         return model
-    prefix = _PROVIDER_PREFIX.get(provider, provider)
+    prefix = _PROVIDER_PREFIX.get(provider, "openai")
     return f"{prefix}/{model}"
 
 

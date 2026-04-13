@@ -37,8 +37,8 @@ class TestLiteLLMModelName:
     def test_already_prefixed_passthrough(self):
         assert litellm_model_name("openai", "openai/gpt-4o") == "openai/gpt-4o"
 
-    def test_custom_provider(self):
-        assert litellm_model_name("custom", "my-model") == "custom/my-model"
+    def test_unknown_provider_defaults_to_openai(self):
+        assert litellm_model_name("custom", "my-model") == "openai/my-model"
 
 
 # ── Tool schemas ───────────────────────────────────────────────────── #
