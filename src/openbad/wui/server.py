@@ -2127,7 +2127,7 @@ async def _get_onboarding_status(request: web.Request) -> web.Response:
         redirect_to = "/providers?wizard=1"
     elif not sleep_complete:
         next_step = "sleep"
-        redirect_to = "/health?onboarding=sleep"
+        redirect_to = "/scheduling?onboarding=sleep"
     elif not assistant_identity_complete:
         next_step = "assistant_identity"
         redirect_to = "/chat?onboarding=assistant"
@@ -2829,32 +2829,18 @@ _CAPABILITIES_CATALOG = [
     },
     {
         "id": "mcp_browser",
-        "label": "Browser (MCP)",
+        "label": "Browser Automation",
         "icon": "🌍",
-        "level": 2,
-        "module": "openbad.toolbelt.mcp_bridge.mcp_runner",
-        "description": "Isolated MCP bridge for browser automation via Playwright. Spins up only for explicitly tagged task nodes and tears down when the node completes.",
+        "level": 1,
+        "module": "openbad.toolbelt.mcp_bridge.browser_context",
+        "description": "Embedded browser automation via Playwright MCP. Navigates pages, clicks elements, fills forms, and captures screenshots. Managed by the interoceptive governor.",
         "tools": [
             {"name": "browser_navigate", "signature": "browser_navigate(url: str) -> str", "description": "Navigate to a URL and return page content."},
             {"name": "browser_click", "signature": "browser_click(selector: str) -> None", "description": "Click an element on the page."},
             {"name": "browser_fill", "signature": "browser_fill(selector: str, value: str) -> None", "description": "Fill a form field."},
             {"name": "browser_screenshot", "signature": "browser_screenshot() -> bytes", "description": "Capture the current page as PNG."},
         ],
-        "gates": ["task-scoped: created per task run, torn down after", "interoception: refuses launch if RAM/thermal limits breached", "audit: every call logged to mcp_audit table"],
-    },
-    {
-        "id": "mcp_github",
-        "label": "GitHub (MCP)",
-        "icon": "🐙",
-        "level": 2,
-        "module": "openbad.toolbelt.mcp_bridge.mcp_runner",
-        "description": "Isolated MCP bridge for GitHub API operations. Bound to one task run, audited per call.",
-        "tools": [
-            {"name": "gh_list_issues", "signature": "gh_list_issues(repo: str) -> list[Issue]", "description": "List open issues for a repository."},
-            {"name": "gh_create_pr", "signature": "gh_create_pr(repo: str, title: str, body: str, head: str, base: str) -> PR", "description": "Create a pull request."},
-            {"name": "gh_get_file", "signature": "gh_get_file(repo: str, path: str, ref: str) -> str", "description": "Fetch file contents from a repository."},
-        ],
-        "gates": ["task-scoped only", "policy: MCPPolicy.allowed_servers must include 'github'", "audit: every call logged to mcp_audit table"],
+        "gates": ["interoception: refuses launch if RAM/thermal limits breached", "audit: every call logged to mcp_audit table"],
     },
     {
         "id": "memory",

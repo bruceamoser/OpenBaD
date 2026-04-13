@@ -21,9 +21,10 @@
     { href: '/senses',    label: 'Senses',    icon: '👁' },
     { href: '/toolbelt',  label: 'Toolbelt',  icon: '🔧' },
     { href: '/immune',    label: 'Immune',    icon: '🛡' },
-    { href: '/skills',    label: 'Skills',    icon: '🛠' },
-    { href: '/entity',    label: 'Entity',    icon: '👤' },
-    { href: '/debug',     label: 'Debug',     icon: '🐛' },
+    { href: '/skills',     label: 'Skills',     icon: '🛠' },
+    { href: '/scheduling', label: 'Scheduling', icon: '⏰' },
+    { href: '/entity',     label: 'Entity',     icon: '👤' },
+    { href: '/debug',      label: 'Debug',      icon: '🐛' },
   ];
 
   let sidebarOpen = $state(true);

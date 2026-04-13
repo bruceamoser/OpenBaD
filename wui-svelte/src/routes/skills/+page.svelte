@@ -39,17 +39,13 @@
   function handleKeydown(e: KeyboardEvent): void {
     if (e.key === 'Escape') closeModal();
   }
-
-  function levelBadgeColor(level: number): string {
-    return level === 1 ? 'var(--green)' : 'var(--mauve)';
-  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="page-header">
   <h2>Skills & Capabilities</h2>
-  <p>Built-in tools available to the agent — click a card for details</p>
+  <p>Embedded skills available to the agent — click a card for details</p>
 </div>
 
 {#if loading}
@@ -58,32 +54,15 @@
   <p class="empty">No capabilities registered.</p>
 {:else}
   <div class="caps-section">
-    <h3 class="section-heading">Level 1 — Core tools</h3>
+    <h3 class="section-heading">Embedded Skills</h3>
     <div class="caps-grid">
-      {#each capabilities.filter(c => c.level === 1) as cap}
+      {#each capabilities as cap}
         <button class="cap-card" onclick={() => selected = cap}>
           <span class="cap-icon">{cap.icon}</span>
           <div class="cap-info">
             <span class="cap-label">{cap.label}</span>
             <span class="cap-desc">{cap.description.slice(0, 70)}{cap.description.length > 70 ? '…' : ''}</span>
           </div>
-          <span class="cap-level-badge" style="color:{levelBadgeColor(cap.level)}">L{cap.level}</span>
-        </button>
-      {/each}
-    </div>
-  </div>
-
-  <div class="caps-section">
-    <h3 class="section-heading">Level 2 — MCP extensions</h3>
-    <div class="caps-grid">
-      {#each capabilities.filter(c => c.level === 2) as cap}
-        <button class="cap-card" onclick={() => selected = cap}>
-          <span class="cap-icon">{cap.icon}</span>
-          <div class="cap-info">
-            <span class="cap-label">{cap.label}</span>
-            <span class="cap-desc">{cap.description.slice(0, 70)}{cap.description.length > 70 ? '…' : ''}</span>
-          </div>
-          <span class="cap-level-badge" style="color:{levelBadgeColor(cap.level)}">L{cap.level}</span>
         </button>
       {/each}
     </div>
@@ -102,8 +81,8 @@
           <h3 id="modal-title">{selected.label}</h3>
           <code class="modal-module">{selected.module}</code>
         </div>
-        <span class="modal-level-badge" style="color:{levelBadgeColor(selected.level)}">
-          Level {selected.level}
+        <span class="modal-level-badge">
+          Embedded
         </span>
         <button class="modal-close" onclick={closeModal} aria-label="Close">✕</button>
       </div>
