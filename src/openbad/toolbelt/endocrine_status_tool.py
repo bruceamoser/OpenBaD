@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EndocrineStatusToolConfig:
-    base_url: str = "http://127.0.0.1:8080"
+    base_url: str = "http://127.0.0.1:9200"
     timeout: float = 5.0
 
 
