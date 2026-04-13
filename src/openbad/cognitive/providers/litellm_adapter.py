@@ -32,8 +32,12 @@ log = logging.getLogger(__name__)
 
 
 # Map internal provider names → LiteLLM model prefix.
+# NOTE: ``github-copilot`` is deliberately mapped to ``openai`` so that
+# LiteLLM routes through its generic OpenAI-compatible codepath.  The
+# built-in ``github_copilot`` provider triggers an interactive OAuth
+# device-flow that blocks for minutes — unusable from a headless service.
 _PROVIDER_PREFIX: dict[str, str] = {
-    "github-copilot": "github_copilot",
+    "github-copilot": "openai",
     "ollama": "ollama",
     "anthropic": "anthropic",
     "openai": "openai",

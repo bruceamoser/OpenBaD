@@ -28,8 +28,8 @@ class TestLiteLLMModelName:
     def test_prefixes_provider(self):
         assert litellm_model_name("ollama", "llama3.2") == "ollama/llama3.2"
 
-    def test_github_copilot(self):
-        assert litellm_model_name("github-copilot", "gpt-4o") == "github_copilot/gpt-4o"
+    def test_github_copilot_routes_via_openai(self):
+        assert litellm_model_name("github-copilot", "gpt-4o") == "openai/gpt-4o"
 
     def test_anthropic(self):
         assert litellm_model_name("anthropic", "claude-sonnet-4") == "anthropic/claude-sonnet-4"

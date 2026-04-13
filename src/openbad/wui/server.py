@@ -811,6 +811,27 @@ def _build_litellm_adapter(
 
     default_model = litellm_model_name(provider.name, model) if model else ""
     api_base = provider.base_url or ""
+    extra_kwargs: dict[str, object] = {}
+
+    # GitHub Copilot: load token via the existing GitHubCopilotProvider
+    # token manager (env var → disk cache → refresh).  LiteLLM's built-in
+    # ``github_copilot`` provider is NOT used because it triggers an
+    # interactive OAuth device-flow that blocks headless services.
+    if provider.name == "github-copilot" and not api_key:
+        from openbad.cognitive.providers.github_copilot import (
+            CopilotAuthError,
+            GitHubCopilotProvider,
+        )
+
+        try:
+            api_key = GitHubCopilotProvider()._get_token()
+        except CopilotAuthError:
+            log.warning(
+                "No Copilot token available — re-authenticate via "
+                "Settings → Providers → GitHub Copilot."
+            )
+    if provider.name == "github-copilot":
+        extra_kwargs["extra_headers"] = {"Editor-Version": "openbad/0.1.0"}
 
     # LiteLLM's OpenAI codepath requires *some* api_key even for local
     # servers that don't check it (llama.cpp, vLLM, etc.).  Supply a
@@ -824,6 +845,7 @@ def _build_litellm_adapter(
         api_key=api_key,
         api_base=api_base,
         timeout_s=timeout_s,
+        extra_kwargs=extra_kwargs,
     )
 
 
