@@ -1,6 +1,6 @@
 {
   "name": "openbad-wui",
-  "version": "0.1.39",
+  "version": "0.1.41",
   "private": true,
   "type": "module",
   "scripts": {

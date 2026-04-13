@@ -101,15 +101,15 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         return json.dumps(records, indent=2, default=str)
 
     if name == "get_system_logs":
-        from openbad.toolbelt.system_logs_tool import SystemLogsToolAdapter
+        from openbad.toolbelt.event_log_tool import EventLogToolAdapter
 
-        adapter = SystemLogsToolAdapter()
-        logs = await asyncio.to_thread(
-            adapter.get_system_logs,
+        adapter = EventLogToolAdapter()
+        events = await asyncio.to_thread(
+            adapter.read_events,
             limit=args.get("limit", 200),
-            system=args.get("system", ""),
+            source=args.get("system", ""),
         )
-        return json.dumps(logs, indent=2, default=str)
+        return json.dumps(events, indent=2, default=str)
 
     if name == "read_events":
         from openbad.toolbelt.event_log_tool import EventLogToolAdapter

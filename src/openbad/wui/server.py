@@ -78,12 +78,6 @@ BUILD_DIR = Path(__file__).resolve().parent / "build"
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# In-memory log ring buffer — captures recent log lines per subsystem
-# ---------------------------------------------------------------------------
-
-_LOG_BUFFER: deque[dict[str, str]] = deque(maxlen=500)
-
 _HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
 _HEARTBEAT_CONFIG_DEFAULT = {"interval_seconds": 60}
 _TELEMETRY_CONFIG_PATH = Path("/var/lib/openbad/telemetry.yaml")
@@ -107,35 +101,6 @@ def _heartbeat_timer_status() -> str:
     except Exception:  # noqa: BLE001
         return "unknown"
 
-
-class _RingBufferHandler(logging.Handler):
-    """Logging handler that appends records to :data:`_LOG_BUFFER`."""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            _LOG_BUFFER.append({
-                "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
-                "level": record.levelname,
-                "logger": record.name,
-                "msg": self.format(record),
-            })
-        except Exception:  # noqa: BLE001
-            pass
-
-
-_ring_handler = _RingBufferHandler()
-_ring_handler.setLevel(logging.DEBUG)
-_ring_handler.setFormatter(logging.Formatter("%(message)s"))
-
-for _log_name in [
-    "openbad.tasks",
-    "openbad.endocrine",
-    "openbad.reflex_arc",
-    "openbad.active_inference",
-    "openbad.immune_system",
-    "openbad.wui",
-]:
-    logging.getLogger(_log_name).addHandler(_ring_handler)
 
 _RESTRICTED_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
 _SETUP_REDIRECT = "/providers?wizard=1"
@@ -2672,18 +2637,6 @@ async def _get_mqtt_log(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# Debug logs
-# ---------------------------------------------------------------------------
-
-async def _get_debug_logs(request: web.Request) -> web.Response:
-    system = request.rel_url.query.get("system", "")
-    limit = int(request.rel_url.query.get("limit", "200"))
-    entries = list(_LOG_BUFFER)
-    if system:
-        entries = [e for e in entries if system in e.get("logger", "")]
-    return web.json_response({"logs": entries[-limit:]})
-
-
 async def _get_system_events(request: web.Request) -> web.Response:
     """GET /api/events — persistent event log (loguru JSON-lines file)."""
     from openbad.state.event_log import recent_events  # noqa: PLC0415
@@ -2763,18 +2716,6 @@ _CAPABILITIES_CATALOG = [
             {"name": "get_mqtt_records", "signature": "get_mqtt_records(limit: int = 100) -> list[dict]", "description": "Return recent broker records from /api/mqtt/log without mutating system state."},
         ],
         "gates": ["read-only endpoint", "limited by API response window"],
-    },
-    {
-        "id": "diagnostics_logs",
-        "label": "System Logs Diagnostics",
-        "icon": "📜",
-        "level": 1,
-        "module": "openbad.toolbelt.system_logs_tool",
-        "description": "Read recent buffered system logs and optionally filter by subsystem logger name.",
-        "tools": [
-            {"name": "get_system_logs", "signature": "get_system_logs(limit: int = 200, system: str = '') -> list[dict]", "description": "Return records from /api/debug/logs for runtime triage."},
-        ],
-        "gates": ["read-only endpoint", "optional subsystem filter"],
     },
     {
         "id": "event_log",
@@ -2957,7 +2898,6 @@ def create_app(
     app.router.add_post("/api/research", _post_research)
     app.router.add_get("/api/research/completed", _get_research_completed)
     app.router.add_get("/api/mqtt/log", _get_mqtt_log)
-    app.router.add_get("/api/debug/logs", _get_debug_logs)
     app.router.add_get("/api/events", _get_system_events)
     app.router.add_get("/api/capabilities", _get_capabilities)
 

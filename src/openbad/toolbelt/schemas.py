@@ -139,7 +139,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "get_system_logs",
-        "Retrieve recent system journal logs. Optionally filter by subsystem.",
+        "Retrieve recent persistent system log events. Optionally filter by source subsystem.",
         {
             "limit": {
                 "type": "integer",
@@ -147,7 +147,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
             "system": {
                 "type": "string",
-                "description": "Optional system name filter (e.g. 'openbad', 'openbad-wui').",
+                "description": "Optional source module filter (e.g. 'wui', 'endocrine').",
             },
         },
     ),
