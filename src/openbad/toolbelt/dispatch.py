@@ -7,6 +7,7 @@ conversation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -94,14 +95,17 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         from openbad.toolbelt.mqtt_records_tool import MqttRecordsToolAdapter
 
         adapter = MqttRecordsToolAdapter()
-        records = adapter.get_mqtt_records(limit=args.get("limit", 100))
+        records = await asyncio.to_thread(
+            adapter.get_mqtt_records, limit=args.get("limit", 100),
+        )
         return json.dumps(records, indent=2, default=str)
 
     if name == "get_system_logs":
         from openbad.toolbelt.system_logs_tool import SystemLogsToolAdapter
 
         adapter = SystemLogsToolAdapter()
-        logs = adapter.get_system_logs(
+        logs = await asyncio.to_thread(
+            adapter.get_system_logs,
             limit=args.get("limit", 200),
             system=args.get("system", ""),
         )
@@ -111,7 +115,8 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         from openbad.toolbelt.event_log_tool import EventLogToolAdapter
 
         adapter = EventLogToolAdapter()
-        events = adapter.read_events(
+        events = await asyncio.to_thread(
+            adapter.read_events,
             limit=args.get("limit", 100),
             level=args.get("level", ""),
             source=args.get("source", ""),
@@ -123,7 +128,8 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         from openbad.toolbelt.event_log_tool import EventLogToolAdapter
 
         adapter = EventLogToolAdapter()
-        ok = adapter.write_event(
+        ok = await asyncio.to_thread(
+            adapter.write_event,
             message=args["message"],
             level=args.get("level", "INFO"),
             source=args.get("source", "system"),
@@ -134,21 +140,22 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         from openbad.toolbelt.endocrine_status_tool import EndocrineStatusToolAdapter
 
         adapter = EndocrineStatusToolAdapter()
-        status = adapter.get_endocrine_status()
+        status = await asyncio.to_thread(adapter.get_endocrine_status)
         return json.dumps(status, indent=2, default=str)
 
     if name == "get_tasks":
         from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
         adapter = TasksDiagnosticsToolAdapter()
-        tasks = adapter.get_tasks()
+        tasks = await asyncio.to_thread(adapter.get_tasks)
         return json.dumps(tasks, indent=2, default=str)
 
     if name == "create_task":
         from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
         adapter = TasksDiagnosticsToolAdapter()
-        result = adapter.create_task(
+        result = await asyncio.to_thread(
+            adapter.create_task,
             title=args["title"],
             description=args.get("description", ""),
             owner=args.get("owner", "user"),
@@ -159,14 +166,15 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
         adapter = ResearchDiagnosticsToolAdapter()
-        nodes = adapter.get_research_nodes()
+        nodes = await asyncio.to_thread(adapter.get_research_nodes)
         return json.dumps(nodes, indent=2, default=str)
 
     if name == "create_research_node":
         from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
         adapter = ResearchDiagnosticsToolAdapter()
-        result = adapter.create_research_node(
+        result = await asyncio.to_thread(
+            adapter.create_research_node,
             title=args["title"],
             description=args.get("description", ""),
             priority=args.get("priority", 0),
