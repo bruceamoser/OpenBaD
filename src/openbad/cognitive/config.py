@@ -16,6 +16,9 @@ class CognitiveSystem(StrEnum):
     SLEEP = "sleep"
     REASONING = "reasoning"
     REACTIONS = "reactions"
+    DOCTOR = "doctor"
+    RESEARCH = "research"
+    TASKS = "tasks"
 
 
 @dataclass(frozen=True)

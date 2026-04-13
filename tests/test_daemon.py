@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from openbad.daemon import Daemon
 
@@ -111,6 +112,24 @@ class TestDaemonSubsystems:
         assert d.fsm._client is mock_client  # noqa: SLF001
         await d.stop()
         await task
+
+
+class TestHardwareTelemetryConfig:
+    def test_load_hardware_telemetry_interval_default_when_missing(self, tmp_path, monkeypatch):
+        import openbad.daemon as daemon
+
+        monkeypatch.setattr(daemon, "_TELEMETRY_CONFIG_PATH", tmp_path / "telemetry.yaml")
+
+        assert daemon._load_hardware_telemetry_interval() == 5.0
+
+    def test_load_hardware_telemetry_interval_from_config(self, tmp_path, monkeypatch):
+        import openbad.daemon as daemon
+
+        cfg_path = tmp_path / "telemetry.yaml"
+        cfg_path.write_text(yaml.safe_dump({"interval_seconds": 12}))
+        monkeypatch.setattr(daemon, "_TELEMETRY_CONFIG_PATH", cfg_path)
+
+        assert daemon._load_hardware_telemetry_interval() == 12.0
 
     async def test_endocrine_controller_created(self, mock_client):
         d = Daemon()

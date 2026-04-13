@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { taskLiveLog } from '$lib/stores/websocket';
-  import { get as apiGet } from '$lib/api/client';
+  import { get as apiGet, post as apiPost } from '$lib/api/client';
 
   interface Task {
     task_id: string;
@@ -12,14 +12,31 @@
     kind: string;
     horizon: string;
     priority: number;
+    owner?: string;
     created_at: string;
     updated_at: string;
   }
 
   let tasks: Task[] = $state([]);
+  let showHeartbeatTasks = $state(false);
+  let createTitle = $state('');
+  let createDescription = $state('');
+  let createOwner = $state('user');
+  let createStatus = $state('');
+  let creating = $state(false);
   let error = $state('');
   let loading = $state(true);
   let expandedId = $state<string | null>(null);
+
+  let visibleTasks = $derived(
+    showHeartbeatTasks
+      ? tasks
+      : tasks.filter((task) => {
+          const title = (task.title ?? '').toLowerCase();
+          const owner = (task.owner ?? '').toLowerCase();
+          return !(title.includes('heartbeat') || owner === 'heartbeat-timer');
+        })
+  );
 
   const STATUS_COLOR: Record<string, string> = {
     pending:          'var(--yellow)',
@@ -52,6 +69,30 @@
     }
   }
 
+  async function createTask(): Promise<void> {
+    const title = createTitle.trim();
+    if (!title || creating) return;
+
+    creating = true;
+    createStatus = '';
+    try {
+      await apiPost<Task>('/api/tasks', {
+        title,
+        description: createDescription,
+        owner: createOwner.trim() || 'user',
+      });
+      createTitle = '';
+      createDescription = '';
+      createOwner = 'user';
+      createStatus = 'Task created';
+      await load();
+    } catch (e) {
+      createStatus = `Create failed: ${e}`;
+    } finally {
+      creating = false;
+    }
+  }
+
   // Reload when a task event arrives
   const unsub = taskLiveLog.subscribe((log) => {
     if (log.length > 0 && log[0].topic.startsWith('agent/task')) {
@@ -69,20 +110,47 @@
 </div>
 
 <div class="toolbar">
-  <span class="count">{tasks.length} task{tasks.length !== 1 ? 's' : ''}</span>
+  <span class="count">{visibleTasks.length} task{visibleTasks.length !== 1 ? 's' : ''}</span>
+  <label class="heartbeat-toggle">
+    <input type="checkbox" bind:checked={showHeartbeatTasks} />
+    Show heartbeat tasks
+  </label>
   <button class="secondary" onclick={load}>↻ Refresh</button>
 </div>
+
+<Card label="Create Task">
+  <div class="create-grid">
+    <label>
+      Title
+      <input type="text" placeholder="New task title" bind:value={createTitle} />
+    </label>
+    <label>
+      Owner
+      <input type="text" placeholder="user" bind:value={createOwner} />
+    </label>
+    <label class="full-row">
+      Description
+      <textarea rows="3" placeholder="Task details" bind:value={createDescription}></textarea>
+    </label>
+  </div>
+  <div class="create-actions">
+    <button onclick={createTask} disabled={creating || !createTitle.trim()}>
+      {creating ? 'Creating…' : 'Create Task'}
+    </button>
+    {#if createStatus}<span class="status-msg">{createStatus}</span>{/if}
+  </div>
+</Card>
 
 <Card label="Task Queue">
   {#if loading}
     <p class="muted">Loading…</p>
   {:else if error}
     <p class="error-msg">Error: {error}</p>
-  {:else if tasks.length === 0}
+  {:else if visibleTasks.length === 0}
     <p class="empty">No tasks recorded yet.</p>
   {:else}
     <div class="task-list">
-      {#each tasks as t}
+      {#each visibleTasks as t}
         <div class="task-row" onclick={() => expandedId = expandedId === t.task_id ? null : t.task_id}
              role="button" tabindex="0"
              onkeydown={(e) => e.key === 'Enter' && (expandedId = expandedId === t.task_id ? null : t.task_id)}>
@@ -124,6 +192,37 @@
 <style>
   .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
   .count { font-size: 0.85rem; color: var(--text-dim); }
+  .heartbeat-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+  .create-grid {
+    display: grid;
+    gap: 0.65rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 0.65rem;
+  }
+  .create-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.82rem;
+    color: var(--text-sub);
+  }
+  .create-grid input,
+  .create-grid textarea {
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+    color: var(--text);
+  }
+  .full-row { grid-column: 1 / -1; }
+  .create-actions { display: flex; align-items: center; gap: 0.65rem; }
+  .status-msg { font-size: 0.82rem; color: var(--text-sub); }
   .empty, .muted { color: var(--text-dim); padding: 2rem; text-align: center; }
   .error-msg { color: var(--red); padding: 1rem; }
   .task-list { display: flex; flex-direction: column; gap: 2px; }
@@ -152,4 +251,9 @@
   .ts { color: var(--text-dim); font-variant-numeric: tabular-nums; min-width: 7ch; }
   .topic-badge { color: var(--blue); font-weight: 600; }
   .event-payload { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  @media (max-width: 900px) {
+    .toolbar { flex-wrap: wrap; }
+    .create-grid { grid-template-columns: 1fr; }
+  }
 </style>

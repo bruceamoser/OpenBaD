@@ -319,6 +319,18 @@ install_package() {
         warn "  openbad-apply-heartbeat-interval not found in $SCRIPT_DIR"
     fi
 
+    # Install the privileged telemetry-interval helper script.
+    helper_src="$SCRIPT_DIR/openbad-apply-telemetry-interval"
+    helper_dst="/usr/local/bin/openbad-apply-telemetry-interval"
+    if [ -f "$helper_src" ]; then
+        cp "$helper_src" "$helper_dst"
+        chown root:root "$helper_dst"
+        chmod 755 "$helper_dst"
+        info "  Installed openbad-apply-telemetry-interval"
+    else
+        warn "  openbad-apply-telemetry-interval not found in $SCRIPT_DIR"
+    fi
+
     # Remove the old sudoers rule if it exists (no longer needed).
     rm -f "/etc/sudoers.d/openbad-heartbeat"
 
@@ -462,6 +474,20 @@ install_units() {
         warn "  openbad-heartbeat-watch.path not found in $CONFIG_SRC"
     fi
 
+    if [ -f "$CONFIG_SRC/openbad-telemetry-apply.service" ]; then
+        cp "$CONFIG_SRC/openbad-telemetry-apply.service" "$SYSTEMD_DIR/openbad-telemetry-apply.service"
+        info "  Installed openbad-telemetry-apply.service"
+    else
+        warn "  openbad-telemetry-apply.service not found in $CONFIG_SRC"
+    fi
+
+    if [ -f "$CONFIG_SRC/openbad-telemetry-watch.path" ]; then
+        cp "$CONFIG_SRC/openbad-telemetry-watch.path" "$SYSTEMD_DIR/openbad-telemetry-watch.path"
+        info "  Installed openbad-telemetry-watch.path"
+    else
+        warn "  openbad-telemetry-watch.path not found in $CONFIG_SRC"
+    fi
+
     systemctl daemon-reload
     info "Enabling services..."
     if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
@@ -473,6 +499,7 @@ install_units() {
     systemctl enable openbad-wui.service
     systemctl enable openbad-heartbeat.timer
     systemctl enable openbad-heartbeat-watch.path
+    systemctl enable openbad-telemetry-watch.path
 }
 
 # ------------------------------------------------------------------
@@ -498,6 +525,9 @@ start_services() {
     systemctl start openbad-heartbeat-apply.service
     systemctl start openbad-heartbeat.timer
     systemctl start openbad-heartbeat-watch.path
+    # Ensure telemetry interval from telemetry.yaml is applied and watched.
+    systemctl start openbad-telemetry-apply.service
+    systemctl start openbad-telemetry-watch.path
     info "Services started. Check status with: systemctl status openbad"
 }
 
@@ -557,11 +587,13 @@ validate_installation() {
 uninstall() {
     if has_systemd; then
         info "Stopping services..."
+        systemctl stop openbad-telemetry-watch.path 2>/dev/null || true
         systemctl stop openbad-heartbeat-watch.path 2>/dev/null || true
         systemctl stop openbad-heartbeat.timer 2>/dev/null || true
         systemctl stop openbad-wui.service 2>/dev/null || true
         systemctl stop openbad.service 2>/dev/null || true
         systemctl stop openbad-broker.service 2>/dev/null || true
+        systemctl disable openbad-telemetry-watch.path 2>/dev/null || true
         systemctl disable openbad-heartbeat-watch.path 2>/dev/null || true
         systemctl disable openbad-heartbeat.timer 2>/dev/null || true
         systemctl disable openbad-wui.service 2>/dev/null || true
@@ -572,6 +604,8 @@ uninstall() {
     fi
 
     info "Removing systemd units..."
+    rm -f "$SYSTEMD_DIR/openbad-telemetry-watch.path"
+    rm -f "$SYSTEMD_DIR/openbad-telemetry-apply.service"
     rm -f "$SYSTEMD_DIR/openbad-heartbeat-watch.path"
     rm -f "$SYSTEMD_DIR/openbad-heartbeat-apply.service"
     rm -f "$SYSTEMD_DIR/openbad-heartbeat.timer"
@@ -588,6 +622,7 @@ uninstall() {
         "$VENV_DIR/bin/python" -m pip uninstall -y openbad 2>/dev/null || true
     fi
     rm -f "$OPENBAD_BIN"
+    rm -f "/usr/local/bin/openbad-apply-telemetry-interval"
     rm -f "/usr/local/bin/openbad-apply-heartbeat-interval"
     rm -rf "/etc/systemd/system/openbad-heartbeat.timer.d"
     rm -rf "$VENV_DIR"

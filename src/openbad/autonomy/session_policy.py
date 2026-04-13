@@ -42,6 +42,15 @@ DEFAULT_SESSION_POLICY: dict[str, object] = {
             "allow_task_autonomy": False,
             "allow_research_autonomy": False,
             "allow_destructive": False,
+            "allow_endocrine_doctor": True,
+        },
+        "doctor": {
+            "session_id": "doctor-autonomy",
+            "label": "Doctor",
+            "allow_task_autonomy": False,
+            "allow_research_autonomy": False,
+            "allow_destructive": False,
+            "allow_endocrine_doctor": True,
         },
     }
 }
@@ -65,12 +74,21 @@ def load_session_policy(path: Path = SESSION_POLICY_PATH) -> dict[str, object]:
         except Exception:  # noqa: BLE001
             data = {}
 
-    result = {
-        "sessions": {
-            **(DEFAULT_SESSION_POLICY.get("sessions", {})),
-            **(data.get("sessions", {}) if isinstance(data.get("sessions"), dict) else {}),
-        }
-    }
+    default_sessions = DEFAULT_SESSION_POLICY.get("sessions", {})
+    loaded_sessions = data.get("sessions", {}) if isinstance(data.get("sessions"), dict) else {}
+    merged_sessions: dict[str, object] = {}
+    all_keys = set(default_sessions.keys()) | set(loaded_sessions.keys())
+    for key in all_keys:
+        default_obj = default_sessions.get(key, {})
+        loaded_obj = loaded_sessions.get(key, {})
+        if isinstance(default_obj, dict) and isinstance(loaded_obj, dict):
+            merged_sessions[key] = {**default_obj, **loaded_obj}
+        elif isinstance(loaded_obj, dict):
+            merged_sessions[key] = dict(loaded_obj)
+        elif isinstance(default_obj, dict):
+            merged_sessions[key] = dict(default_obj)
+
+    result = {"sessions": merged_sessions}
     return result
 
 

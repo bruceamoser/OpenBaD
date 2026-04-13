@@ -38,7 +38,10 @@
   let statusMsg = $state('');
   let sleepSaveMsg = $state('');
   let hbSaveMsg = $state('');
+  let telemetrySaveMsg = $state('');
   let hbInterval = $state(60);
+  let telemetryInterval = $state(5);
+  let telemetryAppliesOnRestart = $state(true);
   let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
   let sleepConfig = $state<SleepConfig>({
     sleep_window_start: '02:00',
@@ -63,6 +66,57 @@
   let adrenaline = $derived($endocrineLevels?.adrenaline ?? 0);
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
   let endorphin = $derived($endocrineLevels?.endorphin ?? 0);
+
+  interface SystemEvent {
+    ts: string;
+    level: string;
+    source: string;
+    message: string;
+    exception: string;
+    function: string;
+    line: number;
+  }
+
+  let eventLog: SystemEvent[] = $state([]);
+  let eventLoading = $state(false);
+  let eventFilter = $state('');
+  let eventLevelFilter = $state('');
+
+  async function loadEvents(): Promise<void> {
+    eventLoading = true;
+    try {
+      let url = '/api/events?limit=200';
+      if (eventLevelFilter) url += `&level=${eventLevelFilter}`;
+      if (eventFilter) url += `&search=${encodeURIComponent(eventFilter)}`;
+      const res = await apiGet<{ events: SystemEvent[] }>(url);
+      eventLog = res.events ?? [];
+    } catch {
+      // ignore
+    } finally {
+      eventLoading = false;
+    }
+  }
+
+  function eventLevelClass(level: string): string {
+    switch (level) {
+      case 'ERROR': return 'level-error';
+      case 'WARNING': return 'level-warning';
+      default: return 'level-info';
+    }
+  }
+
+  function eventLevelIcon(level: string): string {
+    switch (level) {
+      case 'ERROR': return '❌';
+      case 'WARNING': return '⚠️';
+      default: return 'ℹ️';
+    }
+  }
+
+  function shortSource(source: string): string {
+    // "openbad.wui.server" → "wui.server"
+    return source.replace(/^openbad\./, '');
+  }
 
   $effect(() => {
     if (currentFsm && currentFsm !== prevFsm && prevFsm) {
@@ -89,6 +143,31 @@
       setTimeout(() => { hbSaveMsg = ''; }, 2000);
     } catch (e) {
       hbSaveMsg = `Save failed: ${e}`;
+    }
+  }
+
+  async function loadTelemetryConfig(): Promise<void> {
+    try {
+      const res = await apiGet<{ interval_seconds: number; applies_on_restart?: boolean }>('/api/telemetry/config');
+      telemetryInterval = Number(res.interval_seconds ?? 5);
+      telemetryAppliesOnRestart = res.applies_on_restart !== false;
+    } catch {
+      // use default
+    }
+  }
+
+  async function saveTelemetryConfig(): Promise<void> {
+    try {
+      const payload = { interval_seconds: telemetryInterval };
+      const res = await apiPut<{ interval_seconds: number; applies_on_restart?: boolean }>('/api/telemetry/config', payload);
+      telemetryInterval = Number(res.interval_seconds ?? telemetryInterval);
+      telemetryAppliesOnRestart = res.applies_on_restart !== false;
+      telemetrySaveMsg = telemetryAppliesOnRestart
+        ? 'Saved (applies on daemon restart)'
+        : 'Saved';
+      setTimeout(() => { telemetrySaveMsg = ''; }, 2500);
+    } catch (e) {
+      telemetrySaveMsg = `Save failed: ${e}`;
     }
   }
 
@@ -139,6 +218,8 @@
   onMount(() => {
     loadSleepConfig();
     loadHeartbeatConfig();
+    loadTelemetryConfig();
+    loadEvents();
     historyInterval = setInterval(() => {
       cpuHistory = [...cpuHistory, cpu].slice(-SPARKLINE_MAX);
       memHistory = [...memHistory, mem].slice(-SPARKLINE_MAX);
@@ -243,10 +324,10 @@
   <Card label="Endocrine Levels">
     <div class="hormones">
       {#each [
-        { name: 'Dopamine', val: dopamine, emoji: '🧠' },
-        { name: 'Adrenaline', val: adrenaline, emoji: '⚡' },
-        { name: 'Cortisol', val: cortisol, emoji: '🔥' },
-        { name: 'Endorphin', val: endorphin, emoji: '✨' },
+          { name: 'Dopamine', val: dopamine, emoji: '🧠', desc: 'Rewards successful actions and exploration. Higher levels let the agent lean into confident execution.' },
+          { name: 'Adrenaline', val: adrenaline, emoji: '⚡', desc: 'Signals urgency and threat response. Higher levels push emergency handling and rapid safeguards.' },
+          { name: 'Cortisol', val: cortisol, emoji: '🔥', desc: 'Tracks sustained stress and instability. High cortisol increases defensive behavior and can trigger subsystem pauses.' },
+          { name: 'Endorphin', val: endorphin, emoji: '✨', desc: 'Reflects recovery and resilience. Higher levels support stabilization and safe return to normal operation.' },
       ] as h}
         <div class="hormone">
           <div class="hormone-label">
@@ -257,10 +338,52 @@
             <div class="hormone-fill gauge-bar-fill" style="width:{h.val * 100}%; background:{hormoneColor(h.val)}"></div>
           </div>
           <span class="hormone-val">{(h.val * 100).toFixed(0)}%</span>
+            <div class="hormone-desc">{h.desc}</div>
         </div>
       {/each}
     </div>
   </Card>
+
+  <!-- System Event Log — full width -->
+  <div class="activity-log-wrapper">
+    <Card label="System Event Log">
+      <div class="activity-header">
+        <p class="muted">Persistent log of all errors, warnings, and events across every subsystem.</p>
+        <div class="event-filters">
+          <select bind:value={eventLevelFilter} onchange={loadEvents}>
+            <option value="">All levels</option>
+            <option value="ERROR">Errors</option>
+            <option value="WARNING">Warnings</option>
+            <option value="INFO">Info</option>
+          </select>
+          <input type="text" placeholder="Search logs…" bind:value={eventFilter} onkeydown={(e) => { if (e.key === 'Enter') loadEvents(); }} />
+          <button class="secondary" onclick={loadEvents} disabled={eventLoading}>
+            {eventLoading ? 'Loading…' : '↻ Refresh'}
+          </button>
+        </div>
+      </div>
+      {#if eventLog.length === 0}
+        <p class="muted">No events recorded yet.</p>
+      {:else}
+        <div class="activity-list">
+          {#each eventLog as entry, i (i)}
+            <div class="activity-entry {eventLevelClass(entry.level)}">
+              <div class="activity-meta">
+                <span class="activity-icon">{eventLevelIcon(entry.level)}</span>
+                <span class="activity-time">{entry.ts}</span>
+                <span class="activity-source">{shortSource(entry.source)}</span>
+                <span class="event-function">{entry.function}:{entry.line}</span>
+              </div>
+              <div class="activity-reason">{entry.message}</div>
+              {#if entry.exception}
+                <div class="event-exception">{entry.exception}</div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </Card>
+  </div>
 
   <!-- Row 2: CPU + Memory sparklines -->
   <Card label="CPU Usage">
@@ -393,6 +516,26 @@
       </div>
     </div>
   </Card>
+
+  <Card label="Hardware Telemetry">
+    <div class="sleep-section">
+      <p class="muted">How often CPU, memory, disk, and network samples are collected and published.</p>
+      <div class="sleep-config-grid one-col">
+        <label>
+          Interval (seconds)
+          <input type="number" min="1" max="300" step="1" bind:value={telemetryInterval} />
+        </label>
+      </div>
+      <input class="hb-range" type="range" min="1" max="60" step="1" bind:value={telemetryInterval} />
+      {#if telemetryAppliesOnRestart}
+        <p class="muted">Changes apply after restarting the OpenBaD daemon service.</p>
+      {/if}
+      <div class="sleep-actions">
+        <button class="secondary" onclick={saveTelemetryConfig}>Save Telemetry Interval</button>
+        {#if telemetrySaveMsg}<span class="status-msg">{telemetrySaveMsg}</span>{/if}
+      </div>
+    </div>
+  </Card>
 </div>
 
 <style>
@@ -468,7 +611,12 @@
 
   /* Hormones */
   .hormones { display: flex; flex-direction: column; gap: 0.75rem; }
-  .hormone { display: flex; align-items: center; gap: 0.6rem; }
+  .hormone {
+    display: grid;
+    grid-template-columns: 7.5rem 1fr 3rem;
+    gap: 0.45rem 0.6rem;
+    align-items: center;
+  }
   .hormone-label { display: flex; align-items: center; gap: 0.4rem; width: 7.5rem; flex-shrink: 0; }
   .hormone-emoji { font-size: 1rem; }
   .hormone-name { font-size: 0.85rem; font-weight: 600; color: var(--text-sub); }
@@ -490,6 +638,12 @@
     font-size: 0.8rem;
     font-weight: 600;
     color: var(--text-sub);
+  }
+  .hormone-desc {
+    grid-column: 2 / 4;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    line-height: 1.35;
   }
 
   /* Sparklines */
@@ -536,6 +690,9 @@
     background: var(--bg-surface1);
     color: var(--text);
   }
+  .sleep-config-grid.one-col {
+    grid-template-columns: 1fr;
+  }
   .sleep-check {
     display: flex;
     align-items: center;
@@ -557,5 +714,97 @@
 
   @media (max-width: 900px) {
     .sleep-config-grid { grid-template-columns: 1fr; }
+  }
+
+  /* Activity Log */
+  .activity-log-wrapper {
+    grid-column: 1 / -1;
+  }
+  .activity-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+  .activity-header p { margin: 0; }
+  .activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .activity-entry {
+    padding: 0.5rem 0.65rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+    border-left: 3px solid var(--border);
+  }
+  .activity-entry.level-error {
+    border-left-color: var(--red);
+    background: color-mix(in srgb, var(--red) 6%, var(--bg-surface1));
+  }
+  .activity-entry.level-warning {
+    border-left-color: var(--yellow);
+  }
+  .activity-entry.level-info {
+    border-left-color: var(--blue, var(--border));
+  }
+  .activity-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .activity-icon { font-size: 0.9rem; }
+  .activity-time {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: monospace;
+    min-width: 5rem;
+  }
+  .activity-source {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-sub);
+    padding: 0.1rem 0.4rem;
+    background: var(--bg-surface2, var(--bg));
+    border-radius: 999px;
+  }
+  .event-function {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: monospace;
+    margin-left: auto;
+  }
+  .event-filters {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .event-filters select, .event-filters input {
+    font-size: 0.8rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+    color: var(--text);
+  }
+  .event-filters input { min-width: 10rem; }
+  .event-exception {
+    font-size: 0.75rem;
+    color: var(--red);
+    font-family: monospace;
+    margin-top: 0.2rem;
+    padding: 0.2rem 0.4rem;
+    background: color-mix(in srgb, var(--red) 5%, var(--bg-surface1));
+    border-radius: var(--radius-sm);
+  }
+  .activity-reason {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-top: 0.25rem;
+    line-height: 1.4;
   }
 </style>

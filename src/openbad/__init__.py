@@ -1,3 +1,3 @@
 """OpenBaD — Biological as Digital agent framework."""
 
-__version__ = "0.1.20"
+__version__ = "0.1.31"

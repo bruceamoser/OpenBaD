@@ -157,9 +157,10 @@ class AgentFSM:
     def handle_event(self, topic: str, payload: bytes | EndocrineEvent | ImmuneAlert) -> bool:
         """Route an event-bus message to the correct FSM trigger.
 
-        For ``agent/endocrine/cortisol`` the trigger fires only when
-        the message severity is CRITICAL.  For ``agent/immune/alert``
-        the trigger fires only when severity is CRITICAL.
+        For ``agent/endocrine/cortisol`` and ``agent/endocrine/adrenaline``
+        triggers fire only when the message severity is CRITICAL.
+        For ``agent/immune/alert`` the trigger also fires only when
+        severity is CRITICAL.
 
         Returns *True* if a transition was fired, *False* otherwise.
         """
@@ -170,8 +171,12 @@ class AgentFSM:
         if topic.startswith("agent/endocrine/") and self._extract_level(payload) <= 0.0:
             return False
 
-        # Severity gating for cortisol and immune/alert
-        if topic in ("agent/endocrine/cortisol", "agent/immune/alert"):
+        # Severity gating for endocrine escalations and immune/alert
+        if topic in (
+            "agent/endocrine/cortisol",
+            "agent/endocrine/adrenaline",
+            "agent/immune/alert",
+        ):
             severity = self._extract_severity(topic, payload)
             if severity != 3:  # CRITICAL = 3 in the proto enum
                 return False

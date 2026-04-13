@@ -290,6 +290,51 @@ async def test_get_setup_status_ready_with_valid_provider_and_chat_assignment(
 
 
 @pytest.mark.asyncio
+async def test_get_setup_status_not_first_run_with_valid_provider_even_when_chat_assignment_invalid(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    config_path = config_dir / "cognitive.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "cognitive": {
+                    "enabled": True,
+                    "providers": [
+                        {
+                            "name": "openai",
+                            "base_url": "https://api.openai.com",
+                            "api_key": "secret-key",
+                            "api_key_env": "OPENAI_API_KEY",
+                            "timeout_ms": 30000,
+                            "enabled": True,
+                        }
+                    ],
+                    "systems": {
+                        "chat": {"provider": "github-copilot", "model": "gpt-4o"},
+                    },
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/setup-status")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["first_run"] is False
+    assert data["provider_ready"] is True
+    assert data["chat_assignment_ready"] is False
+    assert data["redirect_to"] == ""
+
+
+@pytest.mark.asyncio
 async def test_verify_copilot_provider_route(aiohttp_client):
     app = create_app(enable_mqtt=False)
     client = await aiohttp_client(app)
@@ -507,6 +552,60 @@ async def test_github_copilot_list_models_falls_back_to_known_models():
     assert "gpt-4o" in [model.model_id for model in models]
 
 
+@pytest.mark.asyncio
+async def test_get_provider_models_includes_persisted_system_model_when_discovery_varies(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    (config_dir / "cognitive.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "cognitive": {
+                    "enabled": True,
+                    "providers": [
+                        {
+                            "name": "github-copilot",
+                            "base_url": "https://api.githubcopilot.com",
+                            "api_key_env": "GITHUB_COPILOT_TOKEN",
+                            "timeout_ms": 30000,
+                            "enabled": True,
+                        }
+                    ],
+                    "systems": {
+                        "chat": {"provider": "github-copilot", "model": "gpt-5.1"},
+                    },
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    with patch("openbad.wui.server._build_wizard_adapter") as adapter_builder:
+        adapter = adapter_builder.return_value
+        adapter.list_models = AsyncMock(
+            return_value=[
+                type(
+                    "Model",
+                    (),
+                    {"model_id": "gpt-4o", "provider": "github-copilot", "context_window": 128000},
+                )(),
+            ]
+        )
+
+        resp = await client.get("/api/providers/github-copilot/models")
+
+    assert resp.status == 200
+    data = await resp.json()
+    model_ids = [m["model_id"] for m in data["models"]]
+    assert "gpt-5.1" in model_ids
+    assert "gpt-4o" in model_ids
+
+
 # ── System assignment endpoints ──────────────────────────────────── #
 
 
@@ -600,11 +699,92 @@ async def test_resolve_chat_adapter_requires_explicit_system_model(aiohttp_clien
         },
     )
 
-    adapter, model, provider_name = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is None
     assert model is None
-    assert provider_name is None
+    assert provider_name == ""
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_adapter_falls_back_to_first_valid_provider_when_assignment_invalid(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    import openbad.wui.server as srv
+
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    config = CognitiveConfig(
+        providers=[
+            ProviderConfig(
+                name="openai",
+                base_url="https://api.openai.com",
+                model="",
+                api_key="secret-key",
+                api_key_env="OPENAI_API_KEY",
+                enabled=True,
+            )
+        ],
+        systems={
+            CognitiveSystem.CHAT: SystemAssignment(provider="github-copilot", model="gpt-4o"),
+            CognitiveSystem.REASONING: SystemAssignment(),
+            CognitiveSystem.REACTIONS: SystemAssignment(),
+            CognitiveSystem.SLEEP: SystemAssignment(),
+        },
+    )
+
+    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+
+    assert adapter is not None
+    assert model == "gpt-4o-mini"
+    assert provider_name == "openai"
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_adapter_fallback_uses_model_from_other_system_assignment(
+    aiohttp_client, tmp_path, monkeypatch
+):
+    import openbad.wui.server as srv
+
+    config_dir = tmp_path / "openbad"
+    config_dir.mkdir()
+    monkeypatch.setenv("OPENBAD_CONFIG_DIR", str(config_dir))
+
+    config = CognitiveConfig(
+        providers=[
+            ProviderConfig(
+                name="custom",
+                base_url="http://localhost:11434/v1",
+                model="",
+                api_key="",
+                api_key_env="",
+                enabled=True,
+            ),
+            ProviderConfig(
+                name="github-copilot",
+                base_url="https://api.githubcopilot.com",
+                model="",
+                api_key="",
+                api_key_env="GITHUB_COPILOT_TOKEN",
+                enabled=True,
+            ),
+        ],
+        systems={
+            CognitiveSystem.CHAT: SystemAssignment(provider="github-copilot", model="gpt-5.1"),
+            CognitiveSystem.REASONING: SystemAssignment(),
+            CognitiveSystem.REACTIONS: SystemAssignment(provider="custom", model="Bonsai-8B.gguf"),
+            CognitiveSystem.SLEEP: SystemAssignment(),
+            CognitiveSystem.DOCTOR: SystemAssignment(provider="custom", model="Bonsai-8B.gguf"),
+        },
+    )
+
+    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+
+    assert adapter is not None
+    assert model == "Bonsai-8B.gguf"
+    assert provider_name == "custom"
 
 
 @pytest.mark.asyncio
@@ -978,7 +1158,31 @@ async def test_get_toolbelt_no_registry(aiohttp_client):
     resp = await client.get("/api/toolbelt")
     assert resp.status == 200
     data = await resp.json()
-    assert data == {"cabinet": {}, "belt": {}}
+    assert "cabinet" in data
+    assert "belt" in data
+    assert "cli" in data["cabinet"]
+    assert "code" in data["cabinet"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_registry_contains_split_diagnostics_tools(aiohttp_client):
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/toolbelt")
+    assert resp.status == 200
+    data = await resp.json()
+
+    all_names = {
+        item["name"]
+        for tools in data["cabinet"].values()
+        for item in tools
+    }
+    assert "mqtt-records-tool" in all_names
+    assert "system-logs-tool" in all_names
+    assert "endocrine-status-tool" in all_names
+    assert "tasks-diagnostics-tool" in all_names
+    assert "research-diagnostics-tool" in all_names
 
 
 @pytest.mark.asyncio
@@ -1555,3 +1759,89 @@ async def test_post_onboarding_skip_returns_success(aiohttp_client):
     data = await resp.json()
     assert data["success"] is True
     assert data["skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_telemetry_config_defaults(aiohttp_client, tmp_path, monkeypatch):
+    """GET /api/telemetry/config returns defaults when file is absent."""
+    import openbad.wui.server as srv
+
+    monkeypatch.setattr(srv, "_TELEMETRY_CONFIG_PATH", tmp_path / "telemetry.yaml")
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/telemetry/config")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["interval_seconds"] == 5
+    assert data["applies_on_restart"] is False
+
+
+@pytest.mark.asyncio
+async def test_put_telemetry_config_persists_interval(aiohttp_client, tmp_path, monkeypatch):
+    """PUT /api/telemetry/config persists selected interval."""
+    import openbad.wui.server as srv
+
+    cfg_path = tmp_path / "telemetry.yaml"
+    monkeypatch.setattr(srv, "_TELEMETRY_CONFIG_PATH", cfg_path)
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.put("/api/telemetry/config", json={"interval_seconds": 9})
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["interval_seconds"] == 9
+    assert data["applies_on_restart"] is False
+    saved = yaml.safe_load(cfg_path.read_text())
+    assert saved["interval_seconds"] == 9
+
+
+@pytest.mark.asyncio
+async def test_post_tasks_creates_task(aiohttp_client, tmp_path, monkeypatch):
+    import openbad.state.db as state_db
+
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/tasks",
+        json={"title": "Manual task", "description": "from ui", "owner": "user"},
+    )
+
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["title"] == "Manual task"
+    assert data["owner"] == "user"
+    assert data["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_post_research_creates_node(aiohttp_client, tmp_path, monkeypatch):
+    import openbad.state.db as state_db
+
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/research",
+        json={
+            "title": "Investigate provider timeout",
+            "description": "check latency trends",
+            "priority": 3,
+            "source_task_id": "task-123",
+        },
+    )
+
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["title"] == "Investigate provider timeout"
+    assert data["priority"] == 3
+    assert data["source_task_id"] == "task-123"

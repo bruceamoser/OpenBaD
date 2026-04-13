@@ -144,3 +144,46 @@ def test_node_to_dict(queue: ResearchQueue) -> None:
     assert d["title"] == "Dict check"
     assert d["priority"] == 1
     assert d["status"] == "pending"
+
+
+def test_enqueue_or_append_pending_reuses_existing_node(queue: ResearchQueue) -> None:
+    first = queue.enqueue_or_append_pending(
+        "Investigate provider availability degradation",
+        priority=-4,
+        description="Initial provider degradation signal.",
+        source_task_id="task-1",
+        observation="provider_health_check_failed provider=test",
+    )
+    second = queue.enqueue_or_append_pending(
+        "Investigate provider availability degradation",
+        priority=-4,
+        description="This description should not create a duplicate node.",
+        source_task_id="task-2",
+        observation="provider_health_check_failed provider=test",
+    )
+
+    assert first.node_id == second.node_id
+    pending = queue.list_pending()
+    assert len(pending) == 1
+    assert "Observation history:" in pending[0].description
+
+
+def test_enqueue_or_append_pending_keeps_most_urgent_priority(queue: ResearchQueue) -> None:
+    node = queue.enqueue_or_append_pending("Investigate failures", priority=-2)
+    updated = queue.enqueue_or_append_pending("Investigate failures", priority=-5)
+
+    assert node.node_id == updated.node_id
+    assert updated.priority == -5
+
+
+def test_enqueue_or_append_pending_sets_source_task_if_missing(queue: ResearchQueue) -> None:
+    node = queue.enqueue_or_append_pending("Investigate failures", priority=-2)
+    updated = queue.enqueue_or_append_pending(
+        "Investigate failures",
+        priority=-2,
+        source_task_id="task-123",
+        observation="recent_failed_tasks=4",
+    )
+
+    assert node.node_id == updated.node_id
+    assert updated.source_task_id == "task-123"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch OpenBaD telemetry config for changes
+Documentation=https://github.com/bruceamoser/OpenBaD
+
+[Path]
+# Fire openbad-telemetry-apply.service whenever the WUI writes a new interval.
+PathModified=/var/lib/openbad/telemetry.yaml
+Unit=openbad-telemetry-apply.service
+
+[Install]
+WantedBy=multi-user.target

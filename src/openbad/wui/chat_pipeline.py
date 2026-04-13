@@ -126,7 +126,8 @@ _REASONING_SUFFIX = (
     "\n\nThink step-by-step. Show your reasoning before giving a final answer."
 )
 _CHAT_SUFFIX = (
-    "\n\nAnswer clearly and concisely. Use markdown formatting when helpful."
+    "\n\nThink step-by-step. Show your reasoning before giving a final answer."
+    " Answer clearly and concisely. Use markdown formatting when helpful."
 )
 
 

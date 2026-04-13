@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from openbad.cli import main
+from openbad.cli import (
+    _normalized_endocrine_deltas,
+    _should_publish_endocrine_event,
+    main,
+)
 
 
 class TestMainGroup:
@@ -240,3 +244,31 @@ class TestInternalCommands:
         assert "--port" in result.output
         assert "--mqtt-host" in result.output
         assert "--mqtt-port" in result.output
+
+
+class TestEndocrineHelpers:
+    def test_normalized_endocrine_deltas_filters_unknown_and_zero(self):
+        normalized = _normalized_endocrine_deltas(
+            {
+                "cortisol": 0.12,
+                "adrenaline": 0.0,
+                "unknown": 1.0,
+                "dopamine": -0.03,
+            }
+        )
+
+        assert normalized == {"cortisol": 0.12, "dopamine": -0.03}
+
+    def test_should_publish_endocrine_event_false_for_no_change(self):
+        assert not _should_publish_endocrine_event(
+            {"cortisol": 0.6},
+            {"cortisol": 0.6},
+            "cortisol",
+        )
+
+    def test_should_publish_endocrine_event_true_for_change(self):
+        assert _should_publish_endocrine_event(
+            {"cortisol": 0.6},
+            {"cortisol": 0.62},
+            "cortisol",
+        )

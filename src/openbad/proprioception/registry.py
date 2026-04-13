@@ -44,6 +44,7 @@ class ToolRole(Enum):
     CODE = "CODE"
     FILE_SYSTEM = "FILE_SYSTEM"
     COMMUNICATION = "COMMUNICATION"
+    OBSERVABILITY = "OBSERVABILITY"
 
 
 @dataclass

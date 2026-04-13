@@ -92,6 +92,24 @@
   let loading = $state(true);
   let lastAutoOpenSearch = $state('');
 
+  // Edit modal state
+  let editIdx: number | null = $state(null);
+  let editName = $state('');
+  let editBaseUrl = $state('');
+  let editApiKeyEnv = $state('');
+  let editTimeoutMs = $state(30000);
+  let editEnabled = $state(true);
+  let editSaving = $state(false);
+  // Edit-mode copilot token renewal
+  let editRenewing = $state(false);
+  let editRenewFlowId = $state('');
+  let editRenewUserCode = $state('');
+  let editRenewVerifyUri = $state('');
+  let editRenewMsg = $state('');
+  let editRenewError = $state('');
+  let editRenewBusy = $state(false);
+  let editIsCopilot = $derived(editName.toLowerCase().includes('copilot'));
+
   // Wizard state
   let wizStep: WizardStep = $state('closed');
   let wizMsg = $state('');
@@ -121,7 +139,7 @@
   // Derived cortisol from WS
   let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
   let systemNames = $derived.by(() => {
-    const preferredOrder = ['chat', 'reasoning', 'reactions', 'sleep'];
+    const preferredOrder = ['chat', 'reasoning', 'research', 'tasks', 'reactions', 'doctor', 'sleep'];
     const keys = Object.keys(systems);
     return [...keys].sort((left, right) => {
       const leftIndex = preferredOrder.indexOf(left);
@@ -234,6 +252,115 @@
   async function removeProvider(idx: number): Promise<void> {
     providers = providers.filter((_, i) => i !== idx);
     await persistProviders();
+  }
+
+  // ----------------------------------------------------------------
+  // Edit provider
+  // ----------------------------------------------------------------
+
+  function openEditProvider(idx: number): void {
+    const p = providers[idx];
+    editIdx = idx;
+    editName = p.name;
+    editBaseUrl = p.base_url;
+    editApiKeyEnv = p.api_key_env;
+    editTimeoutMs = p.timeout_ms || 30000;
+    editEnabled = p.enabled;
+    editSaving = false;
+  }
+
+  function closeEditProvider(): void {
+    editIdx = null;
+    editRenewing = false;
+    editRenewFlowId = '';
+    editRenewUserCode = '';
+    editRenewVerifyUri = '';
+    editRenewMsg = '';
+    editRenewError = '';
+    editRenewBusy = false;
+  }
+
+  async function startEditCopilotRenewal(): Promise<void> {
+    editRenewBusy = true;
+    editRenewError = '';
+    editRenewMsg = '';
+    try {
+      const res = await apiPost<DeviceCodeResult>('/api/providers/copilot/device-code', {});
+      editRenewFlowId = res.flow_id;
+      editRenewUserCode = res.user_code;
+      editRenewVerifyUri = res.verification_uri;
+      editRenewing = true;
+      editRenewMsg = res.message;
+    } catch (e) {
+      editRenewError = `Failed to start Copilot auth: ${e}`;
+    } finally {
+      editRenewBusy = false;
+    }
+  }
+
+  async function completeEditCopilotRenewal(): Promise<void> {
+    if (!editRenewFlowId) {
+      editRenewError = 'Start renewal first.';
+      return;
+    }
+    editRenewBusy = true;
+    editRenewError = '';
+    editRenewMsg = 'Checking GitHub authorization state…';
+    try {
+      const res = await apiPost<CopilotCompleteResult>('/api/providers/copilot/complete', {
+        flow_id: editRenewFlowId,
+      });
+      if (res.pending) {
+        editRenewMsg = res.message;
+        editRenewBusy = false;
+        return;
+      }
+      if (res.authorized) {
+        editRenewMsg = '✅ Token renewed successfully!';
+        // Update the provider verified state
+        if (editIdx !== null) {
+          providers[editIdx] = { ...providers[editIdx], verified: true, models: res.models ?? [] };
+          providers = [...providers];
+        }
+        editRenewing = false;
+        editRenewFlowId = '';
+        // Reload providers data to refresh status
+        await load();
+      } else {
+        editRenewError = res.message || 'Authorization failed.';
+      }
+    } catch (e) {
+      editRenewError = `Authorization check failed: ${e}`;
+    } finally {
+      editRenewBusy = false;
+    }
+  }
+
+  async function copyEditCopilotCode(): Promise<void> {
+    if (!editRenewUserCode) return;
+    try {
+      await navigator.clipboard.writeText(editRenewUserCode);
+      editRenewMsg = 'Code copied to clipboard!';
+    } catch {
+      // clipboard not available
+    }
+  }
+
+  async function saveEditProvider(): Promise<void> {
+    if (editIdx === null) return;
+    editSaving = true;
+    providers[editIdx] = {
+      ...providers[editIdx],
+      name: editName.trim(),
+      base_url: editBaseUrl.trim(),
+      api_key_env: editApiKeyEnv.trim(),
+      timeout_ms: editTimeoutMs,
+      enabled: editEnabled,
+    };
+    providers = [...providers];
+    await persistProviders();
+    editSaving = false;
+    editIdx = null;
   }
 
   // ----------------------------------------------------------------
@@ -540,6 +667,97 @@
 </div>
 
 <!-- ============================================================ -->
+<!-- Edit Provider Modal                                          -->
+<!-- ============================================================ -->
+
+{#if editIdx !== null}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="wizard-overlay" onclick={closeEditProvider}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="wizard-panel" onclick={(e) => e.stopPropagation()}>
+      <h3>Edit Provider: {editName}</h3>
+
+      <label class="wiz-label">
+        Name
+        <input class="wiz-input" type="text" bind:value={editName} />
+      </label>
+
+      <label class="wiz-label">
+        Base URL
+        <input class="wiz-input" type="text" bind:value={editBaseUrl} placeholder="http://localhost:11434/v1" />
+      </label>
+
+      <label class="wiz-label">
+        API Key env var
+        <input class="wiz-input" type="text" bind:value={editApiKeyEnv} placeholder="e.g. OPENAI_API_KEY" />
+      </label>
+
+      <label class="wiz-label">
+        Timeout (ms)
+        <input class="wiz-input" type="number" bind:value={editTimeoutMs} min="1000" step="1000" />
+      </label>
+
+      <label class="wiz-check">
+        <input type="checkbox" bind:checked={editEnabled} />
+        Enabled
+      </label>
+
+      {#if editIsCopilot}
+        <div class="copilot-renewal-section">
+          <h4>Token Renewal</h4>
+          {#if editRenewing}
+            <div class="copilot-steps">
+              <div class="copilot-code-box">
+                <span class="copilot-code-label">Verification code</span>
+                <span class="copilot-code">{editRenewUserCode}</span>
+              </div>
+              <ol class="copilot-instructions">
+                <li>
+                  Open
+                  <a href={editRenewVerifyUri} target="_blank" rel="noopener noreferrer">{editRenewVerifyUri}</a>
+                </li>
+                <li>Enter the code above</li>
+                <li>Authorize the application</li>
+                <li>Return here and click the button below</li>
+              </ol>
+              <div class="copilot-actions">
+                <button class="btn-ghost" onclick={copyEditCopilotCode}>Copy code</button>
+                <button class="btn-ghost" onclick={() => window.open(editRenewVerifyUri, '_blank', 'noopener,noreferrer')}>
+                  Open GitHub
+                </button>
+                <button class="btn-primary" onclick={completeEditCopilotRenewal} disabled={editRenewBusy}>
+                  {editRenewBusy ? 'Checking…' : 'I entered the code'}
+                </button>
+              </div>
+            </div>
+          {:else}
+            <p class="renewal-hint">Copilot tokens expire after ~8 hours. Renew here when the token is expired or about to expire.</p>
+            <button class="btn-secondary" onclick={startEditCopilotRenewal} disabled={editRenewBusy}>
+              {editRenewBusy ? 'Starting…' : 'Renew Copilot Token'}
+            </button>
+          {/if}
+          {#if editRenewMsg && !editRenewError}
+            <p class="copilot-auth-msg">{editRenewMsg}</p>
+          {/if}
+          {#if editRenewError}
+            <p class="wizard-error">{editRenewError}</p>
+          {/if}
+        </div>
+      {/if}
+
+      <div class="wizard-done-actions">
+        <button class="btn-secondary" onclick={closeEditProvider}>Cancel</button>
+        <button class="btn-primary" onclick={saveEditProvider} disabled={editSaving}>
+          {editSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ============================================================ -->
 <!-- Setup Wizard (overlay)                                       -->
 <!-- ============================================================ -->
 
@@ -755,7 +973,10 @@
                 <span class="provider-model">{p.base_url || 'Configured connection'}</span>
                 <span class="provider-status" class:verified={p.verified} class:unverified={!p.verified}>{p.verified ? 'verified' : 'unverified'}</span>
               </div>
-              <button class="btn-icon btn-remove" onclick={() => removeProvider(i)} aria-label="Remove provider" title="Remove provider">&times;</button>
+              <div class="provider-actions">
+                <button class="btn-icon btn-edit" onclick={() => openEditProvider(i)} aria-label="Edit provider" title="Edit provider">✎</button>
+                <button class="btn-icon btn-remove" onclick={() => removeProvider(i)} aria-label="Remove provider" title="Remove provider">&times;</button>
+              </div>
             </div>
           {/each}
         </div>
@@ -788,7 +1009,7 @@
             <div class="sys-row">
               <div class="sys-label-wrap">
                 <span class="sys-icon">
-                  {#if sys === 'chat'}💬{:else if sys === 'reasoning'}🧠{:else if sys === 'reactions'}⚡{:else}😴{/if}
+                  {#if sys === 'chat'}💬{:else if sys === 'reasoning'}🧠{:else if sys === 'reactions'}⚡{:else if sys === 'doctor'}🩺{:else}😴{/if}
                 </span>
                 <span class="sys-label">{sys}</span>
               </div>
@@ -912,6 +1133,10 @@
     line-height: 1; transition: all 0.15s var(--ease);
   }
   .btn-remove:hover { color: var(--red); background: rgba(243, 139, 168, 0.1); }
+  .btn-edit:hover { color: var(--blue); background: rgba(137, 180, 250, 0.1); }
+  .provider-actions { display: flex; gap: 0.25rem; align-items: center; flex-shrink: 0; }
+  .wiz-check { display: flex; align-items: center; gap: 0.5rem; margin: 0.75rem 0; cursor: pointer; }
+  .wiz-check input[type="checkbox"] { width: 1.1rem; height: 1.1rem; accent-color: var(--blue); }
 
   /* ---- Buttons ---- */
   .btn-primary {
@@ -921,6 +1146,12 @@
   }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary {
+    background: var(--bg-surface2); color: var(--text-sub); font-weight: 600;
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.5rem 1.25rem;
+    cursor: pointer; transition: all 0.15s var(--ease);
+  }
+  .btn-secondary:hover { background: var(--bg-surface1); color: var(--text-main); }
   .btn-lg { padding: 0.75rem 2rem; font-size: 1rem; }
 
   .btn-ghost {
@@ -1043,6 +1274,18 @@
   }
   .copilot-auth-msg {
     font-size: 0.85rem; color: var(--text-dim); margin: 0;
+  }
+
+  /* ---- Edit: Copilot renewal ---- */
+  .copilot-renewal-section {
+    margin-top: 0.75rem; padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  .copilot-renewal-section h4 {
+    margin: 0 0 0.5rem; font-size: 0.9rem; color: var(--text-sub);
+  }
+  .renewal-hint {
+    font-size: 0.8rem; color: var(--text-dim); margin: 0 0 0.5rem;
   }
 
   /* ---- Wizard: Local form ---- */

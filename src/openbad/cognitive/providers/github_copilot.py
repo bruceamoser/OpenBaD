@@ -234,6 +234,18 @@ class GitHubCopilotProvider(ProviderAdapter):
         )
         raise CopilotAuthError(msg)
 
+    def token_ttl_seconds(self) -> float | None:
+        """Return seconds until the stored token expires, or None if no token."""
+        if os.environ.get("GITHUB_COPILOT_TOKEN", ""):
+            return float("inf")  # env var tokens are managed externally
+        if not self._token_file.exists():
+            return None
+        try:
+            data = json.loads(self._token_file.read_text())
+            return data.get("expires_at", 0) - time.time()
+        except (OSError, json.JSONDecodeError):
+            return None
+
     def _headers(self) -> dict[str, str]:
         token = self._get_token()
         return {

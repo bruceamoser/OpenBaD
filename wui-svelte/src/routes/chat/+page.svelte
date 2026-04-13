@@ -42,7 +42,7 @@
   let messages: ChatMessage[] = $state([]);
   let inputText = $state('');
   let system: 'CHAT' | 'REASONING' = $state('CHAT');
-  let showCot = $state(false);
+  let researchEnabled = $state(false);
   let streaming = $state(false);
   let tokensUsed = $state(0);
   let tokensMax = $state(8192);
@@ -230,10 +230,10 @@
       await loadHistory(storedSessionId);
       return;
     }
-    sessionId = '';
-    messages = [];
-    tokensUsed = 0;
-    tokensMax = 8192;
+    // For autonomy sessions (research, tasks, doctor) there is no stored
+    // UUID — the session_id is the selectedSessionId itself.
+    sessionId = nextSessionId;
+    await loadHistory(nextSessionId);
   }
 
   // ----------------------------------------------------------------
@@ -272,7 +272,7 @@
       const resp = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, system, session_id: sessionId }),
+        body: JSON.stringify({ message: text, system, session_id: sessionId, research: researchEnabled }),
       });
 
       if (!resp.ok) {
@@ -410,6 +410,10 @@
     if (storedSessionId) {
       persistSession(storedSessionId);
       await loadHistory(storedSessionId);
+    } else if (selectedSessionId && selectedSessionId !== 'chat-main') {
+      // Autonomy sessions (research, tasks, doctor) have no stored UUID.
+      sessionId = selectedSessionId;
+      await loadHistory(selectedSessionId);
     }
     scrollToBottom();
 
@@ -449,10 +453,12 @@
           {/each}
         </select>
       </div>
-      <label class="cot-toggle">
-        <input type="checkbox" bind:checked={showCot} />
-        <span>Chain of Thought</span>
-      </label>
+      {#if system === 'CHAT'}
+        <label class="cot-toggle">
+          <input type="checkbox" bind:checked={researchEnabled} />
+          <span>Research</span>
+        </label>
+      {/if}
       <button
         class="new-chat-btn"
         onclick={newChat}
@@ -504,7 +510,7 @@
             {/if}
           </div>
           <div class="content">{@html renderMarkdown(msg.content)}</div>
-          {#if showCot && msg.reasoning}
+          {#if msg.reasoning}
             <details class="reasoning">
               <summary>Reasoning trace</summary>
               <pre>{msg.reasoning}</pre>

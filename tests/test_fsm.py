@@ -213,6 +213,7 @@ class TestHandleEvent:
             header=Header(timestamp_unix=1.0),
             hormone="adrenaline",
             level=1.0,
+            severity=3,
         ).SerializeToString()
         assert fsm.handle_event("agent/endocrine/adrenaline", payload)
         assert fsm.state == "EMERGENCY"

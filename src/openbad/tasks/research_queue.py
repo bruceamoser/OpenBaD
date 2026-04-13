@@ -58,8 +58,29 @@ WHERE dequeued_at IS NULL
 ORDER BY priority ASC, enqueued_at ASC
 """
 
+_SELECT_COMPLETED = """
+SELECT * FROM research_queue
+WHERE dequeued_at IS NOT NULL
+ORDER BY dequeued_at DESC
+LIMIT ?
+"""
+
+_SELECT_PENDING_BY_TITLE = """
+SELECT * FROM research_queue
+WHERE dequeued_at IS NULL AND title = ?
+ORDER BY priority ASC, enqueued_at ASC
+LIMIT 1
+"""
+
 _MARK_DEQUEUED = "UPDATE research_queue SET dequeued_at = ? WHERE node_id = ?"
 _SELECT_BY_ID = "SELECT * FROM research_queue WHERE node_id = ?"
+_UPDATE_PENDING_NODE = """
+UPDATE research_queue
+SET description = ?,
+    priority = ?,
+    source_task_id = COALESCE(source_task_id, ?)
+WHERE node_id = ?
+"""
 
 
 def initialize_research_db(conn: sqlite3.Connection) -> None:
@@ -191,6 +212,86 @@ class ResearchQueue:
             enqueued_at=now,
         )
 
+    def enqueue_or_append_pending(
+        self,
+        title: str,
+        *,
+        priority: int = 0,
+        description: str = "",
+        source_task_id: str | None = None,
+        observation: str | None = None,
+        max_observations: int = 20,
+    ) -> ResearchNode:
+        """Reuse a pending node with the same title, appending observation details.
+
+        This prevents repeated heartbeat anomalies from creating duplicate research
+        rows while preserving fresh context in one place.
+        """
+        existing = self._conn.execute(_SELECT_PENDING_BY_TITLE, (title,)).fetchone()
+        if existing is None:
+            return self.enqueue(
+                title,
+                priority=priority,
+                description=self._with_observation(description, observation, max_observations),
+                source_task_id=source_task_id,
+            )
+
+        node = ResearchNode._from_row(existing)
+        merged_description = self._with_observation(
+            node.description or description,
+            observation,
+            max_observations,
+        )
+        merged_priority = min(node.priority, priority)
+        self._conn.execute(
+            _UPDATE_PENDING_NODE,
+            (merged_description, merged_priority, source_task_id, node.node_id),
+        )
+        self._conn.commit()
+        refreshed = self.get(node.node_id)
+        if refreshed is None:
+            return node
+        return refreshed
+
+    @staticmethod
+    def _with_observation(
+        description: str,
+        observation: str | None,
+        max_observations: int,
+    ) -> str:
+        """Append an observation line to the description history.
+
+        History format:
+        Observation history:
+        - <timestamp> | <observation>
+        """
+        base = (description or "").strip()
+        if not observation:
+            return base
+
+        marker = "Observation history:\n"
+        now = datetime.now(tz=UTC).isoformat()
+        entry = f"- {now} | {observation.strip()}"
+
+        if marker not in base:
+            prefix = base
+            history_lines: list[str] = []
+        else:
+            prefix, history_blob = base.split(marker, 1)
+            history_lines = [line for line in history_blob.splitlines() if line.startswith("- ")]
+
+        if history_lines:
+            last_payload = history_lines[-1].split("|", 1)[-1].strip()
+            if last_payload == observation.strip():
+                return (prefix.rstrip() + "\n\n" + marker + "\n".join(history_lines)).strip()
+
+        history_lines.append(entry)
+        history_lines = history_lines[-max(1, max_observations) :]
+        prefix = prefix.strip()
+        if prefix:
+            return f"{prefix}\n\n{marker}{'\n'.join(history_lines)}"
+        return f"{marker}{'\n'.join(history_lines)}"
+
     def dequeue(self) -> ResearchNode | None:
         """Remove and return the highest-priority pending node.
 
@@ -220,3 +321,8 @@ class ResearchQueue:
         """Return a node by ID regardless of status."""
         row = self._conn.execute(_SELECT_BY_ID, (node_id,)).fetchone()
         return ResearchNode._from_row(row) if row else None
+
+    def list_completed(self, limit: int = 50) -> list[ResearchNode]:
+        """Return recently completed nodes, newest first."""
+        rows = self._conn.execute(_SELECT_COMPLETED, (limit,)).fetchall()
+        return [ResearchNode._from_row(r) for r in rows]

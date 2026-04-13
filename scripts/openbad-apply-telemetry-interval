@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# openbad-apply-telemetry-interval [interval_seconds]
+#
+# Validates /var/lib/openbad/telemetry.yaml (or explicit argument) and
+# restarts openbad.service so interoception monitors pick up the new interval.
+set -euo pipefail
+
+YAML_PATH="/var/lib/openbad/telemetry.yaml"
+DEFAULT_INTERVAL=5
+
+if [[ $# -ge 1 ]]; then
+    INTERVAL="$1"
+else
+    INTERVAL="$DEFAULT_INTERVAL"
+    if [[ -f "$YAML_PATH" ]]; then
+        parsed=$(grep -E '^interval_seconds:' "$YAML_PATH" | head -1 | sed 's/interval_seconds:[[:space:]]*//')
+        if [[ -n "$parsed" ]] && [[ "$parsed" =~ ^[0-9]+$ ]]; then
+            INTERVAL="$parsed"
+        fi
+    fi
+fi
+
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [[ "$INTERVAL" -lt 1 ]]; then
+    echo "interval_seconds must be an integer >= 1 (got: '$INTERVAL')" >&2
+    exit 1
+fi
+
+if systemctl is-active --quiet openbad.service 2>/dev/null; then
+    systemctl restart openbad.service
+else
+    systemctl start openbad.service
+fi
+
+echo "openbad.service restarted to apply telemetry interval ${INTERVAL}s."

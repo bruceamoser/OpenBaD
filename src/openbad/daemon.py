@@ -7,6 +7,9 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
+
+import yaml
 
 from openbad.endocrine.controller import EndocrineController
 from openbad.interoception.disk_network import DiskNetworkMonitor
@@ -19,6 +22,21 @@ from openbad.nervous_system.schemas.telemetry_pb2 import TokenTelemetry
 from openbad.reflex_arc.fsm import AgentFSM
 
 logger = logging.getLogger(__name__)
+
+_TELEMETRY_CONFIG_PATH = Path("/var/lib/openbad/telemetry.yaml")
+_TELEMETRY_INTERVAL_DEFAULT_S = 5.0
+
+
+def _load_hardware_telemetry_interval() -> float:
+    """Read persisted hardware telemetry interval in seconds."""
+    if _TELEMETRY_CONFIG_PATH.exists():
+        try:
+            loaded = yaml.safe_load(_TELEMETRY_CONFIG_PATH.read_text()) or {}
+            interval = float(loaded.get("interval_seconds", _TELEMETRY_INTERVAL_DEFAULT_S))
+            return max(1.0, interval)
+        except Exception:  # noqa: BLE001
+            logger.warning("Invalid telemetry config at %s; using default", _TELEMETRY_CONFIG_PATH)
+    return _TELEMETRY_INTERVAL_DEFAULT_S
 
 
 class Daemon:
@@ -79,9 +97,10 @@ class Daemon:
         self._endocrine = EndocrineController()
 
         # 4. Interoception publishers for vitals panels and dashboards
-        self._telemetry = TelemetryMonitor(self._client)
+        telemetry_interval_s = _load_hardware_telemetry_interval()
+        self._telemetry = TelemetryMonitor(self._client, interval=telemetry_interval_s)
         self._telemetry.start()
-        self._disk_network = DiskNetworkMonitor(self._client)
+        self._disk_network = DiskNetworkMonitor(self._client, interval=telemetry_interval_s)
         self._disk_network.start()
 
         # Seed UI consumers with an initial state snapshot.
@@ -163,6 +182,7 @@ class Daemon:
                     header=Header(timestamp_unix=now, source_module="openbad.daemon"),
                     hormone=hormone,
                     level=level,
+                    severity=1,
                 ),
             )
 
