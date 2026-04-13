@@ -23,6 +23,7 @@ import yaml
 from aiohttp import web
 
 import openbad
+from openbad.autonomy.endocrine_runtime import EndocrineRuntime, load_endocrine_config
 from openbad.autonomy.session_policy import (
     DEFAULT_SESSION_POLICY,
     SESSION_POLICY_PATH,
@@ -44,6 +45,7 @@ from openbad.cognitive.providers.github_copilot import (
     CopilotAuthError,
     GitHubCopilotProvider,
 )
+from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter, litellm_model_name
 from openbad.cognitive.providers.ollama import OllamaProvider
 from openbad.cognitive.providers.openai_compat import (
     custom_provider,
@@ -65,6 +67,7 @@ from openbad.identity.persistence import IdentityPersistence
 from openbad.identity.personality_modulator import PersonalityModulator
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.sleep.schedule import SleepScheduleConfig
+from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.sensory.config import load_sensory_config
 from openbad.wui.bridge import MqttWebSocketBridge
 from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
@@ -83,6 +86,8 @@ _LOG_BUFFER: deque[dict[str, str]] = deque(maxlen=500)
 
 _HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
 _HEARTBEAT_CONFIG_DEFAULT = {"interval_seconds": 60}
+_TELEMETRY_CONFIG_PATH = Path("/var/lib/openbad/telemetry.yaml")
+_TELEMETRY_CONFIG_DEFAULT = {"interval_seconds": 5}
 
 
 def _heartbeat_timer_status() -> str:
@@ -383,13 +388,15 @@ def _provider_setup_status(config: CognitiveConfig) -> dict[str, object]:
         missing.append("provider")
     if not chat_ready:
         missing.append("chat_assignment")
+
+    first_run = not bool(valid_providers)
     return {
-        "first_run": bool(missing),
+        "first_run": first_run,
         "provider_ready": bool(valid_providers),
         "chat_assignment_ready": chat_ready,
         "configured_provider_count": len(valid_providers),
         "missing": missing,
-        "redirect_to": _SETUP_REDIRECT if missing else "",
+        "redirect_to": _SETUP_REDIRECT if first_run else "",
         "supported_providers": list(_SUPPORTED_PROVIDER_TYPES),
     }
 
@@ -419,6 +426,80 @@ def _provider_verification_model(provider_name: str) -> str:
     if spec is None:
         return ""
     return str(spec.get("default_model", "")).strip()
+
+
+def _configured_models_for_provider(
+    config: CognitiveConfig,
+    provider_name: str,
+) -> list[str]:
+    """Return persisted model IDs tied to a provider across config sections."""
+    configured: list[str] = []
+    seen: set[str] = set()
+
+    for assignment in config.systems.values():
+        if assignment.provider != provider_name:
+            continue
+        model_id = assignment.model.strip()
+        if model_id and model_id not in seen:
+            configured.append(model_id)
+            seen.add(model_id)
+
+    for step in config.default_fallback_chain:
+        if step.provider != provider_name:
+            continue
+        model_id = step.model.strip()
+        if model_id and model_id not in seen:
+            configured.append(model_id)
+            seen.add(model_id)
+
+    for provider in config.providers:
+        if provider.name != provider_name:
+            continue
+        model_id = provider.model.strip()
+        if model_id and model_id not in seen:
+            configured.append(model_id)
+            seen.add(model_id)
+
+    return configured
+
+
+def _merge_model_infos(
+    provider_name: str,
+    discovered_models: list,
+    sticky_model_ids: list[str],
+) -> list:
+    """Merge dynamic model discovery with persisted model IDs.
+
+    Persisted model strings remain selectable even when provider discovery fluctuates.
+    """
+    merged: list = []
+    seen: set[str] = set()
+
+    for model in discovered_models:
+        model_id = str(getattr(model, "model_id", "")).strip()
+        if not model_id or model_id in seen:
+            continue
+        merged.append(model)
+        seen.add(model_id)
+
+    for model_id in sticky_model_ids:
+        normalized = str(model_id).strip()
+        if not normalized or normalized in seen:
+            continue
+        merged.append(
+            type(
+                "ModelInfoLike",
+                (),
+                {
+                    "model_id": normalized,
+                    "provider": provider_name,
+                    "context_window": 0,
+                },
+            )()
+        )
+        seen.add(normalized)
+
+    return merged
 
 
 def _dedupe_assignments(assignments: list[SystemAssignment]) -> list[dict[str, str]]:
@@ -709,6 +790,33 @@ def _build_wizard_adapter(provider: ProviderConfig):
         api_key=provider.api_key,
         api_key_env=provider.api_key_env,
         default_model=verification_model,
+        timeout_s=timeout_s,
+    )
+
+
+def _build_litellm_adapter(
+    provider: ProviderConfig,
+    model: str = "",
+) -> LiteLLMAdapter:
+    """Build a LiteLLMAdapter for a given provider config.
+
+    The *model* is converted to a LiteLLM-qualified name (e.g. ``ollama/llama3.2``).
+    """
+    import os
+
+    timeout_s = max(1.0, provider.timeout_ms / 1000)
+    api_key = provider.api_key or ""
+    if not api_key and provider.api_key_env:
+        api_key = os.environ.get(provider.api_key_env, "")
+
+    default_model = litellm_model_name(provider.name, model) if model else ""
+    api_base = provider.base_url or ""
+
+    return LiteLLMAdapter(
+        provider_name=provider.name,
+        default_model=default_model,
+        api_key=api_key,
+        api_base=api_base,
         timeout_s=timeout_s,
     )
 
@@ -1019,6 +1127,11 @@ async def _get_provider_models(request: web.Request) -> web.Response:
         log.exception("list_models failed for %s", provider_name)
         model_infos = []
 
+    sticky_model_ids = _configured_models_for_provider(config, provider_name)
+    if provider_name == "github-copilot":
+        sticky_model_ids.extend(m["id"] for m in _KNOWN_MODELS)
+    model_infos = _merge_model_infos(provider_name, model_infos, sticky_model_ids)
+
     return web.json_response({
         "provider": provider_name,
         "models": [
@@ -1035,28 +1148,67 @@ async def _get_provider_models(request: web.Request) -> web.Response:
 # ── Chat streaming endpoint ──────────────────────────────────────── #
 
 
-def _resolve_chat_adapter(config: CognitiveConfig, system_name: str):
-    """Build a ProviderAdapter for the given cognitive system."""
+def _resolve_chat_adapter(
+    config: CognitiveConfig,
+    system_name: str,
+) -> tuple[Any, str | None, str, bool]:
+    """Build a LiteLLMAdapter for the given cognitive system.
+
+    Returns ``(adapter, litellm_model, provider_name, is_fallback)``.
+    The model string is already in LiteLLM format (e.g. ``ollama/llama3.2``).
+    *is_fallback* is True when the assigned provider was unavailable and a
+    substitute was used instead.
+    """
     try:
         system = CognitiveSystem(system_name.lower())
     except ValueError:
         system = CognitiveSystem.CHAT
 
     assignment = config.systems.get(system)
-    if not assignment or not assignment.provider:
-        return None, None
+    assigned_provider = assignment.provider if assignment else ""
 
+    # Try the explicitly-assigned provider first.
+    if assignment and assigned_provider:
+        for p in config.providers:
+            if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
+                if not assignment.model:
+                    break
+                model = litellm_model_name(p.name, assignment.model)
+                adapter = _build_litellm_adapter(p, assignment.model)
+                return adapter, model, p.name, False
+
+    # Fallback: if chat assignment is stale or unverified, use first valid provider.
     for p in config.providers:
-        if p.name == assignment.provider and p.enabled:
-            if not assignment.model:
-                return None, None, None
-            adapter = _build_wizard_adapter(p)
-            return adapter, assignment.model, p.name
-    return None, None, None
+        if not p.enabled or not _provider_is_valid(p):
+            continue
+
+        configured_models = [
+            a.model.strip()
+            for a in config.systems.values()
+            if a.provider == p.name and a.model.strip()
+        ]
+        fallback_model = (
+            configured_models[0]
+            if configured_models
+            else (_provider_model(p) or _provider_verification_model(p.name))
+        )
+
+        if not fallback_model:
+            continue
+        model = litellm_model_name(p.name, fallback_model)
+        adapter = _build_litellm_adapter(p, fallback_model)
+        used_fallback = bool(assigned_provider and p.name != assigned_provider)
+        if used_fallback:
+            log.warning(
+                "Provider fallback: system=%s assigned=%s using=%s model=%s",
+                system_name, assigned_provider, p.name, model,
+            )
+        return adapter, model, p.name, used_fallback
+    return None, None, "", True
 
 
 def _serialize_chat_turn(turn) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "role": turn.role,
         "content": turn.content,
         "timestamp": datetime.fromtimestamp(
@@ -1064,6 +1216,13 @@ def _serialize_chat_turn(turn) -> dict[str, object]:
             tz=UTC,
         ).isoformat(),
     }
+    meta = getattr(turn, "metadata", None)
+    if isinstance(meta, dict):
+        if meta.get("provider"):
+            result["provider"] = meta["provider"]
+        if meta.get("model"):
+            result["model"] = meta["model"]
+    return result
 
 
 async def _get_chat_history(request: web.Request) -> web.Response:
@@ -1097,10 +1256,28 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
     if not message:
         raise web.HTTPBadRequest(text="message is required")
 
+    with contextlib.suppress(Exception):
+        from openbad.autonomy.endocrine_runtime import EndocrineRuntime, load_endocrine_config
+
+        runtime = EndocrineRuntime(config=load_endocrine_config())
+        chat_gate = runtime.gate("chat")
+        if not chat_gate.enabled:
+            reason = chat_gate.disabled_reason or "doctor-directed safety pause"
+            disabled_until = ""
+            if chat_gate.disabled_until:
+                disabled_until = datetime.fromtimestamp(
+                    chat_gate.disabled_until,
+                    tz=UTC,
+                ).isoformat()
+            detail = f"Chat temporarily disabled by endocrine doctor: {reason}"
+            if disabled_until:
+                detail += f" (scheduled re-enable at {disabled_until})"
+            raise web.HTTPServiceUnavailable(text=detail)
+
     system_name = str(payload.get("system", "chat")).strip()
     session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
     _path, config = _read_providers_config()
-    adapter, model, provider_name = _resolve_chat_adapter(config, system_name)
+    adapter, model, provider_name, _is_fallback = _resolve_chat_adapter(config, system_name)
 
     if adapter is None:
         raise web.HTTPBadRequest(
@@ -1189,6 +1366,13 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
             provider_name,
             model,
         )
+        with contextlib.suppress(Exception):
+            runtime = EndocrineRuntime(config=load_endocrine_config())
+            runtime.apply_adjustment(
+                source="wui_stream_error",
+                reason=f"Chat stream transport failure: system={system_name} provider={provider_name}",
+                deltas={"cortisol": 0.08, "adrenaline": 0.04},
+            )
         error_data = json.dumps(
             {
                 "session_id": session_id,
@@ -1620,6 +1804,37 @@ def _serialize_toolbelt(registry) -> dict:
     return {"cabinet": cabinet, "belt": belt}
 
 
+def _build_runtime_tool_registry() -> ToolRegistry:
+    """Create the default runtime tool registry for the WUI process."""
+    registry = ToolRegistry(timeout=30.0)
+
+    # Core toolbelt tools
+    registry.register("cli-tool", role=ToolRole.CLI)
+    registry.register("web-search", role=ToolRole.WEB_SEARCH)
+    registry.register("memory-tool", role=ToolRole.MEMORY)
+    registry.register("fs-tool", role=ToolRole.FILE_SYSTEM)
+    registry.register("ask-user", role=ToolRole.COMMUNICATION)
+
+    # Level 1 diagnostics tools
+    registry.register("mqtt-records-tool", role=ToolRole.COMMUNICATION)
+    registry.register("system-logs-tool", role=ToolRole.CODE)
+    registry.register("endocrine-status-tool", role=ToolRole.MEMORY)
+    registry.register("tasks-diagnostics-tool", role=ToolRole.CODE)
+    registry.register("research-diagnostics-tool", role=ToolRole.CODE)
+    registry.register("event-log-tool", role=ToolRole.OBSERVABILITY)
+
+    # Default belt selection
+    registry.equip(ToolRole.CLI, "cli-tool")
+    registry.equip(ToolRole.WEB_SEARCH, "web-search")
+    registry.equip(ToolRole.MEMORY, "memory-tool")
+    registry.equip(ToolRole.FILE_SYSTEM, "fs-tool")
+    registry.equip(ToolRole.COMMUNICATION, "ask-user")
+    registry.equip(ToolRole.CODE, "system-logs-tool")
+    registry.equip(ToolRole.OBSERVABILITY, "event-log-tool")
+
+    return registry
+
+
 async def _get_toolbelt(request: web.Request) -> web.Response:
     registry = request.app.get("registry")
     if registry is None:
@@ -1844,10 +2059,7 @@ async def _get_onboarding_status(request: web.Request) -> web.Response:
         if cfg_path and cfg_path.is_file():
             cfg = load_cognitive_config(str(cfg_path))
             setup_status = _provider_setup_status(cfg)
-            providers_complete = bool(
-                setup_status.get("provider_ready")
-                and setup_status.get("chat_assignment_ready")
-            )
+            providers_complete = bool(setup_status.get("provider_ready"))
     except Exception:
         pass
 
@@ -2052,6 +2264,45 @@ async def _put_heartbeat_config(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Hardware telemetry config
+# ---------------------------------------------------------------------------
+
+def _read_telemetry_config() -> dict[str, object]:
+    if _TELEMETRY_CONFIG_PATH.exists():
+        try:
+            return dict(yaml.safe_load(_TELEMETRY_CONFIG_PATH.read_text()) or {})
+        except Exception:  # noqa: BLE001
+            pass
+    return dict(_TELEMETRY_CONFIG_DEFAULT)
+
+
+async def _get_telemetry_config(_request: web.Request) -> web.Response:
+    cfg = _read_telemetry_config()
+    cfg.setdefault("interval_seconds", _TELEMETRY_CONFIG_DEFAULT["interval_seconds"])
+    cfg["applies_on_restart"] = False
+    return web.json_response(cfg)
+
+
+async def _put_telemetry_config(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="body must be an object")
+    interval = payload.get("interval_seconds")
+    try:
+        interval_int = max(1, int(interval))  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="interval_seconds must be an integer") from exc
+    cfg = {"interval_seconds": interval_int}
+    try:
+        _TELEMETRY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _TELEMETRY_CONFIG_PATH.write_text(yaml.dump(cfg))
+    except OSError as exc:
+        raise web.HTTPInternalServerError(text=f"Could not save: {exc}") from exc
+    cfg["applies_on_restart"] = False
+    return web.json_response(cfg)
+
+
+# ---------------------------------------------------------------------------
 # Sessions / immune policy
 # ---------------------------------------------------------------------------
 
@@ -2082,9 +2333,27 @@ def _sanitize_session_policy(payload: dict[str, object]) -> dict[str, object]:
         sanitized_sessions[key] = {
             "session_id": session_id,
             "label": label,
-            "allow_task_autonomy": bool(src_obj.get("allow_task_autonomy", default_obj.get("allow_task_autonomy", False))),
-            "allow_research_autonomy": bool(src_obj.get("allow_research_autonomy", default_obj.get("allow_research_autonomy", False))),
-            "allow_destructive": bool(src_obj.get("allow_destructive", default_obj.get("allow_destructive", False))),
+            "allow_task_autonomy": bool(
+                src_obj.get(
+                    "allow_task_autonomy",
+                    default_obj.get("allow_task_autonomy", False),
+                )
+            ),
+            "allow_research_autonomy": bool(
+                src_obj.get(
+                    "allow_research_autonomy",
+                    default_obj.get("allow_research_autonomy", False),
+                )
+            ),
+            "allow_destructive": bool(
+                src_obj.get("allow_destructive", default_obj.get("allow_destructive", False))
+            ),
+            "allow_endocrine_doctor": bool(
+                src_obj.get(
+                    "allow_endocrine_doctor",
+                    default_obj.get("allow_endocrine_doctor", False),
+                )
+            ),
         }
 
     return {"sessions": sanitized_sessions}
@@ -2113,6 +2382,49 @@ async def _put_immune_policy(request: web.Request) -> web.Response:
     return web.json_response(policy)
 
 
+def _runtime_snapshot() -> dict[str, object]:
+    runtime = EndocrineRuntime(config=load_endocrine_config())
+    return runtime.snapshot()
+
+
+async def _get_endocrine_status(_request: web.Request) -> web.Response:
+    return web.json_response(_runtime_snapshot())
+
+
+async def _get_endocrine_activity(request: web.Request) -> web.Response:
+    """GET /api/endocrine/activity — return recent endocrine adjustment log."""
+    limit = 50
+    try:
+        limit = int(request.query.get("limit", "50"))
+    except (ValueError, TypeError):
+        pass
+    runtime = EndocrineRuntime(config=load_endocrine_config())
+    return web.json_response({"adjustments": runtime.recent_adjustments(limit=limit)})
+
+
+async def _post_endocrine_toggle(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    system = str(payload.get("system", "")).strip().lower()
+    enabled_raw = payload.get("enabled")
+    reason = str(payload.get("reason", "manual user toggle")).strip() or "manual user toggle"
+    if system not in {"chat", "tasks", "research"}:
+        raise web.HTTPBadRequest(text="system must be one of: chat, tasks, research")
+    if not isinstance(enabled_raw, bool):
+        raise web.HTTPBadRequest(text="enabled must be a boolean")
+
+    runtime = EndocrineRuntime(config=load_endocrine_config())
+    now_ts = time.time()
+    if enabled_raw:
+        runtime.enable_system(system, reason=reason, now=now_ts)
+    else:
+        runtime.disable_system(system, reason=reason, now=now_ts, until=None)
+
+    return web.json_response(_runtime_snapshot())
+
+
 # ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
@@ -2134,6 +2446,7 @@ async def _get_tasks(_request: web.Request) -> web.Response:
                     "kind": t.kind,
                     "horizon": t.horizon,
                     "priority": t.priority,
+                    "owner": t.owner,
                     "created_at": t.created_at,
                     "updated_at": t.updated_at,
                 }
@@ -2144,6 +2457,53 @@ async def _get_tasks(_request: web.Request) -> web.Response:
         return web.json_response({"tasks": [], "error": str(exc)})
 
 
+async def _post_tasks(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.models import TaskModel  # noqa: PLC0415
+        from openbad.tasks.store import TaskStore  # noqa: PLC0415
+
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+
+        title = str(payload.get("title", "")).strip()
+        if not title:
+            raise web.HTTPBadRequest(text="title is required")
+
+        description = str(payload.get("description", "")).strip()
+        owner = str(payload.get("owner", "user")).strip() or "user"
+
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        store = TaskStore(conn)
+        task = TaskModel.new(
+            title,
+            description=description,
+            owner=owner,
+        )
+        store.create_task(task)
+
+        return web.json_response(
+            {
+                "task_id": task.task_id,
+                "title": task.title,
+                "description": task.description,
+                "status": task.status,
+                "kind": task.kind,
+                "horizon": task.horizon,
+                "priority": task.priority,
+                "owner": task.owner,
+                "created_at": task.created_at,
+                "updated_at": task.updated_at,
+            },
+            status=201,
+        )
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Research
 # ---------------------------------------------------------------------------
@@ -2151,7 +2511,10 @@ async def _get_tasks(_request: web.Request) -> web.Response:
 async def _get_research(_request: web.Request) -> web.Response:
     try:
         from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.research_queue import ResearchQueue, initialize_research_db  # noqa: PLC0415
+        from openbad.tasks.research_queue import (  # noqa: PLC0415
+            ResearchQueue,
+            initialize_research_db,
+        )
         conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
         initialize_research_db(conn)
         queue = ResearchQueue(conn)
@@ -2174,9 +2537,102 @@ async def _get_research(_request: web.Request) -> web.Response:
         return web.json_response({"nodes": [], "error": str(exc)})
 
 
-# ---------------------------------------------------------------------------
-# MQTT message log
-# ---------------------------------------------------------------------------
+async def _post_research(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.research_queue import (  # noqa: PLC0415
+            ResearchQueue,
+            initialize_research_db,
+        )
+
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+
+        title = str(payload.get("title", "")).strip()
+        if not title:
+            raise web.HTTPBadRequest(text="title is required")
+
+        description = str(payload.get("description", "")).strip()
+        source_task_id_raw = payload.get("source_task_id")
+        source_task_id = None
+        if source_task_id_raw is not None:
+            normalized = str(source_task_id_raw).strip()
+            source_task_id = normalized or None
+
+        priority_raw = payload.get("priority", 0)
+        try:
+            priority = int(priority_raw)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="priority must be an integer") from exc
+
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        initialize_research_db(conn)
+        queue = ResearchQueue(conn)
+        node = queue.enqueue(
+            title,
+            description=description,
+            priority=priority,
+            source_task_id=source_task_id,
+        )
+
+        return web.json_response(
+            {
+                "node_id": node.node_id,
+                "title": node.title,
+                "description": node.description,
+                "priority": node.priority,
+                "source_task_id": node.source_task_id,
+                "enqueued_at": node.enqueued_at.isoformat() if node.enqueued_at else None,
+                "status": "pending",
+            },
+            status=201,
+        )
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
+async def _get_research_completed(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.research_queue import (  # noqa: PLC0415
+            ResearchQueue,
+            initialize_research_db,
+        )
+
+        limit_raw = request.query.get("limit")
+        limit = 50
+        if limit_raw not in (None, ""):
+            try:
+                limit = max(1, min(int(limit_raw), 200))
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text="limit must be an integer") from exc
+
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        initialize_research_db(conn)
+        queue = ResearchQueue(conn)
+        nodes = queue.list_completed(limit=limit)
+        return web.json_response({
+            "nodes": [
+                {
+                    "node_id": n.node_id,
+                    "title": n.title,
+                    "description": n.description,
+                    "priority": n.priority,
+                    "source_task_id": n.source_task_id,
+                    "enqueued_at": n.enqueued_at.isoformat() if n.enqueued_at else None,
+                    "dequeued_at": n.dequeued_at.isoformat() if n.dequeued_at else None,
+                    "status": "completed",
+                }
+                for n in nodes
+            ]
+        })
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"nodes": [], "error": str(exc)})
 
 async def _get_mqtt_log(request: web.Request) -> web.Response:
     bridge: MqttWebSocketBridge = request.app["bridge"]
@@ -2197,6 +2653,19 @@ async def _get_debug_logs(request: web.Request) -> web.Response:
         entries = [e for e in entries if system in e.get("logger", "")]
     return web.json_response({"logs": entries[-limit:]})
 
+
+async def _get_system_events(request: web.Request) -> web.Response:
+    """GET /api/events — persistent event log (loguru JSON-lines file)."""
+    from openbad.state.event_log import recent_events  # noqa: PLC0415
+
+    limit = 100
+    with contextlib.suppress(ValueError, TypeError):
+        limit = int(request.query.get("limit", "100"))
+    level = request.query.get("level") or None
+    source = request.query.get("source") or None
+    search = request.query.get("search") or None
+    events = recent_events(limit=limit, level=level, source=source, search=search)
+    return web.json_response({"events": events})
 
 # ---------------------------------------------------------------------------
 # Built-in capabilities catalog
@@ -2254,6 +2723,81 @@ _CAPABILITIES_CATALOG = [
         "gates": ["presence-aware: reads system/wui/presence", "re-engagement: pending questions surface on reconnect"],
     },
     {
+        "id": "diagnostics_mqtt",
+        "label": "MQTT Diagnostics",
+        "icon": "📡",
+        "level": 1,
+        "module": "openbad.toolbelt.mqtt_records_tool",
+        "description": "Read recent MQTT records from the nervous-system bridge for timeline and topic-level diagnosis.",
+        "tools": [
+            {"name": "get_mqtt_records", "signature": "get_mqtt_records(limit: int = 100) -> list[dict]", "description": "Return recent broker records from /api/mqtt/log without mutating system state."},
+        ],
+        "gates": ["read-only endpoint", "limited by API response window"],
+    },
+    {
+        "id": "diagnostics_logs",
+        "label": "System Logs Diagnostics",
+        "icon": "📜",
+        "level": 1,
+        "module": "openbad.toolbelt.system_logs_tool",
+        "description": "Read recent buffered system logs and optionally filter by subsystem logger name.",
+        "tools": [
+            {"name": "get_system_logs", "signature": "get_system_logs(limit: int = 200, system: str = '') -> list[dict]", "description": "Return records from /api/debug/logs for runtime triage."},
+        ],
+        "gates": ["read-only endpoint", "optional subsystem filter"],
+    },
+    {
+        "id": "event_log",
+        "label": "Persistent Event Log",
+        "icon": "📓",
+        "level": 1,
+        "module": "openbad.toolbelt.event_log_tool",
+        "description": "Read and write persistent system events backed by loguru. Survives restarts, auto-rotated (5 MB), 7-day retention, gzip compressed.",
+        "tools": [
+            {"name": "read_events", "signature": "read_events(limit: int = 100, level: str = '', source: str = '', search: str = '') -> list[dict]", "description": "Query persistent log events. Filter by severity level (ERROR/WARNING/INFO), source module, or free-text search. Returns newest first."},
+            {"name": "write_event", "signature": "write_event(message: str, level: str = 'INFO', source: str = 'system') -> bool", "description": "Write a structured event to the persistent log. Flows through loguru to JSON-lines file and journalctl."},
+        ],
+        "gates": ["write operations are append-only", "auto-pruned by rotation and retention policy"],
+    },
+    {
+        "id": "diagnostics_endocrine",
+        "label": "Endocrine Diagnostics",
+        "icon": "🧪",
+        "level": 1,
+        "module": "openbad.toolbelt.endocrine_status_tool",
+        "description": "Inspect current endocrine levels, severities, source contributions, and subsystem gates.",
+        "tools": [
+            {"name": "get_endocrine_status", "signature": "get_endocrine_status() -> dict", "description": "Return runtime endocrine status snapshot from /api/endocrine/status."},
+        ],
+        "gates": ["read-only endpoint", "sensitive to real-time state drift"],
+    },
+    {
+        "id": "diagnostics_tasks",
+        "label": "Task Diagnostics",
+        "icon": "📋",
+        "level": 1,
+        "module": "openbad.toolbelt.tasks_diagnostics_tool",
+        "description": "Inspect current task records and create new tasks to drive execution.",
+        "tools": [
+            {"name": "get_tasks", "signature": "get_tasks() -> list[dict]", "description": "Return task list from /api/tasks for triage context."},
+            {"name": "create_task", "signature": "create_task(title: str, description: str = '', owner: str = 'user') -> dict", "description": "Create a task via /api/tasks and return the created task record."},
+        ],
+        "gates": ["create operations are non-destructive", "task payloads may include operational context"],
+    },
+    {
+        "id": "diagnostics_research",
+        "label": "Research Diagnostics",
+        "icon": "🔬",
+        "level": 1,
+        "module": "openbad.toolbelt.research_diagnostics_tool",
+        "description": "Inspect pending research nodes and create new research projects for follow-up.",
+        "tools": [
+            {"name": "get_research_nodes", "signature": "get_research_nodes() -> list[dict]", "description": "Return pending research nodes from /api/research."},
+            {"name": "create_research_node", "signature": "create_research_node(title: str, description: str = '', priority: int = 0, source_task_id: str | None = None) -> dict", "description": "Create a research node via /api/research and return the created node."},
+        ],
+        "gates": ["create operations are non-destructive", "queue-only (pending nodes)"],
+    },
+    {
         "id": "mcp_browser",
         "label": "Browser (MCP)",
         "icon": "🌍",
@@ -2307,9 +2851,13 @@ def create_app(
     *,
     enable_mqtt: bool = True,
 ) -> web.Application:
+    from openbad.state.event_log import setup_logging  # noqa: PLC0415
+    setup_logging()
+
     bridge = MqttWebSocketBridge(mqtt_host=mqtt_host, mqtt_port=mqtt_port)
     app = bridge.create_app()
     app["bridge"] = bridge
+    app["registry"] = _build_runtime_tool_registry()
     app["copilot_device_flows"] = {}
     app["sleep_runtime"] = {"last_summary": None}
     app["usage_tracker"] = UsageTracker(db_path=_resolve_usage_db_path())
@@ -2379,13 +2927,22 @@ def create_app(
     app.router.add_post("/api/onboarding/skip", _post_onboarding_skip)
     app.router.add_get("/api/heartbeat/config", _get_heartbeat_config)
     app.router.add_put("/api/heartbeat/config", _put_heartbeat_config)
+    app.router.add_get("/api/telemetry/config", _get_telemetry_config)
+    app.router.add_put("/api/telemetry/config", _put_telemetry_config)
     app.router.add_get("/api/sessions", _get_sessions)
     app.router.add_get("/api/immune/policy", _get_immune_policy)
     app.router.add_put("/api/immune/policy", _put_immune_policy)
+    app.router.add_get("/api/endocrine/status", _get_endocrine_status)
+    app.router.add_get("/api/endocrine/activity", _get_endocrine_activity)
+    app.router.add_post("/api/endocrine/toggle", _post_endocrine_toggle)
     app.router.add_get("/api/tasks", _get_tasks)
+    app.router.add_post("/api/tasks", _post_tasks)
     app.router.add_get("/api/research", _get_research)
+    app.router.add_post("/api/research", _post_research)
+    app.router.add_get("/api/research/completed", _get_research_completed)
     app.router.add_get("/api/mqtt/log", _get_mqtt_log)
     app.router.add_get("/api/debug/logs", _get_debug_logs)
+    app.router.add_get("/api/events", _get_system_events)
     app.router.add_get("/api/capabilities", _get_capabilities)
 
     # SvelteKit static assets + SPA fallback for client-side routing

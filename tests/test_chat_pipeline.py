@@ -41,8 +41,41 @@ class _CapturingAdapter(ProviderAdapter):
         return HealthStatus(provider="test-provider", available=True)
 
 
+def _make_test_state_conn(db_path):
+    """Create an in-memory-like SQLite connection with the session_messages schema."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_messages (
+            message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'assistant',
+            content TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_session_messages_session_id
+            ON session_messages (session_id, created_at)
+        """
+    )
+    conn.commit()
+    return conn
+
+
 @pytest.fixture(autouse=True)
 def _reset_chat_pipeline_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        chat_pipeline,
+        "_state_conn",
+        _make_test_state_conn(tmp_path / "test_state.db"),
+    )
     monkeypatch.setattr(
         chat_pipeline,
         "_stm",
