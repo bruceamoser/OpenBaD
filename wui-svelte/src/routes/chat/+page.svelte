@@ -41,8 +41,8 @@
 
   let messages: ChatMessage[] = $state([]);
   let inputText = $state('');
-  let system: 'CHAT' | 'REASONING' = $state('CHAT');
-  let researchEnabled = $state(false);
+  let reasoningEnabled = $state(false);
+  let system: 'CHAT' | 'REASONING' = $derived(reasoningEnabled ? 'REASONING' : 'CHAT');
   let streaming = $state(false);
   let tokensUsed = $state(0);
   let tokensMax = $state(8192);
@@ -272,7 +272,7 @@
       const resp = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, system, session_id: sessionId, research: researchEnabled }),
+        body: JSON.stringify({ message: text, system, session_id: sessionId }),
       });
 
       if (!resp.ok) {
@@ -435,13 +435,6 @@
     </div>
     <div class="header-controls">
       <div class="control-group">
-        <span class="control-label">System</span>
-        <select bind:value={system}>
-          <option value="CHAT">CHAT</option>
-          <option value="REASONING">REASONING</option>
-        </select>
-      </div>
-      <div class="control-group">
         <span class="control-label">Session</span>
         <select
           bind:value={selectedSessionId}
@@ -453,12 +446,10 @@
           {/each}
         </select>
       </div>
-      {#if system === 'CHAT'}
-        <label class="cot-toggle">
-          <input type="checkbox" bind:checked={researchEnabled} />
-          <span>Research</span>
-        </label>
-      {/if}
+      <label class="cot-toggle">
+        <input type="checkbox" bind:checked={reasoningEnabled} />
+        <span>Reasoning</span>
+      </label>
       <button
         class="new-chat-btn"
         onclick={newChat}
