@@ -145,8 +145,9 @@ class TestLoadAssistantProfile:
     def test_load_missing_section(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"
         cfg.write_text(yaml.safe_dump({"identity": {}}))
-        with pytest.raises(ValueError, match="assistant"):
-            load_assistant_profile(cfg)
+        p = load_assistant_profile(cfg)
+        assert p.name == "OpenBaD"
+        assert p.openness == 0.7
 
     def test_load_clamping(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"

@@ -134,8 +134,9 @@ class TestLoadUserProfile:
     def test_load_missing_user_section(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"
         cfg.write_text(yaml.safe_dump({"identity": {}}))
-        with pytest.raises(ValueError, match="user"):
-            load_user_profile(cfg)
+        p = load_user_profile(cfg)
+        assert p.name == "User"
+        assert p.communication_style is CommunicationStyle.CASUAL
 
     def test_load_invalid_style(self, tmp_path) -> None:
         cfg = tmp_path / "identity.yaml"

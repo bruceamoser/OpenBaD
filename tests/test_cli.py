@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
+import openbad
+
 from openbad.cli import (
+    _find_project_root,
     _normalized_endocrine_deltas,
     _should_publish_endocrine_event,
     main,
@@ -44,7 +48,7 @@ class TestVersionCommand:
         result = CliRunner().invoke(main, ["version"])
         assert result.exit_code == 0
         assert "openbad" in result.output
-        assert "0.1.0" in result.output
+        assert openbad.__version__ in result.output
 
 
 class TestSetupCommand:
@@ -81,7 +85,7 @@ class TestHealthCommand:
 
 class TestServiceControlCommands:
     def test_start_invokes_systemctl_start(self):
-        with patch("openbad.cli.subprocess.run") as run:
+        with patch("openbad.cli.subprocess.run") as run, patch("openbad.cli._ensure_heartbeat_timer"):
             run.side_effect = [
                 MagicMock(stdout="enabled\n", stderr="", returncode=0),
                 MagicMock(stdout="enabled\n", stderr="", returncode=0),
@@ -109,7 +113,7 @@ class TestServiceControlCommands:
         assert run.call_args.args[0][1] == "stop"
 
     def test_restart_invokes_systemctl_restart(self):
-        with patch("openbad.cli.subprocess.run") as run:
+        with patch("openbad.cli.subprocess.run") as run, patch("openbad.cli._ensure_heartbeat_timer"):
             run.side_effect = [
                 MagicMock(stdout="enabled\n", stderr="", returncode=0),
                 MagicMock(stdout="enabled\n", stderr="", returncode=0),
@@ -123,7 +127,7 @@ class TestServiceControlCommands:
         assert run.call_args.args[0][1] == "restart"
 
     def test_restart_skips_disabled_broker_unit(self):
-        with patch("openbad.cli.subprocess.run") as run:
+        with patch("openbad.cli.subprocess.run") as run, patch("openbad.cli._ensure_heartbeat_timer"):
             run.side_effect = [
                 MagicMock(stdout="disabled\n", stderr="", returncode=1),
                 MagicMock(stdout="enabled\n", stderr="", returncode=0),
@@ -136,7 +140,7 @@ class TestServiceControlCommands:
         assert run.call_args.args[0][-2:] == ["openbad.service", "openbad-wui.service"]
 
     def test_start_skips_missing_broker_unit(self):
-        with patch("openbad.cli.subprocess.run") as run:
+        with patch("openbad.cli.subprocess.run") as run, patch("openbad.cli._ensure_heartbeat_timer"):
             run.side_effect = [
                 MagicMock(stdout="not-found\n", stderr="", returncode=1),
                 MagicMock(stdout="enabled\n", stderr="", returncode=0),
@@ -244,6 +248,50 @@ class TestInternalCommands:
         assert "--port" in result.output
         assert "--mqtt-host" in result.output
         assert "--mqtt-port" in result.output
+
+
+class TestUpdateCommand:
+    def test_find_project_root_prefers_current_checkout(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            os.makedirs("scripts", exist_ok=True)
+            with open("pyproject.toml", "w", encoding="utf-8") as handle:
+                handle.write("[project]\nname='openbad'\n")
+            with open("scripts/install.sh", "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env bash\n")
+
+            expected_root = os.getcwd()
+            project_root = _find_project_root()
+
+        assert project_root is not None
+        assert str(project_root) == expected_root
+
+    def test_update_uses_current_checkout_install_script(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem(), patch("openbad.cli.subprocess.run") as run, patch(
+            "openbad.cli._ensure_heartbeat_timer"
+        ):
+            os.makedirs("scripts", exist_ok=True)
+            with open("pyproject.toml", "w", encoding="utf-8") as handle:
+                handle.write("[project]\nname='openbad'\n")
+            with open("scripts/install.sh", "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env bash\n")
+
+            expected_root = os.getcwd()
+            run.side_effect = [
+                MagicMock(returncode=0, stdout="Already up to date.\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),
+            ]
+
+            result = runner.invoke(main, ["update", "--skip-services"])
+
+        assert result.exit_code == 0
+        assert run.call_args_list[0].args[0][1] == "-C"
+        assert run.call_args_list[0].args[0][2] == expected_root
+        assert run.call_args_list[1].args[0] == [
+            os.path.join(expected_root, "scripts", "install.sh"),
+            "--skip-services",
+        ]
 
 
 class TestEndocrineHelpers:

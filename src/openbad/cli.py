@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -92,6 +93,29 @@ def _ensure_heartbeat_timer() -> None:
         )
 
 
+def _find_project_root() -> Path | None:
+    env_root = os.environ.get("OPENBAD_PROJECT_ROOT")
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    candidates.append(Path.cwd())
+    candidates.extend(Path(__file__).resolve().parents)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        for root in (resolved, *resolved.parents):
+            if root in seen:
+                continue
+            seen.add(root)
+            if (root / "pyproject.toml").is_file() and (root / "scripts" / "install.sh").is_file():
+                return root
+    return None
+
+
 @click.group(invoke_without_command=True)
 @click.pass_context
 def main(ctx: click.Context) -> None:
@@ -157,14 +181,14 @@ def update(skip_services: bool) -> None:
     Python package, configuration files, and systemd units, then
     restarts all managed services.
     """
-    install_script = Path(__file__).resolve().parents[2] / "scripts" / "install.sh"
-    if not install_script.is_file():
+    project_root = _find_project_root()
+    if project_root is None:
         raise click.ClickException(
-            f"Install script not found at {install_script}. "
-            "Run from a git checkout of the OpenBaD repository."
+            "Install script not found. Run from a git checkout of the OpenBaD repository "
+            "or set OPENBAD_PROJECT_ROOT."
         )
 
-    project_root = install_script.parent.parent
+    install_script = project_root / "scripts" / "install.sh"
 
     # 1. git pull (best effort — may be a non-git install)
     click.echo("Pulling latest changes...")
