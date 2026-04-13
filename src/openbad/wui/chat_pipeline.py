@@ -12,6 +12,7 @@ engaging the subsystems that make OpenBaD more than a pass-through to an LLM:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -29,6 +30,9 @@ from openbad.cognitive.context_manager import (
     estimate_tokens,
 )
 from openbad.cognitive.providers.base import ProviderAdapter
+from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter
+from openbad.toolbelt.dispatch import dispatch_tool_call
+from openbad.toolbelt.schemas import TOOL_SCHEMAS
 from openbad.identity.onboarding import (
     INTERVIEW_SYSTEM_PROMPT,
     USER_INTERVIEW_SYSTEM_PROMPT,
@@ -59,26 +63,63 @@ _DATA_DIR = Path("/var/lib/openbad")
 _MEMORY_DIR = _DATA_DIR / "memory"
 _MAX_CONVERSATION_TURNS = 50  # max turns to keep in STM
 _SEMANTIC_TOP_K = 3  # top-k results from semantic search
+
+# ── SQLite state DB singleton for session messages ─────────────────── #
+_state_conn: Any = None
+
+_PREFERRED_STATE_DB = Path("/var/lib/openbad/data/state.db")
+
+
+def _get_state_conn() -> Any:
+    """Return a shared SQLite connection to the state database."""
+    global _state_conn
+    if _state_conn is None:
+        from os import environ
+
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
+
+        configured = environ.get("OPENBAD_STATE_DB", "").strip()
+        if configured:
+            db_path = Path(configured)
+        elif _PREFERRED_STATE_DB.exists():
+            db_path = _PREFERRED_STATE_DB
+        else:
+            db_path = DEFAULT_STATE_DB_PATH
+
+        _state_conn = initialize_state_db(db_path)
+    return _state_conn
 _TOOLBELT_BLURB = (
-    "You have the following built-in tools available through the OpenBaD"
-    " daemon's task engine:\n\n"
-    "- **read_file(path)** — Read a file from the local filesystem."
-    " Governed by immune-system path rules.\n"
-    "- **write_file(path, content)** — Write content to a file."
-    " Blocked on restricted paths (/etc/, ~/.ssh/, etc.).\n"
-    "- **exec_command(command)** — Run a shell command asynchronously."
-    " Destructive commands are quarantined before execution.\n"
-    "- **web_search(query)** — Search the web and return a summary of results.\n"
-    "- **web_fetch(url)** — Fetch the raw content of a URL."
-    " Failed fetches are escalated to the autonomous research queue.\n"
-    "- **ask_user(question)** — Ask the user a question."
-    " Awaits an answer inline if the user is present; otherwise suspends"
-    " the task until they reconnect.\n"
-    "- **mcp_bridge** — Dynamically loads an MCP server schema (e.g. browser"
-    " via CDP, GitHub) as a transient session scoped to the current task node.\n\n"
-    "To see the live registry of loaded tool providers, query GET /api/toolbelt."
-    " Describe what you want to do and the daemon will route it through"
-    " the appropriate tool with immune-system and interoceptive gating applied."
+    "You have tools available through OpenBaD's toolbelt. When you need to"
+    " perform actions — read/write files, execute commands, search the web,"
+    " fetch URLs, inspect MQTT records, system logs, events, endocrine status,"
+    " tasks, research nodes, or call MCP servers — call the appropriate tool"
+    " function. Tool definitions are provided as structured function schemas"
+    " alongside this conversation.\n\n"
+    "Use tools proactively for diagnostics and triage."
+    " Do not ask the user for permission just to inspect logs, MQTT, endocrine"
+    " status, tasks, or research state."
+    " Use ask_user(question) only when blocked on missing business context,"
+    " explicit user approval, or destructive/irreversible actions.\n\n"
+    "NEVER fabricate tool output. If a tool call fails, report the error honestly."
+    " NEVER invent file paths or log contents."
+)
+
+_OWNERSHIP_AGENCY_BLOCK = (
+    "You are OpenBaD, a self-regulating digital organism."
+    " The nervous system, endocrine system, immune system, memory, and toolbelt are"
+    " your own subsystems, not external software owned by someone else."
+    " Speak with ownership and operational self-awareness: say 'I observed', 'I adjusted',"
+    " 'my endocrine state', 'my logs', and 'my subsystems'."
+    " Avoid detached phrasing like 'the system you built' unless the user explicitly asks"
+    " for architecture provenance."
+    "\n\nDiagnostics honesty policy: only claim metrics, timings, baselines, or anomalies"
+    " that you can directly observe from available telemetry/tools in this session."
+    " If a metric is not available, say it is not currently observable instead of"
+    " inventing values."
+    " Do not claim to be 'running', 'watching', or 'auditing' something in the background"
+    " unless you actually executed a tool/task and can report concrete results."
+    " When reporting a diagnosis, include the evidence source (logs, MQTT records, endocrine"
+    " status, tasks, research queue, or explicit config/state data)."
 )
 
 _REASONING_SUFFIX = (
@@ -99,6 +140,7 @@ class ConversationTurn:
     role: str  # "user" or "assistant"
     content: str
     timestamp: float = 0.0
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -197,13 +239,16 @@ def _semantic_key(session_id: str, turn_idx: int) -> str:
 
 
 def _next_turn_idx(session_id: str) -> int:
-    episodic = _get_episodic()
-    with suppress(Exception):
-        episodic.reload()
-    entries = episodic.query(f"{_SESSION_PREFIX}{session_id}:")
-    if not entries:
+    try:
+        conn = _get_state_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        log.debug("Failed to get turn index from SQLite, defaulting to 0", exc_info=True)
         return 0
-    return max(int(entry.metadata.get("turn_idx", 0)) for entry in entries) + 1
 
 
 def _write_turn(
@@ -211,52 +256,64 @@ def _write_turn(
     turn: ConversationTurn,
     *,
     onboarding_mode: bool = False,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Write a conversation turn to STM and episodic memory."""
+    """Write a conversation turn to SQLite, STM, and memory stores."""
+    import json as _json
+
     stm = _get_stm()
-    episodic = _get_episodic()
-    semantic = _get_semantic()
 
     turn_idx = _next_turn_idx(session_id)
+    endocrine_levels = _current_endocrine_levels_array()
 
     key = _session_key(session_id, turn_idx)
     now = time.time()
 
+    metadata: dict[str, Any] = {
+        "session_id": session_id,
+        "role": turn.role,
+        "turn_idx": turn_idx,
+        "endocrine_levels": endocrine_levels,
+        "onboarding_mode": onboarding_mode,
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    # ── Primary store: SQLite session_messages table ──
+    try:
+        conn = _get_state_conn()
+        conn.execute(
+            """
+            INSERT INTO session_messages (session_id, role, content, created_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, turn.role, turn.content, now, _json.dumps(metadata, default=str)),
+        )
+        conn.commit()
+    except Exception:
+        log.exception("Failed to write session message to SQLite: session=%s", session_id)
+        _signal_endocrine(
+            "wui_storage_error",
+            f"Failed to persist chat message for session {session_id}",
+            cortisol=0.08,
+            adrenaline=0.03,
+        )
+
+    # ── In-process STM for active WUI context window ──
     entry = MemoryEntry(
         key=key,
         value=turn.content,
         tier=MemoryTier.STM,
         created_at=now,
         accessed_at=now,
-        context=turn.role,  # store role in context field
-        metadata={
-            "session_id": session_id,
-            "role": turn.role,
-            "turn_idx": turn_idx,
-            "onboarding_mode": onboarding_mode,
-        },
+        context=turn.role,
+        metadata=dict(metadata),
     )
     stm.write(entry)
 
-    # Also persist to episodic for long-term recall
-    ep_entry = MemoryEntry(
-        key=key,
-        value=turn.content,
-        tier=MemoryTier.EPISODIC,
-        created_at=now,
-        accessed_at=now,
-        context=turn.role,
-        metadata={
-            "session_id": session_id,
-            "role": turn.role,
-            "turn_idx": turn_idx,
-            "task_id": session_id,
-            "onboarding_mode": onboarding_mode,
-        },
-    )
-    episodic.write(ep_entry)
-
+    # ── Semantic memory for cross-session similarity search ──
     if not onboarding_mode:
+        semantic = _get_semantic()
         semantic.write(
             MemoryEntry(
                 key=_semantic_key(session_id, turn_idx),
@@ -276,27 +333,78 @@ def _write_turn(
         )
 
 
-def _get_conversation_history(session_id: str) -> list[ConversationTurn]:
-    """Retrieve recent conversation from persisted episodic memory."""
-    episodic = _get_episodic()
+def _current_endocrine_levels_array() -> list[float]:
     with suppress(Exception):
-        episodic.reload()
-    entries = episodic.query(f"{_SESSION_PREFIX}{session_id}:")
+        from openbad.autonomy.endocrine_runtime import EndocrineRuntime, load_endocrine_config
 
-    # Sort by turn index
-    entries.sort(key=lambda e: e.metadata.get("turn_idx", 0))
+        runtime = EndocrineRuntime(config=load_endocrine_config())
+        return runtime.level_array()
+    return [0.0, 0.0, 0.0, 0.0]
 
-    # Keep last N turns
-    entries = entries[-_MAX_CONVERSATION_TURNS:]
 
-    return [
-        ConversationTurn(
-            role=e.metadata.get("role", e.context),
-            content=str(e.value),
-            timestamp=e.created_at,
+def _signal_endocrine(
+    source: str,
+    reason: str,
+    cortisol: float = 0.0,
+    adrenaline: float = 0.0,
+) -> None:
+    """Best-effort endocrine signal — never raises."""
+    try:
+        from openbad.autonomy.endocrine_runtime import EndocrineRuntime, load_endocrine_config  # noqa: PLC0415
+
+        deltas: dict[str, float] = {}
+        if cortisol:
+            deltas["cortisol"] = cortisol
+        if adrenaline:
+            deltas["adrenaline"] = adrenaline
+        if not deltas:
+            return
+        runtime = EndocrineRuntime(config=load_endocrine_config())
+        runtime.apply_adjustment(source=source, reason=reason, deltas=deltas)
+    except Exception:
+        log.debug("Could not signal endocrine: source=%s", source, exc_info=True)
+
+
+def _get_conversation_history(session_id: str) -> list[ConversationTurn]:
+    """Retrieve recent conversation from SQLite session_messages table."""
+    try:
+        conn = _get_state_conn()
+        rows = conn.execute(
+            """
+            SELECT role, content, created_at, metadata_json
+            FROM session_messages
+            WHERE session_id = ?
+            ORDER BY created_at ASC, message_id ASC
+            """,
+            (session_id,),
+        ).fetchall()
+        turns: list[ConversationTurn] = []
+        for row in rows:
+            meta: dict[str, Any] | None = None
+            raw = row["metadata_json"]
+            if raw and raw != "{}":
+                try:
+                    meta = json.loads(raw)
+                except (ValueError, TypeError):
+                    pass
+            turns.append(
+                ConversationTurn(
+                    role=str(row["role"]),
+                    content=str(row["content"]),
+                    timestamp=float(row["created_at"]),
+                    metadata=meta,
+                )
+            )
+        return turns
+    except Exception:
+        log.exception("Failed to read conversation history from SQLite: session=%s", session_id)
+        _signal_endocrine(
+            "wui_storage_error",
+            f"Failed to read conversation history for session {session_id}",
+            cortisol=0.06,
+            adrenaline=0.02,
         )
-        for e in entries
-    ]
+        return []
 
 
 def get_conversation_history(
@@ -310,7 +418,12 @@ def get_conversation_history(
     return _get_conversation_history(session_id)[-limit:]
 
 
-def append_assistant_message(session_id: str, content: str) -> None:
+def append_assistant_message(
+    session_id: str,
+    content: str,
+    *,
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
     """Append an assistant-authored message directly to a chat session.
 
     Used by autonomous subsystems (heartbeat, research, immune monitoring)
@@ -328,30 +441,65 @@ def append_assistant_message(session_id: str, content: str) -> None:
             timestamp=time.time(),
         ),
         onboarding_mode=False,
+        extra_metadata=extra_metadata,
+    )
+
+
+def append_session_message(
+    session_id: str,
+    role: str,
+    content: str,
+    *,
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
+    """Append a message with an arbitrary role to a chat session."""
+    text = content.strip()
+    if not text:
+        return
+    _write_turn(
+        session_id,
+        ConversationTurn(
+            role=role,
+            content=text,
+            timestamp=time.time(),
+        ),
+        onboarding_mode=False,
+        extra_metadata=extra_metadata,
     )
 
 
 def _get_episodic_context(session_id: str, query: str) -> str:
-    """Retrieve relevant episodic memories (from prior sessions)."""
-    episodic = _get_episodic()
+    """Retrieve relevant episodic memories (from prior sessions) via SQLite."""
     try:
-        recent = episodic.recent(n=20)
-        # Filter to exclude current session (we already have that in STM)
-        prior = [
-            e for e in recent
-            if e.metadata.get("session_id") != session_id
-            and not e.metadata.get("onboarding_mode", False)
-        ]
-        if not prior:
+        conn = _get_state_conn()
+        rows = conn.execute(
+            """
+            SELECT session_id, role, content, metadata_json
+            FROM session_messages
+            WHERE session_id != ?
+            ORDER BY created_at DESC
+            LIMIT 20
+            """,
+            (session_id,),
+        ).fetchall()
+        if not rows:
             return ""
 
-        # Format as context summary
         lines = []
-        for e in prior[-5:]:  # Last 5 from prior sessions
-            role = e.metadata.get("role", "unknown")
-            content = str(e.value)[:200]  # Truncate long entries
+        for row in reversed(rows[-5:]):
+            # Skip onboarding turns
+            meta_raw = row["metadata_json"]
+            if meta_raw and meta_raw != "{}":
+                with suppress(ValueError, TypeError):
+                    meta = json.loads(meta_raw)
+                    if meta.get("onboarding_mode"):
+                        continue
+            role = str(row["role"])
+            content = str(row["content"])[:200]
             lines.append(f"[{role}] {content}")
 
+        if not lines:
+            return ""
         return "Prior conversation context:\n" + "\n".join(lines)
     except Exception:
         log.debug("Episodic retrieval failed", exc_info=True)
@@ -462,6 +610,8 @@ def _build_identity_prompt(
             " Speak and think as this person naturally would."
             " Never describe yourself as 'configured as' or narrate your own settings;"
             " simply be this person."
+            " Treat OpenBaD subsystems (nervous system, endocrine, immune, memory, tools)"
+            " as your internal physiology and operations."
         )
         if persona_summary:
             opening += f"\n\n{persona_summary}"
@@ -639,9 +789,16 @@ def assemble_context(
             _REASONING_SUFFIX if system == CognitiveSystem.REASONING else _CHAT_SUFFIX
         )
         if identity_block:
-            system_prompt = identity_block + "\n\n" + _TOOLBELT_BLURB + suffix
+            system_prompt = (
+                _OWNERSHIP_AGENCY_BLOCK
+                + "\n\n"
+                + identity_block
+                + "\n\n"
+                + _TOOLBELT_BLURB
+                + suffix
+            )
         else:
-            system_prompt = _TOOLBELT_BLURB + suffix
+            system_prompt = _OWNERSHIP_AGENCY_BLOCK + "\n\n" + _TOOLBELT_BLURB + suffix
 
     onboarding_mode = assistant_needs_config or user_needs_config
 
@@ -732,6 +889,12 @@ def _flatten_messages(messages: list[dict[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
+# ── Agentic loop constants ────────────────────────────────────────── #
+
+_MAX_TOOL_ITERATIONS = 5
+_TOOL_CALL_TIMEOUT_S = 30.0
+
+
 # ── Streaming pipeline ────────────────────────────────────────────── #
 
 
@@ -749,14 +912,14 @@ async def stream_chat(
     usage_tracker: Any | None = None,
     nervous_system_client: NervousSystemClient_T | None = None,
 ) -> AsyncIterator[StreamChunk]:
-    """Full chat pipeline: scan → assemble → stream → consolidate.
+    """Full chat pipeline: scan → assemble → agentic loop → consolidate.
 
-    Yields StreamChunk objects as tokens arrive. The final chunk has done=True.
+    Yields StreamChunk objects as content arrives. The final chunk has done=True.
 
-    If a nervous_system_client is provided, publishes events to the MQTT bus:
-    - COGNITIVE_INPUT on user message received
-    - COGNITIVE_OUTPUT on successful completion
-    - COGNITIVE_ERROR on failures
+    When the adapter is a LiteLLMAdapter, tools are provided via the ``tools``
+    parameter and the LLM can invoke them in a loop (max 5 iterations).
+    Tool-calling turns use non-streaming completion; the final text answer
+    is streamed for real-time display.
     """
     request_id = uuid.uuid4().hex[:12]
     start_timestamp = time.time()
@@ -784,7 +947,6 @@ async def stream_chat(
         )
         return
     elif report.is_threat:
-        # Medium/low severity — flag but allow
         threat_names = ", ".join(m.rule_name for m in report.matches)
         log.info(
             "Immune scan flagged message (non-blocking, request=%s): %s",
@@ -803,16 +965,16 @@ async def stream_chat(
         modulation=modulation,
     )
     messages = _build_messages(context, message)
-    prompt = _flatten_messages(messages)
 
     # ── 3. Record user message in memory ──
+    _provider_meta = {"provider": provider_name, "model": model_id}
     _write_turn(
         session_id,
         ConversationTurn(role="user", content=message, timestamp=time.time()),
         onboarding_mode=onboarding_mode,
+        extra_metadata=_provider_meta,
     )
 
-    # Publish cognitive input event
     _publish_input(
         nervous_system_client,
         source="wui",
@@ -827,16 +989,34 @@ async def stream_chat(
         context.total_tokens, len(context.conversation_history),
     )
 
-    # ── 4. Stream from provider ──
-    full_response = []
+    # ── 4. Agentic loop (LiteLLM) or legacy streaming ──
+    full_response: list[str] = []
     tokens_used = 0
     t0 = time.monotonic()
 
+    use_agentic = isinstance(adapter, LiteLLMAdapter) and not onboarding_mode
+
     try:
-        async for token in adapter.stream(prompt, model_id=model_id):
-            tokens_used += 1
-            full_response.append(token)
-            yield StreamChunk(token=token, tokens_used=tokens_used)
+        if use_agentic:
+            async for chunk in _agentic_stream(
+                adapter, model_id, messages, request_id,
+            ):
+                if chunk.error:
+                    yield chunk
+                    return
+                tokens_used += chunk.tokens_used
+                if chunk.token:
+                    full_response.append(chunk.token)
+                yield chunk
+                if chunk.done:
+                    break
+        else:
+            # Legacy path: plain streaming without tools
+            prompt = _flatten_messages(messages)
+            async for token in adapter.stream(prompt, model_id=model_id):
+                tokens_used += 1
+                full_response.append(token)
+                yield StreamChunk(token=token, tokens_used=tokens_used)
     except Exception as e:
         log.exception("Stream error request=%s", request_id)
         _publish_error(
@@ -845,6 +1025,12 @@ async def stream_chat(
             error_type=type(e).__name__,
             message_hash=_hash_message(message),
             timestamp=time.time(),
+        )
+        _signal_endocrine(
+            "wui_provider_error",
+            f"Chat stream failed: {provider_name or 'unknown'} — {type(e).__name__}",
+            cortisol=0.10,
+            adrenaline=0.05,
         )
         status = getattr(e, "status", None)
         detail = getattr(e, "message", "") or str(e)
@@ -880,9 +1066,9 @@ async def stream_chat(
         session_id,
         ConversationTurn(role="assistant", content=response_text, timestamp=time.time()),
         onboarding_mode=onboarding_mode,
+        extra_metadata=_provider_meta,
     )
 
-    # Publish cognitive output event
     _publish_output(
         nervous_system_client,
         source="wui",
@@ -898,6 +1084,121 @@ async def stream_chat(
     )
 
     yield StreamChunk(done=True, tokens_used=tokens_used, provider=provider_name, model=model_id)
+
+
+async def _agentic_stream(
+    adapter: LiteLLMAdapter,
+    model_id: str,
+    messages: list[dict[str, Any]],
+    request_id: str,
+) -> AsyncIterator[StreamChunk]:
+    """Run the agentic tool-calling loop.
+
+    Non-streaming completions for tool-calling turns; streams the final
+    text answer for real-time display.
+
+    Yields StreamChunk objects. The caller is responsible for the final
+    ``done=True`` chunk and memory consolidation.
+    """
+    import asyncio as _asyncio
+
+    tools = TOOL_SCHEMAS
+    total_tokens = 0
+    # Work on a mutable copy so tool messages accumulate across iterations.
+    working_messages = list(messages)
+
+    for iteration in range(_MAX_TOOL_ITERATIONS):
+        log.debug(
+            "Agentic iteration %d/%d request=%s",
+            iteration + 1, _MAX_TOOL_ITERATIONS, request_id,
+        )
+
+        response = await adapter.agentic_complete(
+            working_messages, model_id, tools=tools,
+        )
+
+        usage = getattr(response, "usage", None)
+        iter_tokens = usage.total_tokens if usage else 0
+        total_tokens += iter_tokens
+
+        choice = response.choices[0] if response.choices else None
+        if choice is None:
+            yield StreamChunk(error="Empty response from provider", done=True)
+            return
+
+        assistant_msg = choice.message
+        tool_calls = getattr(assistant_msg, "tool_calls", None) or []
+
+        if not tool_calls:
+            # Final answer — yield content as streamed chunks.
+            content = assistant_msg.content or ""
+            # Yield in segments for real-time display.
+            chunk_size = 40
+            for i in range(0, max(len(content), 1), chunk_size):
+                segment = content[i : i + chunk_size]
+                if segment:
+                    yield StreamChunk(token=segment, tokens_used=total_tokens)
+            return
+
+        # ── Tool-calling turn ──
+        # Add assistant message (with tool_calls) to context.
+        working_messages.append(assistant_msg.model_dump(exclude_none=True))
+
+        # Yield a progress indicator for the UI.
+        tool_names = [tc.function.name for tc in tool_calls]
+        yield StreamChunk(
+            reasoning=f"Using tools: {', '.join(tool_names)}",
+            tokens_used=total_tokens,
+        )
+
+        # Execute each tool call with a timeout.
+        for tc in tool_calls:
+            fn_name = tc.function.name
+            try:
+                fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except (json.JSONDecodeError, TypeError):
+                fn_args = {}
+
+            log.info(
+                "Tool call request=%s iter=%d tool=%s args=%s",
+                request_id, iteration + 1, fn_name,
+                json.dumps(fn_args, default=str)[:200],
+            )
+
+            try:
+                result = await _asyncio.wait_for(
+                    dispatch_tool_call(fn_name, fn_args),
+                    timeout=_TOOL_CALL_TIMEOUT_S,
+                )
+            except TimeoutError:
+                result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
+                log.warning("Tool timeout request=%s tool=%s", request_id, fn_name)
+
+            working_messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    # Exhausted iterations — ask the model for a final summary without tools.
+    log.warning(
+        "Agentic loop hit max iterations (%d) request=%s",
+        _MAX_TOOL_ITERATIONS, request_id,
+    )
+    working_messages.append({
+        "role": "user",
+        "content": (
+            "You have reached the maximum number of tool calls."
+            " Summarize what you found and provide your best answer."
+        ),
+    })
+    response = await adapter.agentic_complete(working_messages, model_id)
+    usage = getattr(response, "usage", None)
+    total_tokens += usage.total_tokens if usage else 0
+    choice = response.choices[0] if response.choices else None
+    content = (choice.message.content or "") if choice else ""
+    if content:
+        yield StreamChunk(token=content, tokens_used=total_tokens)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -930,7 +1231,7 @@ def _publish_input(
             "timestamp": timestamp,
         }
         import json
-        client.publish(topics.COGNITIVE_INPUT, json.dumps(payload).encode())
+        client.publish_bytes(topics.COGNITIVE_INPUT, json.dumps(payload).encode())
     except Exception:
         log.debug("Failed to publish cognitive input event", exc_info=True)
 
@@ -956,7 +1257,7 @@ def _publish_output(
             "timestamp": timestamp,
         }
         import json
-        client.publish(topics.COGNITIVE_OUTPUT, json.dumps(payload).encode())
+        client.publish_bytes(topics.COGNITIVE_OUTPUT, json.dumps(payload).encode())
     except Exception:
         log.debug("Failed to publish cognitive output event", exc_info=True)
 
@@ -980,6 +1281,6 @@ def _publish_error(
             "timestamp": timestamp,
         }
         import json
-        client.publish(topics.COGNITIVE_ERROR, json.dumps(payload).encode())
+        client.publish_bytes(topics.COGNITIVE_ERROR, json.dumps(payload).encode())
     except Exception:
         log.debug("Failed to publish cognitive error event", exc_info=True)
