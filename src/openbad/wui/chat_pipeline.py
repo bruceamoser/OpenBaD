@@ -30,6 +30,7 @@ from openbad.cognitive.context_manager import (
     estimate_tokens,
 )
 from openbad.cognitive.providers.base import ProviderAdapter
+from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
 from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter
 from openbad.toolbelt.dispatch import dispatch_tool_call
 from openbad.toolbelt.schemas import TOOL_SCHEMAS
@@ -995,7 +996,7 @@ async def stream_chat(
     tokens_used = 0
     t0 = time.monotonic()
 
-    use_agentic = isinstance(adapter, LiteLLMAdapter) and not onboarding_mode
+    use_agentic = isinstance(adapter, (LiteLLMAdapter, GitHubCopilotProvider)) and not onboarding_mode
 
     try:
         if use_agentic:
@@ -1088,7 +1089,7 @@ async def stream_chat(
 
 
 async def _agentic_stream(
-    adapter: LiteLLMAdapter,
+    adapter: LiteLLMAdapter | GitHubCopilotProvider,
     model_id: str,
     messages: list[dict[str, Any]],
     request_id: str,

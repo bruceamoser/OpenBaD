@@ -519,6 +519,47 @@ class GitHubCopilotProvider(ProviderAdapter):
         return models
 
     # ------------------------------------------------------------------ #
+    # Agentic completion (tool-calling support)
+    # ------------------------------------------------------------------ #
+
+    async def agentic_complete(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Non-streaming completion with optional tool definitions.
+
+        Returns a ``litellm.ModelResponse``-compatible object so the
+        agentic loop in ``chat_pipeline`` can process tool calls
+        identically regardless of provider.
+        """
+        from litellm.types.utils import (
+            Choices,
+            Message,
+            ModelResponse,
+            Usage,
+        )
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            **kwargs,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        data = await self._post("/chat/completions", payload)
+
+        # Parse into litellm ModelResponse so the agentic loop can use
+        # .choices[0].message.tool_calls / .content / .model_dump().
+        return ModelResponse(**data)
+
+    # ------------------------------------------------------------------ #
     # HTTP with retry
     # ------------------------------------------------------------------ #
 

@@ -801,6 +801,8 @@ def _build_litellm_adapter(
     """Build a LiteLLMAdapter for a given provider config.
 
     The *model* is converted to a LiteLLM-qualified name (e.g. ``ollama/llama3.2``).
+    GitHub Copilot should NOT go through this path — use
+    :func:`_build_chat_adapter` instead.
     """
     import os
 
@@ -811,27 +813,6 @@ def _build_litellm_adapter(
 
     default_model = litellm_model_name(provider.name, model) if model else ""
     api_base = provider.base_url or ""
-    extra_kwargs: dict[str, object] = {}
-
-    # GitHub Copilot: load token via the existing GitHubCopilotProvider
-    # token manager (env var → disk cache → refresh).  LiteLLM's built-in
-    # ``github_copilot`` provider is NOT used because it triggers an
-    # interactive OAuth device-flow that blocks headless services.
-    if provider.name == "github-copilot" and not api_key:
-        from openbad.cognitive.providers.github_copilot import (
-            CopilotAuthError,
-            GitHubCopilotProvider,
-        )
-
-        try:
-            api_key = GitHubCopilotProvider()._get_token()
-        except CopilotAuthError:
-            log.warning(
-                "No Copilot token available — re-authenticate via "
-                "Settings → Providers → GitHub Copilot."
-            )
-    if provider.name == "github-copilot":
-        extra_kwargs["extra_headers"] = {"Editor-Version": "openbad/0.1.0"}
 
     # LiteLLM's OpenAI codepath requires *some* api_key even for local
     # servers that don't check it (llama.cpp, vLLM, etc.).  Supply a
@@ -845,8 +826,29 @@ def _build_litellm_adapter(
         api_key=api_key,
         api_base=api_base,
         timeout_s=timeout_s,
-        extra_kwargs=extra_kwargs,
     )
+
+
+def _build_chat_adapter(
+    provider: ProviderConfig,
+    model: str,
+) -> tuple[Any, str]:
+    """Build the appropriate adapter for a chat provider.
+
+    Returns ``(adapter, model_id)``.
+    For ``github-copilot`` a native :class:`GitHubCopilotProvider` is used
+    (raw model name, e.g. ``gpt-5.1``).  All other providers go through
+    :class:`LiteLLMAdapter` (LiteLLM-qualified name, e.g. ``ollama/llama3.2``).
+    """
+    if provider.name == "github-copilot":
+        timeout_s = max(1.0, provider.timeout_ms / 1000)
+        adapter = GitHubCopilotProvider(
+            default_model=model,
+            timeout_s=timeout_s,
+        )
+        return adapter, model
+    litellm_model = litellm_model_name(provider.name, model)
+    return _build_litellm_adapter(provider, model), litellm_model
 
 
 async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]:
@@ -1180,10 +1182,12 @@ def _resolve_chat_adapter(
     config: CognitiveConfig,
     system_name: str,
 ) -> tuple[Any, str | None, str, bool]:
-    """Build a LiteLLMAdapter for the given cognitive system.
+    """Build an adapter for the given cognitive system.
 
-    Returns ``(adapter, litellm_model, provider_name, is_fallback)``.
-    The model string is already in LiteLLM format (e.g. ``ollama/llama3.2``).
+    Returns ``(adapter, model_id, provider_name, is_fallback)``.
+    For ``github-copilot`` a native ``GitHubCopilotProvider`` is returned
+    to bypass LiteLLM's broken device-flow authenticator.  All other
+    providers use ``LiteLLMAdapter``.
     *is_fallback* is True when the assigned provider was unavailable and a
     substitute was used instead.
     """
@@ -1201,8 +1205,7 @@ def _resolve_chat_adapter(
             if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
                 if not assignment.model:
                     break
-                model = litellm_model_name(p.name, assignment.model)
-                adapter = _build_litellm_adapter(p, assignment.model)
+                adapter, model = _build_chat_adapter(p, assignment.model)
                 return adapter, model, p.name, False
 
     # Fallback: if chat assignment is stale or unverified, use first valid provider.
@@ -1223,8 +1226,7 @@ def _resolve_chat_adapter(
 
         if not fallback_model:
             continue
-        model = litellm_model_name(p.name, fallback_model)
-        adapter = _build_litellm_adapter(p, fallback_model)
+        adapter, model = _build_chat_adapter(p, fallback_model)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
             log.warning(
