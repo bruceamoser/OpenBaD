@@ -16,12 +16,41 @@ log = logging.getLogger(__name__)
 
 # Maximum output length per tool result to avoid ballooning context.
 _MAX_RESULT_CHARS = 16_000
+_ACCESS_REQUEST_PREFIX = "[access_request]"
 
 
 def _truncate(text: str) -> str:
     if len(text) > _MAX_RESULT_CHARS:
         return text[:_MAX_RESULT_CHARS] + f"\n... (truncated, {len(text)} chars total)"
     return text
+
+
+def _format_access_request(target: str, detail: str) -> str:
+    return (
+        f"{_ACCESS_REQUEST_PREFIX} Access to {target} is not currently permitted. {detail}\n"
+        "Ask the user whether to grant access to that path/root before trying again."
+    )
+
+
+def _format_access_request_with_record(target: str, detail: str, record: dict[str, Any] | None) -> str:
+    if not record:
+        return _format_access_request(target, detail)
+    request = record.get("request") if isinstance(record.get("request"), dict) else {}
+    if request:
+        request_id = str(request.get("request_id", "")).strip()
+        root = str(request.get("normalized_root", "")).strip()
+        return (
+            f"{_ACCESS_REQUEST_PREFIX} Access to {target} is not currently permitted. {detail}\n"
+            f"Pending request: {request_id or 'unknown'} for root {root or 'unknown'}.\n"
+            "Ask the user to approve that request in the Toolbelt UI before retrying."
+        )
+    grant = record.get("grant") if isinstance(record.get("grant"), dict) else {}
+    if grant:
+        return (
+            f"{_ACCESS_REQUEST_PREFIX} Access to {target} was previously blocked, but the root is now granted. "
+            "Retry the operation."
+        )
+    return _format_access_request(target, detail)
 
 
 async def dispatch_tool_call(name: str, arguments: dict[str, Any]) -> str:
@@ -42,16 +71,43 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
 
     if name == "read_file":
         from openbad.toolbelt.fs_tool import read_file
+        from openbad.toolbelt.access_control import create_access_request
 
-        return read_file(args["path"])
+        try:
+            return read_file(args["path"])
+        except PermissionError as exc:
+            detail = str(exc)
+            if "outside allowed roots" in detail:
+                record = create_access_request(
+                    args["path"],
+                    requester="tool:read_file",
+                    reason="read_file requested access outside allowed roots",
+                    prefer_parent=True,
+                )
+                return _format_access_request_with_record(f"path {args['path']!r}", detail, record)
+            return f"Error executing read_file: PermissionError: {detail}"
 
     if name == "write_file":
         from openbad.toolbelt.fs_tool import write_file
+        from openbad.toolbelt.access_control import create_access_request
 
-        write_file(args["path"], args["content"])
+        try:
+            write_file(args["path"], args["content"])
+        except PermissionError as exc:
+            detail = str(exc)
+            if "outside allowed roots" in detail:
+                record = create_access_request(
+                    args["path"],
+                    requester="tool:write_file",
+                    reason="write_file requested access outside allowed roots",
+                    prefer_parent=True,
+                )
+                return _format_access_request_with_record(f"path {args['path']!r}", detail, record)
+            return f"Error executing write_file: PermissionError: {detail}"
         return f"File written: {args['path']}"
 
     if name == "exec_command":
+        from openbad.toolbelt.access_control import create_access_request
         from openbad.toolbelt.cli_tool import CliToolAdapter
 
         cli = CliToolAdapter()
@@ -63,10 +119,90 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         parts = []
         if result.stdout:
             parts.append(result.stdout)
+        if result.returncode == -1 and "allowed roots" in (result.stderr or ""):
+            requested_cwd = str(args.get("cwd") or cli.config.working_directory)
+            record = create_access_request(
+                requested_cwd,
+                requester="tool:exec_command",
+                reason=f"exec_command requested cwd access for command {args.get('command', '')}",
+                prefer_parent=False,
+            )
+            return _format_access_request_with_record(
+                f"working directory {requested_cwd!r}",
+                result.stderr,
+                record,
+            )
         if result.stderr:
             parts.append(f"STDERR: {result.stderr}")
-        parts.append(f"(exit code {result.exit_code})")
+        parts.append(f"(exit code {result.returncode})")
         return "\n".join(parts)
+
+    if name == "get_path_access_status":
+        from openbad.toolbelt.access_control import list_access_grants, list_access_requests
+
+        return json.dumps(
+            {
+                "pending_requests": list_access_requests(status="pending"),
+                "grants": list_access_grants(),
+            },
+            indent=2,
+            default=str,
+        )
+
+    if name == "list_terminal_sessions":
+        from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+        return json.dumps(get_terminal_session_manager().list_sessions(), indent=2, default=str)
+
+    if name == "create_terminal_session":
+        from openbad.toolbelt.access_control import create_access_request
+        from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+        manager = get_terminal_session_manager()
+        try:
+            session = manager.create_session(
+                cwd=str(args.get("cwd") or "."),
+                requester=str(args.get("requester") or "session"),
+                shell=str(args.get("shell") or "/bin/bash"),
+            )
+        except PermissionError as exc:
+            requested_cwd = str(args.get("cwd") or ".")
+            record = create_access_request(
+                requested_cwd,
+                requester="tool:create_terminal_session",
+                reason="terminal session requested cwd access outside allowed roots",
+                prefer_parent=False,
+            )
+            return _format_access_request_with_record(f"working directory {requested_cwd!r}", str(exc), record)
+        return json.dumps(session, indent=2, default=str)
+
+    if name == "send_terminal_input":
+        from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+        result = get_terminal_session_manager().send_input(
+            str(args["session_id"]),
+            str(args.get("input", "")),
+            append_newline=bool(args.get("append_newline", True)),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "read_terminal_output":
+        from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+        result = get_terminal_session_manager().read_output(
+            str(args["session_id"]),
+            max_bytes=int(args.get("max_bytes", 8192)),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "close_terminal_session":
+        from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+        result = get_terminal_session_manager().close_session(
+            str(args["session_id"]),
+            reason=str(args.get("reason") or "session-request"),
+        )
+        return json.dumps(result, indent=2, default=str)
 
     if name == "web_search":
         from openbad.toolbelt.web_search import WebSearchToolAdapter

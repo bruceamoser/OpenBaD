@@ -2039,6 +2039,142 @@ async def _delete_toolbelt_role(request: web.Request) -> web.Response:
     return web.json_response(_serialize_toolbelt(registry))
 
 
+async def _get_toolbelt_access(_request: web.Request) -> web.Response:
+    from openbad.toolbelt.access_control import list_access_grants, list_access_requests
+
+    return web.json_response(
+        {
+            "pending_requests": list_access_requests(status="pending"),
+            "requests": list_access_requests(),
+            "grants": list_access_grants(),
+        }
+    )
+
+
+async def _post_toolbelt_access_approve(request: web.Request) -> web.Response:
+    from openbad.toolbelt.access_control import approve_access_request
+
+    request_id = request.match_info["request_id"]
+    payload = await request.json() if request.can_read_body else {}
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    approved_by = str(payload.get("approved_by", "user")).strip() or "user"
+    reason = str(payload.get("reason", "")).strip()
+    expires_at_raw = payload.get("expires_at")
+    expires_at = None
+    if expires_at_raw not in (None, ""):
+        try:
+            expires_at = float(expires_at_raw)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="expires_at must be numeric") from exc
+    try:
+        result = approve_access_request(
+            request_id,
+            approved_by=approved_by,
+            reason=reason,
+            expires_at=expires_at,
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response(result)
+
+
+async def _delete_toolbelt_access_grant(request: web.Request) -> web.Response:
+    from openbad.toolbelt.access_control import revoke_access_grant
+
+    grant_id = request.match_info["grant_id"]
+    revoked_by = str(request.query.get("revoked_by", "user")).strip() or "user"
+    try:
+        result = revoke_access_grant(grant_id, revoked_by=revoked_by)
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response(result)
+
+
+async def _get_toolbelt_terminal(_request: web.Request) -> web.Response:
+    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+    return web.json_response({"sessions": get_terminal_session_manager().list_sessions()})
+
+
+async def _post_toolbelt_terminal(request: web.Request) -> web.Response:
+    from openbad.toolbelt.access_control import create_access_request
+    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    cwd = str(payload.get("cwd", "")).strip()
+    if not cwd:
+        raise web.HTTPBadRequest(text="cwd is required")
+    shell = str(payload.get("shell", "/bin/bash")).strip() or "/bin/bash"
+    requester = str(payload.get("requester", "wui")).strip() or "wui"
+    try:
+        session = get_terminal_session_manager().create_session(cwd=cwd, shell=shell, requester=requester)
+    except PermissionError as exc:
+        record = create_access_request(
+            cwd,
+            requester="wui:terminal",
+            reason="Toolbelt terminal session requested cwd access outside allowed roots",
+        )
+        return web.json_response({"access_request": record, "detail": str(exc)}, status=403)
+    return web.json_response(session, status=201)
+
+
+async def _post_toolbelt_terminal_input(request: web.Request) -> web.Response:
+    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    text = str(payload.get("input", ""))
+    append_newline = bool(payload.get("append_newline", True))
+    try:
+        result = get_terminal_session_manager().send_input(
+            request.match_info["session_id"],
+            text,
+            append_newline=append_newline,
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response(result)
+
+
+async def _get_toolbelt_terminal_output(request: web.Request) -> web.Response:
+    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+    max_bytes = 8192
+    raw = request.query.get("max_bytes")
+    if raw not in (None, ""):
+        try:
+            max_bytes = max(256, int(raw))
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="max_bytes must be an integer") from exc
+    try:
+        result = get_terminal_session_manager().read_output(
+            request.match_info["session_id"],
+            max_bytes=max_bytes,
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response(result)
+
+
+async def _delete_toolbelt_terminal(request: web.Request) -> web.Response:
+    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+
+    try:
+        result = get_terminal_session_manager().close_session(
+            request.match_info["session_id"],
+            reason=str(request.query.get("reason", "wui-delete")),
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response(result)
+
+
 # ---------------------------------------------------------------------- #
 # Entity endpoints — user / assistant profile management
 # ---------------------------------------------------------------------- #
@@ -2983,11 +3119,39 @@ _CAPABILITIES_CATALOG = [
         "icon": "💻",
         "level": 1,
         "module": "openbad.toolbelt.cli_tool",
-        "description": "Execute shell commands asynchronously within quarantine boundaries. Destructive commands are intercepted.",
+        "description": "Execute one-shot shell commands within configured allowed roots. Destructive commands are intercepted, and stdout/stderr plus return code are returned to the model.",
         "tools": [
-            {"name": "exec_command", "signature": "exec_command(cmd: str, timeout_s: float = 30) -> ExecResult", "description": "Run a shell command. Uses asyncio.create_subprocess_shell, never blocks the event loop."},
+            {"name": "exec_command", "signature": "exec_command(command: str, args: list[str] | None = None, cwd: str | None = None) -> str", "description": "Run a one-shot command and return stdout, stderr, and exit code. If args are omitted, command may be a shell-style string such as 'find . -name spec.md'."},
         ],
-        "gates": ["immune: blocks rm -rf, mkfs, chmod 777", "quarantine: sets node to QUARANTINED and publishes agent/immune/alert"],
+        "gates": ["immune: blocks rm -rf, mkfs, chmod 777", "filesystem: cwd must remain inside configured allowed roots", "not a persistent terminal session: each call is isolated"],
+    },
+    {
+        "id": "path_access",
+        "label": "Path Access Control",
+        "icon": "🗂️",
+        "level": 1,
+        "module": "openbad.toolbelt.access_control",
+        "description": "Track pending path access requests and approved roots used by file and command tools.",
+        "tools": [
+            {"name": "get_path_access_status", "signature": "get_path_access_status() -> dict", "description": "Return pending path access requests and currently approved roots."},
+        ],
+        "gates": ["approvals are user-mediated via WUI", "grants are persisted and revocable"],
+    },
+    {
+        "id": "terminal_sessions",
+        "label": "Terminal Sessions",
+        "icon": "🖥️",
+        "level": 1,
+        "module": "openbad.toolbelt.terminal_sessions",
+        "description": "PTY-backed interactive terminal sessions gated by approved roots and audited to the state database.",
+        "tools": [
+            {"name": "list_terminal_sessions", "signature": "list_terminal_sessions() -> list[dict]", "description": "List active terminal sessions and their metadata."},
+            {"name": "create_terminal_session", "signature": "create_terminal_session(cwd: str, shell: str = '/bin/bash', requester: str = 'session') -> dict", "description": "Start a PTY-backed terminal session rooted in an approved directory."},
+            {"name": "send_terminal_input", "signature": "send_terminal_input(session_id: str, input: str, append_newline: bool = True) -> dict", "description": "Send input to an active terminal session."},
+            {"name": "read_terminal_output", "signature": "read_terminal_output(session_id: str, max_bytes: int = 8192) -> dict", "description": "Read buffered output from an active terminal session."},
+            {"name": "close_terminal_session", "signature": "close_terminal_session(session_id: str, reason: str = '') -> dict", "description": "Close an active terminal session."},
+        ],
+        "gates": ["cwd must remain inside approved roots", "idle sessions are reaped automatically", "all actions are audited"],
     },
     {
         "id": "web",
@@ -3201,6 +3365,14 @@ def create_app(
     app.router.add_get("/api/toolbelt", _get_toolbelt)
     app.router.add_put("/api/toolbelt/{role}", _put_toolbelt_role)
     app.router.add_delete("/api/toolbelt/{role}", _delete_toolbelt_role)
+    app.router.add_get("/api/toolbelt/access", _get_toolbelt_access)
+    app.router.add_post("/api/toolbelt/access/requests/{request_id}/approve", _post_toolbelt_access_approve)
+    app.router.add_delete("/api/toolbelt/access/grants/{grant_id}", _delete_toolbelt_access_grant)
+    app.router.add_get("/api/toolbelt/terminal", _get_toolbelt_terminal)
+    app.router.add_post("/api/toolbelt/terminal", _post_toolbelt_terminal)
+    app.router.add_post("/api/toolbelt/terminal/{session_id}/input", _post_toolbelt_terminal_input)
+    app.router.add_get("/api/toolbelt/terminal/{session_id}/output", _get_toolbelt_terminal_output)
+    app.router.add_delete("/api/toolbelt/terminal/{session_id}", _delete_toolbelt_terminal)
     app.router.add_get("/api/entity/user", _get_entity_user)
     app.router.add_put("/api/entity/user", _put_entity_user)
     app.router.add_post("/api/entity/user/reset", _post_entity_user_reset)

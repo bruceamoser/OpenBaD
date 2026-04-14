@@ -37,6 +37,38 @@
     reason: string;
   }
 
+  interface AccessRequest {
+    request_id: string;
+    requested_path: string;
+    normalized_root: string;
+    requester: string;
+    reason: string;
+    status: string;
+    created_at: number;
+  }
+
+  interface AccessGrant {
+    grant_id: string;
+    requested_path: string;
+    normalized_root: string;
+    approved_by: string;
+    reason: string;
+    created_at: number;
+    revoked_at?: number | null;
+  }
+
+  interface TerminalSession {
+    session_id: string;
+    cwd: string;
+    shell: string;
+    requester: string;
+    pid: number;
+    created_at: number;
+    last_activity: number;
+    alive: boolean;
+    output?: string;
+  }
+
   // ----------------------------------------------------------------
   // State
   // ----------------------------------------------------------------
@@ -53,6 +85,13 @@
     runtime_belt: '',
     embedded_tools: '',
   });
+  let accessRequests: AccessRequest[] = $state([]);
+  let accessGrants: AccessGrant[] = $state([]);
+  let terminalSessions: TerminalSession[] = $state([]);
+  let terminalOutputById: Record<string, string> = $state({});
+  let terminalCwd = $state('.');
+  let terminalShell = $state('/bin/bash');
+  let terminalInputById: Record<string, string> = $state({});
   let statusMsg = $state('');
 
   // Group cabinet by role
@@ -72,17 +111,24 @@
 
   async function load(): Promise<void> {
     try {
-      const data = await apiGet<{
-        cabinet: Record<string, ToolEntry[]>;
-        belt: Record<string, string | null>;
-        swap_log?: AutoSwapEvent[];
-        chat_callable_tools?: ChatCallableTool[];
-        tool_surfaces?: ToolSurfaces;
-      }>('/api/toolbelt');
+      const [data, accessData, terminalData] = await Promise.all([
+        apiGet<{
+          cabinet: Record<string, ToolEntry[]>;
+          belt: Record<string, string | null>;
+          swap_log?: AutoSwapEvent[];
+          chat_callable_tools?: ChatCallableTool[];
+          tool_surfaces?: ToolSurfaces;
+        }>('/api/toolbelt'),
+        apiGet<{ pending_requests: AccessRequest[]; grants: AccessGrant[] }>('/api/toolbelt/access'),
+        apiGet<{ sessions: TerminalSession[] }>('/api/toolbelt/terminal'),
+      ]);
       cabinet = Object.values(data.cabinet ?? {}).flat();
       swapLog = (data.swap_log ?? []).slice(-20);
       chatCallableTools = data.chat_callable_tools ?? [];
       toolSurfaces = data.tool_surfaces ?? toolSurfaces;
+      accessRequests = accessData.pending_requests ?? [];
+      accessGrants = accessData.grants ?? [];
+      terminalSessions = terminalData.sessions ?? [];
     } catch (e) {
       statusMsg = `Load failed: ${e}`;
     }
@@ -132,6 +178,76 @@
     if (h === 'DEGRADED') return '#eab308';
     return '#ef4444';
   }
+
+  function fmtTs(ts: number | string | null | undefined): string {
+    if (ts === null || ts === undefined || ts === '') return '—';
+    const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+    return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+  }
+
+  async function approveAccess(requestId: string): Promise<void> {
+    try {
+      await apiPost(`/api/toolbelt/access/requests/${requestId}/approve`, { approved_by: 'user' });
+      statusMsg = 'Access request approved';
+      await load();
+    } catch (e) {
+      statusMsg = `Approve failed: ${e}`;
+    }
+  }
+
+  async function revokeGrant(grantId: string): Promise<void> {
+    try {
+      await apiDel(`/api/toolbelt/access/grants/${grantId}`);
+      statusMsg = 'Grant revoked';
+      await load();
+    } catch (e) {
+      statusMsg = `Revoke failed: ${e}`;
+    }
+  }
+
+  async function createTerminalSession(): Promise<void> {
+    try {
+      await apiPost('/api/toolbelt/terminal', { cwd: terminalCwd.trim(), shell: terminalShell.trim() || '/bin/bash', requester: 'wui' });
+      statusMsg = 'Terminal session created';
+      await load();
+    } catch (e) {
+      statusMsg = `Terminal create failed: ${e}`;
+      await load();
+    }
+  }
+
+  async function closeTerminalSession(sessionId: string): Promise<void> {
+    try {
+      await apiDel(`/api/toolbelt/terminal/${sessionId}`);
+      statusMsg = 'Terminal session closed';
+      delete terminalOutputById[sessionId];
+      await load();
+    } catch (e) {
+      statusMsg = `Terminal close failed: ${e}`;
+    }
+  }
+
+  async function readTerminalOutput(sessionId: string): Promise<void> {
+    try {
+      const result = await apiGet<TerminalSession>(`/api/toolbelt/terminal/${sessionId}/output?max_bytes=8192`);
+      terminalOutputById = { ...terminalOutputById, [sessionId]: result.output ?? '' };
+      await load();
+    } catch (e) {
+      statusMsg = `Read output failed: ${e}`;
+    }
+  }
+
+  async function sendTerminalInput(sessionId: string): Promise<void> {
+    const value = (terminalInputById[sessionId] ?? '').trimEnd();
+    if (!value) return;
+    try {
+      await apiPost(`/api/toolbelt/terminal/${sessionId}/input`, { input: value, append_newline: true });
+      terminalInputById = { ...terminalInputById, [sessionId]: '' };
+      await readTerminalOutput(sessionId);
+    } catch (e) {
+      statusMsg = `Send input failed: ${e}`;
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -164,6 +280,89 @@
       </div>
     {/each}
   </div>
+</Card>
+
+<Card label={`Path Access Requests (${accessRequests.length})`}>
+  {#if accessRequests.length === 0}
+    <p class="hint">No pending path access requests.</p>
+  {:else}
+    <div class="access-list">
+      {#each accessRequests as req}
+        <div class="access-row">
+          <div class="access-main">
+            <strong>{req.normalized_root}</strong>
+            <span class="access-sub">requested path: {req.requested_path} · by {req.requester} · {fmtTs(req.created_at)}</span>
+            {#if req.reason}<span class="access-sub">reason: {req.reason}</span>{/if}
+          </div>
+          <button class="secondary sm" onclick={() => approveAccess(req.request_id)}>Approve</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</Card>
+
+<Card label={`Approved Path Grants (${accessGrants.length})`}>
+  {#if accessGrants.length === 0}
+    <p class="hint">No approved path grants.</p>
+  {:else}
+    <div class="access-list">
+      {#each accessGrants as grant}
+        <div class="access-row">
+          <div class="access-main">
+            <strong>{grant.normalized_root}</strong>
+            <span class="access-sub">requested path: {grant.requested_path} · approved by {grant.approved_by} · {fmtTs(grant.created_at)}</span>
+            {#if grant.reason}<span class="access-sub">reason: {grant.reason}</span>{/if}
+          </div>
+          <button class="ghost danger-text" onclick={() => revokeGrant(grant.grant_id)}>Revoke</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</Card>
+
+<Card label={`Terminal Sessions (${terminalSessions.length})`}>
+  <div class="create-grid">
+    <label>
+      Working Directory
+      <input type="text" bind:value={terminalCwd} placeholder="/path/to/root" />
+    </label>
+    <label>
+      Shell
+      <input type="text" bind:value={terminalShell} placeholder="/bin/bash" />
+    </label>
+  </div>
+  <div class="create-actions">
+    <button onclick={createTerminalSession} disabled={!terminalCwd.trim()}>Start Session</button>
+  </div>
+  {#if terminalSessions.length === 0}
+    <p class="hint">No active terminal sessions.</p>
+  {:else}
+    <div class="terminal-list">
+      {#each terminalSessions as session}
+        <div class="terminal-card">
+          <div class="terminal-head">
+            <div>
+              <strong>{session.cwd}</strong>
+              <div class="access-sub">{session.shell} · pid {session.pid} · {session.alive ? 'alive' : 'closed'} · last activity {fmtTs(session.last_activity)}</div>
+            </div>
+            <div class="terminal-actions">
+              <button class="secondary sm" onclick={() => readTerminalOutput(session.session_id)}>Read Output</button>
+              <button class="ghost danger-text" onclick={() => closeTerminalSession(session.session_id)}>Close</button>
+            </div>
+          </div>
+          <textarea
+            rows="3"
+            placeholder="Type a shell command to send to this PTY session"
+            bind:value={terminalInputById[session.session_id]}
+          ></textarea>
+          <div class="create-actions">
+            <button class="secondary sm" onclick={() => sendTerminalInput(session.session_id)}>Send</button>
+          </div>
+          <pre class="terminal-output">{terminalOutputById[session.session_id] ?? ''}</pre>
+        </div>
+      {/each}
+    </div>
+  {/if}
 </Card>
 
 <!-- Belt (equipped) -->
@@ -286,6 +485,80 @@
   .embedded-tool-desc {
     color: var(--text-dim);
     font-size: 0.84rem;
+  }
+
+  .access-list,
+  .terminal-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .access-row,
+  .terminal-card {
+    background: var(--bg-surface1);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--bg-surface2);
+    padding: 0.75rem;
+  }
+
+  .access-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    justify-content: space-between;
+  }
+
+  .access-main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .access-sub {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+  }
+
+  .terminal-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.6rem;
+  }
+
+  .terminal-actions {
+    display: flex;
+    gap: 0.45rem;
+  }
+
+  .terminal-card textarea,
+  .terminal-output {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-mono, monospace);
+  }
+
+  .terminal-card textarea {
+    margin-top: 0.5rem;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface0);
+    color: var(--text);
+  }
+
+  .terminal-output {
+    min-height: 7rem;
+    max-height: 16rem;
+    overflow: auto;
+    margin: 0.45rem 0 0;
+    padding: 0.65rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface0);
+    color: var(--text);
+    white-space: pre-wrap;
   }
 
   .empty-belt { text-align: center; padding: 1.5rem 0; color: var(--text-dim); }

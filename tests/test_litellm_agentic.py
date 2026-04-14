@@ -47,7 +47,7 @@ class TestLiteLLMModelName:
 
 class TestToolSchemas:
     def test_schema_count(self):
-        assert len(TOOL_SCHEMAS) == 25
+        assert len(TOOL_SCHEMAS) == 31
 
     def test_all_have_required_fields(self):
         for schema in TOOL_SCHEMAS:
@@ -65,7 +65,9 @@ class TestToolSchemas:
     def test_known_tools_present(self):
         names = {s["function"]["name"] for s in TOOL_SCHEMAS}
         expected = {
-            "read_file", "write_file", "exec_command", "web_search",
+            "read_file", "write_file", "exec_command", "get_path_access_status",
+            "list_terminal_sessions", "create_terminal_session", "send_terminal_input",
+            "read_terminal_output", "close_terminal_session", "web_search",
             "web_fetch", "ask_user", "get_mqtt_records", "get_system_logs",
             "read_events", "write_event", "get_endocrine_status", "call_doctor",
             "get_tasks", "create_task", "update_task", "complete_task",
@@ -116,7 +118,15 @@ class TestToolDispatch:
         """Tool that raises should return error string, not propagate."""
         with patch("openbad.toolbelt.fs_tool.read_file", side_effect=PermissionError("denied")):
             result = await dispatch_tool_call("read_file", {"path": "/etc/shadow"})
-        assert "PermissionError" in result
+        assert "PermissionError: denied" in result
+
+    @pytest.mark.asyncio
+    async def test_exec_command_outside_allowed_roots_returns_access_request(self):
+        mock_result = SimpleNamespace(stdout="", stderr="Working directory escapes allowed roots ['/tmp/demo']", returncode=-1)
+        with patch("openbad.toolbelt.cli_tool.CliToolAdapter.async_execute", new=AsyncMock(return_value=mock_result)):
+            result = await dispatch_tool_call("exec_command", {"command": "find . -name spec.md", "cwd": "/home/bruceamoser"})
+        assert "[access_request]" in result
+        assert "/home/bruceamoser" in result
 
 
 # ── LiteLLM Adapter ───────────────────────────────────────────────── #

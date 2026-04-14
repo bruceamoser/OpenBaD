@@ -17,6 +17,9 @@ _TOOLING_BASE_PROMPT = (
     " the quality of the work. You may inspect files, events, MQTT records, endocrine"
     " state, tasks, and research nodes, and you may create or update task/research"
     " entries when follow-up work is warranted. Never fabricate tool results."
+    " If a tool result starts with [access_request], do not claim the file or directory"
+    " is missing. Call ask_user to request permission for that path/root, then wait for"
+    " approval before retrying."
     " If a tool fails, acknowledge that explicitly and continue with the best supported"
     " answer you can provide."
 )

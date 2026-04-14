@@ -93,6 +93,84 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         ["command"],
     ),
     _tool(
+        "get_path_access_status",
+        "Return current approved path roots and pending access requests for tool usage.",
+        {},
+    ),
+    _tool(
+        "list_terminal_sessions",
+        "List currently active PTY-backed terminal sessions.",
+        {},
+    ),
+    _tool(
+        "create_terminal_session",
+        "Create a PTY-backed interactive terminal session in an approved working directory.",
+        {
+            "cwd": {
+                "type": "string",
+                "description": "Working directory for the shell session.",
+            },
+            "shell": {
+                "type": "string",
+                "description": "Shell executable to launch (default: /bin/bash).",
+            },
+            "requester": {
+                "type": "string",
+                "description": "Requester identity, such as session or subsystem name.",
+            },
+        },
+        ["cwd"],
+    ),
+    _tool(
+        "send_terminal_input",
+        "Send text input to an active PTY terminal session.",
+        {
+            "session_id": {
+                "type": "string",
+                "description": "Terminal session identifier.",
+            },
+            "input": {
+                "type": "string",
+                "description": "Text to send to the terminal.",
+            },
+            "append_newline": {
+                "type": "boolean",
+                "description": "Whether to append a newline after the input (default: true).",
+            },
+        },
+        ["session_id", "input"],
+    ),
+    _tool(
+        "read_terminal_output",
+        "Read the latest available output from an active PTY terminal session.",
+        {
+            "session_id": {
+                "type": "string",
+                "description": "Terminal session identifier.",
+            },
+            "max_bytes": {
+                "type": "integer",
+                "description": "Maximum bytes of terminal output to return (default: 8192).",
+            },
+        },
+        ["session_id"],
+    ),
+    _tool(
+        "close_terminal_session",
+        "Close an active PTY terminal session and release resources.",
+        {
+            "session_id": {
+                "type": "string",
+                "description": "Terminal session identifier.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Reason for closing the session.",
+            },
+        },
+        ["session_id"],
+    ),
+    _tool(
         "web_search",
         "Search the web using the configured search engine."
         " Returns a list of results with title, URL, and snippet.",

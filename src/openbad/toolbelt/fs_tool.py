@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from openbad.immune_system.rules_engine import FileOperationRule
+from openbad.toolbelt.access_control import effective_allowed_roots
 
 if TYPE_CHECKING:
     from openbad.endocrine.controller import EndocrineController
@@ -112,7 +113,7 @@ class ResourceDeferredError(OSError):
 
 def _is_safe_path(resolved: str) -> bool:
     """Return True if *resolved* (an absolute, real path) is under an allowed root."""
-    for root in ALLOWED_ROOTS:
+    for root in effective_allowed_roots(ALLOWED_ROOTS):
         real_root = os.path.realpath(root)
         if resolved.startswith(real_root + os.sep) or resolved == real_root:
             return True

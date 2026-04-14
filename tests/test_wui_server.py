@@ -1151,6 +1151,19 @@ def _app_with_registry():
     return app
 
 
+def _configure_toolbelt_state(monkeypatch, db_path):
+    import openbad.toolbelt.access_control as access_control
+    import openbad.toolbelt.terminal_sessions as terminal_sessions
+
+    monkeypatch.setattr(access_control, "DEFAULT_STATE_DB_PATH", db_path)
+    monkeypatch.setattr(terminal_sessions, "DEFAULT_STATE_DB_PATH", db_path)
+    monkeypatch.setattr(
+        terminal_sessions,
+        "_DEFAULT_MANAGER",
+        terminal_sessions.TerminalSessionManager(db_path=db_path, idle_timeout_s=60.0),
+    )
+
+
 @pytest.mark.asyncio
 async def test_get_toolbelt_no_registry(aiohttp_client):
     app = create_app(enable_mqtt=False)
@@ -1250,6 +1263,108 @@ async def test_delete_toolbelt_unequip(aiohttp_client):
     assert resp.status == 200
     data = await resp.json()
     assert data["belt"].get("cli") is None
+
+
+@pytest.mark.asyncio
+async def test_toolbelt_access_endpoints(aiohttp_client, tmp_path, monkeypatch):
+    _configure_toolbelt_state(monkeypatch, tmp_path / "state.db")
+
+    from openbad.toolbelt.access_control import create_access_request
+
+    requested_dir = tmp_path / "requested"
+    requested_dir.mkdir()
+    record = create_access_request(
+        str(requested_dir),
+        requester="test-suite",
+        reason="Need access for inspection",
+    )
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/toolbelt/access")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["pending_requests"]
+    assert data["pending_requests"][0]["request_id"] == record["request"]["request_id"]
+
+    approve_resp = await client.post(
+        f"/api/toolbelt/access/requests/{record['request']['request_id']}/approve",
+        json={"approved_by": "tester", "reason": "Approved for tests"},
+    )
+    assert approve_resp.status == 200
+    approve_data = await approve_resp.json()
+    assert approve_data["request"]["status"] == "approved"
+    assert approve_data["grant"]["normalized_root"] == str(requested_dir.resolve())
+
+    delete_resp = await client.delete(
+        f"/api/toolbelt/access/grants/{approve_data['grant']['grant_id']}?revoked_by=tester"
+    )
+    assert delete_resp.status == 200
+    delete_data = await delete_resp.json()
+    assert delete_data["revoked_by"] == "tester"
+    assert delete_data["revoked_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_toolbelt_terminal_endpoints(aiohttp_client, tmp_path, monkeypatch):
+    _configure_toolbelt_state(monkeypatch, tmp_path / "state.db")
+
+    requested_dir = tmp_path / "terminal-root"
+    requested_dir.mkdir()
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    denied_resp = await client.post(
+        "/api/toolbelt/terminal",
+        json={"cwd": str(requested_dir), "requester": "test-suite"},
+    )
+    assert denied_resp.status == 403
+    denied_data = await denied_resp.json()
+    assert denied_data["access_request"]["status"] == "pending"
+
+    request_id = denied_data["access_request"]["request"]["request_id"]
+    approve_resp = await client.post(
+        f"/api/toolbelt/access/requests/{request_id}/approve",
+        json={"approved_by": "tester"},
+    )
+    assert approve_resp.status == 200
+
+    create_resp = await client.post(
+        "/api/toolbelt/terminal",
+        json={"cwd": str(requested_dir), "requester": "test-suite"},
+    )
+    assert create_resp.status == 201
+    session = await create_resp.json()
+    session_id = session["session_id"]
+    assert session["cwd"] == str(requested_dir.resolve())
+
+    input_resp = await client.post(
+        f"/api/toolbelt/terminal/{session_id}/input",
+        json={"input": "printf 'hello-from-terminal'", "append_newline": True},
+    )
+    assert input_resp.status == 200
+
+    output = ""
+    for _ in range(10):
+        output_resp = await client.get(f"/api/toolbelt/terminal/{session_id}/output?max_bytes=4096")
+        assert output_resp.status == 200
+        output_data = await output_resp.json()
+        output += output_data.get("output", "")
+        if "hello-from-terminal" in output:
+            break
+    assert "hello-from-terminal" in output
+
+    list_resp = await client.get("/api/toolbelt/terminal")
+    assert list_resp.status == 200
+    list_data = await list_resp.json()
+    assert any(item["session_id"] == session_id for item in list_data["sessions"])
+
+    delete_resp = await client.delete(f"/api/toolbelt/terminal/{session_id}?reason=test-cleanup")
+    assert delete_resp.status == 200
+    delete_data = await delete_resp.json()
+    assert delete_data["session_id"] == session_id
 
 
 # ---------------------------------------------------------------------- #
