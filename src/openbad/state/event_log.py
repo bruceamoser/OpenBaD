@@ -84,41 +84,50 @@ def setup_logging(
     global _setup_done  # noqa: PLW0603
     if _setup_done:
         return
-    _setup_done = True
 
     level = "DEBUG" if verbose else "INFO"
     resolved_dir = Path(log_dir) if log_dir else _DEFAULT_LOG_DIR
-    resolved_dir.mkdir(parents=True, exist_ok=True)
+
+    def _configure(log_path: Path) -> None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Remove loguru's default stderr sink — we'll add our own.
+        logger.remove()
+
+        # Sink 1: stderr (for journalctl) — human-readable
+        logger.add(
+            _safe_stderr_sink,
+            level=level,
+            format="{time:HH:mm:ss} [{level}] {name}: {message}",
+            backtrace=False,
+            diagnose=False,
+        )
+
+        # Sink 2: JSON-lines file with rotation + retention + compression
+        logger.add(
+            str(log_path),
+            level=level,
+            format="{message}",
+            serialize=True,
+            rotation=_ROTATION,
+            retention=_RETENTION,
+            compression=_COMPRESSION,
+            enqueue=True,
+            backtrace=True,
+            diagnose=False,
+        )
+
+        # Intercept all stdlib logging → loguru
+        logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+
     log_path = resolved_dir / _DEFAULT_LOG_FILE
+    try:
+        _configure(log_path)
+    except OSError:
+        fallback_path = Path("/tmp/openbad") / _DEFAULT_LOG_FILE
+        _configure(fallback_path)
 
-    # Remove loguru's default stderr sink — we'll add our own.
-    logger.remove()
-
-    # Sink 1: stderr (for journalctl) — human-readable
-    logger.add(
-        _safe_stderr_sink,
-        level=level,
-        format="{time:HH:mm:ss} [{level}] {name}: {message}",
-        backtrace=False,
-        diagnose=False,
-    )
-
-    # Sink 2: JSON-lines file with rotation + retention + compression
-    logger.add(
-        str(log_path),
-        level=level,
-        format="{message}",
-        serialize=True,
-        rotation=_ROTATION,
-        retention=_RETENTION,
-        compression=_COMPRESSION,
-        enqueue=True,        # thread-safe, non-blocking
-        backtrace=True,
-        diagnose=False,      # don't leak variable values in prod
-    )
-
-    # Intercept all stdlib logging → loguru
-    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    _setup_done = True
 
 
 def _safe_stderr_sink(message: str) -> None:

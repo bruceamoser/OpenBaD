@@ -738,7 +738,7 @@ async def test_resolve_chat_adapter_falls_back_to_first_valid_provider_when_assi
     adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is not None
-    assert model == "gpt-4o-mini"
+    assert model == "openai/gpt-4o-mini"
     assert provider_name == "openai"
 
 
@@ -783,7 +783,7 @@ async def test_resolve_chat_adapter_fallback_uses_model_from_other_system_assign
     adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is not None
-    assert model == "Bonsai-8B.gguf"
+    assert model == "openai/Bonsai-8B.gguf"
     assert provider_name == "custom"
 
 
@@ -1160,6 +1160,8 @@ async def test_get_toolbelt_no_registry(aiohttp_client):
     data = await resp.json()
     assert "cabinet" in data
     assert "belt" in data
+    assert "chat_callable_tools" in data
+    assert "tool_surfaces" in data
     assert "cli" in data["cabinet"]
     assert "code" in data["cabinet"]
 
@@ -1194,6 +1196,8 @@ async def test_get_toolbelt_with_registry(aiohttp_client):
     data = await resp.json()
     assert "cabinet" in data
     assert "belt" in data
+    assert data["tool_surfaces"]["runtime_belt"]
+    assert any(tool["name"] == "create_research_node" for tool in data["chat_callable_tools"])
     assert "cli" in data["cabinet"]
     assert "web_search" in data["cabinet"]
 
@@ -1630,7 +1634,7 @@ async def test_get_onboarding_status_uses_setup_ready_provider_logic(aiohttp_cli
     data = await resp.json()
     assert data["providers_complete"] is True
     assert data["next_step"] == "sleep"
-    assert data["redirect_to"] == "/health?onboarding=sleep"
+    assert data["redirect_to"] == "/scheduling?onboarding=sleep"
 
 
 @pytest.mark.asyncio

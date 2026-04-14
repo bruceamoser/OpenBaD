@@ -996,7 +996,8 @@ async def stream_chat(
     tokens_used = 0
     t0 = time.monotonic()
 
-    use_agentic = isinstance(adapter, (LiteLLMAdapter, GitHubCopilotProvider)) and not onboarding_mode
+    agentic_complete = getattr(adapter, "agentic_complete", None)
+    use_agentic = callable(agentic_complete) and not onboarding_mode
 
     try:
         if use_agentic:
@@ -1006,7 +1007,7 @@ async def stream_chat(
                 if chunk.error:
                     yield chunk
                     return
-                tokens_used += chunk.tokens_used
+                tokens_used = max(tokens_used, chunk.tokens_used)
                 if chunk.token:
                     full_response.append(chunk.token)
                 yield chunk

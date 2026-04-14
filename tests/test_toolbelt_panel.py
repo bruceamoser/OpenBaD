@@ -93,6 +93,13 @@ def test_api_toolbelt():
     assert "/api/toolbelt" in t
 
 
+def test_tool_surfaces_copy_present():
+    t = _text()
+    assert "Runtime Toolbelt" in t
+    assert "Chat-Callable Embedded Tools" in t
+    assert "embedded tools" in t.lower()
+
+
 # -- Responsive card-based layout --
 
 def test_responsive_layout():

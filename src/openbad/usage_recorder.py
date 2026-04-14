@@ -24,6 +24,12 @@ def _normalize_system_name(system: str | CognitiveSystem) -> str:
         return system.value
     return str(system or "").strip().lower() or "unknown"
 
+def _safe_string(value: object, fallback: str) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or fallback
+    return fallback
+
 
 def _resolve_session_id(
     policy: dict[str, object],
@@ -51,8 +57,8 @@ def record_usage_event(
     tracker = UsageTracker(db_path=resolve_usage_db_path())
     try:
         tracker.record(
-            provider=provider,
-            model=model,
+            provider=_safe_string(provider, "unknown"),
+            model=_safe_string(model, "unknown"),
             system=_normalize_system_name(system),
             tokens=tokens,
             request_id=request_id,
@@ -96,8 +102,8 @@ class UsageRecorder:
             session_id,
         )
         self._tracker.record(
-            provider=provider,
-            model=model,
+            provider=_safe_string(provider, "unknown"),
+            model=_safe_string(model, "unknown"),
             system=normalized_system,
             tokens=tokens,
             request_id=request_id,
@@ -166,12 +172,17 @@ class UsageTrackingProviderAdapter(ProviderAdapter):
 
     async def health_check(self) -> HealthStatus:
         status = await self._adapter.health_check()
-        model_name = getattr(self._adapter, "_default_model", "health-check") or "health-check"
+        model_name = _safe_string(getattr(self._adapter, "_default_model", ""), "health-check")
+        provider_name = _safe_string(
+            getattr(status, "provider", ""),
+            _safe_string(getattr(self._adapter, "_provider_name", ""), "unknown"),
+        )
+        tokens_used = int(getattr(status, "tokens_used", 0) or 0)
         record_usage_event(
-            provider=status.provider or getattr(self._adapter, "_provider_name", "unknown") or "unknown",
+            provider=provider_name,
             model=str(model_name),
             system=self._system,
-            tokens=int(status.tokens_used),
+            tokens=tokens_used,
             request_id=f"health-check:{uuid4().hex}",
             session_id=self._session_id,
         )

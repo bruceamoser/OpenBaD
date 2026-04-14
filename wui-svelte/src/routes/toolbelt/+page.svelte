@@ -19,6 +19,16 @@
     equipped: boolean;
   }
 
+  interface ChatCallableTool {
+    name: string;
+    description: string;
+  }
+
+  interface ToolSurfaces {
+    runtime_belt: string;
+    embedded_tools: string;
+  }
+
   interface AutoSwapEvent {
     ts: string;
     role: string;
@@ -38,6 +48,11 @@
 
   let cabinet: ToolEntry[] = $state([]);
   let swapLog: AutoSwapEvent[] = $state([]);
+  let chatCallableTools: ChatCallableTool[] = $state([]);
+  let toolSurfaces: ToolSurfaces = $state({
+    runtime_belt: '',
+    embedded_tools: '',
+  });
   let statusMsg = $state('');
 
   // Group cabinet by role
@@ -58,11 +73,16 @@
   async function load(): Promise<void> {
     try {
       const data = await apiGet<{
-        cabinet: ToolEntry[];
+        cabinet: Record<string, ToolEntry[]>;
+        belt: Record<string, string | null>;
         swap_log?: AutoSwapEvent[];
+        chat_callable_tools?: ChatCallableTool[];
+        tool_surfaces?: ToolSurfaces;
       }>('/api/toolbelt');
-      cabinet = data.cabinet ?? [];
+      cabinet = Object.values(data.cabinet ?? {}).flat();
       swapLog = (data.swap_log ?? []).slice(-20);
+      chatCallableTools = data.chat_callable_tools ?? [];
+      toolSurfaces = data.tool_surfaces ?? toolSurfaces;
     } catch (e) {
       statusMsg = `Load failed: ${e}`;
     }
@@ -83,7 +103,7 @@
         : t.equipped,
     }));
     try {
-      await apiPut(`/api/toolbelt/${role}`, { name: toolName });
+      await apiPut(`/api/toolbelt/${role}`, { tool: toolName });
     } catch (e) {
       statusMsg = `Equip failed: ${e}`;
       await load();
@@ -116,8 +136,35 @@
 
 <div class="page-header">
   <h2>Toolbelt</h2>
-  <p>Equip, swap, and monitor agent tool integrations</p>
+  <p>Runtime belt assignments and chat-callable embedded tools are separate surfaces</p>
 </div>
+
+<Card label="Tooling Surfaces">
+  <div class="surface-grid">
+    <div class="surface-card">
+      <h4>Runtime Toolbelt</h4>
+      <p>{toolSurfaces.runtime_belt}</p>
+    </div>
+    <div class="surface-card">
+      <h4>Embedded Skills / Chat Tools</h4>
+      <p>{toolSurfaces.embedded_tools}</p>
+    </div>
+  </div>
+</Card>
+
+<Card label={`Chat-Callable Embedded Tools (${chatCallableTools.length})`}>
+  <p class="hint">
+    These are the structured function schemas the chat agent can call directly. They are not limited by the currently equipped runtime belt below.
+  </p>
+  <div class="embedded-tools">
+    {#each chatCallableTools as tool}
+      <div class="embedded-tool-row">
+        <span class="embedded-tool-name">{tool.name}</span>
+        <span class="embedded-tool-desc">{tool.description}</span>
+      </div>
+    {/each}
+  </div>
+</Card>
 
 <!-- Belt (equipped) -->
 <Card label="Equipped Belt">
@@ -130,7 +177,7 @@
     <div class="belt-grid">
       {#each belt as tool}
         <div class="belt-chip">
-          <span class="h-dot" style="background:{healthColor(tool.health)}"></span>
+          <span class="health-dot" style="background:{healthColor(tool.health)}"></span>
           <div class="chip-info">
             <span class="chip-name">{tool.name}</span>
             <span class="chip-role">{tool.role}</span>
@@ -150,7 +197,7 @@
         <div class="tool-list">
           {#each grouped[role] as tool}
             <div class="tool-row" class:is-equipped={tool.equipped}>
-              <span class="h-dot" style="background:{healthColor(tool.health)}"></span>
+              <span class="health-dot" style="background:{healthColor(tool.health)}"></span>
               <span class="tool-name">{tool.name}</span>
               <span class="health-tag" class:ok={tool.health === 'AVAILABLE'} class:degraded={tool.health === 'DEGRADED'}>
                 {tool.health.toLowerCase()}
@@ -191,6 +238,56 @@
 {/if}
 
 <style>
+  .surface-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+    gap: 0.75rem;
+  }
+
+  .surface-card {
+    padding: 0.85rem 1rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+    border: 1px solid var(--bg-surface2);
+  }
+
+  .surface-card h4 {
+    margin: 0 0 0.35rem;
+    font-size: 0.92rem;
+  }
+
+  .surface-card p {
+    margin: 0;
+    font-size: 0.84rem;
+    color: var(--text-dim);
+    line-height: 1.45;
+  }
+
+  .embedded-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .embedded-tool-row {
+    display: grid;
+    grid-template-columns: minmax(12rem, 16rem) 1fr;
+    gap: 0.75rem;
+    padding: 0.45rem 0.6rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+  }
+
+  .embedded-tool-name {
+    font-weight: 600;
+    font-family: var(--font-mono, monospace);
+  }
+
+  .embedded-tool-desc {
+    color: var(--text-dim);
+    font-size: 0.84rem;
+  }
+
   .empty-belt { text-align: center; padding: 1.5rem 0; color: var(--text-dim); }
   .empty-icon { font-size: 2rem; display: block; margin-bottom: 0.5rem; }
 
@@ -204,7 +301,7 @@
   .chip-name { font-weight: 600; font-size: 0.85rem; }
   .chip-role { font-size: 0.7rem; color: var(--text-dim); text-transform: capitalize; }
 
-  .h-dot {
+  .health-dot {
     width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
     box-shadow: 0 0 6px currentColor;
   }
@@ -243,5 +340,11 @@
     margin-top: 1rem; padding: 0.5rem 1rem;
     background: var(--bg-surface1); border-radius: var(--radius-sm);
     font-size: 0.85rem; color: var(--text-sub);
+  }
+
+  @media (max-width: 860px) {
+    .embedded-tool-row {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

@@ -19,6 +19,7 @@ from openbad.memory.semantic import SemanticMemory
 from openbad.memory.stm import ShortTermMemory
 from openbad.toolbelt.dispatch import dispatch_tool_call
 from openbad.toolbelt.schemas import TOOL_SCHEMAS
+from openbad.usage_recorder import UsageTrackingProviderAdapter
 from openbad.wui import chat_pipeline
 
 # ── litellm_model_name ─────────────────────────────────────────────── #
@@ -332,6 +333,84 @@ async def test_agentic_stream_with_tool_calls(_reset_pipeline):
     # LLM was called twice: once with tool calls, once with results
     assert mock_llm.call_count == 2
     mock_dispatch.assert_called_once_with("get_endocrine_status", {})
+
+
+@pytest.mark.asyncio
+async def test_agentic_stream_with_usage_tracking_wrapper(_reset_pipeline):
+    """Wrapped adapters should still enter the tool-calling loop."""
+    adapter = UsageTrackingProviderAdapter(
+        LiteLLMAdapter(provider_name="test", default_model="test/model"),
+        system="chat",
+    )
+
+    tool_call = _mock_tool_call("create_research_node", {"title": "Temporal decay"})
+    response_with_tool = _mock_response(content="", tool_calls=[tool_call], tokens=20)
+    response_final = _mock_response(content="Research queued.", tokens=10)
+
+    with (
+        patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "openbad.wui.chat_pipeline.dispatch_tool_call",
+            new_callable=AsyncMock,
+        ) as mock_dispatch,
+    ):
+        mock_llm.side_effect = [response_with_tool, response_final]
+        mock_dispatch.return_value = '{"node_id": "research-123"}'
+
+        chunks = [
+            chunk
+            async for chunk in chat_pipeline.stream_chat(
+                adapter,
+                "test/model",
+                "Create a research item",
+                "session-agentic-wrapper",
+            )
+        ]
+
+    text = "".join(c.token for c in chunks if c.token)
+    assert "Research queued." in text
+    assert any("create_research_node" in c.reasoning for c in chunks if c.reasoning)
+    assert mock_llm.call_count == 2
+    mock_dispatch.assert_called_once_with(
+        "create_research_node",
+        {"title": "Temporal decay"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agentic_stream_does_not_double_count_tokens(_reset_pipeline):
+    """Agentic chunks report cumulative totals, so stream_chat should not re-sum them."""
+    adapter = UsageTrackingProviderAdapter(
+        LiteLLMAdapter(provider_name="test", default_model="test/model"),
+        system="chat",
+    )
+
+    tool_call = _mock_tool_call("get_endocrine_status", {})
+    response_with_tool = _mock_response(content="", tool_calls=[tool_call], tokens=20)
+    response_final = _mock_response(content="Done", tokens=10)
+
+    with (
+        patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "openbad.wui.chat_pipeline.dispatch_tool_call",
+            new_callable=AsyncMock,
+        ) as mock_dispatch,
+    ):
+        mock_llm.side_effect = [response_with_tool, response_final]
+        mock_dispatch.return_value = '{"cortisol": 0.3}'
+
+        chunks = [
+            chunk
+            async for chunk in chat_pipeline.stream_chat(
+                adapter,
+                "test/model",
+                "Check cortisol",
+                "session-agentic-token-count",
+            )
+        ]
+
+    assert chunks[-1].done is True
+    assert chunks[-1].tokens_used == 30
 
 
 @pytest.mark.asyncio

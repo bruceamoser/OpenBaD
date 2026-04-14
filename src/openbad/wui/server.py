@@ -1363,7 +1363,12 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
     system_name = str(payload.get("system", "chat")).strip()
     session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
     _path, config = _read_providers_config()
-    adapter, model, provider_name, _is_fallback = _resolve_chat_adapter(config, system_name)
+    resolved_adapter = _resolve_chat_adapter(config, system_name)
+    if len(resolved_adapter) == 4:
+        adapter, model, provider_name, _is_fallback = resolved_adapter
+    else:
+        adapter, model, provider_name = resolved_adapter
+        _is_fallback = False
 
     if adapter is None:
         raise web.HTTPBadRequest(
@@ -1893,6 +1898,13 @@ async def _put_senses(request: web.Request) -> web.Response:
 
 def _serialize_toolbelt(registry) -> dict:
     """Serialize ToolRegistry state for JSON response."""
+    from openbad.toolbelt.schemas import TOOL_SCHEMAS  # noqa: PLC0415
+
+    belt_names: dict[str, str | None] = {}
+    for role, tool in registry.get_belt().items():
+        role_name = role.value.lower() if hasattr(role, "value") else str(role).lower()
+        belt_names[role_name] = tool.name if tool else None
+
     cabinet: dict[str, list[dict]] = {}
     for role, tools in registry.cabinet.items():
         role_name = role.value.lower() if hasattr(role, "value") else str(role).lower()
@@ -1904,17 +1916,41 @@ def _serialize_toolbelt(registry) -> dict:
                     if hasattr(t.status, "value")
                     else str(t.status).lower()
                 ),
+                "health": (
+                    t.status.value.upper()
+                    if hasattr(t.status, "value")
+                    else str(t.status).upper()
+                ),
                 "role": role_name,
+                "equipped": belt_names.get(role_name) == t.name,
             }
             for t in tools
         ]
 
-    belt: dict[str, str | None] = {}
-    for role, tool in registry.get_belt().items():
-        role_name = role.value.lower() if hasattr(role, "value") else str(role).lower()
-        belt[role_name] = tool.name if tool else None
+    chat_callable_tools = [
+        {
+            "name": schema["function"]["name"],
+            "description": schema["function"]["description"],
+        }
+        for schema in TOOL_SCHEMAS
+    ]
 
-    return {"cabinet": cabinet, "belt": belt}
+    return {
+        "cabinet": cabinet,
+        "belt": belt_names,
+        "swap_log": [],
+        "tool_surfaces": {
+            "runtime_belt": (
+                "The runtime toolbelt is the role-based cabinet and equipped belt used by "
+                "the WUI/runtime registry for swaps and role assignment."
+            ),
+            "embedded_tools": (
+                "Chat-callable embedded tools are separate structured function schemas used "
+                "by the chat agentic loop. They do not depend on the equipped runtime belt."
+            ),
+        },
+        "chat_callable_tools": chat_callable_tools,
+    }
 
 
 def _build_runtime_tool_registry() -> ToolRegistry:
