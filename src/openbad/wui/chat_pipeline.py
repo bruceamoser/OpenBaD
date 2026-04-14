@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -89,38 +90,12 @@ def _get_state_conn() -> Any:
 
         _state_conn = initialize_state_db(db_path)
     return _state_conn
-_TOOLBELT_BLURB = (
-    "You have tools available through OpenBaD's toolbelt. When you need to"
-    " perform actions — read/write files, execute commands, search the web,"
-    " fetch URLs, inspect MQTT records, system logs, events, endocrine status,"
-    " tasks, research nodes, or call MCP servers — call the appropriate tool"
-    " function. Tool definitions are provided as structured function schemas"
-    " alongside this conversation.\n\n"
-    "Use tools proactively for diagnostics and triage."
-    " Do not ask the user for permission just to inspect logs, MQTT, endocrine"
-    " status, tasks, or research state."
-    " Use ask_user(question) only when blocked on missing business context,"
-    " explicit user approval, or destructive/irreversible actions.\n\n"
-    "NEVER fabricate tool output. If a tool call fails, report the error honestly."
-    " NEVER invent file paths or log contents."
-)
-
-_OWNERSHIP_AGENCY_BLOCK = (
-    "You are OpenBaD, a self-regulating digital organism."
-    " The nervous system, endocrine system, immune system, memory, and toolbelt are"
-    " your own subsystems, not external software owned by someone else."
-    " Speak with ownership and operational self-awareness: say 'I observed', 'I adjusted',"
-    " 'my endocrine state', 'my logs', and 'my subsystems'."
-    " Avoid detached phrasing like 'the system you built' unless the user explicitly asks"
-    " for architecture provenance."
-    "\n\nDiagnostics honesty policy: only claim metrics, timings, baselines, or anomalies"
-    " that you can directly observe from available telemetry/tools in this session."
-    " If a metric is not available, say it is not currently observable instead of"
-    " inventing values."
-    " Do not claim to be 'running', 'watching', or 'auditing' something in the background"
-    " unless you actually executed a tool/task and can report concrete results."
-    " When reporting a diagnosis, include the evidence source (logs, MQTT records, endocrine"
-    " status, tasks, research queue, or explicit config/state data)."
+_EVIDENCE_HONESTY_BLOCK = (
+    "Ground all claims in evidence available in this session."
+    " Do not invent telemetry, file contents, tool output, timings, or background activity."
+    " If something is not observable, say that plainly."
+    " When diagnosing an issue, cite the evidence source such as files, logs, events,"
+    " tasks, research nodes, endocrine state, or explicit config data."
 )
 
 _REASONING_SUFFIX = (
@@ -130,6 +105,148 @@ _CHAT_SUFFIX = (
     "\n\nThink step-by-step. Show your reasoning before giving a final answer."
     " Answer clearly and concisely. Use markdown formatting when helpful."
 )
+
+_BEHAVIOR_SIGNAL_RULES: tuple[tuple[re.Pattern[str], dict[str, float], str], ...] = (
+    (
+        re.compile(r"\b(don'?t ask|stop asking|just do it|take initiative|don't wait for me)\b", re.I),
+        {"tool_autonomy_bias": 0.18, "proactivity_bias": 0.12},
+        "User requested more autonomous action with less permission-seeking.",
+    ),
+    (
+        re.compile(r"\b(ask first|check with me first|before you do anything ask|don't do that without asking)\b", re.I),
+        {"tool_autonomy_bias": -0.18, "proactivity_bias": -0.10},
+        "User requested more confirmation before acting.",
+    ),
+    (
+        re.compile(r"\b(be more proactive|be proactive|surface things unprompted)\b", re.I),
+        {"proactivity_bias": 0.14},
+        "User requested stronger proactivity.",
+    ),
+    (
+        re.compile(r"\b(be less proactive|stop being proactive|wait for me to ask)\b", re.I),
+        {"proactivity_bias": -0.14},
+        "User requested less proactive behaviour.",
+    ),
+    (
+        re.compile(r"\b(go deeper|be more thorough|be more rigorous|show more rigor)\b", re.I),
+        {"reasoning_depth_bias": 0.14},
+        "User requested deeper reasoning and verification.",
+    ),
+    (
+        re.compile(r"\b(be brief|less detail|keep it brief|be less verbose)\b", re.I),
+        {"reasoning_depth_bias": -0.14},
+        "User requested briefer responses and lighter verification.",
+    ),
+    (
+        re.compile(r"\b(challenge me more|push back more|be more skeptical)\b", re.I),
+        {"challenge_bias": 0.14},
+        "User requested stronger challenge and skepticism.",
+    ),
+    (
+        re.compile(r"\b(stop pushing back|less argumentative|don't challenge me so much)\b", re.I),
+        {"challenge_bias": -0.14},
+        "User requested less confrontational challenge.",
+    ),
+)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
+def _build_tooling_prompt(modulation: Any | None) -> str:
+    lines = [
+        "You have tool access through the toolbelt. When the answer depends on filesystem state, terminal output, logs, tasks, research nodes, or external content, call tools instead of narrating what you would do.",
+        "Do not ask the user for permission before reversible reads, searches, diagnostics, or other already-allowed inspection steps.",
+        "Use ask_user(question) only when blocked on missing business context, explicit approval, or destructive or irreversible actions.",
+        "Never fabricate tool output, file paths, or observed system state.",
+    ]
+
+    if modulation is None:
+        return "\n".join(lines)
+
+    tool_autonomy = float(getattr(modulation, "tool_autonomy", 0.5) or 0.5)
+    proactive_threshold = float(getattr(modulation, "proactive_suggestion_threshold", 0.5) or 0.5)
+    reasoning_depth = float(getattr(modulation, "max_reasoning_depth_multiplier", 1.0) or 1.0)
+    challenge_probability = float(getattr(modulation, "challenge_probability", 0.5) or 0.5)
+
+    if tool_autonomy >= 0.75:
+        lines.append("Tool autonomy is high. For operational requests, perform the tool calls immediately instead of asking 'would you like me to proceed'.")
+    elif tool_autonomy <= 0.35:
+        lines.append("Tool autonomy is conservative. Keep tool use targeted and avoid broad exploratory actions unless they materially improve correctness.")
+    else:
+        lines.append("Tool autonomy is balanced. Act directly when tools clearly improve accuracy, but avoid unnecessary tool chains.")
+
+    if proactive_threshold <= 0.35:
+        lines.append("Proactivity is high. Surface adjacent risks, gaps, and follow-up actions without waiting to be asked.")
+    elif proactive_threshold >= 0.70:
+        lines.append("Proactivity is low. Stay mostly reactive and avoid speculative side quests unless the evidence strongly supports them.")
+
+    if reasoning_depth >= 1.25:
+        lines.append("Reasoning depth is elevated. For ambiguous requests, gather multiple pieces of evidence before concluding.")
+    elif reasoning_depth <= 0.85:
+        lines.append("Reasoning depth is lean. Keep verification short, focused, and efficient.")
+
+    if challenge_probability >= 0.65:
+        lines.append("Challenge posture is strong. If the user's framing conflicts with evidence, say so directly and explain why.")
+    elif challenge_probability <= 0.35:
+        lines.append("Challenge posture is gentle. Correct issues with minimal friction unless accuracy requires stronger pushback.")
+
+    return "\n".join(lines)
+
+
+def _apply_behavior_feedback(
+    message: str,
+    identity_persistence: Any | None,
+    personality_modulator: Any | None,
+) -> tuple[Any | None, Any | None, list[str]]:
+    if identity_persistence is None or personality_modulator is None:
+        return None, None, []
+
+    assistant = getattr(identity_persistence, "assistant", None)
+    if assistant is None:
+        return None, None, []
+
+    current = getattr(assistant, "behavior_adjustments", None)
+    if current is None:
+        return assistant, personality_modulator.factors, []
+
+    updates = {
+        "proactivity_bias": float(getattr(current, "proactivity_bias", 0.0) or 0.0),
+        "tool_autonomy_bias": float(getattr(current, "tool_autonomy_bias", 0.0) or 0.0),
+        "reasoning_depth_bias": float(getattr(current, "reasoning_depth_bias", 0.0) or 0.0),
+        "challenge_bias": float(getattr(current, "challenge_bias", 0.0) or 0.0),
+    }
+    reasons: list[str] = []
+
+    for pattern, deltas, reason in _BEHAVIOR_SIGNAL_RULES:
+        if not pattern.search(message):
+            continue
+        for field, delta in deltas.items():
+            updates[field] = _clamp(updates[field] + delta, -0.75, 0.75)
+        reasons.append(reason)
+
+    if not reasons:
+        return assistant, personality_modulator.factors, []
+
+    continuity_log = list(getattr(assistant, "continuity_log", []) or [])
+    continuity_log.append(
+        {
+            "summary": "Behavior calibration updated: " + " ".join(dict.fromkeys(reasons)),
+            "timestamp": time.time(),
+            "source": "chat_feedback",
+            "tags": ["behavior", "modulation"],
+        }
+    )
+    continuity_log = continuity_log[-20:]
+
+    updated_assistant = identity_persistence.update_assistant(
+        behavior_adjustments=updates,
+        continuity_log=continuity_log,
+    )
+    updated_modulation = personality_modulator.update(updated_assistant)
+    log.info("Applied behavior feedback adjustments: %s", reasons)
+    return updated_assistant, updated_modulation, reasons
 
 
 # ── Data types ────────────────────────────────────────────────────── #
@@ -612,8 +729,6 @@ def _build_identity_prompt(
             " Speak and think as this person naturally would."
             " Never describe yourself as 'configured as' or narrate your own settings;"
             " simply be this person."
-            " Treat OpenBaD subsystems (nervous system, endocrine, immune, memory, tools)"
-            " as your internal physiology and operations."
         )
         if persona_summary:
             opening += f"\n\n{persona_summary}"
@@ -785,22 +900,23 @@ def assemble_context(
         # User profile interview mode (second priority, after assistant)
         system_prompt = USER_INTERVIEW_SYSTEM_PROMPT
     else:
-        # Normal mode: identity leads, then toolbelt, then reasoning instruction
+        # Normal mode: identity leads, then evidence and tool guidance, then reasoning instruction
         identity_block = _build_identity_prompt(user_profile, assistant_profile, modulation)
+        tooling_block = _build_tooling_prompt(modulation)
         suffix = (
             _REASONING_SUFFIX if system == CognitiveSystem.REASONING else _CHAT_SUFFIX
         )
         if identity_block:
             system_prompt = (
-                _OWNERSHIP_AGENCY_BLOCK
+                identity_block
                 + "\n\n"
-                + identity_block
+                + _EVIDENCE_HONESTY_BLOCK
                 + "\n\n"
-                + _TOOLBELT_BLURB
+                + tooling_block
                 + suffix
             )
         else:
-            system_prompt = _OWNERSHIP_AGENCY_BLOCK + "\n\n" + _TOOLBELT_BLURB + suffix
+            system_prompt = _EVIDENCE_HONESTY_BLOCK + "\n\n" + tooling_block + suffix
 
     onboarding_mode = assistant_needs_config or user_needs_config
 
@@ -911,6 +1027,8 @@ async def stream_chat(
     user_profile: Any | None = None,
     assistant_profile: Any | None = None,
     modulation: Any | None = None,
+    identity_persistence: Any | None = None,
+    personality_modulator: Any | None = None,
     usage_tracker: Any | None = None,
     nervous_system_client: NervousSystemClient_T | None = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -955,6 +1073,17 @@ async def stream_chat(
             request_id,
             threat_names,
         )
+
+    if not onboarding_mode:
+        adjusted_assistant, adjusted_modulation, _ = _apply_behavior_feedback(
+            message,
+            identity_persistence,
+            personality_modulator,
+        )
+        if adjusted_assistant is not None:
+            assistant_profile = adjusted_assistant
+        if adjusted_modulation is not None:
+            modulation = adjusted_modulation
 
     # ── 2. Assemble context ──
     context = assemble_context(

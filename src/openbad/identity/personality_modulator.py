@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from openbad.identity.assistant_profile import AssistantProfile
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
 @dataclass
 class ModulationFactors:
     """Endocrine modulation factors derived from OCEAN personality values."""
@@ -20,6 +24,7 @@ class ModulationFactors:
     proactive_suggestion_threshold: float
     challenge_probability: float
     cortisol_decay_multiplier: float
+    tool_autonomy: float
     response_tone: str
     explanation_depth: str
     disagreement_style: str
@@ -53,12 +58,29 @@ class PersonalityModulator:
 
     @staticmethod
     def _compute(profile: AssistantProfile) -> ModulationFactors:
+        adjustments = profile.behavior_adjustments
+        proactivity = _clamp(profile.extraversion + adjustments.proactivity_bias, 0.0, 1.0)
+        reasoning_depth = _clamp(profile.conscientiousness + adjustments.reasoning_depth_bias, 0.0, 1.0)
+        challenge_probability = _clamp((1.0 - profile.agreeableness) + adjustments.challenge_bias, 0.0, 1.0)
+        tool_autonomy = _clamp(
+            (
+                profile.openness * 0.35
+                + profile.conscientiousness * 0.25
+                + profile.extraversion * 0.20
+                + (1.0 - profile.agreeableness) * 0.10
+                + profile.stability * 0.10
+            )
+            + adjustments.tool_autonomy_bias,
+            0.0,
+            1.0,
+        )
         return ModulationFactors(
             exploration_budget_multiplier=0.5 + profile.openness,
-            max_reasoning_depth_multiplier=0.5 + profile.conscientiousness,
-            proactive_suggestion_threshold=1.0 - profile.extraversion,
-            challenge_probability=1.0 - profile.agreeableness,
+            max_reasoning_depth_multiplier=_clamp(0.5 + reasoning_depth, 0.5, 1.75),
+            proactive_suggestion_threshold=_clamp(1.0 - proactivity, 0.0, 1.0),
+            challenge_probability=challenge_probability,
             cortisol_decay_multiplier=0.5 + profile.stability,
+            tool_autonomy=tool_autonomy,
             response_tone=profile.rhetorical_style.tone,
             explanation_depth=profile.rhetorical_style.explanation_depth,
             disagreement_style=profile.rhetorical_style.challenge_mode,
