@@ -131,13 +131,16 @@ class TestRuntimeUpdates:
         ip.update_assistant(
             stability=0.9,
             boundaries=["Do not guess", "Do not bluff"],
+            behavior_adjustments={"tool_autonomy_bias": 0.2},
         )
         assert ip.assistant.stability == pytest.approx(0.9)
         assert ip.assistant.boundaries[-1] == "Do not bluff"
+        assert ip.assistant.behavior_adjustments.tool_autonomy_bias == pytest.approx(0.2)
         entry = ep.read("identity/assistant_shadow")
         assert entry is not None
         assert entry.value["stability"] == pytest.approx(0.9)
         assert entry.value["boundaries"][-1] == "Do not bluff"
+        assert entry.value["behavior_adjustments"]["tool_autonomy_bias"] == pytest.approx(0.2)
 
     def test_update_user_bad_field_raises(self, env) -> None:
         _, _, ip = env
@@ -163,7 +166,7 @@ class TestConsolidation:
     def test_consolidate_writes_back_config(self, env) -> None:
         cfg, _, ip = env
         ip.update_user(preferred_name="Consolidated")
-        ip.update_assistant(openness=0.1)
+        ip.update_assistant(openness=0.1, behavior_adjustments={"proactivity_bias": 0.2})
 
         backup = ip.consolidate()
         assert backup is not None
@@ -173,6 +176,7 @@ class TestConsolidation:
         raw = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         assert raw["user"]["preferred_name"] == "Consolidated"
         assert raw["assistant"]["ocean"]["openness"] == pytest.approx(0.1)
+        assert raw["assistant"]["behavior_adjustments"]["proactivity_bias"] == pytest.approx(0.2)
         assert raw["user"]["work_hours"] == [9, 17]
         assert raw["assistant"]["boundaries"] == ["Do not guess"]
 

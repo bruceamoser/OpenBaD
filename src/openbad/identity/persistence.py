@@ -228,6 +228,7 @@ class IdentityPersistence:
             "opinions": assistant_d.pop("opinions"),
             "vocabulary": assistant_d.pop("vocabulary"),
             "rhetorical_style": assistant_d.pop("rhetorical_style"),
+            "behavior_adjustments": assistant_d.pop("behavior_adjustments"),
             "influences": assistant_d.pop("influences"),
             "anti_patterns": assistant_d.pop("anti_patterns"),
             "current_focus": assistant_d.pop("current_focus"),

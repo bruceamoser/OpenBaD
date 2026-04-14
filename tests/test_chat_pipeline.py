@@ -8,6 +8,7 @@ import pytest
 from openbad.cognitive.context_manager import ContextWindowManager
 from openbad.cognitive.providers.base import HealthStatus, ModelInfo, ProviderAdapter
 from openbad.identity.assistant_profile import AssistantProfile
+from openbad.identity.personality_modulator import PersonalityModulator
 from openbad.identity.user_profile import UserProfile
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.semantic import SemanticMemory
@@ -161,6 +162,7 @@ async def test_stream_chat_uses_persistent_history_and_no_duplicate_current_mess
     prompt = adapter.prompts[0]
     assert prompt.count("What should I remember about Friday?") == 1
     assert "You are OpenBaD" in prompt
+    assert "self-regulating digital organism" not in prompt
     assert "Preferred communication style: terse" in prompt
     assert "Relevant prior memories:" in prompt
 
@@ -358,3 +360,43 @@ async def test_stream_chat_allows_medium_severity_immune_match(monkeypatch):
     assert not errors, f"Medium severity should not block but got errors: {errors}"
     texts = "".join(c.token or "" for c in chunks)
     assert texts == "result"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_applies_behavior_feedback_before_prompting():
+    adapter = _CapturingAdapter(["Understood"])
+    assistant_profile = AssistantProfile(name="Sven", persona_summary="A precise systems engineer")
+
+    class _Persistence:
+        def __init__(self, assistant):
+            self.assistant = assistant
+
+        def update_assistant(self, **changes):
+            for key, value in changes.items():
+                setattr(self.assistant, key, value)
+            self.assistant.__post_init__()
+            return self.assistant
+
+    persistence = _Persistence(assistant_profile)
+    modulator = PersonalityModulator(assistant_profile)
+
+    _ = [
+        chunk
+        async for chunk in chat_pipeline.stream_chat(
+            adapter,
+            "test-model",
+            "Don't ask, just do it. Be more proactive.",
+            "session-calibration",
+            provider_name="test-provider",
+            assistant_profile=assistant_profile,
+            modulation=modulator.factors,
+            identity_persistence=persistence,
+            personality_modulator=modulator,
+        )
+    ]
+
+    assert persistence.assistant.behavior_adjustments.tool_autonomy_bias > 0.0
+    assert persistence.assistant.behavior_adjustments.proactivity_bias > 0.0
+    prompt = adapter.prompts[0]
+    assert "perform the tool calls immediately" in prompt
+    assert "Proactivity is high" in prompt or "Tool autonomy is high" in prompt

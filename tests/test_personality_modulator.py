@@ -21,6 +21,7 @@ class TestModulationFactors:
         assert f.proactive_suggestion_threshold == pytest.approx(0.5)
         assert f.challenge_probability == pytest.approx(0.6)
         assert f.cortisol_decay_multiplier == pytest.approx(1.1)
+        assert f.tool_autonomy == pytest.approx(0.665)
         assert f.response_tone == "direct"
         assert f.explanation_depth == "balanced"
         assert f.disagreement_style == "steel-man first"
@@ -128,6 +129,24 @@ class TestUpdate:
         assert f.explanation_depth == "thorough"
         assert f.disagreement_style == "socratic"
         assert f.anti_pattern_guard == ["Avoid flattery"]
+
+    def test_behavior_adjustments_affect_modulation(self) -> None:
+        p = AssistantProfile(
+            extraversion=0.4,
+            conscientiousness=0.4,
+            agreeableness=0.6,
+            behavior_adjustments={
+                "proactivity_bias": 0.3,
+                "tool_autonomy_bias": 0.2,
+                "reasoning_depth_bias": 0.2,
+                "challenge_bias": 0.2,
+            },
+        )
+        f = PersonalityModulator(p).factors
+        assert f.proactive_suggestion_threshold == pytest.approx(0.3)
+        assert f.max_reasoning_depth_multiplier == pytest.approx(1.1)
+        assert f.challenge_probability == pytest.approx(0.6)
+        assert f.tool_autonomy > 0.5
 
 
 class TestCortisolIntegration:

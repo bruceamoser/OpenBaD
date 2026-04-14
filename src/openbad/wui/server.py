@@ -1415,6 +1415,8 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
             user_profile=getattr(persistence, "user", None),
             assistant_profile=getattr(persistence, "assistant", None),
             modulation=getattr(modulator, "factors", None),
+            identity_persistence=persistence,
+            personality_modulator=modulator,
             usage_tracker=request.app.get("usage_tracker"),
             nervous_system_client=nervous_system_client,
         ):
@@ -1459,9 +1461,13 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
         )
         with contextlib.suppress(Exception):
             runtime = EndocrineRuntime(config=load_endocrine_config())
+            reason = (
+                "Chat stream transport failure: "
+                f"system={system_name} provider={provider_name}"
+            )
             runtime.apply_adjustment(
                 source="wui_stream_error",
-                reason=f"Chat stream transport failure: system={system_name} provider={provider_name}",
+                reason=reason,
                 deltas={"cortisol": 0.08, "adrenaline": 0.04},
             )
         error_data = json.dumps(
@@ -2214,6 +2220,7 @@ async def _get_entity_assistant(request: web.Request) -> web.Response:
             "proactive_suggestion_threshold": f.proactive_suggestion_threshold,
             "challenge_probability": f.challenge_probability,
             "cortisol_decay_multiplier": f.cortisol_decay_multiplier,
+            "tool_autonomy": f.tool_autonomy,
         }
     return web.json_response(data)
 

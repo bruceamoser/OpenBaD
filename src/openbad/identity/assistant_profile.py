@@ -24,6 +24,11 @@ def _clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _clamp_signed(value: float, limit: float = 0.75) -> float:
+    limit = abs(float(limit))
+    return max(-limit, min(limit, float(value)))
+
+
 def _list_of_str(value: Any) -> list[str]:
     if value is None:
         return []
@@ -56,6 +61,22 @@ class RhetoricalStyle:
     sentence_pattern: str = "concise"
     challenge_mode: str = "steel-man first"
     explanation_depth: str = "balanced"
+
+
+@dataclass
+class BehaviorAdjustments:
+    """Runtime-tunable behaviour offsets persisted in the assistant entity."""
+
+    proactivity_bias: float = 0.0
+    tool_autonomy_bias: float = 0.0
+    reasoning_depth_bias: float = 0.0
+    challenge_bias: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.proactivity_bias = _clamp_signed(self.proactivity_bias)
+        self.tool_autonomy_bias = _clamp_signed(self.tool_autonomy_bias)
+        self.reasoning_depth_bias = _clamp_signed(self.reasoning_depth_bias)
+        self.challenge_bias = _clamp_signed(self.challenge_bias)
 
 
 @dataclass
@@ -93,6 +114,19 @@ def _coerce_rhetorical_style(value: Any) -> RhetoricalStyle:
     return RhetoricalStyle()
 
 
+def _coerce_behavior_adjustments(value: Any) -> BehaviorAdjustments:
+    if isinstance(value, BehaviorAdjustments):
+        return value
+    if isinstance(value, dict):
+        return BehaviorAdjustments(
+            proactivity_bias=float(value.get("proactivity_bias", 0.0) or 0.0),
+            tool_autonomy_bias=float(value.get("tool_autonomy_bias", 0.0) or 0.0),
+            reasoning_depth_bias=float(value.get("reasoning_depth_bias", 0.0) or 0.0),
+            challenge_bias=float(value.get("challenge_bias", 0.0) or 0.0),
+        )
+    return BehaviorAdjustments()
+
+
 def _coerce_continuity_entries(value: Any) -> list[ContinuityEntry]:
     if not isinstance(value, list):
         return []
@@ -120,6 +154,7 @@ class AssistantProfile:
     opinions: dict[str, list[str]] = field(default_factory=dict)
     vocabulary: dict[str, str] = field(default_factory=dict)
     rhetorical_style: RhetoricalStyle = field(default_factory=RhetoricalStyle)
+    behavior_adjustments: BehaviorAdjustments = field(default_factory=BehaviorAdjustments)
     influences: list[str] = field(default_factory=list)
     anti_patterns: list[str] = field(default_factory=list)
     current_focus: list[str] = field(default_factory=list)
@@ -138,6 +173,7 @@ class AssistantProfile:
         self.opinions = _dict_of_str_list(self.opinions)
         self.vocabulary = _dict_of_str(self.vocabulary)
         self.rhetorical_style = _coerce_rhetorical_style(self.rhetorical_style)
+        self.behavior_adjustments = _coerce_behavior_adjustments(self.behavior_adjustments)
         self.influences = _list_of_str(self.influences)
         self.anti_patterns = _list_of_str(self.anti_patterns)
         self.current_focus = _list_of_str(self.current_focus)
@@ -173,6 +209,7 @@ def load_assistant_profile(path: str | Path) -> AssistantProfile:
         opinions=data.get("opinions", {}),
         vocabulary=data.get("vocabulary", {}),
         rhetorical_style=data.get("rhetorical_style", {}),
+        behavior_adjustments=data.get("behavior_adjustments", {}),
         influences=data.get("influences", []),
         anti_patterns=data.get("anti_patterns", []),
         current_focus=data.get("current_focus", []),
