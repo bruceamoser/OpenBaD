@@ -1451,6 +1451,7 @@ async def test_chat_history_route_returns_serialized_messages(aiohttp_client, mo
 @pytest.mark.asyncio
 async def test_get_usage_route_returns_usage_snapshot(aiohttp_client, tmp_path, monkeypatch):
     monkeypatch.setenv("OPENBAD_USAGE_DB", str(tmp_path / "usage.db"))
+    monkeypatch.setattr("openbad.state.event_log.setup_logging", lambda *args, **kwargs: None)
 
     app = create_app(enable_mqtt=False)
     tracker = app["usage_tracker"]
@@ -1460,7 +1461,7 @@ async def test_get_usage_route_returns_usage_snapshot(aiohttp_client, tmp_path, 
         system="chat",
         tokens=320,
         request_id="req-1",
-        session_id="sess-1",
+        session_id="85d1ce5f-b679-4d5e-a251-2a27bd0b1f91",
     )
     tracker.record(
         provider="anthropic",
@@ -1468,7 +1469,7 @@ async def test_get_usage_route_returns_usage_snapshot(aiohttp_client, tmp_path, 
         system="reasoning",
         tokens=180,
         request_id="req-2",
-        session_id="sess-2",
+        session_id="doctor-autonomy",
     )
 
     client = await aiohttp_client(app)
@@ -1480,6 +1481,15 @@ async def test_get_usage_route_returns_usage_snapshot(aiohttp_client, tmp_path, 
     assert data["summary"]["request_count"] == 2
     assert data["by_provider_model"][0]["tokens"] == 320
     assert {item["system"] for item in data["by_system"]} == {"chat", "reasoning"}
+    assert {item["session_id"] for item in data["by_session"]} == {
+        "85d1ce5f-b679-4d5e-a251-2a27bd0b1f91",
+        "doctor-autonomy",
+    }
+    session_types = {item["session_type"]: item for item in data["by_session"]}
+    assert session_types["chat"]["type_label"] == "Chat"
+    assert session_types["doctor"]["type_label"] == "Doctor"
+    assert {item["session_type"] for item in data["by_session_type"]} == {"chat", "doctor"}
+    assert data["recent_events"][0]["session_type"] in {"chat", "doctor"}
     assert data["recent_events"][0]["tokens"] in {180, 320}
 
 

@@ -89,6 +89,32 @@ class TaskService:
         """Convenience wrapper to cancel a task."""
         return self.transition_task(task_id, TaskStatus.CANCELLED)
 
+    def complete_task(self, task_id: str) -> TaskModel:
+        """Convenience wrapper to mark a task done."""
+        return self.transition_task(task_id, TaskStatus.DONE)
+
+    def update_task(
+        self,
+        task_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        owner: str | None = None,
+    ) -> TaskModel:
+        """Update mutable task metadata and return the refreshed task."""
+        task = self._store.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Task {task_id!r} not found")
+        self._store.update_task_fields(
+            task_id,
+            title=title,
+            description=description,
+            owner=owner,
+        )
+        updated = self._store.get_task(task_id)
+        assert updated is not None
+        return updated
+
     # ------------------------------------------------------------------
     # Node lifecycle
     # ------------------------------------------------------------------

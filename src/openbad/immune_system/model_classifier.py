@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import aiohttp
 
+from openbad.usage_recorder import UsageRecorder
+
 
 @dataclass(frozen=True)
 class ClassificationResult:
@@ -67,6 +69,7 @@ class ModelClassifier:
         model: str = "llama3.2",
         timeout_ms: int = 500,
         confidence_threshold: float = 0.7,
+        usage_recorder: UsageRecorder | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -74,6 +77,7 @@ class ModelClassifier:
             total=timeout_ms / 1000,
         )
         self._confidence_threshold = confidence_threshold
+        self._usage_recorder = usage_recorder
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,13 +104,24 @@ class ModelClassifier:
         t0 = time.monotonic()
 
         try:
-            raw = await self._call_ollama(user_msg)
+            raw_result = await self._call_ollama(user_msg)
         except (
             aiohttp.ClientError,
             TimeoutError,
             OSError,
         ):
             return _FALLBACK_RESULT
+
+        raw, tokens_used = (
+            raw_result if isinstance(raw_result, tuple) else (raw_result, 0)
+        )
+        if self._usage_recorder is not None:
+            self._usage_recorder.record_completion(
+                provider="ollama",
+                model=self._model,
+                system="immune",
+                tokens=tokens_used,
+            )
 
         elapsed_ms = (time.monotonic() - t0) * 1000
 
@@ -116,8 +131,8 @@ class ModelClassifier:
     # Internals
     # ------------------------------------------------------------------
 
-    async def _call_ollama(self, user_msg: str) -> str:
-        """Send a chat completion request to Ollama and return raw text."""
+    async def _call_ollama(self, user_msg: str) -> tuple[str, int]:
+        """Send a chat completion request to Ollama and return raw text + tokens."""
         url = f"{self._base_url}/api/chat"
         body = {
             "model": self._model,
@@ -134,7 +149,10 @@ class ModelClassifier:
         ):
             resp.raise_for_status()
             data = await resp.json()
-            return data["message"]["content"]
+            tokens_used = int(data.get("prompt_eval_count", 0)) + int(
+                data.get("eval_count", 0)
+            )
+            return data["message"]["content"], tokens_used
 
     def _parse_response(
         self,

@@ -89,8 +89,8 @@ def load_user_profile(path: str | Path) -> UserProfile:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     user_data = raw.get("user")
     if not isinstance(user_data, dict):
-        msg = "identity.yaml must contain a 'user' mapping"
-        raise ValueError(msg)
+        logger.warning("identity.yaml is missing 'user'; using default user profile")
+        user_data = {"name": "User", "communication_style": "casual"}
 
     style_raw = user_data.get("communication_style", "casual")
     try:

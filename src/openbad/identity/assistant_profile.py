@@ -157,8 +157,8 @@ def load_assistant_profile(path: str | Path) -> AssistantProfile:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     data = raw.get("assistant")
     if not isinstance(data, dict):
-        msg = "identity.yaml must contain an 'assistant' mapping"
-        raise ValueError(msg)
+        logger.warning("identity.yaml is missing 'assistant'; using default assistant profile")
+        data = {}
 
     ocean = data.get("ocean", {})
     if not isinstance(ocean, dict):

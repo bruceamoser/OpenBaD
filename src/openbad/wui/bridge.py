@@ -32,6 +32,7 @@ from openbad.cognitive.providers.openai_compat import (
     openrouter_provider,
     xai_provider,
 )
+from openbad.usage_recorder import UsageTrackingProviderAdapter
 from openbad.nervous_system import topics
 from openbad.nervous_system.client import NervousSystemClient
 from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus, ReasoningResponse
@@ -498,46 +499,73 @@ def _build_provider_adapter(provider: ProviderConfig) -> Any | None:
     }
 
     if provider.name == "ollama":
-        return OllamaProvider(**common)
+        return UsageTrackingProviderAdapter(OllamaProvider(**common), system="provider-health")
     if provider.name == "openai":
-        return openai_provider(api_key_env=provider.api_key_env or "OPENAI_API_KEY", **common)
+        return UsageTrackingProviderAdapter(
+            openai_provider(api_key_env=provider.api_key_env or "OPENAI_API_KEY", **common),
+            system="provider-health",
+        )
     if provider.name == "openai-codex":
-        return openai_codex_provider(
-            api_key_env=provider.api_key_env or "OPENAI_CODEX_TOKEN",
-            **common,
+        return UsageTrackingProviderAdapter(
+            openai_codex_provider(
+                api_key_env=provider.api_key_env or "OPENAI_CODEX_TOKEN",
+                **common,
+            ),
+            system="provider-health",
         )
     if provider.name == "openrouter":
-        return openrouter_provider(
-            api_key_env=provider.api_key_env or "OPENROUTER_API_KEY",
-            **common,
+        return UsageTrackingProviderAdapter(
+            openrouter_provider(
+                api_key_env=provider.api_key_env or "OPENROUTER_API_KEY",
+                **common,
+            ),
+            system="provider-health",
         )
     if provider.name == "groq":
-        return groq_provider(api_key_env=provider.api_key_env or "GROQ_API_KEY", **common)
+        return UsageTrackingProviderAdapter(
+            groq_provider(api_key_env=provider.api_key_env or "GROQ_API_KEY", **common),
+            system="provider-health",
+        )
     if provider.name == "xai":
-        return xai_provider(api_key_env=provider.api_key_env or "XAI_API_KEY", **common)
+        return UsageTrackingProviderAdapter(
+            xai_provider(api_key_env=provider.api_key_env or "XAI_API_KEY", **common),
+            system="provider-health",
+        )
     if provider.name == "mistral":
-        return mistral_provider(
-            api_key_env=provider.api_key_env or "MISTRAL_API_KEY",
-            **common,
+        return UsageTrackingProviderAdapter(
+            mistral_provider(
+                api_key_env=provider.api_key_env or "MISTRAL_API_KEY",
+                **common,
+            ),
+            system="provider-health",
         )
     if provider.name == "anthropic":
-        return AnthropicProvider(
-            base_url=provider.base_url,
-            api_key_env=provider.api_key_env or "ANTHROPIC_API_KEY",
-            default_model=verification_model,
-            timeout_s=timeout_s,
+        return UsageTrackingProviderAdapter(
+            AnthropicProvider(
+                base_url=provider.base_url,
+                api_key_env=provider.api_key_env or "ANTHROPIC_API_KEY",
+                default_model=verification_model,
+                timeout_s=timeout_s,
+            ),
+            system="provider-health",
         )
     if provider.name == "github-copilot":
-        return GitHubCopilotProvider(
-            default_model=verification_model or "gpt-4o",
-            timeout_s=timeout_s,
+        return UsageTrackingProviderAdapter(
+            GitHubCopilotProvider(
+                default_model=verification_model or "gpt-4o",
+                timeout_s=timeout_s,
+            ),
+            system="provider-health",
         )
     if provider.name == "custom":
-        return custom_provider(
-            base_url=provider.base_url,
-            api_key_env=provider.api_key_env,
-            default_model=verification_model,
-            timeout_s=timeout_s,
+        return UsageTrackingProviderAdapter(
+            custom_provider(
+                base_url=provider.base_url,
+                api_key_env=provider.api_key_env,
+                default_model=verification_model,
+                timeout_s=timeout_s,
+            ),
+            system="provider-health",
         )
 
     logger.debug("Unsupported provider for WUI readiness count: %s", provider.name)

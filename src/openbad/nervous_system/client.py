@@ -59,7 +59,7 @@ class NervousSystemClient:
             client_id=client_id,
             protocol=mqtt.MQTTv5,
         )
-        self._subscriptions: dict[str, list[tuple[type[Message], Callable[..., Any]]]] = {}
+        self._subscriptions: dict[str, list[tuple[type[Message] | type[bytes], Callable[..., Any]]]] = {}
         self._connected = threading.Event()
         self._mqtt.on_connect = self._on_connect
         self._mqtt.on_message = self._on_message
@@ -174,8 +174,8 @@ class NervousSystemClient:
     def subscribe(
         self,
         topic: str,
-        message_type: type[T],
-        callback: Callable[[str, T], Any],
+        message_type: type[T] | type[bytes],
+        callback: Callable[[str, T | bytes], Any],
         qos: int | None = None,
     ) -> None:
         """Subscribe to *topic* with typed deserialization.
@@ -243,6 +243,9 @@ class NervousSystemClient:
 
         for message_type, callback in handlers:
             try:
+                if message_type is bytes:
+                    callback(msg.topic, bytes(msg.payload))
+                    continue
                 parsed = message_type()
                 parsed.ParseFromString(msg.payload)
                 callback(msg.topic, parsed)

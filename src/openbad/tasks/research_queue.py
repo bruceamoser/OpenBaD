@@ -76,9 +76,10 @@ _MARK_DEQUEUED = "UPDATE research_queue SET dequeued_at = ? WHERE node_id = ?"
 _SELECT_BY_ID = "SELECT * FROM research_queue WHERE node_id = ?"
 _UPDATE_PENDING_NODE = """
 UPDATE research_queue
-SET description = ?,
+SET title = ?,
+    description = ?,
     priority = ?,
-    source_task_id = COALESCE(source_task_id, ?)
+    source_task_id = ?
 WHERE node_id = ?
 """
 
@@ -245,7 +246,7 @@ class ResearchQueue:
         merged_priority = min(node.priority, priority)
         self._conn.execute(
             _UPDATE_PENDING_NODE,
-            (merged_description, merged_priority, source_task_id, node.node_id),
+            (node.title, merged_description, merged_priority, source_task_id, node.node_id),
         )
         self._conn.commit()
         refreshed = self.get(node.node_id)
@@ -326,3 +327,46 @@ class ResearchQueue:
         """Return recently completed nodes, newest first."""
         rows = self._conn.execute(_SELECT_COMPLETED, (limit,)).fetchall()
         return [ResearchNode._from_row(r) for r in rows]
+
+    def update(
+        self,
+        node_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        priority: int | None = None,
+        source_task_id: str | None = None,
+    ) -> ResearchNode:
+        """Update a pending research node and return the refreshed record."""
+        node = self.get(node_id)
+        if node is None:
+            raise KeyError(f"Research node {node_id!r} not found")
+        if node.dequeued_at is not None:
+            raise ValueError(f"Research node {node_id!r} is already completed")
+
+        next_title = node.title if title is None else title
+        next_description = node.description if description is None else description
+        next_priority = node.priority if priority is None else int(priority)
+        next_source_task_id = node.source_task_id if source_task_id is None else source_task_id
+
+        self._conn.execute(
+            _UPDATE_PENDING_NODE,
+            (next_title, next_description, next_priority, next_source_task_id, node_id),
+        )
+        self._conn.commit()
+        refreshed = self.get(node_id)
+        assert refreshed is not None
+        return refreshed
+
+    def complete(self, node_id: str) -> ResearchNode:
+        """Mark a research node complete and return the updated record."""
+        node = self.get(node_id)
+        if node is None:
+            raise KeyError(f"Research node {node_id!r} not found")
+        if node.dequeued_at is None:
+            now = datetime.now(tz=UTC)
+            self._conn.execute(_MARK_DEQUEUED, (now.isoformat(), node_id))
+            self._conn.commit()
+        refreshed = self.get(node_id)
+        assert refreshed is not None
+        return refreshed

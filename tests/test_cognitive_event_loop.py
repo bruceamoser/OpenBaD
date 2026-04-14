@@ -33,6 +33,8 @@ from openbad.cognitive.providers.base import CompletionResult, HealthStatus, Pro
 from openbad.cognitive.providers.registry import ProviderRegistry
 from openbad.cognitive.reasoning.base import ReasoningResult, ReasoningStrategy
 from openbad.memory.base import MemoryEntry, MemoryTier
+from openbad.usage_recorder import UsageRecorder
+from openbad.wui.usage_tracker import UsageTracker
 
 # ------------------------------------------------------------------ #
 # Helpers
@@ -128,6 +130,7 @@ def _event_loop(
     strategies: dict[Priority | CognitiveSystem, ReasoningStrategy] | None = None,
     publish_fn: AsyncMock | None = None,
     validate_fn: MagicMock | None = None,
+    usage_recorder: UsageRecorder | None = None,
 ) -> CognitiveEventLoop:
     return CognitiveEventLoop(
         model_router=_mock_router(),
@@ -135,6 +138,7 @@ def _event_loop(
         strategies=strategies or {},
         publish_fn=publish_fn,
         validate_fn=validate_fn,
+        usage_recorder=usage_recorder,
     )
 
 
@@ -218,6 +222,66 @@ class TestHandleRequest:
         topic, payload = pub.call_args[0]
         assert topic == "agent/cognitive/response"
         assert payload["request_id"] == "r3"
+
+    async def test_persists_usage_for_direct_calls(self, tmp_path) -> None:
+        tracker = UsageTracker(db_path=tmp_path / "usage.db")
+        recorder = UsageRecorder(tracker)
+        try:
+            loop = _event_loop(usage_recorder=recorder)
+            req = CognitiveRequest(
+                request_id="r-usage-direct",
+                prompt="hello",
+                system=CognitiveSystem.REACTIONS,
+            )
+
+            resp = await loop.handle_request(req)
+
+            snapshot = tracker.snapshot()
+            assert resp.provider == "ollama"
+            assert resp.model_id == "llama3.2"
+            assert snapshot["summary"]["total_used"] == 50
+            assert snapshot["by_system"][0]["system"] == "reactions"
+            assert snapshot["recent_events"][0]["request_id"] == "r-usage-direct"
+            assert snapshot["recent_events"][0]["session_id"] == "reaction-loop"
+        finally:
+            tracker.close()
+
+    async def test_persists_usage_for_strategy_calls(self, tmp_path) -> None:
+        tracker = UsageTracker(db_path=tmp_path / "usage.db")
+        recorder = UsageRecorder(tracker)
+        try:
+            strategy = AsyncMock(spec=ReasoningStrategy)
+            strategy.reason = AsyncMock(
+                return_value=ReasoningResult(
+                    final_answer="reasoned",
+                    total_tokens=125,
+                    metadata={
+                        "provider": "anthropic",
+                        "model_id": "claude-sonnet",
+                    },
+                )
+            )
+            loop = _event_loop(
+                strategies={CognitiveSystem.RESEARCH: strategy},
+                usage_recorder=recorder,
+            )
+
+            resp = await loop.handle_request(
+                CognitiveRequest(
+                    request_id="r-usage-strategy",
+                    prompt="investigate",
+                    system=CognitiveSystem.RESEARCH,
+                )
+            )
+
+            snapshot = tracker.snapshot()
+            assert resp.provider == "anthropic"
+            assert resp.model_id == "claude-sonnet"
+            assert snapshot["summary"]["total_used"] == 125
+            assert snapshot["recent_events"][0]["system"] == "research"
+            assert snapshot["recent_events"][0]["session_id"] == "research-autonomy"
+        finally:
+            tracker.close()
 
 
 # ------------------------------------------------------------------ #

@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from openbad.daemon import Daemon
+from openbad.nervous_system import topics
+
+
+@pytest.fixture
+def mock_client():
+    with patch("openbad.daemon.NervousSystemClient") as cls:
+        instance = MagicMock()
+        cls.get_instance.return_value = instance
+        yield instance
 
 
 class TestDaemonInit:
@@ -49,6 +59,10 @@ class TestDaemonDryRun:
         d = Daemon(dry_run=True)
         await d.start()
         _mock_mqtt.connect.assert_called_once()
+        _mock_mqtt.subscribe.assert_any_call(topics.SCHEDULER_TICK, bytes, d._on_scheduler_tick)
+        _mock_mqtt.subscribe.assert_any_call(topics.TASK_WORK_REQUEST, bytes, d._on_task_work_request)
+        _mock_mqtt.subscribe.assert_any_call(topics.RESEARCH_WORK_REQUEST, bytes, d._on_research_work_request)
+        _mock_mqtt.subscribe.assert_any_call(topics.DOCTOR_CALL, bytes, d._on_doctor_call)
 
 
 class TestDaemonStartStop:
@@ -112,6 +126,50 @@ class TestDaemonSubsystems:
         assert d.fsm._client is mock_client  # noqa: SLF001
         await d.stop()
         await task
+
+    def test_scheduler_tick_dispatches_worker(self, mock_client):
+        d = Daemon(dry_run=True)
+        payload = json.dumps({"eligible_task_id": "task-1", "eligible_research_id": None}).encode("utf-8")
+        with patch("openbad.autonomy.scheduler_worker.process_pending_autonomy_work") as worker:
+            d._on_scheduler_tick(topics.SCHEDULER_TICK, payload)
+        worker.assert_called_once_with()
+
+    def test_scheduler_tick_with_queued_ids_does_not_dispatch_worker(self, mock_client):
+        d = Daemon(dry_run=True)
+        payload = json.dumps(
+            {
+                "eligible_task_id": None,
+                "eligible_research_id": None,
+                "queued_task_id": "task-1",
+                "queued_research_id": "research-1",
+            }
+        ).encode("utf-8")
+        with patch("openbad.autonomy.scheduler_worker.process_pending_autonomy_work") as worker:
+            d._on_scheduler_tick(topics.SCHEDULER_TICK, payload)
+        worker.assert_not_called()
+
+    def test_doctor_call_dispatches_worker(self, mock_client):
+        d = Daemon(dry_run=True)
+        payload = json.dumps(
+            {"source": "heartbeat", "reason": "endocrine activation detected"}
+        ).encode("utf-8")
+        with patch("openbad.autonomy.scheduler_worker.process_doctor_call") as worker:
+            d._on_doctor_call(topics.DOCTOR_CALL, payload)
+        worker.assert_called_once_with({"source": "heartbeat", "reason": "endocrine activation detected"})
+
+    def test_task_work_request_dispatches_worker(self, mock_client):
+        d = Daemon(dry_run=True)
+        payload = json.dumps({"mode": "specific", "task_id": "task-1", "source": "chat"}).encode("utf-8")
+        with patch("openbad.autonomy.scheduler_worker.process_task_call") as worker:
+            d._on_task_work_request(topics.TASK_WORK_REQUEST, payload)
+        worker.assert_called_once_with({"mode": "specific", "task_id": "task-1", "source": "chat"})
+
+    def test_research_work_request_dispatches_worker(self, mock_client):
+        d = Daemon(dry_run=True)
+        payload = json.dumps({"mode": "next", "source": "chat"}).encode("utf-8")
+        with patch("openbad.autonomy.scheduler_worker.process_research_call") as worker:
+            d._on_research_work_request(topics.RESEARCH_WORK_REQUEST, payload)
+        worker.assert_called_once_with({"mode": "next", "source": "chat"})
 
 
 class TestHardwareTelemetryConfig:

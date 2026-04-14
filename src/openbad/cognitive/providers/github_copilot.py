@@ -459,14 +459,16 @@ class GitHubCopilotProvider(ProviderAdapter):
                 "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 1,
             }
-            await self._post("/chat/completions", payload)
+            data = await self._post("/chat/completions", payload)
             latency_ms = (time.monotonic() - t0) * 1000
             models = await self.list_models()
+            usage = data.get("usage", {}) if isinstance(data, dict) else {}
             return HealthStatus(
                 provider="github-copilot",
                 available=True,
                 latency_ms=latency_ms,
                 models_available=len(models),
+                tokens_used=int(usage.get("total_tokens", 0) or 0),
             )
         except (aiohttp.ClientError, TimeoutError, OSError, CopilotAuthError):
             return HealthStatus(provider="github-copilot", available=False)

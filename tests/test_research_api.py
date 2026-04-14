@@ -81,6 +81,42 @@ async def test_get_research_not_found(client: TestClient) -> None:
     assert resp.status == 404
 
 
+@pytest.mark.asyncio
+async def test_create_research_node(client: TestClient) -> None:
+    resp = await client.post("/api/research", json={"title": "Find A", "priority": -1})
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["title"] == "Find A"
+    assert data["priority"] == -1
+
+
+@pytest.mark.asyncio
+async def test_patch_research_node(client: TestClient, db) -> None:
+    queue = ResearchQueue(db)
+    node = queue.enqueue("Find B", priority=2)
+
+    resp = await client.patch(
+        f"/api/research/{node.node_id}",
+        json={"title": "Find B2", "description": "updated", "priority": 0},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["title"] == "Find B2"
+    assert data["description"] == "updated"
+    assert data["priority"] == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_research_node(client: TestClient, db) -> None:
+    queue = ResearchQueue(db)
+    node = queue.enqueue("Find C", priority=1)
+
+    resp = await client.post(f"/api/research/{node.node_id}/complete")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "dequeued"
+
+
 # ---------------------------------------------------------------------------
 # Capability endpoint
 # ---------------------------------------------------------------------------

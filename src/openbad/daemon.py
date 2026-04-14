@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +16,7 @@ import yaml
 from openbad.endocrine.controller import EndocrineController
 from openbad.interoception.disk_network import DiskNetworkMonitor
 from openbad.interoception.monitor import TelemetryMonitor
+from openbad.nervous_system import topics
 from openbad.nervous_system.client import NervousSystemClient
 from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus
 from openbad.nervous_system.schemas.common_pb2 import Header
@@ -59,6 +62,7 @@ class Daemon:
         self._telemetry: TelemetryMonitor | None = None
         self._disk_network: DiskNetworkMonitor | None = None
         self._stop_event: asyncio.Event | None = None
+        self._scheduler_worker_lock = threading.Lock()
 
     # -- public --------------------------------------------------------- #
 
@@ -88,6 +92,10 @@ class Daemon:
             host=self._mqtt_host, port=self._mqtt_port
         )
         self._client.connect(timeout=5.0)
+        self._client.subscribe(topics.SCHEDULER_TICK, bytes, self._on_scheduler_tick)
+        self._client.subscribe(topics.TASK_WORK_REQUEST, bytes, self._on_task_work_request)
+        self._client.subscribe(topics.RESEARCH_WORK_REQUEST, bytes, self._on_research_work_request)
+        self._client.subscribe(topics.DOCTOR_CALL, bytes, self._on_doctor_call)
 
         # 2. Finite state machine
         self._fsm = AgentFSM(client=self._client)
@@ -209,3 +217,88 @@ class Daemon:
                 latency_p99=0.0,
             ),
         )
+
+    def _on_scheduler_tick(self, _topic: str, payload: bytes) -> None:
+        try:
+            tick = json.loads(payload.decode("utf-8"))
+        except Exception:
+            logger.exception("Invalid scheduler tick payload")
+            return
+
+        if (
+            not tick.get("eligible_task_id")
+            and not tick.get("eligible_research_id")
+        ):
+            return
+        if not self._scheduler_worker_lock.acquire(blocking=False):
+            logger.info("Scheduler worker already active; skipping overlapping tick")
+            return
+
+        try:
+            from openbad.autonomy.scheduler_worker import process_pending_autonomy_work
+
+            process_pending_autonomy_work()
+        except Exception:
+            logger.exception("Scheduler worker failed")
+        finally:
+            self._scheduler_worker_lock.release()
+
+    def _on_doctor_call(self, _topic: str, payload: bytes) -> None:
+        try:
+            request = json.loads(payload.decode("utf-8")) if payload else {}
+        except Exception:
+            logger.exception("Invalid doctor call payload")
+            return
+
+        if not self._scheduler_worker_lock.acquire(blocking=False):
+            logger.info("Scheduler worker already active; skipping overlapping doctor call")
+            return
+
+        try:
+            from openbad.autonomy.scheduler_worker import process_doctor_call
+
+            process_doctor_call(request if isinstance(request, dict) else None)
+        except Exception:
+            logger.exception("Doctor call worker failed")
+        finally:
+            self._scheduler_worker_lock.release()
+
+    def _on_task_work_request(self, _topic: str, payload: bytes) -> None:
+        try:
+            request = json.loads(payload.decode("utf-8")) if payload else {}
+        except Exception:
+            logger.exception("Invalid task work payload")
+            return
+
+        if not self._scheduler_worker_lock.acquire(blocking=False):
+            logger.info("Scheduler worker already active; skipping overlapping task work request")
+            return
+
+        try:
+            from openbad.autonomy.scheduler_worker import process_task_call
+
+            process_task_call(request if isinstance(request, dict) else None)
+        except Exception:
+            logger.exception("Task work worker failed")
+        finally:
+            self._scheduler_worker_lock.release()
+
+    def _on_research_work_request(self, _topic: str, payload: bytes) -> None:
+        try:
+            request = json.loads(payload.decode("utf-8")) if payload else {}
+        except Exception:
+            logger.exception("Invalid research work payload")
+            return
+
+        if not self._scheduler_worker_lock.acquire(blocking=False):
+            logger.info("Scheduler worker already active; skipping overlapping research work request")
+            return
+
+        try:
+            from openbad.autonomy.scheduler_worker import process_research_call
+
+            process_research_call(request if isinstance(request, dict) else None)
+        except Exception:
+            logger.exception("Research work worker failed")
+        finally:
+            self._scheduler_worker_lock.release()

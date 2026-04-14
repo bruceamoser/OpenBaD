@@ -17,8 +17,13 @@
     provider?: string;
     model?: string;
     system?: string;
+    session_id?: string;
+    session_type?: string;
+    type_label?: string;
+    label?: string;
     tokens: number;
     request_count: number;
+    session_count?: number;
     last_timestamp?: number;
   }
 
@@ -35,6 +40,9 @@
     system: string;
     request_id: string;
     session_id: string;
+    session_type?: string;
+    type_label?: string;
+    label?: string;
     tokens: number;
   }
 
@@ -47,6 +55,8 @@
     summary: UsageSummary;
     by_provider_model: UsageRow[];
     by_system: UsageRow[];
+    by_session_type: UsageRow[];
+    by_session: UsageRow[];
     daily_series: DailyPoint[];
     recent_events: RecentEvent[];
   }
@@ -184,6 +194,68 @@
   </div>
 
   <div class="usage-grid">
+    <Card label="By Session Type">
+      {#if usage.by_session_type.length === 0}
+        <p class="empty-copy">No session-type usage recorded yet.</p>
+      {:else}
+        <div class="system-list">
+          {#each usage.by_session_type as row}
+            <div class="system-row">
+              <div>
+                <div class="system-name">{row.label || row.type_label || row.session_type}</div>
+                <div class="system-meta">
+                  {formatNumber(row.request_count)} requests · {formatNumber(row.session_count || 0)} sessions · {formatTimestamp(row.last_timestamp)}
+                </div>
+              </div>
+              <div class="system-tokens">{formatNumber(row.tokens)} tokens</div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </Card>
+
+    <Card label="By Session">
+      {#if usage.by_session.length === 0}
+        <p class="empty-copy">No session usage recorded yet.</p>
+      {:else}
+        <div class="system-list">
+          {#each usage.by_session as row}
+            <div class="system-row">
+              <div>
+                <div class="system-name">{row.type_label || row.label || row.session_id}</div>
+                <div class="system-meta">
+                  {row.label || row.session_id} · {formatNumber(row.request_count)} requests · {formatTimestamp(row.last_timestamp)}
+                </div>
+              </div>
+              <div class="system-tokens">{formatNumber(row.tokens)} tokens</div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </Card>
+  </div>
+
+  <div class="usage-grid">
+    <Card label="Recent Activity">
+      {#if usage.recent_events.length === 0}
+        <p class="empty-copy">No recent events yet.</p>
+      {:else}
+        <div class="event-list">
+          {#each usage.recent_events as event}
+            <div class="event-row">
+              <div class="event-main">
+                <div class="event-title">{event.provider} / {event.model}</div>
+                <div class="event-meta">{event.system} · {event.type_label || event.label || event.session_id} · {formatTimestamp(event.timestamp)}</div>
+              </div>
+              <div class="event-tokens">{formatNumber(event.tokens)}</div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </Card>
+  </div>
+
+  <div class="usage-grid">
     <Card label="Daily Trend">
       {#if usage.daily_series.length === 0}
         <p class="empty-copy">No historical usage yet.</p>
@@ -202,24 +274,6 @@
                 ></div>
               </div>
               <div class="trend-value">{formatNumber(point.tokens)}</div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </Card>
-
-    <Card label="Recent Activity">
-      {#if usage.recent_events.length === 0}
-        <p class="empty-copy">No recent events yet.</p>
-      {:else}
-        <div class="event-list">
-          {#each usage.recent_events as event}
-            <div class="event-row">
-              <div class="event-main">
-                <div class="event-title">{event.provider} / {event.model}</div>
-                <div class="event-meta">{event.system} · {formatTimestamp(event.timestamp)}</div>
-              </div>
-              <div class="event-tokens">{formatNumber(event.tokens)}</div>
             </div>
           {/each}
         </div>
