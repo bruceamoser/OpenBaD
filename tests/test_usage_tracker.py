@@ -53,6 +53,8 @@ def test_usage_tracker_snapshot_groups_by_provider_model_and_system(tmp_path) ->
         assert snapshot["by_provider_model"][0]["tokens"] == 450
         assert snapshot["by_system"][0]["system"] == "chat"
         assert snapshot["by_system"][0]["tokens"] == 550
+        assert snapshot["by_session"][0]["session_id"] == "sess-1"
+        assert snapshot["by_session"][0]["tokens"] == 300
         assert snapshot["recent_events"][0]["request_id"] == "req-3"
     finally:
         tracker.close()
@@ -107,5 +109,25 @@ def test_usage_tracker_excludes_old_records_from_windows(tmp_path) -> None:
         assert snapshot["summary"]["total_used"] == 1_000
         assert snapshot["summary"]["daily_used"] == 100
         assert snapshot["summary"]["hourly_used"] == 100
+    finally:
+        tracker.close()
+
+
+def test_usage_tracker_counts_zero_token_records(tmp_path) -> None:
+    tracker = UsageTracker(db_path=tmp_path / "usage.db")
+    try:
+        tracker.record(
+            provider="custom",
+            model="health-check",
+            system="chat",
+            tokens=0,
+            request_id="health-1",
+            session_id="chat-main",
+        )
+
+        snapshot = tracker.snapshot()
+        assert snapshot["summary"]["total_used"] == 0
+        assert snapshot["summary"]["request_count"] == 1
+        assert snapshot["recent_events"][0]["request_id"] == "health-1"
     finally:
         tracker.close()

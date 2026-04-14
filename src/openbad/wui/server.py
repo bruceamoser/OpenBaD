@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -69,14 +70,110 @@ from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.sleep.schedule import SleepScheduleConfig
 from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.sensory.config import load_sensory_config
+from openbad.usage_recorder import UsageTrackingProviderAdapter
 from openbad.wui.bridge import MqttWebSocketBridge
 from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
-from openbad.wui.usage_tracker import UsageTracker
+from openbad.wui.usage_tracker import UsageTracker, resolve_usage_db_path
 
 # SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
 BUILD_DIR = Path(__file__).resolve().parent / "build"
 
 log = logging.getLogger(__name__)
+
+_UUID_SESSION_RE = re.compile(
+    r"^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _session_metadata(
+    session_id: str,
+    session_catalog: dict[str, dict[str, str]],
+) -> dict[str, str]:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        return {
+            "session_type": "unknown",
+            "type_label": "Unknown",
+            "label": "Unknown",
+        }
+
+    catalog_entry = session_catalog.get(normalized)
+    if catalog_entry is not None:
+        return {
+            "session_type": catalog_entry["key"],
+            "type_label": catalog_entry["label"],
+            "label": catalog_entry["label"],
+        }
+
+    lowered = normalized.lower()
+    inferred_type = "unknown"
+    inferred_label = "Unknown"
+    if "doctor" in lowered:
+        inferred_type = "doctor"
+        inferred_label = "Doctor"
+    elif "immune" in lowered:
+        inferred_type = "immune"
+        inferred_label = "Immune"
+    elif "sleep" in lowered:
+        inferred_type = "sleep"
+        inferred_label = "Sleep"
+    elif "reason" in lowered:
+        inferred_type = "reasoning"
+        inferred_label = "Reasoning"
+    elif "research" in lowered:
+        inferred_type = "research"
+        inferred_label = "Research"
+    elif "task" in lowered:
+        inferred_type = "tasks"
+        inferred_label = "Tasks"
+    elif "provider" in lowered:
+        inferred_type = "providers"
+        inferred_label = "Providers"
+    elif "reaction" in lowered or "reflex" in lowered:
+        inferred_type = "reaction"
+        inferred_label = "Reaction"
+    elif "chat" in lowered or _UUID_SESSION_RE.fullmatch(normalized):
+        inferred_type = "chat"
+        inferred_label = "Chat"
+
+    return {
+        "session_type": inferred_type,
+        "type_label": inferred_label,
+        "label": normalized,
+    }
+
+
+def _group_by_session_type(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        session_type = str(row.get("session_type", "unknown") or "unknown")
+        type_label = str(row.get("type_label", "Unknown") or "Unknown")
+        current = grouped.setdefault(
+            session_type,
+            {
+                "session_type": session_type,
+                "label": type_label,
+                "tokens": 0,
+                "request_count": 0,
+                "last_timestamp": 0.0,
+                "session_count": 0,
+            },
+        )
+        current["tokens"] = int(current["tokens"]) + int(row.get("tokens", 0) or 0)
+        current["request_count"] = int(current["request_count"]) + int(
+            row.get("request_count", 0) or 0
+        )
+        current["session_count"] = int(current["session_count"]) + 1
+        current["last_timestamp"] = max(
+            float(current["last_timestamp"]),
+            float(row.get("last_timestamp", 0.0) or 0.0),
+        )
+
+    return sorted(
+        grouped.values(),
+        key=lambda row: (-int(row["tokens"]), str(row["label"])),
+    )
 
 _HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
 _HEARTBEAT_CONFIG_DEFAULT = {"interval_seconds": 60}
@@ -190,31 +287,6 @@ _SUPPORTED_PROVIDER_TYPES: tuple[dict[str, object], ...] = (
 _SUPPORTED_PROVIDER_INDEX = {
     str(entry["provider_type"]): entry for entry in _SUPPORTED_PROVIDER_TYPES
 }
-
-
-def _resolve_usage_db_path() -> Path:
-    configured = os.environ.get("OPENBAD_USAGE_DB", "").strip()
-    if configured:
-        return Path(configured)
-
-    preferred_dir = Path("/var/lib/openbad/state")
-    try:
-        if preferred_dir.is_dir() and os.access(preferred_dir, os.W_OK):
-            return preferred_dir / "usage.db"
-    except PermissionError:
-        pass
-
-    preferred_parent = preferred_dir.parent
-    try:
-        if preferred_parent.is_dir() and os.access(preferred_parent, os.W_OK):
-            return preferred_dir / "usage.db"
-    except PermissionError:
-        pass
-
-    state_home = Path(
-        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
-    )
-    return state_home / "openbad" / "usage.db"
 
 
 def _candidate_cognitive_config_paths() -> list[Path]:
@@ -689,74 +761,83 @@ def _build_wizard_adapter(provider: ProviderConfig):
     timeout_s = max(1.0, provider.timeout_ms / 1000)
     verification_model = _provider_verification_model(provider.name)
     if provider.name == "github-copilot":
-        return GitHubCopilotProvider(
+        adapter = GitHubCopilotProvider(
             default_model=verification_model or "gpt-4o",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "anthropic":
-        return AnthropicProvider(
+        adapter = AnthropicProvider(
             base_url=provider.base_url or "https://api.anthropic.com",
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "ANTHROPIC_API_KEY",
             default_model=verification_model or "claude-sonnet-4-20250514",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "ollama":
-        return OllamaProvider(
+        adapter = OllamaProvider(
             base_url=provider.base_url or "http://localhost:11434",
             default_model=verification_model or "llama3.2",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "openai":
-        return openai_provider(
+        adapter = openai_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "OPENAI_API_KEY",
             default_model=verification_model or "gpt-4o-mini",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "openrouter":
-        return openrouter_provider(
+        adapter = openrouter_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "OPENROUTER_API_KEY",
             default_model=verification_model or "openai/gpt-4o-mini",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "groq":
-        return groq_provider(
+        adapter = groq_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "GROQ_API_KEY",
             default_model=verification_model or "llama-3.1-8b-instant",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "mistral":
-        return mistral_provider(
+        adapter = mistral_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "MISTRAL_API_KEY",
             default_model=verification_model or "mistral-small-latest",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
     if provider.name == "xai":
-        return xai_provider(
+        adapter = xai_provider(
             api_key=provider.api_key,
             api_key_env=provider.api_key_env or "XAI_API_KEY",
             default_model=verification_model or "grok-3-mini",
             timeout_s=timeout_s,
         )
+        return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
-    return custom_provider(
+    adapter = custom_provider(
         base_url=provider.base_url,
         api_key=provider.api_key,
         api_key_env=provider.api_key_env,
         default_model=verification_model,
         timeout_s=timeout_s,
     )
+    return UsageTrackingProviderAdapter(adapter, system="provider-verification")
 
 
 def _build_litellm_adapter(
@@ -797,6 +878,7 @@ def _build_litellm_adapter(
 def _build_chat_adapter(
     provider: ProviderConfig,
     model: str,
+    system_name: str = "chat",
 ) -> tuple[Any, str]:
     """Build the appropriate adapter for a chat provider.
 
@@ -807,13 +889,22 @@ def _build_chat_adapter(
     """
     if provider.name == "github-copilot":
         timeout_s = max(1.0, provider.timeout_ms / 1000)
-        adapter = GitHubCopilotProvider(
-            default_model=model,
-            timeout_s=timeout_s,
+        adapter = UsageTrackingProviderAdapter(
+            GitHubCopilotProvider(
+                default_model=model,
+                timeout_s=timeout_s,
+            ),
+            system=system_name,
         )
         return adapter, model
     litellm_model = litellm_model_name(provider.name, model)
-    return _build_litellm_adapter(provider, model), litellm_model
+    return (
+        UsageTrackingProviderAdapter(
+            _build_litellm_adapter(provider, model),
+            system=system_name,
+        ),
+        litellm_model,
+    )
 
 
 async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]:
@@ -1170,7 +1261,7 @@ def _resolve_chat_adapter(
             if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
                 if not assignment.model:
                     break
-                adapter, model = _build_chat_adapter(p, assignment.model)
+                adapter, model = _build_chat_adapter(p, assignment.model, system_name)
                 return adapter, model, p.name, False
 
     # Fallback: if chat assignment is stale or unverified, use first valid provider.
@@ -1191,7 +1282,7 @@ def _resolve_chat_adapter(
 
         if not fallback_model:
             continue
-        adapter, model = _build_chat_adapter(p, fallback_model)
+        adapter, model = _build_chat_adapter(p, fallback_model, system_name)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
             log.warning(
@@ -1385,10 +1476,37 @@ async def _get_usage(request: web.Request) -> web.Response:
     tracker = request.app.get("usage_tracker")
     if tracker is None:
         raise web.HTTPServiceUnavailable(text="UsageTracker not available")
+    snapshot = tracker.snapshot()
+    policy = load_session_policy(SESSION_POLICY_PATH)
+    session_catalog = {
+        str(item["session_id"]): {
+            "key": str(item["key"]),
+            "label": str(item["label"]),
+        }
+        for item in list_sessions(policy)
+    }
+    by_session = [
+        {
+            **row,
+            **_session_metadata(str(row.get("session_id", "")), session_catalog),
+        }
+        for row in snapshot.get("by_session", [])
+    ]
+    by_session_type = _group_by_session_type(by_session)
+    recent_events = [
+        {
+            **event,
+            **_session_metadata(str(event.get("session_id", "")), session_catalog),
+        }
+        for event in snapshot.get("recent_events", [])
+    ]
     return web.json_response(
         {
             "generated_at": datetime.now(UTC).isoformat(),
-            **tracker.snapshot(),
+            **snapshot,
+            "by_session_type": by_session_type,
+            "by_session": by_session,
+            "recent_events": recent_events,
         }
     )
 
@@ -2499,6 +2617,51 @@ async def _post_tasks(request: web.Request) -> web.Response:
         raise web.HTTPInternalServerError(text=str(exc)) from exc
 
 
+async def _patch_task(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
+
+        task_id = request.match_info["task_id"]
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        svc = TaskService(conn)
+        task = svc.update_task(
+            task_id,
+            title=None if payload.get("title") is None else str(payload.get("title")).strip(),
+            description=None if payload.get("description") is None else str(payload.get("description")),
+            owner=None if payload.get("owner") is None else str(payload.get("owner")).strip(),
+        )
+        return web.json_response(task.to_dict())
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
+async def _post_task_complete(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
+
+        task_id = request.match_info["task_id"]
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        svc = TaskService(conn)
+        task = svc.complete_task(task_id)
+        return web.json_response(task.to_dict())
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Research
 # ---------------------------------------------------------------------------
@@ -2585,6 +2748,67 @@ async def _post_research(request: web.Request) -> web.Response:
         )
     except web.HTTPException:
         raise
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
+async def _patch_research(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.research_queue import (  # noqa: PLC0415
+            ResearchQueue,
+            initialize_research_db,
+        )
+
+        research_id = request.match_info["research_id"]
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+        priority_raw = payload.get("priority")
+        try:
+            priority = None if priority_raw is None else int(priority_raw)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="priority must be an integer") from exc
+
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        initialize_research_db(conn)
+        queue = ResearchQueue(conn)
+        node = queue.update(
+            research_id,
+            title=None if payload.get("title") is None else str(payload.get("title")).strip(),
+            description=None if payload.get("description") is None else str(payload.get("description")),
+            priority=priority,
+            source_task_id=None
+            if payload.get("source_task_id") is None
+            else (str(payload.get("source_task_id")).strip() or None),
+        )
+        return web.json_response(node.to_dict())
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
+async def _post_research_complete(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.research_queue import (  # noqa: PLC0415
+            ResearchQueue,
+            initialize_research_db,
+        )
+
+        research_id = request.match_info["research_id"]
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        initialize_research_db(conn)
+        queue = ResearchQueue(conn)
+        node = queue.complete(research_id)
+        return web.json_response(node.to_dict())
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise web.HTTPInternalServerError(text=str(exc)) from exc
 
@@ -2743,30 +2967,50 @@ _CAPABILITIES_CATALOG = [
         "gates": ["read-only endpoint", "sensitive to real-time state drift"],
     },
     {
+        "id": "doctor_orchestration",
+        "label": "Doctor Orchestration",
+        "icon": "🩺",
+        "level": 1,
+        "module": "openbad.toolbelt.doctor_tool",
+        "description": "Request a doctor visit over MQTT so the daemon-side doctor loop investigates endocrine state and remediation actions.",
+        "tools": [
+            {"name": "call_doctor", "signature": "call_doctor(reason: str, source: str = 'session', context: dict | None = None) -> dict", "description": "Publish a doctor-call event to the nervous system bus with optional structured context."},
+        ],
+        "gates": ["queues a request instead of running doctor inline", "doctor execution still obeys immune session policy"],
+    },
+    {
         "id": "diagnostics_tasks",
-        "label": "Task Diagnostics",
+        "label": "Task Management",
         "icon": "📋",
         "level": 1,
         "module": "openbad.toolbelt.tasks_diagnostics_tool",
-        "description": "Inspect current task records and create new tasks to drive execution.",
+        "description": "Inspect, create, update, and complete task records from the embedded toolbelt.",
         "tools": [
             {"name": "get_tasks", "signature": "get_tasks() -> list[dict]", "description": "Return task list from /api/tasks for triage context."},
             {"name": "create_task", "signature": "create_task(title: str, description: str = '', owner: str = 'user') -> dict", "description": "Create a task via /api/tasks and return the created task record."},
+            {"name": "update_task", "signature": "update_task(task_id: str, title: str | None = None, description: str | None = None, owner: str | None = None) -> dict", "description": "Update mutable task metadata via /api/tasks/{task_id}."},
+            {"name": "complete_task", "signature": "complete_task(task_id: str) -> dict", "description": "Mark a task complete via /api/tasks/{task_id}/complete."},
+            {"name": "work_on_next_task", "signature": "work_on_next_task(source: str = 'session', reason: str = 'next task requested') -> dict", "description": "Publish an event requesting work on the next eligible task."},
+            {"name": "work_on_task", "signature": "work_on_task(task_id: str, source: str = 'session', reason: str = 'specific task requested') -> dict", "description": "Publish an event requesting work on a specific task."},
         ],
-        "gates": ["create operations are non-destructive", "task payloads may include operational context"],
+        "gates": ["metadata edits are limited to mutable task fields", "task payloads may include operational context"],
     },
     {
         "id": "diagnostics_research",
-        "label": "Research Diagnostics",
+        "label": "Research Management",
         "icon": "🔬",
         "level": 1,
         "module": "openbad.toolbelt.research_diagnostics_tool",
-        "description": "Inspect pending research nodes and create new research projects for follow-up.",
+        "description": "Inspect, create, update, and complete research nodes from the embedded toolbelt.",
         "tools": [
             {"name": "get_research_nodes", "signature": "get_research_nodes() -> list[dict]", "description": "Return pending research nodes from /api/research."},
             {"name": "create_research_node", "signature": "create_research_node(title: str, description: str = '', priority: int = 0, source_task_id: str | None = None) -> dict", "description": "Create a research node via /api/research and return the created node."},
+            {"name": "update_research_node", "signature": "update_research_node(node_id: str, title: str | None = None, description: str | None = None, priority: int | None = None, source_task_id: str | None = None) -> dict", "description": "Update a pending research node via /api/research/{node_id}."},
+            {"name": "complete_research_node", "signature": "complete_research_node(node_id: str) -> dict", "description": "Mark a research node complete via /api/research/{node_id}/complete."},
+            {"name": "work_on_next_research", "signature": "work_on_next_research(source: str = 'session', reason: str = 'next research requested') -> dict", "description": "Publish an event requesting work on the next eligible research item."},
+            {"name": "work_on_research", "signature": "work_on_research(node_id: str, source: str = 'session', reason: str = 'specific research requested') -> dict", "description": "Publish an event requesting work on a specific research item."},
         ],
-        "gates": ["create operations are non-destructive", "queue-only (pending nodes)"],
+        "gates": ["updates apply only to pending nodes", "completion removes the node from the pending queue"],
     },
     {
         "id": "mcp_browser",
@@ -2817,7 +3061,7 @@ def create_app(
     app["registry"] = _build_runtime_tool_registry()
     app["copilot_device_flows"] = {}
     app["sleep_runtime"] = {"last_summary": None}
-    app["usage_tracker"] = UsageTracker(db_path=_resolve_usage_db_path())
+    app["usage_tracker"] = UsageTracker(db_path=resolve_usage_db_path())
 
     async def _cleanup_usage_tracker(app: web.Application) -> None:
         tracker = app.get("usage_tracker")
@@ -2894,8 +3138,12 @@ def create_app(
     app.router.add_post("/api/endocrine/toggle", _post_endocrine_toggle)
     app.router.add_get("/api/tasks", _get_tasks)
     app.router.add_post("/api/tasks", _post_tasks)
+    app.router.add_patch("/api/tasks/{task_id}", _patch_task)
+    app.router.add_post("/api/tasks/{task_id}/complete", _post_task_complete)
     app.router.add_get("/api/research", _get_research)
     app.router.add_post("/api/research", _post_research)
+    app.router.add_patch("/api/research/{research_id}", _patch_research)
+    app.router.add_post("/api/research/{research_id}/complete", _post_research_complete)
     app.router.add_get("/api/research/completed", _get_research_completed)
     app.router.add_get("/api/mqtt/log", _get_mqtt_log)
     app.router.add_get("/api/events", _get_system_events)

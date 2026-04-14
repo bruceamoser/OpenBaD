@@ -165,6 +165,34 @@ async def test_cancel_task(client: TestClient, store: TaskStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_patch_task_updates_fields(client: TestClient, store: TaskStore) -> None:
+    task = TaskModel.new("Original", description="before")
+    store.create_task(task)
+
+    resp = await client.patch(
+        f"/api/tasks/{task.task_id}",
+        json={"title": "Updated", "description": "after", "owner": "agent"},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["title"] == "Updated"
+    assert data["description"] == "after"
+    assert data["owner"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_complete_task(client: TestClient, store: TaskStore) -> None:
+    task = TaskModel.new("Running task")
+    store.create_task(task)
+    store.update_task_status(task.task_id, TaskStatus.RUNNING)
+
+    resp = await client.post(f"/api/tasks/{task.task_id}/complete")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_pause_nonexistent_returns_404(client: TestClient) -> None:
     resp = await client.post("/api/tasks/ghost/pause")
     assert resp.status == 404

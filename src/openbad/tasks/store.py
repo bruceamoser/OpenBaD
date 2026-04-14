@@ -56,6 +56,39 @@ class TaskStore:
         )
         self._conn.commit()
 
+    def update_task_fields(
+        self,
+        task_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        owner: str | None = None,
+    ) -> None:
+        """Update mutable task metadata fields."""
+        updates: list[str] = []
+        values: list[object] = []
+
+        if title is not None:
+            updates.append("title = ?")
+            values.append(title)
+        if description is not None:
+            updates.append("description = ?")
+            values.append(description)
+        if owner is not None:
+            updates.append("owner = ?")
+            values.append(owner)
+        if not updates:
+            return
+
+        updates.append("updated_at = ?")
+        values.append(time.time())
+        values.append(task_id)
+        self._conn.execute(
+            f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ?",
+            values,
+        )
+        self._conn.commit()
+
     def list_tasks(
         self,
         *,

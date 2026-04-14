@@ -38,6 +38,7 @@ class HealthStatus:
     available: bool
     latency_ms: float = 0.0
     models_available: int = 0
+    tokens_used: int = 0
 
 
 @dataclass(frozen=True)

@@ -46,7 +46,7 @@ class TestLiteLLMModelName:
 
 class TestToolSchemas:
     def test_schema_count(self):
-        assert len(TOOL_SCHEMAS) == 16
+        assert len(TOOL_SCHEMAS) == 25
 
     def test_all_have_required_fields(self):
         for schema in TOOL_SCHEMAS:
@@ -66,9 +66,12 @@ class TestToolSchemas:
         expected = {
             "read_file", "write_file", "exec_command", "web_search",
             "web_fetch", "ask_user", "get_mqtt_records", "get_system_logs",
-            "read_events", "write_event", "get_endocrine_status",
-            "get_tasks", "create_task", "get_research_nodes",
-            "create_research_node", "mcp_bridge",
+            "read_events", "write_event", "get_endocrine_status", "call_doctor",
+            "get_tasks", "create_task", "update_task", "complete_task",
+            "work_on_next_task", "work_on_task",
+            "get_research_nodes", "create_research_node", "update_research_node",
+            "complete_research_node", "work_on_next_research", "work_on_research",
+            "mcp_bridge",
         }
         assert expected == names
 

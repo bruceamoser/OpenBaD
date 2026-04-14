@@ -205,7 +205,7 @@ class LiteLLMAdapter(ProviderAdapter):
             model = self._default_model
             common = self._common_kwargs()
             # Lightweight ping: 1 token completion
-            await litellm.acompletion(
+            response = await litellm.acompletion(
                 model=model,
                 messages=[{"role": "user", "content": "ping"}],
                 max_tokens=1,
@@ -213,10 +213,13 @@ class LiteLLMAdapter(ProviderAdapter):
                 **common,
             )
             latency_ms = (time.monotonic() - t0) * 1000
+            usage = getattr(response, "usage", None)
+            tokens = int(usage.total_tokens) if usage else 0
             return HealthStatus(
                 provider=self._provider_name,
                 available=True,
                 latency_ms=latency_ms,
+                tokens_used=tokens,
             )
         except Exception:
             log.debug("LiteLLM health check failed for %s", self._provider_name, exc_info=True)

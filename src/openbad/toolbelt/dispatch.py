@@ -143,6 +143,18 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         status = await asyncio.to_thread(adapter.get_endocrine_status)
         return json.dumps(status, indent=2, default=str)
 
+    if name == "call_doctor":
+        from openbad.toolbelt.doctor_tool import DoctorToolAdapter
+
+        adapter = DoctorToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.call_doctor,
+            args["reason"],
+            source=args.get("source", "session"),
+            context=args.get("context") if isinstance(args.get("context"), dict) else None,
+        )
+        return json.dumps(result, indent=2, default=str)
+
     if name == "get_tasks":
         from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
@@ -162,6 +174,49 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         )
         return json.dumps(result, indent=2, default=str)
 
+    if name == "update_task":
+        from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+
+        adapter = TasksDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.update_task,
+            args["task_id"],
+            title=args.get("title"),
+            description=args.get("description"),
+            owner=args.get("owner"),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "complete_task":
+        from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+
+        adapter = TasksDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(adapter.complete_task, args["task_id"])
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "work_on_next_task":
+        from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+
+        adapter = TasksDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.work_on_next_task,
+            source=args.get("source", "session"),
+            reason=args.get("reason", "next task requested"),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "work_on_task":
+        from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+
+        adapter = TasksDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.work_on_task,
+            args["task_id"],
+            source=args.get("source", "session"),
+            reason=args.get("reason", "specific task requested"),
+        )
+        return json.dumps(result, indent=2, default=str)
+
     if name == "get_research_nodes":
         from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
@@ -178,6 +233,50 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
             title=args["title"],
             description=args.get("description", ""),
             priority=args.get("priority", 0),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "update_research_node":
+        from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+
+        adapter = ResearchDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.update_research_node,
+            args["node_id"],
+            title=args.get("title"),
+            description=args.get("description"),
+            priority=args.get("priority"),
+            source_task_id=args.get("source_task_id"),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "complete_research_node":
+        from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+
+        adapter = ResearchDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(adapter.complete_research_node, args["node_id"])
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "work_on_next_research":
+        from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+
+        adapter = ResearchDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.work_on_next_research,
+            source=args.get("source", "session"),
+            reason=args.get("reason", "next research requested"),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "work_on_research":
+        from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+
+        adapter = ResearchDiagnosticsToolAdapter()
+        result = await asyncio.to_thread(
+            adapter.work_on_research,
+            args["node_id"],
+            source=args.get("source", "session"),
+            reason=args.get("reason", "specific research requested"),
         )
         return json.dumps(result, indent=2, default=str)
 

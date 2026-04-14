@@ -5,8 +5,10 @@ Registers the following routes on a supplied :class:`aiohttp.web.Application`:
 - ``GET  /api/tasks``                          — list tasks (optional ``?status=``)
 - ``POST /api/tasks``                          — create a new task
 - ``GET  /api/tasks/{task_id}``                — get task detail
+- ``PATCH /api/tasks/{task_id}``               — update task metadata
 - ``POST /api/tasks/{task_id}/pause``          — transition to BLOCKED
 - ``POST /api/tasks/{task_id}/resume``         — transition to RUNNING
+- ``POST /api/tasks/{task_id}/complete``       — transition to DONE
 - ``POST /api/tasks/{task_id}/cancel``         — transition to CANCELLED
 - ``GET  /api/tasks/{task_id}/events``         — list events, oldest-first
 
@@ -102,6 +104,28 @@ async def _pause_task(request: web.Request) -> web.Response:
     return web.json_response(_task_to_dict(task))
 
 
+async def _patch_task(request: web.Request) -> web.Response:
+    svc: TaskService = request.app[_APP_KEY]
+    task_id = request.match_info["task_id"]
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+
+    title = body.get("title")
+    description = body.get("description")
+    owner = body.get("owner")
+    try:
+        task = svc.update_task(
+            task_id,
+            title=None if title is None else str(title).strip(),
+            description=None if description is None else str(description),
+            owner=None if owner is None else str(owner).strip(),
+        )
+    except KeyError:
+        raise web.HTTPNotFound(text=f"task {task_id!r} not found") from None
+    return web.json_response(_task_to_dict(task))
+
+
 async def _resume_task(request: web.Request) -> web.Response:
     svc: TaskService = request.app[_APP_KEY]
     task_id = request.match_info["task_id"]
@@ -119,6 +143,18 @@ async def _cancel_task(request: web.Request) -> web.Response:
     task_id = request.match_info["task_id"]
     try:
         task = svc.transition_task(task_id, TaskStatus.CANCELLED)
+    except KeyError:
+        raise web.HTTPNotFound(text=f"task {task_id!r} not found") from None
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    return web.json_response(_task_to_dict(task))
+
+
+async def _complete_task(request: web.Request) -> web.Response:
+    svc: TaskService = request.app[_APP_KEY]
+    task_id = request.match_info["task_id"]
+    try:
+        task = svc.complete_task(task_id)
     except KeyError:
         raise web.HTTPNotFound(text=f"task {task_id!r} not found") from None
     except ValueError as exc:
@@ -154,7 +190,9 @@ def setup_task_routes(app: web.Application, conn: sqlite3.Connection) -> None:
     app.router.add_get("/api/tasks", _list_tasks)
     app.router.add_post("/api/tasks", _create_task)
     app.router.add_get("/api/tasks/{task_id}", _get_task)
+    app.router.add_patch("/api/tasks/{task_id}", _patch_task)
     app.router.add_post("/api/tasks/{task_id}/pause", _pause_task)
     app.router.add_post("/api/tasks/{task_id}/resume", _resume_task)
+    app.router.add_post("/api/tasks/{task_id}/complete", _complete_task)
     app.router.add_post("/api/tasks/{task_id}/cancel", _cancel_task)
     app.router.add_get("/api/tasks/{task_id}/events", _list_task_events)

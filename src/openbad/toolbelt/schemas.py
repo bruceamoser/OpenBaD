@@ -200,6 +200,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         {},
     ),
     _tool(
+        "call_doctor",
+        "Request a doctor visit over the embedded MQTT bus with a reason and optional context.",
+        {
+            "reason": {
+                "type": "string",
+                "description": "Why the doctor should be called.",
+            },
+            "source": {
+                "type": "string",
+                "description": "Requester identity, such as session or subsystem name.",
+            },
+            "context": {
+                "type": "object",
+                "description": "Optional structured context payload for the doctor.",
+            },
+        },
+        ["reason"],
+    ),
+    _tool(
         "get_tasks",
         "Retrieve the current task list from the task manager.",
         {},
@@ -224,6 +243,73 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         ["title"],
     ),
     _tool(
+        "update_task",
+        "Update mutable fields on an existing task.",
+        {
+            "task_id": {
+                "type": "string",
+                "description": "The task ID to update.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Optional updated title.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional updated description.",
+            },
+            "owner": {
+                "type": "string",
+                "description": "Optional updated owner.",
+            },
+        },
+        ["task_id"],
+    ),
+    _tool(
+        "complete_task",
+        "Mark an existing task complete.",
+        {
+            "task_id": {
+                "type": "string",
+                "description": "The task ID to complete.",
+            },
+        },
+        ["task_id"],
+    ),
+    _tool(
+        "work_on_next_task",
+        "Queue an event requesting work on the next eligible task.",
+        {
+            "source": {
+                "type": "string",
+                "description": "Requester identity, such as session or subsystem name.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why the next task should be processed now.",
+            },
+        },
+    ),
+    _tool(
+        "work_on_task",
+        "Queue an event requesting work on a specific task by ID.",
+        {
+            "task_id": {
+                "type": "string",
+                "description": "The task ID to work on.",
+            },
+            "source": {
+                "type": "string",
+                "description": "Requester identity, such as session or subsystem name.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why this specific task should be processed now.",
+            },
+        },
+        ["task_id"],
+    ),
+    _tool(
         "get_research_nodes",
         "List current research queue nodes.",
         {},
@@ -246,6 +332,77 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         ["title"],
+    ),
+    _tool(
+        "update_research_node",
+        "Update a pending research node.",
+        {
+            "node_id": {
+                "type": "string",
+                "description": "The research node ID to update.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Optional updated title.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional updated description.",
+            },
+            "priority": {
+                "type": "integer",
+                "description": "Optional updated priority.",
+            },
+            "source_task_id": {
+                "type": "string",
+                "description": "Optional related task ID.",
+            },
+        },
+        ["node_id"],
+    ),
+    _tool(
+        "complete_research_node",
+        "Mark a research node complete.",
+        {
+            "node_id": {
+                "type": "string",
+                "description": "The research node ID to complete.",
+            },
+        },
+        ["node_id"],
+    ),
+    _tool(
+        "work_on_next_research",
+        "Queue an event requesting work on the next eligible research item.",
+        {
+            "source": {
+                "type": "string",
+                "description": "Requester identity, such as session or subsystem name.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why the next research item should be processed now.",
+            },
+        },
+    ),
+    _tool(
+        "work_on_research",
+        "Queue an event requesting work on a specific research item by ID.",
+        {
+            "node_id": {
+                "type": "string",
+                "description": "The research node ID to work on.",
+            },
+            "source": {
+                "type": "string",
+                "description": "Requester identity, such as session or subsystem name.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why this specific research item should be processed now.",
+            },
+        },
+        ["node_id"],
     ),
     _tool(
         "mcp_bridge",

@@ -10,6 +10,7 @@ from openbad.cognitive.event_loop import CognitiveEventLoop
 from openbad.cognitive.model_router import ModelRouter, Priority
 from openbad.cognitive.providers.registry import ProviderRegistry
 from openbad.cognitive.reasoning.base import ReasoningStrategy
+from openbad.usage_recorder import UsageRecorder
 
 log = logging.getLogger(__name__)
 
@@ -34,12 +35,14 @@ class CognitiveOrchestrator:
         self._router = router
         self._ctx = context_manager
         self._strategies = strategies or {}
+        self._usage_recorder = UsageRecorder()
         self._event_loop = CognitiveEventLoop(
             model_router=router,
             context_manager=context_manager,
             strategies=self._strategies,
             publish_fn=publish_fn,
             validate_fn=validate_fn,
+            usage_recorder=self._usage_recorder,
         )
 
     @property
@@ -54,4 +57,5 @@ class CognitiveOrchestrator:
     async def stop(self) -> None:
         """Stop the cognitive module."""
         await self._event_loop.stop()
+        self._usage_recorder.close()
         log.info("CognitiveOrchestrator stopped")

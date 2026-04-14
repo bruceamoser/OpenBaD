@@ -6,6 +6,7 @@ aggregated by provider, model, and cognitive system over time.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -39,6 +40,31 @@ _CREATE_USAGE_INDEXES = (
 class UsageLimits:
     daily_ceiling: int
     hourly_ceiling: int
+
+
+def resolve_usage_db_path() -> Path:
+    configured = os.environ.get("OPENBAD_USAGE_DB", "").strip()
+    if configured:
+        return Path(configured)
+
+    preferred_dir = Path("/var/lib/openbad/state")
+    try:
+        if preferred_dir.is_dir() and os.access(preferred_dir, os.W_OK):
+            return preferred_dir / "usage.db"
+    except PermissionError:
+        pass
+
+    preferred_parent = preferred_dir.parent
+    try:
+        if preferred_parent.is_dir() and os.access(preferred_parent, os.W_OK):
+            return preferred_dir / "usage.db"
+    except PermissionError:
+        pass
+
+    state_home = Path(
+        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    )
+    return state_home / "openbad" / "usage.db"
 
 
 class UsageTracker:
@@ -83,7 +109,7 @@ class UsageTracker:
         session_id: str = "",
         timestamp: float | None = None,
     ) -> None:
-        if tokens <= 0:
+        if tokens < 0:
             return
         self._conn.execute(
             """
@@ -155,6 +181,7 @@ class UsageTracker:
             },
             "by_provider_model": self._group_by_provider_model(),
             "by_system": self._group_by_system(),
+            "by_session": self._group_by_session(),
             "daily_series": self._daily_series(),
             "recent_events": self._recent_events(),
         }
@@ -193,6 +220,26 @@ class UsageTracker:
         return [
             {
                 "system": row["system"],
+                "tokens": int(row["tokens"]),
+                "request_count": int(row["request_count"]),
+                "last_timestamp": float(row["last_timestamp"] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def _group_by_session(self) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            """
+            SELECT session_id, SUM(tokens) AS tokens, COUNT(*) AS request_count,
+                   MAX(timestamp) AS last_timestamp
+            FROM usage_events
+            GROUP BY session_id
+            ORDER BY tokens DESC, session_id ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "session_id": row["session_id"],
                 "tokens": int(row["tokens"]),
                 "request_count": int(row["request_count"]),
                 "last_timestamp": float(row["last_timestamp"] or 0.0),

@@ -142,6 +142,7 @@ TASK_FAILED = "agent/task/{task_id}/failed"
 TASK_CONTEXT_REQUIRED = "agent/tasks/context_required"
 TASK_ISOLATED = "agent/tasks/isolated"
 TASK_EVENTS = "agent/tasks/events"
+TASK_WORK_REQUEST = "agent/tasks/work"
 
 # Wildcard: all task events
 TASK_ALL = "agent/task/#"
@@ -154,6 +155,7 @@ RESEARCH_STARTED = "agent/research/{research_id}/started"
 RESEARCH_COMPLETED = "agent/research/{research_id}/completed"
 RESEARCH_FINDING = "agent/research/{research_id}/finding"
 RESEARCH_DEEP_DIVE = "agent/research/deep_dive"
+RESEARCH_WORK_REQUEST = "agent/research/work"
 
 # Wildcard: all research events
 RESEARCH_ALL = "agent/research/#"
@@ -176,6 +178,11 @@ SCHEDULER_MAINTENANCE = "agent/scheduler/maintenance"
 
 # Wildcard: all scheduler events
 SCHEDULER_ALL = "agent/scheduler/+"
+
+# ---------------------------------------------------------------------------
+# Doctor orchestration
+# ---------------------------------------------------------------------------
+DOCTOR_CALL = "agent/doctor/call"
 
 # ---------------------------------------------------------------------------
 # Agent chat / user escalation (Phase 10)
@@ -229,10 +236,13 @@ STATIC_TOPICS: tuple[str, ...] = (
     SENSORY_ATTENTION_TRIGGER,
     # Phase 9
     RESEARCH_QUEUED,
+    TASK_WORK_REQUEST,
+    RESEARCH_WORK_REQUEST,
     SCHEDULER_TICK,
     SCHEDULER_WINDOW_START,
     SCHEDULER_WINDOW_END,
     SCHEDULER_DISPATCH,
+    DOCTOR_CALL,
     # Phase 10
     AGENT_CHAT_RESPONSE,
     AGENT_CHAT_INBOUND,

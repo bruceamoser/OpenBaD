@@ -3,7 +3,10 @@
 Registers the following routes on a supplied :class:`aiohttp.web.Application`:
 
 - ``GET /api/research``                        — list pending research nodes
+- ``POST /api/research``                       — create a research node
 - ``GET /api/research/{research_id}``          — get research node by id
+- ``PATCH /api/research/{research_id}``        — update a pending research node
+- ``POST /api/research/{research_id}/complete``— mark a research node complete
 - ``GET /api/capabilities``                    — list registered capabilities
 - ``GET /api/mcp/audit``                       — recent MCP audit records
 - ``GET /api/scheduler/state``                 — scheduler config / quiet-hour status
@@ -45,6 +48,67 @@ async def _get_research(request: web.Request) -> web.Response:
     node = queue.get(research_id)
     if node is None:
         raise web.HTTPNotFound(text=f"research node {research_id!r} not found")
+    return web.json_response(node.to_dict())
+
+
+async def _create_research(request: web.Request) -> web.Response:
+    queue: ResearchQueue = request.app[_KEY_RESEARCH]
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise web.HTTPBadRequest(text="title is required")
+    try:
+        priority = int(body.get("priority", 0))
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="priority must be an integer") from exc
+    node = queue.enqueue(
+        title,
+        description=str(body.get("description", "")),
+        priority=priority,
+        source_task_id=(str(body.get("source_task_id")).strip() or None)
+        if body.get("source_task_id") is not None
+        else None,
+    )
+    return web.json_response(node.to_dict(), status=201)
+
+
+async def _patch_research(request: web.Request) -> web.Response:
+    queue: ResearchQueue = request.app[_KEY_RESEARCH]
+    research_id = request.match_info["research_id"]
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    priority_raw = body.get("priority")
+    try:
+        priority = None if priority_raw is None else int(priority_raw)
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="priority must be an integer") from exc
+    try:
+        node = queue.update(
+            research_id,
+            title=None if body.get("title") is None else str(body.get("title")).strip(),
+            description=None if body.get("description") is None else str(body.get("description")),
+            priority=priority,
+            source_task_id=None
+            if body.get("source_task_id") is None
+            else (str(body.get("source_task_id")).strip() or None),
+        )
+    except KeyError:
+        raise web.HTTPNotFound(text=f"research node {research_id!r} not found") from None
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    return web.json_response(node.to_dict())
+
+
+async def _complete_research(request: web.Request) -> web.Response:
+    queue: ResearchQueue = request.app[_KEY_RESEARCH]
+    research_id = request.match_info["research_id"]
+    try:
+        node = queue.complete(research_id)
+    except KeyError:
+        raise web.HTTPNotFound(text=f"research node {research_id!r} not found") from None
     return web.json_response(node.to_dict())
 
 
@@ -130,7 +194,10 @@ def setup_research_routes(
     app[_KEY_SCHEDULER] = scheduler_config or SchedulerConfig()
 
     app.router.add_get("/api/research", _list_research)
+    app.router.add_post("/api/research", _create_research)
     app.router.add_get("/api/research/{research_id}", _get_research)
+    app.router.add_patch("/api/research/{research_id}", _patch_research)
+    app.router.add_post("/api/research/{research_id}/complete", _complete_research)
     app.router.add_get("/api/capabilities", _list_capabilities)
     app.router.add_get("/api/mcp/audit", _list_audit)
     app.router.add_get("/api/scheduler/state", _get_scheduler_state)

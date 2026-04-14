@@ -13,6 +13,7 @@ from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.context_manager import ContextWindowManager
 from openbad.cognitive.model_router import ModelRouter, Priority
 from openbad.cognitive.reasoning.base import ReasoningStrategy
+from openbad.usage_recorder import UsageRecorder
 
 if TYPE_CHECKING:
     from openbad.memory.semantic import SemanticMemory
@@ -92,6 +93,7 @@ class CognitiveEventLoop:
         validate_fn: Any = None,
         semantic_memory: SemanticMemory | None = None,
         memory_top_k: int = 3,
+        usage_recorder: UsageRecorder | None = None,
     ) -> None:
         self._router = model_router
         self._ctx = context_manager
@@ -100,6 +102,7 @@ class CognitiveEventLoop:
         self._validate = validate_fn
         self._semantic_memory = semantic_memory
         self._memory_top_k = memory_top_k
+        self._usage_recorder = usage_recorder
         self._running = False
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -213,6 +216,8 @@ class CognitiveEventLoop:
             )
             answer = result.final_answer
             tokens = result.total_tokens
+            provider = str(result.metadata.get("provider") or decision.provider)
+            response_model_id = str(result.metadata.get("model_id") or model_id)
             strategy_name = type(strategy).__name__
         else:
             # Direct single-pass call
@@ -221,19 +226,29 @@ class CognitiveEventLoop:
             )
             answer = completion.content
             tokens = completion.tokens_used
+            provider = completion.provider or decision.provider
+            response_model_id = completion.model_id or model_id
             strategy_name = "direct"
 
         latency = (time.monotonic() - t0) * 1000
 
         # 4. Track usage
-        self._ctx.track_usage(decision.provider, tokens, request.request_id)
-        self._router.record_latency(decision.provider, latency)
+        self._ctx.track_usage(provider, tokens, request.request_id)
+        if self._usage_recorder is not None:
+            self._usage_recorder.record_completion(
+                provider=provider,
+                model=response_model_id,
+                system=request.system,
+                tokens=tokens,
+                request_id=request.request_id,
+            )
+        self._router.record_latency(provider, latency)
 
         return CognitiveResponse(
             request_id=request.request_id,
             answer=answer,
-            provider=decision.provider,
-            model_id=model_id,
+            provider=provider,
+            model_id=response_model_id,
             tokens_used=tokens,
             latency_ms=latency,
             strategy=strategy_name,
