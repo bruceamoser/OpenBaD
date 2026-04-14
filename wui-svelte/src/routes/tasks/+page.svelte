@@ -17,7 +17,15 @@
     updated_at: string;
   }
 
+  interface SessionMessage {
+    role: string;
+    content: string;
+    timestamp: string;
+  }
+
   let tasks: Task[] = $state([]);
+  let completedTasks: Task[] = $state([]);
+  let sessionMessages: SessionMessage[] = $state([]);
   let showHeartbeatTasks = $state(false);
   let createTitle = $state('');
   let createDescription = $state('');
@@ -28,10 +36,24 @@
   let loading = $state(true);
   let expandedId = $state<string | null>(null);
 
+  const TERMINAL_STATUSES = new Set(['done', 'failed', 'cancelled']);
+
+  let activeTasks = $derived(tasks.filter((task) => !TERMINAL_STATUSES.has(task.status.toLowerCase())));
+
   let visibleTasks = $derived(
     showHeartbeatTasks
-      ? tasks
-      : tasks.filter((task) => {
+      ? activeTasks
+      : activeTasks.filter((task) => {
+          const title = (task.title ?? '').toLowerCase();
+          const owner = (task.owner ?? '').toLowerCase();
+          return !(title.includes('heartbeat') || owner === 'heartbeat-timer');
+        })
+  );
+
+  let visibleCompletedTasks = $derived(
+    showHeartbeatTasks
+      ? completedTasks
+      : completedTasks.filter((task) => {
           const title = (task.title ?? '').toLowerCase();
           const owner = (task.owner ?? '').toLowerCase();
           return !(title.includes('heartbeat') || owner === 'heartbeat-timer');
@@ -58,10 +80,19 @@
   }
 
   async function load(): Promise<void> {
+    loading = true;
+    error = '';
     try {
-      const res = await apiGet<{ tasks: Task[]; error?: string }>('/api/tasks');
-      tasks = res.tasks ?? [];
-      if (res.error) error = res.error;
+      const [activeRes, completedRes, sessionRes] = await Promise.all([
+        apiGet<{ tasks: Task[]; error?: string }>('/api/tasks'),
+        apiGet<{ tasks: Task[]; error?: string }>('/api/tasks/completed?limit=20'),
+        apiGet<{ session_id: string; messages: SessionMessage[] }>('/api/chat/history?session_id=tasks-autonomy&limit=50'),
+      ]);
+      tasks = activeRes.tasks ?? [];
+      completedTasks = completedRes.tasks ?? [];
+      sessionMessages = sessionRes.messages ?? [];
+      if (activeRes.error) error = activeRes.error;
+      else if (completedRes.error) error = completedRes.error;
     } catch (e) {
       error = String(e);
     } finally {
@@ -110,7 +141,7 @@
 </div>
 
 <div class="toolbar">
-  <span class="count">{visibleTasks.length} task{visibleTasks.length !== 1 ? 's' : ''}</span>
+  <span class="count">{visibleTasks.length} active task{visibleTasks.length !== 1 ? 's' : ''}</span>
   <label class="heartbeat-toggle">
     <input type="checkbox" bind:checked={showHeartbeatTasks} />
     Show heartbeat tasks
@@ -141,13 +172,13 @@
   </div>
 </Card>
 
-<Card label="Task Queue">
+<Card label="Active Tasks">
   {#if loading}
     <p class="muted">Loading…</p>
   {:else if error}
     <p class="error-msg">Error: {error}</p>
   {:else if visibleTasks.length === 0}
-    <p class="empty">No tasks recorded yet.</p>
+    <p class="empty">No active tasks recorded.</p>
   {:else}
     <div class="task-list">
       {#each visibleTasks as t}
@@ -170,6 +201,56 @@
             <div class="detail-row"><strong>Updated:</strong> {fmtTime(t.updated_at)}</div>
           </div>
         {/if}
+      {/each}
+    </div>
+  {/if}
+</Card>
+
+<Card label="Completed Tasks ({visibleCompletedTasks.length})">
+  {#if loading}
+    <p class="muted">Loading…</p>
+  {:else if visibleCompletedTasks.length === 0}
+    <p class="empty">No completed tasks yet.</p>
+  {:else}
+    <div class="task-list">
+      {#each visibleCompletedTasks as t}
+        <div class="task-row completed-row" onclick={() => expandedId = expandedId === t.task_id ? null : t.task_id}
+             role="button" tabindex="0"
+             onkeydown={(e) => e.key === 'Enter' && (expandedId = expandedId === t.task_id ? null : t.task_id)}>
+          <span class="status-dot" style="color:{statusColor(t.status)}">●</span>
+          <div class="task-meta">
+            <span class="task-title">{t.title}</span>
+            <span class="task-sub">{t.status} · updated {fmtTime(t.updated_at)}</span>
+          </div>
+          <span class="expand-icon">{expandedId === t.task_id ? '▲' : '▼'}</span>
+        </div>
+        {#if expandedId === t.task_id}
+          <div class="task-detail">
+            {#if t.description}<p>{t.description}</p>{/if}
+            <div class="detail-row"><strong>ID:</strong> <code>{t.task_id}</code></div>
+            <div class="detail-row"><strong>Status:</strong> {t.status}</div>
+            <div class="detail-row"><strong>Created:</strong> {fmtTime(t.created_at)}</div>
+            <div class="detail-row"><strong>Updated:</strong> {fmtTime(t.updated_at)}</div>
+          </div>
+        {/if}
+      {/each}
+    </div>
+  {/if}
+</Card>
+
+<Card label="Task Session Log ({sessionMessages.length})">
+  {#if sessionMessages.length === 0}
+    <p class="empty">No task session messages yet.</p>
+  {:else}
+    <div class="session-log">
+      {#each sessionMessages as msg}
+        <div class="session-msg">
+          <div class="msg-header">
+            <span class="msg-role">{msg.role}</span>
+            <span class="msg-time">{fmtTime(msg.timestamp)}</span>
+          </div>
+          <div class="msg-content">{msg.content}</div>
+        </div>
       {/each}
     </div>
   {/if}
@@ -234,6 +315,7 @@
     cursor: pointer; font-size: 0.85rem;
   }
   .task-row:hover { background: var(--bg-surface2); }
+  .completed-row { opacity: 0.92; }
   .status-dot { font-size: 0.7rem; }
   .task-meta { flex: 1; display: flex; flex-direction: column; gap: 0.1rem; overflow: hidden; }
   .task-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -251,6 +333,27 @@
   .ts { color: var(--text-dim); font-variant-numeric: tabular-nums; min-width: 7ch; }
   .topic-badge { color: var(--blue); font-weight: 600; }
   .event-payload { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-log {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .session-msg {
+    padding: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+  }
+  .msg-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.35rem;
+    font-size: 0.78rem;
+  }
+  .msg-role { font-weight: 600; text-transform: capitalize; color: var(--teal); }
+  .msg-time { color: var(--text-dim); }
+  .msg-content { white-space: pre-wrap; line-height: 1.45; }
 
   @media (max-width: 900px) {
     .toolbar { flex-wrap: wrap; }

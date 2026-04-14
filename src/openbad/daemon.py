@@ -228,6 +228,7 @@ class Daemon:
         if (
             not tick.get("eligible_task_id")
             and not tick.get("eligible_research_id")
+            and (tick.get("queued_task_id") or tick.get("queued_research_id"))
         ):
             return
         if not self._scheduler_worker_lock.acquire(blocking=False):

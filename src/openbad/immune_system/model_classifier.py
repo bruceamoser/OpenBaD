@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 
 import aiohttp
 
+from openbad.autonomy.session_policy import load_session_policy, session_id_for
+from openbad.autonomy.tool_agent import build_tooling_system_prompt, run_tool_agent
 from openbad.usage_recorder import UsageRecorder
+from openbad.wui.chat_pipeline import append_assistant_message, append_session_message
+from openbad.wui.server import _read_providers_config, _resolve_chat_adapter
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -125,7 +132,10 @@ class ModelClassifier:
 
         elapsed_ms = (time.monotonic() - t0) * 1000
 
-        return self._parse_response(raw, elapsed_ms)
+        result = self._parse_response(raw, elapsed_ms)
+        if result.threat_type != "safe":
+            await self._run_session_analysis(text, result, context=context)
+        return result
 
     # ------------------------------------------------------------------
     # Internals
@@ -183,6 +193,74 @@ class ModelClassifier:
             threat_type=threat_type,
             explanation=explanation,
         )
+
+    async def _run_session_analysis(
+        self,
+        text: str,
+        result: ClassificationResult,
+        *,
+        context: str | None,
+    ) -> None:
+        policy = load_session_policy()
+        session_id = session_id_for(policy, "immune")
+        user_prompt = (
+            "Immune event requires analysis.\n"
+            f"Message: {text}\n"
+            f"Context: {context or '(none)'}\n"
+            f"Classifier verdict: threat={result.is_threat}, type={result.threat_type},"
+            f" confidence={result.confidence:.2f}\n"
+            f"Explanation: {result.explanation}"
+        )
+        try:
+            append_session_message(session_id, "user", user_prompt)
+        except Exception:
+            log.exception("Failed to post immune analysis prompt to session")
+
+        try:
+            _cfg_path, cfg = _read_providers_config()
+            adapter, model, provider_name, _is_fallback = _resolve_chat_adapter(cfg, "immune")
+            if adapter is None or model is None:
+                append_assistant_message(
+                    session_id,
+                    "Immune follow-up analysis could not run because no provider/model was available.",
+                    extra_metadata={"system": "immune"},
+                )
+                return
+
+            analysis = await run_tool_agent(
+                adapter,
+                model,
+                provider_name=provider_name,
+                system_prompt=build_tooling_system_prompt(
+                    "You are the OpenBaD immune analyst. Use available tools to inspect evidence,"
+                    " logs, tasks, research, and endocrine state when that improves confidence."
+                    " If the incident warrants remediation or deeper investigation, create"
+                    " follow-up task or research entries directly via tools. Return a concise"
+                    " operational summary of the verdict, evidence consulted, and any follow-up"
+                    " work you created."
+                ),
+                user_prompt=user_prompt,
+                request_id=f"immune-{int(time.time() * 1000)}",
+            )
+            if self._usage_recorder is not None:
+                self._usage_recorder.record_completion(
+                    provider=analysis.provider or provider_name or "unknown",
+                    model=analysis.model or model,
+                    system="immune",
+                    tokens=analysis.tokens_used,
+                )
+            append_assistant_message(
+                session_id,
+                analysis.content,
+                extra_metadata={
+                    "provider": analysis.provider or provider_name,
+                    "model": analysis.model or model,
+                    "tools_used": list(analysis.tools_used),
+                    "system": "immune",
+                },
+            )
+        except Exception:
+            log.exception("Immune session analysis failed")
 
     @property
     def model(self) -> str:

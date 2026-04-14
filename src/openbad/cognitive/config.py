@@ -19,6 +19,7 @@ class CognitiveSystem(StrEnum):
     DOCTOR = "doctor"
     RESEARCH = "research"
     TASKS = "tasks"
+    IMMUNE = "immune"
 
 
 @dataclass(frozen=True)

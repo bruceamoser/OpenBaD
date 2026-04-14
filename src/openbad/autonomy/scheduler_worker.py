@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 from openbad.autonomy.endocrine_runtime import EndocrineRuntime, load_endocrine_config
 from openbad.autonomy.session_policy import (
@@ -12,8 +16,13 @@ from openbad.autonomy.session_policy import (
     session_allows,
     session_id_for,
 )
+from openbad.autonomy.tool_agent import build_tooling_system_prompt, run_tool_agent
 from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
+from openbad.state.event_log import recent_events
 from openbad.tasks.models import TaskKind, TaskModel, TaskPriority, TaskStatus
+from openbad.tasks.reward_endocrine import RewardEndocrineBridge, initialize_reward_db
+from openbad.tasks.reward_evaluator import RewardEvaluator
+from openbad.tasks.reward_models import RewardTrace, TraceOutcome
 from openbad.tasks.research_queue import ResearchQueue, initialize_research_db
 from openbad.tasks.store import TaskStore
 from openbad.wui.chat_pipeline import append_assistant_message, append_session_message
@@ -21,6 +30,59 @@ from openbad.wui.server import _provider_is_valid, _read_providers_config, _reso
 from openbad.wui.usage_tracker import UsageTracker, resolve_usage_db_path
 
 log = logging.getLogger(__name__)
+
+_AUTONOMY_INTERACTIVE_PATTERNS = (
+    re.compile(r"(^|\n)(?:#+\s*)?(?:actionable\s+)?next\s+steps\s*:?.*", re.IGNORECASE),
+    re.compile(r"\bwould you like\b", re.IGNORECASE),
+    re.compile(r"\blet me know if you'd like\b", re.IGNORECASE),
+    re.compile(r"\blet me know if you want\b", re.IGNORECASE),
+    re.compile(r"\bif you need further assistance\b", re.IGNORECASE),
+    re.compile(r"\bdo you want me to\b", re.IGNORECASE),
+)
+
+
+def _normalize_research_field(value: str | None) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _build_research_tool_validator(node) -> Callable[[str, dict[str, Any]], str | None]:
+    current_title = _normalize_research_field(getattr(node, "title", ""))
+    current_description = _normalize_research_field(getattr(node, "description", ""))
+
+    def _validator(tool_name: str, tool_args: dict[str, Any]) -> str | None:
+        if tool_name != "create_research_node":
+            return None
+        requested_title = _normalize_research_field(str(tool_args.get("title", "")))
+        requested_description = _normalize_research_field(str(tool_args.get("description", "")))
+        if requested_title == current_title and requested_description == current_description:
+            return (
+                "Blocked tool call: refusing to create a duplicate research node with the same"
+                " title and description as the node currently being processed."
+            )
+        return None
+
+    return _validator
+
+
+def _strip_autonomy_interaction(text: str) -> str:
+    paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", (text or "").strip()) if chunk.strip()]
+    kept: list[str] = []
+    for paragraph in paragraphs:
+        if any(pattern.search(paragraph) for pattern in _AUTONOMY_INTERACTIVE_PATTERNS):
+            continue
+        kept.append(paragraph)
+    return "\n\n".join(kept).strip()
+
+
+def _parse_event_timestamp(raw: object) -> float | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized).timestamp()
+    except ValueError:
+        return None
 
 
 def process_pending_autonomy_work(db_path: str | Path | None = None) -> dict[str, str | None]:
@@ -88,6 +150,7 @@ def _process_autonomy_work(
     resolved_db_path = Path(db_path) if db_path else DEFAULT_STATE_DB_PATH
     conn = initialize_state_db(resolved_db_path)
     initialize_research_db(conn)
+    initialize_reward_db(conn)
 
     policy = load_session_policy()
     chat_session_id = session_id_for(policy, "chat")
@@ -100,6 +163,24 @@ def _process_autonomy_work(
     endocrine_runtime.decay_to()
     endocrine_config = endocrine_runtime.config
     task_store = TaskStore(conn)
+    reward_evaluator = RewardEvaluator()
+
+    class _BufferedRewardController:
+        def __init__(self) -> None:
+            self._deltas: dict[str, float] = {}
+
+        def trigger(self, hormone: str, amount: float | None = None) -> float:
+            delta = float(amount or 0.0)
+            self._deltas[hormone] = self._deltas.get(hormone, 0.0) + delta
+            return self._deltas[hormone]
+
+        def consume(self) -> dict[str, float]:
+            deltas = dict(self._deltas)
+            self._deltas.clear()
+            return deltas
+
+    reward_controller = _BufferedRewardController()
+    reward_bridge = RewardEndocrineBridge(conn, reward_controller)
 
     executed_task_id: str | None = None
     executed_research_id: str | None = None
@@ -123,6 +204,7 @@ def _process_autonomy_work(
             log.exception("Failed endocrine adjustment: source=%s reason=%s", source, reason)
 
     def _has_recent_adjustment(source: str, reason: str, *, window_seconds: int) -> bool:
+        cutoff = max(0.0, time.time() - max(1, int(window_seconds)))
         row = conn.execute(
             """
             SELECT 1
@@ -132,9 +214,118 @@ def _process_autonomy_work(
               AND ts >= ?
             LIMIT 1
             """,
-            (source, reason, max(0.0, endocrine_runtime.last_update_ts - max(1, int(window_seconds)))),
+            (source, reason, cutoff),
         ).fetchone()
         return row is not None
+
+    def _apply_reward(
+        *,
+        outcome: TraceOutcome,
+        node_id: str,
+        task_id: str,
+        source: str,
+        reason: str,
+        context: dict[str, object] | None = None,
+    ) -> None:
+        trace = RewardTrace(
+            node_id=node_id,
+            task_id=task_id,
+            outcome=outcome,
+            duration_ms=0,
+            retry_count=0,
+            context=dict(context or {}),
+        )
+        result = reward_evaluator.evaluate(trace)
+        reward_bridge.apply(trace, result)
+        deltas = reward_controller.consume()
+        if deltas:
+            _adjust(source, reason, deltas)
+
+    def _summarize_log_health(*, lookback_seconds: int = 900) -> dict[str, object] | None:
+        cutoff = time.time() - max(60, int(lookback_seconds))
+        warning_events = recent_events(limit=80, level="WARNING")
+        error_events = recent_events(limit=80, level="ERROR")
+        critical_events = recent_events(limit=40, level="CRITICAL")
+
+        def _filter(events: list[dict[str, object]]) -> list[dict[str, object]]:
+            filtered: list[dict[str, object]] = []
+            for event in events:
+                event_ts = _parse_event_timestamp(event.get("ts"))
+                if event_ts is None or event_ts < cutoff:
+                    continue
+                source_name = str(event.get("source", "")).strip().lower()
+                if not source_name.startswith("openbad"):
+                    continue
+                filtered.append(event)
+            return filtered
+
+        warnings = _filter(warning_events)
+        errors = _filter(error_events)
+        criticals = _filter(critical_events)
+        if not warnings and not errors and not criticals:
+            return None
+
+        sources = sorted(
+            {
+                str(event.get("source", "")).strip()
+                for event in [*warnings, *errors, *criticals]
+                if str(event.get("source", "")).strip()
+            }
+        )
+        recent_messages = [
+            {
+                "level": str(event.get("level", "")),
+                "source": str(event.get("source", "")),
+                "message": str(event.get("message", "")),
+            }
+            for event in [*criticals[:3], *errors[:5], *warnings[:5]]
+        ]
+        return {
+            "warning_count": len(warnings),
+            "error_count": len(errors),
+            "critical_count": len(criticals),
+            "sources": sources,
+            "recent_messages": recent_messages,
+        }
+
+    def _process_log_health() -> None:
+        summary = _summarize_log_health()
+        if summary is None:
+            return
+
+        warning_count = int(summary.get("warning_count", 0))
+        error_count = int(summary.get("error_count", 0))
+        critical_count = int(summary.get("critical_count", 0))
+
+        if error_count or critical_count:
+            reason = "Observed runtime error accumulation in persistent event log"
+            if not _has_recent_adjustment("log-health", reason, window_seconds=600):
+                _adjust(
+                    "log-health",
+                    reason,
+                    {
+                        "cortisol": min(0.04 * error_count + 0.08 * critical_count, 0.25),
+                        "adrenaline": min(0.02 * error_count + 0.05 * critical_count, 0.16),
+                    },
+                )
+            doctor_policy = session_allows(policy, "doctor", "allow_endocrine_doctor", True)
+            if doctor_policy:
+                _process_doctor(
+                    {
+                        "source": "log-health",
+                        "reason": reason,
+                        "context": summary,
+                    }
+                )
+            return
+
+        reason = "Observed runtime warning accumulation in persistent event log"
+        if not _has_recent_adjustment("log-health", reason, window_seconds=900):
+            _adjust(
+                "log-health",
+                reason,
+                {"cortisol": min(0.01 * warning_count, 0.08)},
+            )
 
     def _parse_doctor_payload(raw: str) -> dict[str, object] | None:
         text = (raw or "").strip()
@@ -151,27 +342,39 @@ def _process_autonomy_work(
         return parsed if isinstance(parsed, dict) else None
 
     def _run_llm(
-        prompt: str,
+        system_prompt: str,
+        user_prompt: str,
         *,
         system_name: str,
         session_id: str,
         request_id: str,
-    ) -> tuple[str, str, str] | None:
+        tool_call_validator: Callable[[str, dict[str, Any]], str | None] | None = None,
+    ) -> tuple[str, str, str, tuple[str, ...]] | None:
         try:
             _cfg_path, cfg = _read_providers_config()
             adapter, model, provider_name, _is_fallback = _resolve_chat_adapter(cfg, system_name)
             if adapter is None or model is None:
                 return None
-            result = asyncio.run(adapter.complete(prompt, model))
+            result = asyncio.run(
+                run_tool_agent(
+                    adapter,
+                    model,
+                    provider_name=provider_name,
+                    system_prompt=build_tooling_system_prompt(system_prompt),
+                    user_prompt=user_prompt,
+                    request_id=request_id,
+                    tool_call_validator=tool_call_validator,
+                )
+            )
             usage_tracker.record(
-                provider=provider_name or "unknown",
-                model=result.model_id or model,
+                provider=result.provider or provider_name or "unknown",
+                model=result.model or model,
                 system=system_name,
                 tokens=int(result.tokens_used),
                 request_id=request_id,
                 session_id=session_id,
             )
-            return result.content.strip(), provider_name or "", result.model_id
+            return result.content.strip(), result.provider or provider_name or "", result.model or model, result.tools_used
         except Exception:
             log.exception("LLM call failed for system=%s", system_name)
             return None
@@ -277,10 +480,11 @@ def _process_autonomy_work(
             if not marker.startswith("ENDOCRINE_REENABLE:"):
                 continue
             system_name = marker.split(":", 1)[1].strip().lower()
+            followup_now = time.time()
             endocrine_runtime.enable_system(
                 system_name,
                 reason="Follow-up re-enable",
-                now=endocrine_runtime.last_update_ts,
+                now=followup_now,
             )
             task_store.update_task_status(follow.task_id, TaskStatus.DONE)
             task_store.append_event(
@@ -317,9 +521,17 @@ def _process_autonomy_work(
 
         task_store.update_task_status(task_to_run.task_id, TaskStatus.RUNNING)
         llm = _run_llm(
-            (
+            system_prompt=(
                 "You are the autonomous OpenBaD task worker. "
-                "Complete the task in a non-destructive way and return a concise status summary.\n\n"
+                "Complete the assigned task in a non-destructive way. Use tools whenever"
+                " they improve execution or diagnosis. There is no interactive human in this"
+                " session. Do not ask the operator questions, do not ask what to do next, and"
+                " do not end with invitations for follow-up. When the task reveals additional"
+                " concrete follow-up work, create task or research entries directly via tools"
+                " instead of only describing them. Return a concise execution summary of what"
+                " you completed and what follow-up entries you created."
+            ),
+            user_prompt=(
                 f"Task: {task_to_run.title}\nDescription: {task_to_run.description}"
             ),
             system_name="tasks",
@@ -334,29 +546,44 @@ def _process_autonomy_work(
                 payload={"reason": "provider_unavailable", "owner": task_to_run.owner},
             )
             _post_session(task_session_id, f"Task {task_to_run.task_id} failed: no provider available.")
-            _adjust("tasks", f"Task {task_to_run.task_id} failed", {"cortisol": 0.12})
+            _apply_reward(
+                outcome=TraceOutcome.FAILURE,
+                node_id=task_to_run.task_id,
+                task_id=task_to_run.task_id,
+                source="tasks",
+                reason=f"Reward evaluation for failed task {task_to_run.task_id}",
+                context={"system": "tasks", "owner": task_to_run.owner, "failure": "provider_unavailable"},
+            )
             return
 
-        summary, provider_name, model_id = llm
+        summary, provider_name, model_id, tools_used = llm
+        summary = _strip_autonomy_interaction(summary)
         task_store.update_task_status(task_to_run.task_id, TaskStatus.DONE)
         task_store.append_event(
             task_to_run.task_id,
             "autonomy_completed",
             payload={"summary": summary, "provider": provider_name, "model": model_id},
         )
-        meta = {"provider": provider_name, "model": model_id}
-        _post_session(task_session_id, f"Completed task '{task_to_run.title}': {summary}", extra_metadata=meta)
+        meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}
+        tools_suffix = f"\n\n*Tools used: {', '.join(tools_used)}*" if tools_used else ""
+        _post_session(task_session_id, f"Completed task '{task_to_run.title}': {summary}{tools_suffix}", extra_metadata=meta)
         _post_session(chat_session_id, f"Autonomous task update: completed '{task_to_run.title}'.", extra_metadata=meta)
-        _adjust("tasks", f"Completed task {task_to_run.task_id}", {"dopamine": 0.10, "endorphin": 0.05})
+        _apply_reward(
+            outcome=TraceOutcome.SUCCESS,
+            node_id=task_to_run.task_id,
+            task_id=task_to_run.task_id,
+            source="tasks",
+            reason=f"Reward evaluation for completed task {task_to_run.task_id}",
+            context={"system": "tasks", "owner": task_to_run.owner, "tools_used": list(tools_used)},
+        )
         executed_task_id = task_to_run.task_id
 
     def _process_research(node=None) -> None:
         nonlocal executed_research_id
         queue = ResearchQueue(conn)
+        requested_node = node is not None
         if node is None:
             node = queue.dequeue()
-        else:
-            queue.complete(node.node_id)
         if node is None:
             return
         research_prompt = (
@@ -370,35 +597,67 @@ def _process_autonomy_work(
             log.exception("Failed to post research prompt to session")
 
         llm = _run_llm(
-            (
+            system_prompt=(
                 "You are the OpenBaD research worker. "
-                "Produce a concise research result with actionable next steps.\n\n"
+                "Investigate the topic using tools whenever they help. If the findings imply"
+                " more concrete work, create follow-up task or research entries directly via"
+                " tools. Never create a follow-up research node that duplicates the current"
+                " research title and description. There is no interactive human in this"
+                " session. Do not ask questions, do not ask what should be worked on next,"
+                " and do not emit recommendation lists for a human to choose from. If more"
+                " work is warranted, create follow-up task or research entries directly and"
+                " report what you created. Return a concise research result and concrete"
+                " findings only."
+            ),
+            user_prompt=(
                 f"Research title: {node.title}\nDescription: {node.description}"
             ),
             system_name="research",
             session_id=research_session_id,
             request_id=node.node_id,
+            tool_call_validator=_build_research_tool_validator(node),
         )
         if llm is None:
+            if requested_node:
+                log.warning("Research node %s failed before completion; leaving pending for retry", node.node_id)
             _post_session(research_session_id, f"Research node {node.node_id} dequeued but provider was unavailable.")
-            _adjust("research", f"Research node {node.node_id} failed", {"cortisol": 0.09})
+            _apply_reward(
+                outcome=TraceOutcome.FAILURE,
+                node_id=node.node_id,
+                task_id=node.source_task_id or f"research:{node.node_id}",
+                source="research",
+                reason=f"Reward evaluation for failed research node {node.node_id}",
+                context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "provider_unavailable"},
+            )
             return
 
-        summary, provider_name, model_id = llm
-        meta = {"provider": provider_name, "model": model_id}
+        summary, provider_name, model_id, tools_used = llm
+        summary = _strip_autonomy_interaction(summary)
+        if requested_node:
+            queue.complete(node.node_id)
+        meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}
+        tools_suffix = f"\n\n*Tools used: {', '.join(tools_used)}*" if tools_used else ""
         _post_session(
             research_session_id,
-            f"**Research complete: {node.title}**\n\n{summary}\n\n*Provider: {provider_name} / {model_id}*",
+            f"**Research complete: {node.title}**\n\n{summary}\n\n*Provider: {provider_name} / {model_id}*{tools_suffix}",
             extra_metadata=meta,
         )
         _post_session(chat_session_id, f"Autonomous research update: completed '{node.title}'.", extra_metadata=meta)
-        _adjust("research", f"Completed research node {node.node_id}", {"dopamine": 0.08, "endorphin": 0.04})
+        _apply_reward(
+            outcome=TraceOutcome.SUCCESS,
+            node_id=node.node_id,
+            task_id=node.source_task_id or f"research:{node.node_id}",
+            source="research",
+            reason=f"Reward evaluation for completed research node {node.node_id}",
+            context={"system": "research", "source_task_id": node.source_task_id or "", "tools_used": list(tools_used)},
+        )
         executed_research_id = node.node_id
 
     def _process_doctor(request: dict[str, object] | None) -> None:
         nonlocal executed_doctor
+        doctor_now = time.time()
         levels = endocrine_runtime.levels
-        source_recent = endocrine_runtime.source_contributions(window_seconds=900, now=endocrine_runtime.last_update_ts)
+        source_recent = endocrine_runtime.source_contributions(window_seconds=900, now=doctor_now)
         severity = endocrine_runtime.current_severity()
         request_payload = request if isinstance(request, dict) else {}
         request_source = str(request_payload.get("source", "unknown")).strip() or "unknown"
@@ -418,6 +677,7 @@ def _process_autonomy_work(
         doctor_prompt = (
             "You are the OpenBaD endocrine doctor. "
             "Evaluate global hormone levels and recent source contributions. "
+            "Use tools when you need better evidence before deciding. "
             "Return strict JSON with keys: summary (string), mood_tags (array of strings), "
             "actions (array). Each action must be one of: "
             "{\"type\":\"disable_system\",\"system\":\"chat|tasks|research\","
@@ -437,16 +697,23 @@ def _process_autonomy_work(
             f"Recent source contributions (15m): {json.dumps(source_recent, sort_keys=True)}"
         )
         llm = _run_llm(
-            doctor_prompt,
+            system_prompt=(
+                "You are the OpenBaD endocrine doctor. "
+                "Use available tools to inspect state, logs, tasks, research, and endocrine"
+                " signals before making decisions when that improves confidence. Final output"
+                " must be strict JSON that matches the requested schema exactly."
+            ),
+            user_prompt=doctor_prompt,
             system_name="doctor",
             session_id=doctor_session_id,
-            request_id=f"doctor-{int(endocrine_runtime.last_update_ts)}",
+            request_id=f"doctor-{int(doctor_now)}",
         )
         parsed: dict[str, object] | None = None
         provider_name = ""
         model_id = ""
+        tools_used: tuple[str, ...] = ()
         if llm is not None:
-            summary, provider_name, model_id = llm
+            summary, provider_name, model_id, tools_used = llm
             parsed = _parse_doctor_payload(summary)
             endocrine_runtime.add_doctor_note(
                 {
@@ -456,7 +723,7 @@ def _process_autonomy_work(
                     "summary": str(parsed.get("summary", "")).strip() if isinstance(parsed, dict) else "",
                     "raw": summary,
                 },
-                now=endocrine_runtime.last_update_ts,
+                now=doctor_now,
             )
 
         if parsed is None and levels.get("cortisol", 0.0) >= 0.8:
@@ -478,7 +745,7 @@ def _process_autonomy_work(
 
         mood_tags = parsed.get("mood_tags", [])
         if isinstance(mood_tags, list):
-            endocrine_runtime.set_mood_tags([str(tag) for tag in mood_tags], now=endocrine_runtime.last_update_ts)
+            endocrine_runtime.set_mood_tags([str(tag) for tag in mood_tags], now=doctor_now)
 
         summary_text = str(parsed.get("summary", "")).strip()
         if summary_text:
@@ -487,6 +754,8 @@ def _process_autonomy_work(
                 metadata["provider"] = provider_name
             if model_id:
                 metadata["model"] = model_id
+            if tools_used:
+                metadata["tools_used"] = list(tools_used)
             metadata["source"] = request_source
             metadata["reason"] = request_reason
             _post_session(doctor_session_id, f"Doctor summary: {summary_text}", extra_metadata=metadata)
@@ -534,11 +803,11 @@ def _process_autonomy_work(
 
                 if action_type == "disable_system":
                     duration_minutes = max(5, int(action.get("duration_minutes", 30)))
-                    disabled_until = endocrine_runtime.last_update_ts + duration_minutes * 60
+                    disabled_until = doctor_now + duration_minutes * 60
                     endocrine_runtime.disable_system(
                         system_name,
                         reason=reason,
-                        now=endocrine_runtime.last_update_ts,
+                        now=doctor_now,
                         until=disabled_until,
                     )
                     _create_reenable_task(system_name, reason, disabled_until)
@@ -553,7 +822,7 @@ def _process_autonomy_work(
                     )
 
                 if action_type == "enable_system":
-                    endocrine_runtime.enable_system(system_name, reason=reason, now=endocrine_runtime.last_update_ts)
+                    endocrine_runtime.enable_system(system_name, reason=reason, now=doctor_now)
                     _post_session(chat_session_id, f"Doctor action: enabled {system_name}. Reason: {reason}")
                     _post_session(
                         doctor_session_id,
@@ -564,6 +833,9 @@ def _process_autonomy_work(
         executed_doctor = summary_text or f"doctor-called:{request_source}"
 
     _process_endocrine_followups()
+
+    if doctor_request is None:
+        _process_log_health()
 
     if run_tasks:
         tasks_policy = session_allows(policy, "tasks", "allow_task_autonomy", True)

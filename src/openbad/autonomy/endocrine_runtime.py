@@ -43,6 +43,10 @@ class EndocrineRuntime:
         self._ensure_rows()
 
     @property
+    def config(self) -> EndocrineConfig:
+        return self._config
+
+    @property
     def levels(self) -> dict[str, float]:
         row = self._conn.execute(
             "SELECT dopamine, adrenaline, cortisol, endorphin FROM endocrine_state WHERE id = 1"

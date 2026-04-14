@@ -1835,6 +1835,38 @@ async def test_post_tasks_creates_task(aiohttp_client, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_tasks_completed_returns_terminal_tasks(aiohttp_client, tmp_path, monkeypatch):
+    import openbad.state.db as state_db
+    from openbad.tasks.models import TaskStatus
+    from openbad.tasks.service import TaskService
+    from openbad.state.db import initialize_state_db
+
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
+
+    conn = initialize_state_db(db_path)
+    service = TaskService(conn)
+    done_task = service.create_task("Completed task", owner="user")
+    cancelled_task = service.create_task("Cancelled task", owner="user")
+    pending_task = service.create_task("Pending task", owner="user")
+    service.transition_task(done_task.task_id, TaskStatus.RUNNING)
+    service.complete_task(done_task.task_id)
+    service.cancel_task(cancelled_task.task_id)
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/api/tasks/completed?limit=10")
+
+    assert resp.status == 200
+    data = await resp.json()
+    titles = [task["title"] for task in data["tasks"]]
+    assert "Completed task" in titles
+    assert "Cancelled task" in titles
+    assert "Pending task" not in titles
+
+
+@pytest.mark.asyncio
 async def test_post_research_creates_node(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
 

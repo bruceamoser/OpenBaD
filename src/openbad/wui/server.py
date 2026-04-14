@@ -2606,6 +2606,55 @@ async def _get_tasks(_request: web.Request) -> web.Response:
         return web.json_response({"tasks": [], "error": str(exc)})
 
 
+async def _get_tasks_completed(request: web.Request) -> web.Response:
+    try:
+        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+
+        limit_raw = request.query.get("limit")
+        limit = 50
+        if limit_raw not in (None, ""):
+            try:
+                limit = max(1, min(int(limit_raw), 200))
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text="limit must be an integer") from exc
+
+        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
+        rows = conn.execute(
+            """
+            SELECT task_id, title, description, status, kind, horizon, priority,
+                   owner, created_at, updated_at
+            FROM tasks
+            WHERE status IN ('done', 'failed', 'cancelled')
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return web.json_response(
+            {
+                "tasks": [
+                    {
+                        "task_id": row["task_id"],
+                        "title": row["title"],
+                        "description": row["description"],
+                        "status": row["status"],
+                        "kind": row["kind"],
+                        "horizon": row["horizon"],
+                        "priority": row["priority"],
+                        "owner": row["owner"],
+                        "created_at": row["created_at"],
+                        "updated_at": row["updated_at"],
+                    }
+                    for row in rows
+                ]
+            }
+        )
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"tasks": [], "error": str(exc)})
+
+
 async def _post_tasks(request: web.Request) -> web.Response:
     try:
         from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
@@ -3173,6 +3222,7 @@ def create_app(
     app.router.add_get("/api/endocrine/activity", _get_endocrine_activity)
     app.router.add_post("/api/endocrine/toggle", _post_endocrine_toggle)
     app.router.add_get("/api/tasks", _get_tasks)
+    app.router.add_get("/api/tasks/completed", _get_tasks_completed)
     app.router.add_post("/api/tasks", _post_tasks)
     app.router.add_patch("/api/tasks/{task_id}", _patch_task)
     app.router.add_post("/api/tasks/{task_id}/complete", _post_task_complete)

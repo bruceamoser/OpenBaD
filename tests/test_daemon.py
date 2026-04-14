@@ -134,6 +134,20 @@ class TestDaemonSubsystems:
             d._on_scheduler_tick(topics.SCHEDULER_TICK, payload)
         worker.assert_called_once_with()
 
+    def test_scheduler_tick_without_work_dispatches_worker_for_maintenance(self, mock_client):
+        d = Daemon(dry_run=True)
+        payload = json.dumps(
+            {
+                "eligible_task_id": None,
+                "eligible_research_id": None,
+                "queued_task_id": None,
+                "queued_research_id": None,
+            }
+        ).encode("utf-8")
+        with patch("openbad.autonomy.scheduler_worker.process_pending_autonomy_work") as worker:
+            d._on_scheduler_tick(topics.SCHEDULER_TICK, payload)
+        worker.assert_called_once_with()
+
     def test_scheduler_tick_with_queued_ids_does_not_dispatch_worker(self, mock_client):
         d = Daemon(dry_run=True)
         payload = json.dumps(
