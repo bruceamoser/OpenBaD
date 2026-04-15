@@ -14,10 +14,13 @@ _MAX_TOOL_ITERATIONS = 6
 _TOOL_CALL_TIMEOUT_S = 20
 
 _TOOLING_BASE_PROMPT = (
-    "You have access to OpenBaD's embedded tools. Use them proactively when they improve"
-    " the quality of the work. You may inspect files, events, MQTT records, endocrine"
-    " state, tasks, and research nodes, and you may create or update task/research"
-    " entries when follow-up work is warranted. Never fabricate tool results."
+    "You have access to OpenBaD's embedded skills. These are built-in tools provided"
+    " directly to you — they are NOT on an external server. Use them proactively when"
+    " they improve the quality of the work. You may inspect files, events, MQTT records,"
+    " endocrine state, tasks, and research nodes, and you may create or update"
+    " task/research entries when follow-up work is warranted. Never fabricate tool results."
+    " The mcp_bridge tool is ONLY for connecting to external third-party MCP servers."
+    " Do not use mcp_bridge to access your own embedded skills — just call them directly."
     " If the user refers to a file but you have not verified its exact path yet, call"
     " find_files before read_file. Search the current workspace first, and do not"
     " supply a guessed absolute cwd such as another user's home directory unless the"
