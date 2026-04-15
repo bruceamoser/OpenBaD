@@ -18,7 +18,7 @@ WorkingDirectory=/var/lib/openbad
 
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=read-only
 ReadWritePaths=/var/lib/openbad /var/log/openbad /etc/openbad
 PrivateTmp=true
 ProtectKernelTunables=true
