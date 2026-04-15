@@ -9,7 +9,7 @@ from openbad.memory.base import MemoryTier
 from openbad.memory.config import MemoryConfig
 from openbad.memory.controller import MemoryController
 from openbad.proprioception.registry import ToolRegistry, ToolRole
-from openbad.toolbelt.memory_tool import MemoryToolAdapter, RecallResult
+from openbad.skills.memory_tool import MemoryToolAdapter, RecallResult
 
 
 def _make_controller(

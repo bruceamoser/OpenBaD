@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openbad.proprioception.registry import ToolRegistry, ToolRole
-from openbad.toolbelt.web_search import (
+from openbad.skills.web_search import (
     WebFetchError,
     WebFetchEscalator,
     WebSearchConfig,
@@ -239,7 +239,7 @@ class TestWebFetchEscalator:
     def test_successful_fetch_returns_content(self) -> None:
         queue = _mock_queue()
         escalator = WebFetchEscalator(queue)
-        with patch("openbad.toolbelt.web_search.web_fetch", return_value="page text"):
+        with patch("openbad.skills.web_search.web_fetch", return_value="page text"):
             outcome = escalator.fetch("https://example.com")
         assert outcome.content == "page text"
         assert outcome.escalated is False
@@ -249,7 +249,7 @@ class TestWebFetchEscalator:
         queue = _mock_queue()
         escalator = WebFetchEscalator(queue)
         err = WebFetchError("Not Found", status_code=404)
-        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+        with patch("openbad.skills.web_search.web_fetch", side_effect=err):
             outcome = escalator.fetch("https://example.com/gone", source_task_id="t1")
         assert outcome.content is None
         assert outcome.escalated is True
@@ -263,7 +263,7 @@ class TestWebFetchEscalator:
         queue = _mock_queue()
         escalator = WebFetchEscalator(queue)
         err = WebFetchError("Forbidden", status_code=403)
-        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+        with patch("openbad.skills.web_search.web_fetch", side_effect=err):
             outcome = escalator.fetch("https://example.com/secret")
         assert outcome.escalated is True
         queue.enqueue.assert_called_once()
@@ -272,7 +272,7 @@ class TestWebFetchEscalator:
         queue = _mock_queue()
         escalator = WebFetchEscalator(queue)
         err = WebFetchError("timed out", status_code=0)
-        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+        with patch("openbad.skills.web_search.web_fetch", side_effect=err):
             outcome = escalator.fetch("https://slow.example.com")
         assert outcome.escalated is True
         queue.enqueue.assert_called_once()
@@ -282,7 +282,7 @@ class TestWebFetchEscalator:
         escalator = WebFetchEscalator(queue)
         err = WebFetchError("Not Found", status_code=404)
         url = "https://example.com/missing"
-        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+        with patch("openbad.skills.web_search.web_fetch", side_effect=err):
             escalator.fetch(url)
         title_arg = queue.enqueue.call_args[0][0]
         assert url in title_arg
@@ -292,7 +292,7 @@ class TestWebFetchEscalator:
         queue.enqueue.side_effect = RuntimeError("db down")
         escalator = WebFetchEscalator(queue)
         err = WebFetchError("Not Found", status_code=404)
-        with patch("openbad.toolbelt.web_search.web_fetch", side_effect=err):
+        with patch("openbad.skills.web_search.web_fetch", side_effect=err):
             outcome = escalator.fetch("https://example.com/gone")
         assert outcome.escalated is True  # still escalated, but queue silently failed
 
@@ -301,7 +301,7 @@ class TestWebFetchEscalator:
         escalator = WebFetchEscalator(queue)
         err = WebFetchError("Internal Server Error", status_code=500)
         with (
-            patch("openbad.toolbelt.web_search.web_fetch", side_effect=err),
+            patch("openbad.skills.web_search.web_fetch", side_effect=err),
             pytest.raises(WebFetchError),
         ):
             escalator.fetch("https://example.com/fail")

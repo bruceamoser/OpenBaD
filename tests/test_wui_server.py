@@ -1152,8 +1152,8 @@ def _app_with_registry():
 
 
 def _configure_toolbelt_state(monkeypatch, db_path):
-    import openbad.toolbelt.access_control as access_control
-    import openbad.toolbelt.terminal_sessions as terminal_sessions
+    import openbad.skills.access_control as access_control
+    import openbad.skills.terminal_sessions as terminal_sessions
 
     monkeypatch.setattr(access_control, "DEFAULT_STATE_DB_PATH", db_path)
     monkeypatch.setattr(terminal_sessions, "DEFAULT_STATE_DB_PATH", db_path)
@@ -1269,7 +1269,7 @@ async def test_delete_toolbelt_unequip(aiohttp_client):
 async def test_toolbelt_access_endpoints(aiohttp_client, tmp_path, monkeypatch):
     _configure_toolbelt_state(monkeypatch, tmp_path / "state.db")
 
-    from openbad.toolbelt.access_control import create_access_request
+    from openbad.skills.access_control import create_access_request
 
     requested_dir = tmp_path / "requested"
     requested_dir.mkdir()
@@ -1310,7 +1310,7 @@ async def test_toolbelt_access_endpoints(aiohttp_client, tmp_path, monkeypatch):
 async def test_toolbelt_access_deny_endpoint(aiohttp_client, tmp_path, monkeypatch):
     _configure_toolbelt_state(monkeypatch, tmp_path / "state.db")
 
-    from openbad.toolbelt.access_control import create_access_request
+    from openbad.skills.access_control import create_access_request
 
     requested_dir = tmp_path / "denied-request"
     requested_dir.mkdir()

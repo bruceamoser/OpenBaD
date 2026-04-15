@@ -1,4 +1,4 @@
-"""Tests for openbad.toolbelt.fs_tool (issue #407)."""
+"""Tests for openbad.skills.fs_tool (issue #407)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import openbad.toolbelt.fs_tool as fs_tool
+import openbad.skills.fs_tool as fs_tool
 from openbad.immune_system.rules_engine import FileOperationRule, is_restricted_path
-from openbad.toolbelt.fs_tool import (
+from openbad.skills.fs_tool import (
     CORTISOL_HIGH_THRESHOLD,
     DISK_FREE_BYTES_MIN,
     DISK_LATENCY_SATURATION_MS,

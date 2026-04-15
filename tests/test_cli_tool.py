@@ -9,7 +9,7 @@ import pytest
 
 from openbad.immune_system.rules_engine import DestructiveCommandRule, is_destructive_command
 from openbad.proprioception.registry import ToolRegistry, ToolRole
-from openbad.toolbelt.cli_tool import CliToolAdapter, CliToolConfig, CommandResult
+from openbad.skills.cli_tool import CliToolAdapter, CliToolConfig, CommandResult
 
 
 @pytest.fixture()

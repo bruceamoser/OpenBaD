@@ -2046,7 +2046,7 @@ async def _delete_toolbelt_role(request: web.Request) -> web.Response:
 
 
 async def _get_toolbelt_access(_request: web.Request) -> web.Response:
-    from openbad.toolbelt.access_control import list_access_grants, list_access_requests
+    from openbad.skills.access_control import list_access_grants, list_access_requests
 
     return web.json_response(
         {
@@ -2058,7 +2058,7 @@ async def _get_toolbelt_access(_request: web.Request) -> web.Response:
 
 
 async def _post_toolbelt_access_approve(request: web.Request) -> web.Response:
-    from openbad.toolbelt.access_control import approve_access_request
+    from openbad.skills.access_control import approve_access_request
 
     request_id = request.match_info["request_id"]
     payload = await request.json() if request.can_read_body else {}
@@ -2088,7 +2088,7 @@ async def _post_toolbelt_access_approve(request: web.Request) -> web.Response:
 
 
 async def _post_toolbelt_access_deny(request: web.Request) -> web.Response:
-    from openbad.toolbelt.access_control import deny_access_request
+    from openbad.skills.access_control import deny_access_request
 
     request_id = request.match_info["request_id"]
     payload = await request.json() if request.can_read_body else {}
@@ -2110,7 +2110,7 @@ async def _post_toolbelt_access_deny(request: web.Request) -> web.Response:
 
 
 async def _delete_toolbelt_access_grant(request: web.Request) -> web.Response:
-    from openbad.toolbelt.access_control import revoke_access_grant
+    from openbad.skills.access_control import revoke_access_grant
 
     grant_id = request.match_info["grant_id"]
     revoked_by = str(request.query.get("revoked_by", "user")).strip() or "user"
@@ -2122,14 +2122,14 @@ async def _delete_toolbelt_access_grant(request: web.Request) -> web.Response:
 
 
 async def _get_toolbelt_terminal(_request: web.Request) -> web.Response:
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     return web.json_response({"sessions": get_terminal_session_manager().list_sessions()})
 
 
 async def _post_toolbelt_terminal(request: web.Request) -> web.Response:
-    from openbad.toolbelt.access_control import create_access_request
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.access_control import create_access_request
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     payload = await request.json()
     if not isinstance(payload, dict):
@@ -2152,7 +2152,7 @@ async def _post_toolbelt_terminal(request: web.Request) -> web.Response:
 
 
 async def _post_toolbelt_terminal_input(request: web.Request) -> web.Response:
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     payload = await request.json()
     if not isinstance(payload, dict):
@@ -2171,7 +2171,7 @@ async def _post_toolbelt_terminal_input(request: web.Request) -> web.Response:
 
 
 async def _get_toolbelt_terminal_output(request: web.Request) -> web.Response:
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     max_bytes = 8192
     raw = request.query.get("max_bytes")
@@ -2191,7 +2191,7 @@ async def _get_toolbelt_terminal_output(request: web.Request) -> web.Response:
 
 
 async def _delete_toolbelt_terminal(request: web.Request) -> web.Response:
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     try:
         result = get_terminal_session_manager().close_session(
@@ -3134,7 +3134,7 @@ _CAPABILITIES_CATALOG = [
         "label": "File System",
         "icon": "📁",
         "level": 1,
-        "module": "openbad.toolbelt.fs_tool",
+        "module": "openbad.skills.fs_tool",
         "description": "Read and write files within permitted paths, governed by immune-system path rules and disk I/O interoception.",
         "tools": [
             {"name": "find_files", "signature": "find_files(pattern: str, cwd: str | None = None, limit: int = 50) -> list[str]", "description": "Locate files under a permitted directory using a glob or substring pattern before reading them."},
@@ -3148,7 +3148,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Command Line",
         "icon": "💻",
         "level": 1,
-        "module": "openbad.toolbelt.cli_tool",
+        "module": "openbad.skills.cli_tool",
         "description": "Execute one-shot shell commands within configured allowed roots. Destructive commands are intercepted, and stdout/stderr plus return code are returned to the model.",
         "tools": [
             {"name": "exec_command", "signature": "exec_command(command: str, args: list[str] | None = None, cwd: str | None = None) -> str", "description": "Run a one-shot command and return stdout, stderr, and exit code. If args are omitted, command may be a shell-style string such as 'find . -name spec.md'."},
@@ -3160,7 +3160,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Path Access Control",
         "icon": "🗂️",
         "level": 1,
-        "module": "openbad.toolbelt.access_control",
+        "module": "openbad.skills.access_control",
         "description": "Track pending path access requests and approved roots used by file and command tools.",
         "tools": [
             {"name": "get_path_access_status", "signature": "get_path_access_status() -> dict", "description": "Return pending path access requests and currently approved roots."},
@@ -3172,7 +3172,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Terminal Sessions",
         "icon": "🖥️",
         "level": 1,
-        "module": "openbad.toolbelt.terminal_sessions",
+        "module": "openbad.skills.terminal_sessions",
         "description": "PTY-backed interactive terminal sessions gated by approved roots and audited to the state database.",
         "tools": [
             {"name": "list_terminal_sessions", "signature": "list_terminal_sessions() -> list[dict]", "description": "List active terminal sessions and their metadata."},
@@ -3188,7 +3188,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Web Information",
         "icon": "🌐",
         "level": 1,
-        "module": "openbad.toolbelt.web_search",
+        "module": "openbad.skills.web_search",
         "description": "Fast, stateless external data gathering. Feeds active inference to reduce surprise. Failed fetches auto-escalate to research queue.",
         "tools": [
             {"name": "web_search", "signature": "web_search(query: str, n: int = 5) -> list[SearchResult]", "description": "Search the web and return result summaries."},
@@ -3201,7 +3201,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Ask User",
         "icon": "🙋",
         "level": 1,
-        "module": "openbad.toolbelt.ask_user",
+        "module": "openbad.skills.ask_user",
         "description": "Dual-mode communication. Synchronous when user is present in WUI; asynchronous via MQTT when offline.",
         "tools": [
             {"name": "ask_user", "signature": "ask_user(question: str, timeout_s: float = 30) -> str | None", "description": "Mode A (active): publishes to agent/chat/response and awaits reply. Mode B (inactive): sets node to BLOCKED_ON_USER, yields lease."},
@@ -3213,7 +3213,7 @@ _CAPABILITIES_CATALOG = [
         "label": "MQTT Diagnostics",
         "icon": "📡",
         "level": 1,
-        "module": "openbad.toolbelt.mqtt_records_tool",
+        "module": "openbad.skills.mqtt_records_tool",
         "description": "Read recent MQTT records from the nervous-system bridge for timeline and topic-level diagnosis.",
         "tools": [
             {"name": "get_mqtt_records", "signature": "get_mqtt_records(limit: int = 100) -> list[dict]", "description": "Return recent broker records from /api/mqtt/log without mutating system state."},
@@ -3225,7 +3225,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Persistent Event Log",
         "icon": "📓",
         "level": 1,
-        "module": "openbad.toolbelt.event_log_tool",
+        "module": "openbad.skills.event_log_tool",
         "description": "Read and write persistent system events backed by loguru. Survives restarts, auto-rotated (5 MB), 7-day retention, gzip compressed.",
         "tools": [
             {"name": "read_events", "signature": "read_events(limit: int = 100, level: str = '', source: str = '', search: str = '') -> list[dict]", "description": "Query persistent log events. Filter by severity level (ERROR/WARNING/INFO), source module, or free-text search. Returns newest first."},
@@ -3238,7 +3238,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Endocrine Diagnostics",
         "icon": "🧪",
         "level": 1,
-        "module": "openbad.toolbelt.endocrine_status_tool",
+        "module": "openbad.skills.endocrine_status_tool",
         "description": "Inspect current endocrine levels, severities, source contributions, and subsystem gates.",
         "tools": [
             {"name": "get_endocrine_status", "signature": "get_endocrine_status() -> dict", "description": "Return runtime endocrine status snapshot from /api/endocrine/status."},
@@ -3250,7 +3250,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Doctor Orchestration",
         "icon": "🩺",
         "level": 1,
-        "module": "openbad.toolbelt.doctor_tool",
+        "module": "openbad.skills.doctor_tool",
         "description": "Request a doctor visit over MQTT so the daemon-side doctor loop investigates endocrine state and remediation actions.",
         "tools": [
             {"name": "call_doctor", "signature": "call_doctor(reason: str, source: str = 'session', context: dict | None = None) -> dict", "description": "Publish a doctor-call event to the nervous system bus with optional structured context."},
@@ -3262,7 +3262,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Task Management",
         "icon": "📋",
         "level": 1,
-        "module": "openbad.toolbelt.tasks_diagnostics_tool",
+        "module": "openbad.skills.tasks_diagnostics_tool",
         "description": "Inspect, create, update, and complete task records from the embedded toolbelt.",
         "tools": [
             {"name": "get_tasks", "signature": "get_tasks() -> list[dict]", "description": "Return task list from /api/tasks for triage context."},
@@ -3279,7 +3279,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Research Management",
         "icon": "🔬",
         "level": 1,
-        "module": "openbad.toolbelt.research_diagnostics_tool",
+        "module": "openbad.skills.research_diagnostics_tool",
         "description": "Inspect, create, update, and complete research nodes from the embedded toolbelt.",
         "tools": [
             {"name": "get_research_nodes", "signature": "get_research_nodes() -> list[dict]", "description": "Return pending research nodes from /api/research."},
@@ -3296,7 +3296,7 @@ _CAPABILITIES_CATALOG = [
         "label": "Browser Automation",
         "icon": "🌍",
         "level": 1,
-        "module": "openbad.toolbelt.mcp_bridge.browser_context",
+        "module": "openbad.skills.mcp_bridge.browser_context",
         "description": "Embedded browser automation via Playwright MCP. Navigates pages, clicks elements, fills forms, and captures screenshots. Managed by the interoceptive governor.",
         "tools": [
             {"name": "browser_navigate", "signature": "browser_navigate(url: str) -> str", "description": "Navigate to a URL and return page content."},
