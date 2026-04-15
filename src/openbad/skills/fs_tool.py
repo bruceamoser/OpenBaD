@@ -200,6 +200,10 @@ def find_files(
 ) -> str:
     """Find files under *cwd* matching *pattern* and return JSON paths.
 
+    Uses ``locate`` (pre-indexed, instant) when available, otherwise falls
+    back to the POSIX ``find`` command.  Both are orders of magnitude faster
+    than walking the tree in Python.
+
     Unlike read_file/write_file, find_files does NOT require the cwd to be
     inside allowed roots.  Searching for file names is a read-only metadata
     operation; the permission gate is on read_file/write_file.
@@ -214,35 +218,83 @@ def find_files(
     limit:
         Maximum number of matches to return.
     """
-    resolved_root = os.path.realpath(os.path.abspath(cwd))
-    root = Path(resolved_root)
+    import shutil
+    import subprocess
+
     needle = pattern.strip()
     max_results = max(1, min(int(limit), 200))
+    resolved_root = os.path.realpath(os.path.abspath(cwd))
 
+    # --- Try locate first (instant, uses pre-built database) ---
+    locate_bin = shutil.which("plocate") or shutil.which("mlocate") or shutil.which("locate")
+    if locate_bin:
+        try:
+            cmd = [locate_bin, "-i", "-l", str(max_results)]
+            if resolved_root != "/":
+                # locate has no --root; filter with a regex anchor
+                cmd.extend(["-r", f"^{resolved_root}/.*{needle}"])
+            else:
+                cmd.append(needle)
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode in (0, 1):  # 1 = no matches
+                results = [
+                    line for line in proc.stdout.splitlines()
+                    if line and os.path.isfile(line)
+                ][:max_results]
+                if results:
+                    return json.dumps(sorted(results), indent=2)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # --- Fallback: POSIX find (fast, C implementation) ---
+    find_bin = shutil.which("find")
+    if find_bin:
+        try:
+            has_glob = any(c in needle for c in "*?[]")
+            name_arg = needle if has_glob else f"*{needle}*"
+            proc = subprocess.run(
+                [find_bin, resolved_root, "-maxdepth", "8",
+                 "-type", "f", "-iname", name_arg],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            results = [
+                os.path.realpath(line)
+                for line in proc.stdout.splitlines()
+                if line
+            ][:max_results]
+            return json.dumps(sorted(dict.fromkeys(results)), indent=2)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # --- Last resort: Python walk (slow but always works) ---
+    root = Path(resolved_root)
     results: list[str] = []
-    if any(char in needle for char in "*?[]"):
+    if any(c in needle for c in "*?[]"):
         glob_pattern = needle if "/" in needle or needle.startswith("**") else f"**/{needle}"
-        iterator = root.glob(glob_pattern)
-        for candidate in iterator:
-            if not candidate.is_file():
-                continue
-            results.append(str(candidate.resolve(strict=False)))
-            if len(results) >= max_results:
-                break
+        for candidate in root.glob(glob_pattern):
+            if candidate.is_file():
+                results.append(str(candidate.resolve(strict=False)))
+                if len(results) >= max_results:
+                    break
     else:
         lowered = needle.lower()
         for candidate in root.rglob("*"):
             if not candidate.is_file():
                 continue
-            resolved_candidate = str(candidate.resolve(strict=False))
-            if lowered and lowered not in candidate.name.lower() and lowered not in resolved_candidate.lower():
+            if lowered not in candidate.name.lower():
                 continue
-            results.append(resolved_candidate)
+            results.append(str(candidate.resolve(strict=False)))
             if len(results) >= max_results:
                 break
 
-    results = sorted(dict.fromkeys(results))
-    return json.dumps(results, indent=2)
+    return json.dumps(sorted(dict.fromkeys(results)), indent=2)
 
 
 def write_file(
