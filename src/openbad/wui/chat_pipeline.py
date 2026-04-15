@@ -277,6 +277,35 @@ def _extract_access_notice(result: str) -> tuple[str, dict[str, Any] | None] | N
     ), None
 
 
+async def _wait_for_access_decision(
+    request_id: str,
+    *,
+    timeout: float = 120.0,
+    poll_interval: float = 0.5,
+) -> str:
+    """Poll the DB until the access request is approved, denied, or times out.
+
+    Returns ``"approved"``, ``"denied"``, or ``"timeout"``.
+    """
+    import asyncio as _aio
+
+    from openbad.skills.access_control import list_access_requests
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = list_access_requests()
+        for row in rows:
+            if row.get("request_id") == request_id:
+                status = str(row.get("status", "")).lower()
+                if status == "approved":
+                    return "approved"
+                if status == "denied":
+                    return "denied"
+                break
+        await _aio.sleep(poll_interval)
+    return "timeout"
+
+
 # ── Data types ────────────────────────────────────────────────────── #
 
 
@@ -1348,6 +1377,36 @@ async def _agentic_stream(
                     tokens_used=total_tokens,
                     access_request=request_data,
                 )
+
+                # Wait for the user to approve/deny in the UI, then retry
+                if request_data and request_data.get("request_id"):
+                    decision = await _wait_for_access_decision(
+                        request_data["request_id"], timeout=120.0,
+                    )
+                    if decision == "approved":
+                        yield StreamChunk(
+                            reasoning="Access approved — retrying...",
+                            tokens_used=total_tokens,
+                        )
+                        try:
+                            result = await _asyncio.wait_for(
+                                call_skill(fn_name, fn_args),
+                                timeout=_TOOL_CALL_TIMEOUT_S,
+                            )
+                        except TimeoutError:
+                            result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
+                    elif decision == "denied":
+                        result = f"Access to {request_data.get('root', 'path')} was denied by the user."
+                        yield StreamChunk(
+                            reasoning="Access denied.",
+                            tokens_used=total_tokens,
+                        )
+                    else:
+                        result = "Access request timed out waiting for user response."
+                        yield StreamChunk(
+                            reasoning="Access request timed out.",
+                            tokens_used=total_tokens,
+                        )
 
             working_messages.append({
                 "role": "tool",

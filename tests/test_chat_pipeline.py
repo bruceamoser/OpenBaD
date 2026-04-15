@@ -458,6 +458,12 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
 
     monkeypatch.setattr(chat_pipeline, "call_skill", _fake_dispatch)
 
+    # Prevent the pipeline from waiting for a real DB decision
+    async def _instant_timeout(*_args, **_kwargs):
+        return "timeout"
+
+    monkeypatch.setattr(chat_pipeline, "_wait_for_access_decision", _instant_timeout)
+
     chunks = [
         chunk
         async for chunk in chat_pipeline._agentic_stream(

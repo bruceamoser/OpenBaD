@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +11,8 @@ from typing import Any
 from uuid import uuid4
 
 from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,73 @@ def _base_roots() -> list[str]:
         seen.add(resolved)
         normalized.append(resolved)
     return normalized
+
+
+OPENBAD_USER = "openbad"
+
+
+def _grant_acl(root: str) -> None:
+    """Grant the openbad service user read + traverse access via POSIX ACLs.
+
+    Sets ``u:openbad:rX`` on the directory tree so the systemd service can
+    read files inside it.  Also walks parent directories up to ``/`` and
+    adds traverse-only (``u:openbad:x``) ACLs on any directory that lacks
+    the execute bit for other users, since the service needs to traverse
+    the full path chain.
+
+    Requires ``setfacl`` (from the ``acl`` package).
+    Falls back silently if setfacl is missing or the command fails.
+    """
+    setfacl = shutil.which("setfacl")
+    if not setfacl:
+        log.warning("setfacl not found; cannot grant OS-level ACL for %s", root)
+        return
+
+    resolved = str(Path(root).resolve(strict=False))
+
+    # Grant read + traverse on the target tree
+    try:
+        subprocess.run(
+            [setfacl, "-R", "-m", f"u:{OPENBAD_USER}:rX", resolved],
+            capture_output=True, timeout=30, check=False,
+        )
+        # Set default ACL so new files inherit the permission
+        subprocess.run(
+            [setfacl, "-R", "-d", "-m", f"u:{OPENBAD_USER}:rX", resolved],
+            capture_output=True, timeout=30, check=False,
+        )
+        log.info("Granted ACL u:%s:rX on %s", OPENBAD_USER, resolved)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("Failed to set ACL on %s: %s", resolved, exc)
+        return
+
+    # Walk parent directories and ensure traverse permission
+    parent = Path(resolved).parent
+    while str(parent) != parent.root:
+        try:
+            subprocess.run(
+                [setfacl, "-m", f"u:{OPENBAD_USER}:x", str(parent)],
+                capture_output=True, timeout=5, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            break
+        parent = parent.parent
+
+
+def _revoke_acl(root: str) -> None:
+    """Remove openbad ACL entries from a directory tree."""
+    setfacl = shutil.which("setfacl")
+    if not setfacl:
+        return
+    resolved = str(Path(root).resolve(strict=False))
+    try:
+        subprocess.run(
+            [setfacl, "-R", "-x", f"u:{OPENBAD_USER}", resolved],
+            capture_output=True, timeout=30, check=False,
+        )
+        log.info("Revoked ACL u:%s on %s", OPENBAD_USER, resolved)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("Failed to revoke ACL on %s: %s", resolved, exc)
 
 
 def effective_allowed_roots(base_roots: list[str] | None = None, *, db_path: str | Path | None = None) -> list[str]:
@@ -230,6 +302,10 @@ def approve_access_request(
         "SELECT * FROM path_access_grants WHERE normalized_root = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1",
         (normalized_root,),
     ).fetchone()
+
+    # Grant Linux ACL so the openbad service user can actually read the path
+    _grant_acl(normalized_root)
+
     return {"request": dict(conn.execute("SELECT * FROM path_access_requests WHERE request_id = ?", (request_id,)).fetchone()), "grant": dict(grant) if grant is not None else {}}
 
 
@@ -284,5 +360,12 @@ def revoke_access_grant(
         (now_ts, revoked_by.strip() or "user", grant_id),
     )
     conn.commit()
+
+    # Revoke Linux ACL
+    grant_data = dict(row)
+    normalized_root = str(grant_data.get("normalized_root", "")).strip()
+    if normalized_root:
+        _revoke_acl(normalized_root)
+
     updated = conn.execute("SELECT * FROM path_access_grants WHERE grant_id = ?", (grant_id,)).fetchone()
     return dict(updated) if updated is not None else {}
