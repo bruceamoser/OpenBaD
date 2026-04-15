@@ -5,7 +5,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from openbad.toolbelt.schemas import TOOL_SCHEMAS
+from openbad.skills import call_skill
+from openbad.skills.server import async_get_openai_tools
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +18,10 @@ _TOOLING_BASE_PROMPT = (
     " the quality of the work. You may inspect files, events, MQTT records, endocrine"
     " state, tasks, and research nodes, and you may create or update task/research"
     " entries when follow-up work is warranted. Never fabricate tool results."
+    " If the user refers to a file but you have not verified its exact path yet, call"
+    " find_files before read_file. Search the current workspace first, and do not"
+    " supply a guessed absolute cwd such as another user's home directory unless the"
+    " user or a prior tool result explicitly provided that directory."
     " If a tool result starts with [access_request], do not claim the file or directory"
     " is missing. The access request has already been created. Tell the user to approve"
     " it in Toolbelt -> Path Access Requests, then retry after approval. Do not call"
@@ -118,8 +123,9 @@ async def run_tool_agent(
         {"role": "user", "content": user_prompt},
     ]
 
+    skill_schemas = await async_get_openai_tools()
     for iteration in range(_MAX_TOOL_ITERATIONS):
-        response = await agentic_complete(working_messages, model_id, tools=TOOL_SCHEMAS)
+        response = await agentic_complete(working_messages, model_id, tools=skill_schemas)
         usage = getattr(response, "usage", None)
         total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
 
@@ -188,10 +194,10 @@ async def run_tool_agent(
                 )
             else:
                 try:
-                    from openbad.toolbelt.dispatch import dispatch_tool_call
+                    import asyncio as _aio
 
-                    result = await __import__("asyncio").wait_for(
-                        dispatch_tool_call(fn_name, fn_args),
+                    result = await _aio.wait_for(
+                        call_skill(fn_name, fn_args),
                         timeout=_TOOL_CALL_TIMEOUT_S,
                     )
                 except TimeoutError:

@@ -208,6 +208,8 @@ def test_assemble_context_includes_access_approval_guidance():
 
     assert "Toolbelt -> Path Access Requests" in context.system_prompt
     assert "already created the path access request automatically" in context.system_prompt
+    assert "use find_files before read_file" in context.system_prompt
+    assert "Search the current workspace first" in context.system_prompt
 
 
 @pytest.mark.asyncio
@@ -454,7 +456,7 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
             "That request is already created. Tell the user to approve it in Toolbelt -> Path Access Requests, then retry."
         )
 
-    monkeypatch.setattr(chat_pipeline, "dispatch_tool_call", _fake_dispatch)
+    monkeypatch.setattr(chat_pipeline, "call_skill", _fake_dispatch)
 
     chunks = [
         chunk

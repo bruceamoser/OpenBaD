@@ -47,7 +47,7 @@ class TestLiteLLMModelName:
 
 class TestToolSchemas:
     def test_schema_count(self):
-        assert len(TOOL_SCHEMAS) == 31
+        assert len(TOOL_SCHEMAS) == 32
 
     def test_all_have_required_fields(self):
         for schema in TOOL_SCHEMAS:
@@ -65,7 +65,7 @@ class TestToolSchemas:
     def test_known_tools_present(self):
         names = {s["function"]["name"] for s in TOOL_SCHEMAS}
         expected = {
-            "read_file", "write_file", "exec_command", "get_path_access_status",
+            "find_files", "read_file", "write_file", "exec_command", "get_path_access_status",
             "list_terminal_sessions", "create_terminal_session", "send_terminal_input",
             "read_terminal_output", "close_terminal_session", "web_search",
             "web_fetch", "ask_user", "get_mqtt_records", "get_system_logs",
@@ -99,6 +99,19 @@ class TestToolDispatch:
         with patch("openbad.toolbelt.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
             result = await dispatch_tool_call("read_file", {"path": str(p)})
         assert "world" in result
+
+    @pytest.mark.asyncio
+    async def test_find_files(self, tmp_path):
+        nested = tmp_path / "docs"
+        nested.mkdir()
+        target = nested / "11-OpenBaD Library System Upgrade Spec.md"
+        target.write_text("spec")
+        with patch("openbad.toolbelt.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
+            result = await dispatch_tool_call(
+                "find_files",
+                {"pattern": "*Library System Upgrade Spec.md", "cwd": str(tmp_path)},
+            )
+        assert str(target) in result
 
     @pytest.mark.asyncio
     async def test_write_file(self, tmp_path):
@@ -322,7 +335,7 @@ async def test_agentic_stream_with_tool_calls(_reset_pipeline):
     with (
         patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
         patch(
-            "openbad.wui.chat_pipeline.dispatch_tool_call",
+            "openbad.wui.chat_pipeline.call_skill",
             new_callable=AsyncMock,
         ) as mock_dispatch,
     ):
@@ -361,7 +374,7 @@ async def test_agentic_stream_with_usage_tracking_wrapper(_reset_pipeline):
     with (
         patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
         patch(
-            "openbad.wui.chat_pipeline.dispatch_tool_call",
+            "openbad.wui.chat_pipeline.call_skill",
             new_callable=AsyncMock,
         ) as mock_dispatch,
     ):
@@ -403,7 +416,7 @@ async def test_agentic_stream_does_not_double_count_tokens(_reset_pipeline):
     with (
         patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
         patch(
-            "openbad.wui.chat_pipeline.dispatch_tool_call",
+            "openbad.wui.chat_pipeline.call_skill",
             new_callable=AsyncMock,
         ) as mock_dispatch,
     ):
@@ -436,7 +449,7 @@ async def test_agentic_stream_max_iterations(_reset_pipeline):
     with (
         patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
         patch(
-            "openbad.wui.chat_pipeline.dispatch_tool_call",
+            "openbad.wui.chat_pipeline.call_skill",
             new_callable=AsyncMock,
         ) as mock_dispatch,
     ):

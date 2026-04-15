@@ -23,8 +23,11 @@ import logging
 import os
 import tempfile
 import uuid
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import json
 
 from openbad.immune_system.rules_engine import FileOperationRule
 from openbad.toolbelt.access_control import effective_allowed_roots
@@ -187,6 +190,54 @@ def read_file(
             f"read_file deferred: disk saturated (path={resolved!r})"
         )
     return Path(resolved).read_text(encoding=encoding)
+
+
+def find_files(
+    pattern: str,
+    *,
+    cwd: str = ".",
+    limit: int = 50,
+) -> str:
+    """Find files under *cwd* matching *pattern* and return JSON paths.
+
+    Parameters
+    ----------
+    pattern:
+        Glob-like pattern or plain substring to search for.
+    cwd:
+        Root directory to search within. Must be inside allowed roots.
+    limit:
+        Maximum number of matches to return.
+    """
+    resolved_root = _validate(cwd)
+    root = Path(resolved_root)
+    needle = pattern.strip()
+    max_results = max(1, min(int(limit), 200))
+
+    results: list[str] = []
+    if any(char in needle for char in "*?[]"):
+        glob_pattern = needle if "/" in needle or needle.startswith("**") else f"**/{needle}"
+        iterator = root.glob(glob_pattern)
+        for candidate in iterator:
+            if not candidate.is_file():
+                continue
+            results.append(str(candidate.resolve(strict=False)))
+            if len(results) >= max_results:
+                break
+    else:
+        lowered = needle.lower()
+        for candidate in root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            resolved_candidate = str(candidate.resolve(strict=False))
+            if lowered and lowered not in candidate.name.lower() and lowered not in resolved_candidate.lower():
+                continue
+            results.append(resolved_candidate)
+            if len(results) >= max_results:
+                break
+
+    results = sorted(dict.fromkeys(results))
+    return json.dumps(results, indent=2)
 
 
 def write_file(
