@@ -6,6 +6,7 @@ from openbad.state.db import initialize_state_db
 from openbad.toolbelt.access_control import (
     approve_access_request,
     create_access_request,
+    deny_access_request,
     effective_allowed_roots,
     list_access_grants,
     list_access_requests,
@@ -38,3 +39,24 @@ def test_access_request_approve_and_revoke(tmp_path: Path) -> None:
     assert revoked["revoked_by"] == "user"
     active_grants = list_access_grants(db_path=db_path)
     assert active_grants == []
+
+
+def test_access_request_can_be_denied(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    initialize_state_db(db_path)
+    target = tmp_path / "outside" / "private"
+
+    created = create_access_request(
+        str(target),
+        requester="test",
+        reason="Need access for triage",
+        db_path=db_path,
+    )
+    request = created["request"]
+
+    denied = deny_access_request(request["request_id"], denied_by="user", reason="No", db_path=db_path)
+    assert denied["status"] == "denied"
+    assert denied["decided_by"] == "user"
+    assert denied["reason"] == "No"
+    assert list_access_requests(db_path=db_path, status="pending") == []
+    assert list_access_grants(db_path=db_path) == []

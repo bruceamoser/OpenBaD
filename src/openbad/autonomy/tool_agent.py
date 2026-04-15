@@ -18,8 +18,9 @@ _TOOLING_BASE_PROMPT = (
     " state, tasks, and research nodes, and you may create or update task/research"
     " entries when follow-up work is warranted. Never fabricate tool results."
     " If a tool result starts with [access_request], do not claim the file or directory"
-    " is missing. Call ask_user to request permission for that path/root, then wait for"
-    " approval before retrying."
+    " is missing. The access request has already been created. Tell the user to approve"
+    " it in Toolbelt -> Path Access Requests, then retry after approval. Do not call"
+    " ask_user just to repeat the permission request."
     " If a tool fails, acknowledge that explicitly and continue with the best supported"
     " answer you can provide."
 )

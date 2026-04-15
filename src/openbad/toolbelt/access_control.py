@@ -233,6 +233,41 @@ def approve_access_request(
     return {"request": dict(conn.execute("SELECT * FROM path_access_requests WHERE request_id = ?", (request_id,)).fetchone()), "grant": dict(grant) if grant is not None else {}}
 
 
+def deny_access_request(
+    request_id: str,
+    *,
+    denied_by: str,
+    reason: str = "",
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    conn = initialize_state_db(db_path or DEFAULT_STATE_DB_PATH)
+    row = conn.execute(
+        "SELECT * FROM path_access_requests WHERE request_id = ?",
+        (request_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(request_id)
+
+    request_data = dict(row)
+    now_ts = time.time()
+    decided_by = denied_by.strip() or "user"
+    decision_reason = reason.strip() or str(request_data.get("reason") or "")
+    conn.execute(
+        """
+        UPDATE path_access_requests
+        SET status = 'denied', decided_at = ?, decided_by = ?, reason = ?
+        WHERE request_id = ?
+        """,
+        (now_ts, decided_by, decision_reason, request_id),
+    )
+    conn.commit()
+    updated = conn.execute(
+        "SELECT * FROM path_access_requests WHERE request_id = ?",
+        (request_id,),
+    ).fetchone()
+    return dict(updated) if updated is not None else {}
+
+
 def revoke_access_grant(
     grant_id: str,
     *,
