@@ -156,7 +156,8 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 def _build_tooling_prompt(modulation: Any | None) -> str:
     lines = [
-        "You have tool access through the toolbelt. When the answer depends on filesystem state, terminal output, logs, tasks, research nodes, or external content, call tools instead of narrating what you would do.",
+        "You have access to OpenBaD's embedded skills. These are built-in tools provided directly to you — they are NOT on an external server. When the answer depends on filesystem state, terminal output, logs, tasks, research nodes, or external content, call your tools instead of narrating what you would do.",
+        "The mcp_bridge tool is ONLY for connecting to external third-party MCP servers. Do not use mcp_bridge to access your own embedded skills — just call them directly by name.",
         "Do not ask the user for permission before reversible reads, searches, diagnostics, or other already-allowed inspection steps.",
         "Use ask_user(question) only when blocked on missing business context, explicit approval, or destructive or irreversible actions.",
         "If the user mentions a filename or spec and the exact path is not verified, use find_files before read_file. Search the current workspace first, and never invent directories, absolute paths, or a guessed cwd.",
