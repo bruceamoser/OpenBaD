@@ -69,6 +69,33 @@ async def dispatch_tool_call(name: str, arguments: dict[str, Any]) -> str:
 async def _dispatch(name: str, args: dict[str, Any]) -> str:
     """Route to the correct adapter."""
 
+    if name == "find_files":
+        from openbad.toolbelt.fs_tool import find_files
+        from openbad.toolbelt.access_control import create_access_request
+
+        try:
+            return find_files(
+                str(args.get("pattern") or ""),
+                cwd=str(args.get("cwd") or "."),
+                limit=int(args.get("limit", 50)),
+            )
+        except PermissionError as exc:
+            requested_cwd = str(args.get("cwd") or ".")
+            detail = str(exc)
+            if "outside allowed roots" in detail:
+                record = create_access_request(
+                    requested_cwd,
+                    requester="tool:find_files",
+                    reason=f"find_files requested cwd access for pattern {args.get('pattern', '')}",
+                    prefer_parent=False,
+                )
+                return _format_access_request_with_record(
+                    f"search root {requested_cwd!r}",
+                    detail,
+                    record,
+                )
+            return f"Error executing find_files: PermissionError: {detail}"
+
     if name == "read_file":
         from openbad.toolbelt.fs_tool import read_file
         from openbad.toolbelt.access_control import create_access_request

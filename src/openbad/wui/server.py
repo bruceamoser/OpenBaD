@@ -1904,7 +1904,7 @@ async def _put_senses(request: web.Request) -> web.Response:
 
 def _serialize_toolbelt(registry) -> dict:
     """Serialize ToolRegistry state for JSON response."""
-    from openbad.toolbelt.schemas import TOOL_SCHEMAS  # noqa: PLC0415
+    from openbad.skills.server import get_openai_tools  # noqa: PLC0415
 
     belt_names: dict[str, str | None] = {}
     for role, tool in registry.get_belt().items():
@@ -1938,7 +1938,7 @@ def _serialize_toolbelt(registry) -> dict:
             "name": schema["function"]["name"],
             "description": schema["function"]["description"],
         }
-        for schema in TOOL_SCHEMAS
+        for schema in get_openai_tools()
     ]
 
     return {
@@ -3137,6 +3137,7 @@ _CAPABILITIES_CATALOG = [
         "module": "openbad.toolbelt.fs_tool",
         "description": "Read and write files within permitted paths, governed by immune-system path rules and disk I/O interoception.",
         "tools": [
+            {"name": "find_files", "signature": "find_files(pattern: str, cwd: str | None = None, limit: int = 50) -> list[str]", "description": "Locate files under a permitted directory using a glob or substring pattern before reading them."},
             {"name": "read_file", "signature": "read_file(path: str) -> str", "description": "Read a file and return its contents as text."},
             {"name": "write_file", "signature": "write_file(path: str, content: str) -> None", "description": "Write content to a file. Blocked for restricted paths (/etc/, ~/.ssh/, system binaries)."},
         ],

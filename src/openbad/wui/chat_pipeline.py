@@ -33,8 +33,8 @@ from openbad.cognitive.context_manager import (
 from openbad.cognitive.providers.base import ProviderAdapter
 from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
 from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter
-from openbad.toolbelt.dispatch import dispatch_tool_call
-from openbad.toolbelt.schemas import TOOL_SCHEMAS
+from openbad.skills import call_skill
+from openbad.skills.server import async_get_openai_tools
 from openbad.identity.onboarding import (
     INTERVIEW_SYSTEM_PROMPT,
     USER_INTERVIEW_SYSTEM_PROMPT,
@@ -159,6 +159,7 @@ def _build_tooling_prompt(modulation: Any | None) -> str:
         "You have tool access through the toolbelt. When the answer depends on filesystem state, terminal output, logs, tasks, research nodes, or external content, call tools instead of narrating what you would do.",
         "Do not ask the user for permission before reversible reads, searches, diagnostics, or other already-allowed inspection steps.",
         "Use ask_user(question) only when blocked on missing business context, explicit approval, or destructive or irreversible actions.",
+        "If the user mentions a filename or spec and the exact path is not verified, use find_files before read_file. Search the current workspace first, and never invent directories, absolute paths, or a guessed cwd.",
         "If a tool returns [access_request], the system already created the path access request automatically. Tell the user to approve it in Toolbelt -> Path Access Requests, then continue with any non-blocked next steps.",
         "Never fabricate tool output, file paths, or observed system state.",
     ]
@@ -1254,7 +1255,7 @@ async def _agentic_stream(
     """
     import asyncio as _asyncio
 
-    tools = TOOL_SCHEMAS
+    tools = await async_get_openai_tools()
     total_tokens = 0
     access_notices: list[str] = []
     # Work on a mutable copy so tool messages accumulate across iterations.
@@ -1323,7 +1324,7 @@ async def _agentic_stream(
 
             try:
                 result = await _asyncio.wait_for(
-                    dispatch_tool_call(fn_name, fn_args),
+                    call_skill(fn_name, fn_args),
                     timeout=_TOOL_CALL_TIMEOUT_S,
                 )
             except TimeoutError:

@@ -46,6 +46,25 @@ def _tool(
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     _tool(
+        "find_files",
+        "Find files under a directory using a glob or substring pattern.",
+        {
+            "pattern": {
+                "type": "string",
+                "description": "Glob-like pattern or plain substring to search for.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Directory to search within. Defaults to the current working directory. Omit this unless the directory was explicitly provided by the user or a prior tool result.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of matches to return (default: 50).",
+            },
+        },
+        ["pattern"],
+    ),
+    _tool(
         "read_file",
         "Read the contents of a file. Return the text content.",
         {

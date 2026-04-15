@@ -56,7 +56,7 @@ async def test_run_tool_agent_uses_agentic_tools() -> None:
         ]
     )
 
-    with patch("openbad.toolbelt.dispatch.dispatch_tool_call", new_callable=AsyncMock) as dispatch:
+    with patch("openbad.autonomy.tool_agent.call_skill", new_callable=AsyncMock) as dispatch:
         dispatch.return_value = '{"task_id": "task-123"}'
         result = await run_tool_agent(
             adapter,
@@ -93,7 +93,7 @@ async def test_run_tool_agent_marks_missing_creation_as_unverified() -> None:
         ]
     )
 
-    with patch("openbad.toolbelt.dispatch.dispatch_tool_call", new_callable=AsyncMock) as dispatch:
+    with patch("openbad.autonomy.tool_agent.call_skill", new_callable=AsyncMock) as dispatch:
         dispatch.return_value = "{}"
         result = await run_tool_agent(
             adapter,
@@ -125,7 +125,7 @@ async def test_run_tool_agent_blocks_tool_call_via_validator() -> None:
         ]
     )
 
-    with patch("openbad.toolbelt.dispatch.dispatch_tool_call", new_callable=AsyncMock) as dispatch:
+    with patch("openbad.autonomy.tool_agent.call_skill", new_callable=AsyncMock) as dispatch:
         result = await run_tool_agent(
             adapter,
             "test-model",
