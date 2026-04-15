@@ -77,7 +77,7 @@ def _fmt_access_with_record(target: str, detail: str, record: dict[str, Any] | N
 @skill_server.tool()
 def find_files(
     pattern: str,
-    cwd: str = ".",
+    cwd: str = "/",
     limit: int = 50,
 ) -> str:
     """Find files under a directory using a glob or substring pattern.
@@ -87,9 +87,9 @@ def find_files(
 
     Args:
         pattern: Glob-like pattern or plain substring to search for.
-        cwd: Directory to search within.  Defaults to the current working
-             directory.  Omit unless the directory was explicitly provided
-             by the user or a prior tool result.
+        cwd: Directory to search within.  Defaults to "/" so the entire
+             filesystem is searched.  Narrow the search by providing a
+             specific directory.
         limit: Maximum number of matches to return (default 50).
     """
     from openbad.skills.fs_tool import find_files as _find

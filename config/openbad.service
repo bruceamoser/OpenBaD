@@ -22,7 +22,7 @@ WorkingDirectory=/var/lib/openbad
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=read-only
 ReadWritePaths=/var/lib/openbad /var/log/openbad
 PrivateTmp=true
 ProtectKernelTunables=true

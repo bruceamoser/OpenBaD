@@ -195,7 +195,7 @@ def read_file(
 def find_files(
     pattern: str,
     *,
-    cwd: str = ".",
+    cwd: str = "/",
     limit: int = 50,
 ) -> str:
     """Find files under *cwd* matching *pattern* and return JSON paths.
@@ -209,7 +209,8 @@ def find_files(
     pattern:
         Glob-like pattern or plain substring to search for.
     cwd:
-        Root directory to search within.
+        Root directory to search within.  Defaults to "/" so the entire
+        filesystem is searched when no directory is specified.
     limit:
         Maximum number of matches to return.
     """
