@@ -294,12 +294,25 @@ ensure_home_traversable() {
     if [[ -z "$owner_home" ]] || [[ ! -d "$owner_home" ]]; then
         return
     fi
-    # Add o+x so the openbad user can traverse (but not list) the directory
-    local perms
-    perms="$(stat -c '%a' "$owner_home")"
-    if (( (perms & 1) == 0 )); then
-        info "Adding traverse (o+x) permission on $owner_home for $OPENBAD_USER..."
-        chmod o+x "$owner_home"
+
+    # Grant the openbad user read+execute via POSIX ACL so that:
+    #   - x (execute): allows traversing to known paths inside the home dir
+    #   - r (read):    allows listing directory contents (needed by find_files)
+    # Using an ACL targets only the openbad user — not all users on the system.
+    if command -v setfacl &>/dev/null; then
+        if ! getfacl -p "$owner_home" 2>/dev/null | grep -q "^user:${OPENBAD_USER}:r.x"; then
+            info "Granting $OPENBAD_USER read+traverse ACL on $owner_home..."
+            setfacl -m "u:${OPENBAD_USER}:rx" "$owner_home"
+        fi
+    else
+        # Fallback: plain chmod o+x (traverse only, find_files from / won't
+        # discover files but stat-based access still works).
+        local perms
+        perms="$(stat -c '%a' "$owner_home")"
+        if (( (perms & 1) == 0 )); then
+            info "Adding traverse (o+x) permission on $owner_home for $OPENBAD_USER..."
+            chmod o+x "$owner_home"
+        fi
     fi
 }
 
