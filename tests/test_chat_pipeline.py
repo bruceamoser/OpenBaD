@@ -198,6 +198,18 @@ def test_assemble_context_uses_semantic_retrieval_from_prior_sessions():
     assert "Friday rollout" in context.supporting_context
 
 
+def test_assemble_context_includes_access_approval_guidance():
+    context = chat_pipeline.assemble_context(
+        "session-current",
+        "Find a spec file outside the current root",
+        chat_pipeline.CognitiveSystem.CHAT,
+        "test-model",
+    )
+
+    assert "Toolbelt -> Path Access Requests" in context.system_prompt
+    assert "already created the path access request automatically" in context.system_prompt
+
+
 @pytest.mark.asyncio
 async def test_stream_chat_records_usage_to_tracker(tmp_path):
     adapter = _CapturingAdapter(["a", "b", "c"])
@@ -400,3 +412,62 @@ async def test_stream_chat_applies_behavior_feedback_before_prompting():
     prompt = adapter.prompts[0]
     assert "perform the tool calls immediately" in prompt
     assert "Proactivity is high" in prompt or "Tool autonomy is high" in prompt
+
+
+@pytest.mark.asyncio
+async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
+    class _AgenticAdapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def agentic_complete(self, messages, model_id, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                tool_call = SimpleNamespace(
+                    id="tool-1",
+                    function=SimpleNamespace(
+                        name="read_file",
+                        arguments='{"path": "/home/bruceamoser/11-OpenBaD Library System Upgrade Spec.md"}',
+                    ),
+                )
+                message = SimpleNamespace(
+                    content="",
+                    tool_calls=[tool_call],
+                    model_dump=lambda exclude_none=True: {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [tool_call],
+                    },
+                )
+            else:
+                message = SimpleNamespace(content="I can continue after approval.", tool_calls=[])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                usage=SimpleNamespace(total_tokens=7),
+            )
+
+    async def _fake_dispatch(name, args):
+        return (
+            "[access_request] Access to path '/home/bruceamoser/11-OpenBaD Library System Upgrade Spec.md' "
+            "is not currently permitted. outside allowed roots\n"
+            "Pending request: req-123 for root /home/bruceamoser.\n"
+            "That request is already created. Tell the user to approve it in Toolbelt -> Path Access Requests, then retry."
+        )
+
+    monkeypatch.setattr(chat_pipeline, "dispatch_tool_call", _fake_dispatch)
+
+    chunks = [
+        chunk
+        async for chunk in chat_pipeline._agentic_stream(
+            _AgenticAdapter(),
+            "test-model",
+            [{"role": "system", "content": "test"}, {"role": "user", "content": "find the file"}],
+            "req-1",
+        )
+    ]
+
+    text = "".join(chunk.token for chunk in chunks if chunk.token)
+    reasoning = "".join(chunk.reasoning for chunk in chunks if chunk.reasoning)
+    assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" in text
+    assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" in reasoning
+

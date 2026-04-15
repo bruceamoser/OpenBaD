@@ -28,7 +28,7 @@ def _truncate(text: str) -> str:
 def _format_access_request(target: str, detail: str) -> str:
     return (
         f"{_ACCESS_REQUEST_PREFIX} Access to {target} is not currently permitted. {detail}\n"
-        "Ask the user whether to grant access to that path/root before trying again."
+        "A path access request must be approved in the Toolbelt UI under Path Access Requests before retrying."
     )
 
 
@@ -42,7 +42,7 @@ def _format_access_request_with_record(target: str, detail: str, record: dict[st
         return (
             f"{_ACCESS_REQUEST_PREFIX} Access to {target} is not currently permitted. {detail}\n"
             f"Pending request: {request_id or 'unknown'} for root {root or 'unknown'}.\n"
-            "Ask the user to approve that request in the Toolbelt UI before retrying."
+            "That request is already created. Tell the user to approve it in Toolbelt -> Path Access Requests, then retry."
         )
     grant = record.get("grant") if isinstance(record.get("grant"), dict) else {}
     if grant:

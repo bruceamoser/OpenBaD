@@ -159,6 +159,7 @@ def _build_tooling_prompt(modulation: Any | None) -> str:
         "You have tool access through the toolbelt. When the answer depends on filesystem state, terminal output, logs, tasks, research nodes, or external content, call tools instead of narrating what you would do.",
         "Do not ask the user for permission before reversible reads, searches, diagnostics, or other already-allowed inspection steps.",
         "Use ask_user(question) only when blocked on missing business context, explicit approval, or destructive or irreversible actions.",
+        "If a tool returns [access_request], the system already created the path access request automatically. Tell the user to approve it in Toolbelt -> Path Access Requests, then continue with any non-blocked next steps.",
         "Never fabricate tool output, file paths, or observed system state.",
     ]
 
@@ -247,6 +248,25 @@ def _apply_behavior_feedback(
     updated_modulation = personality_modulator.update(updated_assistant)
     log.info("Applied behavior feedback adjustments: %s", reasons)
     return updated_assistant, updated_modulation, reasons
+
+
+def _extract_access_notice(result: str) -> str | None:
+    if not result.startswith("[access_request]"):
+        return None
+
+    request_match = re.search(r"Pending request:\s*([^\s]+)\s+for root\s+(.+?)\.", result)
+    if request_match:
+        request_id = request_match.group(1).strip()
+        root = request_match.group(2).strip()
+        return (
+            "Path access approval is required before I can continue that file or terminal step. "
+            f"Approve request {request_id} for {root} in Toolbelt -> Path Access Requests, then ask me to retry."
+        )
+
+    return (
+        "Path access approval is required before I can continue that file or terminal step. "
+        "Approve the pending request in Toolbelt -> Path Access Requests, then ask me to retry."
+    )
 
 
 # ── Data types ────────────────────────────────────────────────────── #
@@ -1236,6 +1256,7 @@ async def _agentic_stream(
 
     tools = TOOL_SCHEMAS
     total_tokens = 0
+    access_notices: list[str] = []
     # Work on a mutable copy so tool messages accumulate across iterations.
     working_messages = list(messages)
 
@@ -1264,6 +1285,9 @@ async def _agentic_stream(
         if not tool_calls:
             # Final answer — yield content as streamed chunks.
             content = assistant_msg.content or ""
+            if access_notices:
+                notice_block = "\n\n".join(dict.fromkeys(access_notices))
+                content = f"{notice_block}\n\n{content}".strip()
             # Yield in segments for real-time display.
             chunk_size = 40
             for i in range(0, max(len(content), 1), chunk_size):
@@ -1306,6 +1330,11 @@ async def _agentic_stream(
                 result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
                 log.warning("Tool timeout request=%s tool=%s", request_id, fn_name)
 
+            access_notice = _extract_access_notice(result)
+            if access_notice:
+                access_notices.append(access_notice)
+                yield StreamChunk(reasoning=access_notice, tokens_used=total_tokens)
+
             working_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -1329,6 +1358,9 @@ async def _agentic_stream(
     total_tokens += usage.total_tokens if usage else 0
     choice = response.choices[0] if response.choices else None
     content = (choice.message.content or "") if choice else ""
+    if access_notices:
+        notice_block = "\n\n".join(dict.fromkeys(access_notices))
+        content = f"{notice_block}\n\n{content}".strip()
     if content:
         yield StreamChunk(token=content, tokens_used=total_tokens)
 

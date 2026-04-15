@@ -127,6 +127,7 @@ class TestToolDispatch:
             result = await dispatch_tool_call("exec_command", {"command": "find . -name spec.md", "cwd": "/home/bruceamoser"})
         assert "[access_request]" in result
         assert "/home/bruceamoser" in result
+        assert "Toolbelt -> Path Access Requests" in result
 
 
 # ── LiteLLM Adapter ───────────────────────────────────────────────── #

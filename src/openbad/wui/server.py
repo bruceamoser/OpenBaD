@@ -2087,6 +2087,28 @@ async def _post_toolbelt_access_approve(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def _post_toolbelt_access_deny(request: web.Request) -> web.Response:
+    from openbad.toolbelt.access_control import deny_access_request
+
+    request_id = request.match_info["request_id"]
+    payload = await request.json() if request.can_read_body else {}
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="request body must be an object")
+    denied_by = str(payload.get("denied_by", "user")).strip() or "user"
+    reason = str(payload.get("reason", "")).strip()
+    try:
+        result = deny_access_request(
+            request_id,
+            denied_by=denied_by,
+            reason=reason,
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    return web.json_response({"request": result})
+
+
 async def _delete_toolbelt_access_grant(request: web.Request) -> web.Response:
     from openbad.toolbelt.access_control import revoke_access_grant
 
@@ -3374,6 +3396,7 @@ def create_app(
     app.router.add_delete("/api/toolbelt/{role}", _delete_toolbelt_role)
     app.router.add_get("/api/toolbelt/access", _get_toolbelt_access)
     app.router.add_post("/api/toolbelt/access/requests/{request_id}/approve", _post_toolbelt_access_approve)
+    app.router.add_post("/api/toolbelt/access/requests/{request_id}/deny", _post_toolbelt_access_deny)
     app.router.add_delete("/api/toolbelt/access/grants/{grant_id}", _delete_toolbelt_access_grant)
     app.router.add_get("/api/toolbelt/terminal", _get_toolbelt_terminal)
     app.router.add_post("/api/toolbelt/terminal", _post_toolbelt_terminal)

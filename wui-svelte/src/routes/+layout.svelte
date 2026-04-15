@@ -31,6 +31,15 @@
   let appVersion = $state('0.1.0');
   function toggleSidebar(): void { sidebarOpen = !sidebarOpen; }
 
+  type AccessRequest = {
+    request_id: string;
+    requested_path: string;
+    normalized_root: string;
+    requester: string;
+    reason: string;
+    created_at: number;
+  };
+
   let pathname = $derived($page.url.pathname);
   function isActive(href: string): boolean {
     if (href === '/') return pathname === '/';
@@ -39,6 +48,11 @@
 
   let wsStatusVal = $derived($wsStatus);
   let fsmVal = $derived($fsmState?.current_state?.toUpperCase() ?? 'IDLE');
+  let pendingAccessRequests = $state<AccessRequest[]>([]);
+  let accessModalOpen = $state(false);
+  let accessDecisionBusy = $state(false);
+  let accessStatusMsg = $state('');
+  let accessPollHandle: ReturnType<typeof setInterval> | null = null;
 
   function statusColor(s: string): string {
     if (s === 'connected') return 'var(--green)';
@@ -87,6 +101,54 @@
     } catch { }
   }
 
+  async function loadPendingAccessRequests(): Promise<void> {
+    try {
+      const data = await apiGet<{ pending_requests: AccessRequest[] }>('/api/toolbelt/access');
+      pendingAccessRequests = data.pending_requests ?? [];
+      if (pendingAccessRequests.length > 0) {
+        accessModalOpen = true;
+      } else if (!accessDecisionBusy) {
+        accessModalOpen = false;
+        accessStatusMsg = '';
+      }
+    } catch {
+      // keep the current modal state if the fetch fails
+    }
+  }
+
+  function fmtAccessTime(ts: number): string {
+    const date = new Date(ts * 1000);
+    return Number.isNaN(date.getTime()) ? String(ts) : date.toLocaleString();
+  }
+
+  async function approvePathRequest(requestId: string): Promise<void> {
+    accessDecisionBusy = true;
+    accessStatusMsg = '';
+    try {
+      await apiPost(`/api/toolbelt/access/requests/${requestId}/approve`, { approved_by: 'user' });
+      accessStatusMsg = 'Path access approved.';
+      await loadPendingAccessRequests();
+    } catch (e) {
+      accessStatusMsg = `Approve failed: ${e}`;
+    } finally {
+      accessDecisionBusy = false;
+    }
+  }
+
+  async function denyPathRequest(requestId: string): Promise<void> {
+    accessDecisionBusy = true;
+    accessStatusMsg = '';
+    try {
+      await apiPost(`/api/toolbelt/access/requests/${requestId}/deny`, { denied_by: 'user', reason: 'User denied access' });
+      accessStatusMsg = 'Path access denied.';
+      await loadPendingAccessRequests();
+    } catch (e) {
+      accessStatusMsg = `Deny failed: ${e}`;
+    } finally {
+      accessDecisionBusy = false;
+    }
+  }
+
   async function finishWizard(): Promise<void> {
     try {
       await apiPost('/api/setup', {
@@ -106,9 +168,19 @@
     connect();
     checkOnboarding();
     loadVersion();
+    loadPendingAccessRequests();
+    accessPollHandle = setInterval(() => {
+      void loadPendingAccessRequests();
+    }, 3000);
   });
 
-  onDestroy(() => { disconnect(); });
+  onDestroy(() => {
+    if (accessPollHandle) {
+      clearInterval(accessPollHandle);
+      accessPollHandle = null;
+    }
+    disconnect();
+  });
 </script>
 
 <!-- First-run wizard overlay -->
@@ -176,6 +248,40 @@
         </button>
         <button class="ghost skip-btn" onclick={skipWizard}>Skip setup</button>
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if accessModalOpen && pendingAccessRequests.length > 0}
+  <div class="access-modal-backdrop" role="presentation"></div>
+  <div class="access-modal" role="dialog" aria-modal="true" aria-labelledby="access-modal-title">
+    <div class="access-modal-card">
+      <div class="access-modal-header">
+        <h2 id="access-modal-title">System Access Approval Required</h2>
+        <p>
+          OpenBaD needs permission to access a filesystem path outside the current allowed roots.
+          This is a system-level approval, not a chat clarification.
+        </p>
+      </div>
+      <div class="access-modal-list">
+        {#each pendingAccessRequests as req}
+          <div class="access-modal-item">
+            <div class="access-modal-path">{req.normalized_root}</div>
+            <div class="access-modal-meta">requested path: {req.requested_path}</div>
+            <div class="access-modal-meta">requested by: {req.requester} · {fmtAccessTime(req.created_at)}</div>
+            {#if req.reason}
+              <div class="access-modal-reason">reason: {req.reason}</div>
+            {/if}
+            <div class="access-modal-actions">
+              <button class="secondary" onclick={() => approvePathRequest(req.request_id)} disabled={accessDecisionBusy}>Approve</button>
+              <button class="ghost" onclick={() => denyPathRequest(req.request_id)} disabled={accessDecisionBusy}>Deny</button>
+            </div>
+          </div>
+        {/each}
+      </div>
+      {#if accessStatusMsg}
+        <div class="access-modal-status">{accessStatusMsg}</div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -249,6 +355,83 @@
     width: 100vw;
     overflow: hidden;
     transition: grid-template-columns 0.25s var(--ease);
+  }
+
+  .access-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgb(10 12 16 / 0.7);
+    backdrop-filter: blur(4px);
+    z-index: 70;
+  }
+
+  .access-modal {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    z-index: 71;
+  }
+
+  .access-modal-card {
+    width: min(42rem, calc(100vw - 2rem));
+    max-height: calc(100vh - 3rem);
+    overflow: auto;
+    background: var(--bg-surface0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 24px 80px rgb(0 0 0 / 0.35);
+    padding: 1.25rem;
+  }
+
+  .access-modal-header h2 {
+    margin: 0 0 0.35rem;
+  }
+
+  .access-modal-header p {
+    margin: 0;
+    color: var(--text-dim);
+  }
+
+  .access-modal-list {
+    display: grid;
+    gap: 0.9rem;
+    margin-top: 1rem;
+  }
+
+  .access-modal-item {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface1);
+    padding: 0.9rem;
+  }
+
+  .access-modal-path {
+    font-weight: 700;
+    word-break: break-word;
+  }
+
+  .access-modal-meta,
+  .access-modal-reason {
+    margin-top: 0.35rem;
+    color: var(--text-dim);
+    font-size: 0.92rem;
+    word-break: break-word;
+  }
+
+  .access-modal-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.85rem;
+  }
+
+  .access-modal-status {
+    margin-top: 1rem;
+    padding: 0.75rem 0.85rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface1);
+    color: var(--text-sub);
   }
   .app-shell.sidebar-collapsed {
     grid-template-columns: 0 1fr;

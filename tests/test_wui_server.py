@@ -1307,6 +1307,37 @@ async def test_toolbelt_access_endpoints(aiohttp_client, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_toolbelt_access_deny_endpoint(aiohttp_client, tmp_path, monkeypatch):
+    _configure_toolbelt_state(monkeypatch, tmp_path / "state.db")
+
+    from openbad.toolbelt.access_control import create_access_request
+
+    requested_dir = tmp_path / "denied-request"
+    requested_dir.mkdir()
+    record = create_access_request(
+        str(requested_dir),
+        requester="test-suite",
+        reason="Need access for inspection",
+    )
+
+    app = create_app(enable_mqtt=False)
+    client = await aiohttp_client(app)
+
+    deny_resp = await client.post(
+        f"/api/toolbelt/access/requests/{record['request']['request_id']}/deny",
+        json={"denied_by": "tester", "reason": "Declined"},
+    )
+    assert deny_resp.status == 200
+    deny_data = await deny_resp.json()
+    assert deny_data["request"]["status"] == "denied"
+    assert deny_data["request"]["decided_by"] == "tester"
+
+    access_resp = await client.get("/api/toolbelt/access")
+    access_data = await access_resp.json()
+    assert access_data["pending_requests"] == []
+
+
+@pytest.mark.asyncio
 async def test_toolbelt_terminal_endpoints(aiohttp_client, tmp_path, monkeypatch):
     _configure_toolbelt_state(monkeypatch, tmp_path / "state.db")
 
