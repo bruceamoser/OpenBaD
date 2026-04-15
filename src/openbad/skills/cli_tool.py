@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openbad.immune_system.rules_engine import DestructiveCommandRule
-from openbad.toolbelt.access_control import effective_allowed_roots
+from openbad.skills.access_control import effective_allowed_roots
 
 logger = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from openbad.state.db import initialize_state_db
-from openbad.toolbelt.access_control import approve_access_request, create_access_request
-from openbad.toolbelt.terminal_sessions import TerminalSessionManager
+from openbad.skills.access_control import approve_access_request, create_access_request
+from openbad.skills.terminal_sessions import TerminalSessionManager
 
 
 @pytest.mark.parametrize("command", ["pwd", "echo terminal-test"])

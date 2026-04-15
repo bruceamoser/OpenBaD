@@ -10,7 +10,7 @@ from openbad.identity.permissions import (
     PermissionClassifier,
 )
 from openbad.proprioception.registry import ToolRegistry, ToolRole
-from openbad.toolbelt.media_tool import (
+from openbad.skills.media_tool import (
     CaptureResult,
     MediaConfig,
     MediaToolAdapter,

@@ -82,6 +82,9 @@ def find_files(
 ) -> str:
     """Find files under a directory using a glob or substring pattern.
 
+    This tool can search anywhere on the filesystem. No permission is needed
+    to find files — permission is only required to read or write them.
+
     Args:
         pattern: Glob-like pattern or plain substring to search for.
         cwd: Directory to search within.  Defaults to the current working
@@ -89,21 +92,9 @@ def find_files(
              by the user or a prior tool result.
         limit: Maximum number of matches to return (default 50).
     """
-    from openbad.toolbelt.fs_tool import find_files as _find
-    from openbad.toolbelt.access_control import create_access_request
+    from openbad.skills.fs_tool import find_files as _find
 
-    try:
-        return _find(pattern, cwd=cwd, limit=limit)
-    except PermissionError as exc:
-        detail = str(exc)
-        if "outside allowed roots" in detail:
-            record = create_access_request(
-                cwd, requester="skill:find_files",
-                reason=f"find_files requested cwd access for pattern {pattern}",
-                prefer_parent=False,
-            )
-            return _fmt_access_with_record(f"search root {cwd!r}", detail, record)
-        return f"Error: PermissionError: {detail}"
+    return _find(pattern, cwd=cwd, limit=limit)
 
 
 @skill_server.tool()
@@ -113,8 +104,8 @@ def read_file(path: str) -> str:
     Args:
         path: Absolute or relative path to the file.
     """
-    from openbad.toolbelt.fs_tool import read_file as _read
-    from openbad.toolbelt.access_control import create_access_request
+    from openbad.skills.fs_tool import read_file as _read
+    from openbad.skills.access_control import create_access_request
 
     try:
         return _read(path)
@@ -138,8 +129,8 @@ def write_file(path: str, content: str) -> str:
         path: Absolute or relative path to the file.
         content: Content to write to the file.
     """
-    from openbad.toolbelt.fs_tool import write_file as _write
-    from openbad.toolbelt.access_control import create_access_request
+    from openbad.skills.fs_tool import write_file as _write
+    from openbad.skills.access_control import create_access_request
 
     try:
         _write(path, content)
@@ -172,8 +163,8 @@ async def exec_command(
         args: Optional list of arguments.
         cwd: Optional working directory.
     """
-    from openbad.toolbelt.access_control import create_access_request
-    from openbad.toolbelt.cli_tool import CliToolAdapter
+    from openbad.skills.access_control import create_access_request
+    from openbad.skills.cli_tool import CliToolAdapter
 
     cli = CliToolAdapter()
     result = await cli.async_execute(command, args=args, cwd=cwd)
@@ -202,7 +193,7 @@ async def exec_command(
 @skill_server.tool()
 def get_path_access_status() -> str:
     """Return current approved path roots and pending access requests for tool usage."""
-    from openbad.toolbelt.access_control import list_access_grants, list_access_requests
+    from openbad.skills.access_control import list_access_grants, list_access_requests
 
     return json.dumps(
         {"pending_requests": list_access_requests(status="pending"),
@@ -217,7 +208,7 @@ def get_path_access_status() -> str:
 @skill_server.tool()
 def list_terminal_sessions() -> str:
     """List currently active PTY-backed terminal sessions."""
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     return json.dumps(get_terminal_session_manager().list_sessions(), indent=2, default=str)
 
@@ -235,8 +226,8 @@ def create_terminal_session(
         shell: Shell executable to launch (default /bin/bash).
         requester: Requester identity, such as session or subsystem name.
     """
-    from openbad.toolbelt.access_control import create_access_request
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.access_control import create_access_request
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     try:
         session = get_terminal_session_manager().create_session(
@@ -265,7 +256,7 @@ def send_terminal_input(
         input: Text to send to the terminal.
         append_newline: Whether to append a newline after the input (default true).
     """
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     result = get_terminal_session_manager().send_input(
         session_id, input, append_newline=append_newline,
@@ -284,7 +275,7 @@ def read_terminal_output(
         session_id: Terminal session identifier.
         max_bytes: Maximum bytes of terminal output to return (default 8192).
     """
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     result = get_terminal_session_manager().read_output(session_id, max_bytes=max_bytes)
     return json.dumps(result, indent=2, default=str)
@@ -301,7 +292,7 @@ def close_terminal_session(
         session_id: Terminal session identifier.
         reason: Reason for closing the session.
     """
-    from openbad.toolbelt.terminal_sessions import get_terminal_session_manager
+    from openbad.skills.terminal_sessions import get_terminal_session_manager
 
     result = get_terminal_session_manager().close_session(session_id, reason=reason)
     return json.dumps(result, indent=2, default=str)
@@ -317,7 +308,7 @@ def web_search(query: str) -> str:
     Args:
         query: The search query.
     """
-    from openbad.toolbelt.web_search import WebSearchToolAdapter
+    from openbad.skills.web_search import WebSearchToolAdapter
 
     adapter = WebSearchToolAdapter()
     results = adapter.search(query)
@@ -334,7 +325,7 @@ def web_fetch(url: str) -> str:
     Args:
         url: The URL to fetch.
     """
-    from openbad.toolbelt.web_search import web_fetch as _fetch
+    from openbad.skills.web_search import web_fetch as _fetch
 
     return _fetch(url)
 
@@ -365,7 +356,7 @@ async def get_mqtt_records(limit: int = 100) -> str:
     Args:
         limit: Maximum number of records to return (default 100).
     """
-    from openbad.toolbelt.mqtt_records_tool import MqttRecordsToolAdapter
+    from openbad.skills.mqtt_records_tool import MqttRecordsToolAdapter
 
     adapter = MqttRecordsToolAdapter()
     records = await asyncio.to_thread(adapter.get_mqtt_records, limit=limit)
@@ -380,7 +371,7 @@ async def get_system_logs(limit: int = 200, system: str = "") -> str:
         limit: Maximum number of log lines (default 200).
         system: Optional source module filter (e.g. 'wui', 'endocrine').
     """
-    from openbad.toolbelt.event_log_tool import EventLogToolAdapter
+    from openbad.skills.event_log_tool import EventLogToolAdapter
 
     adapter = EventLogToolAdapter()
     events = await asyncio.to_thread(adapter.read_events, limit=limit, source=system)
@@ -402,7 +393,7 @@ async def read_events(
         source: Filter by event source.
         search: Text search within event messages.
     """
-    from openbad.toolbelt.event_log_tool import EventLogToolAdapter
+    from openbad.skills.event_log_tool import EventLogToolAdapter
 
     adapter = EventLogToolAdapter()
     events = await asyncio.to_thread(
@@ -424,7 +415,7 @@ async def write_event(
         level: Log level (default 'INFO').  One of DEBUG, INFO, WARNING, ERROR, CRITICAL.
         source: Event source identifier (default 'system').
     """
-    from openbad.toolbelt.event_log_tool import EventLogToolAdapter
+    from openbad.skills.event_log_tool import EventLogToolAdapter
 
     adapter = EventLogToolAdapter()
     ok = await asyncio.to_thread(adapter.write_event, message=message, level=level, source=source)
@@ -434,7 +425,7 @@ async def write_event(
 @skill_server.tool()
 async def get_endocrine_status() -> str:
     """Get the current endocrine system hormone levels (cortisol, dopamine, serotonin, etc.)."""
-    from openbad.toolbelt.endocrine_status_tool import EndocrineStatusToolAdapter
+    from openbad.skills.endocrine_status_tool import EndocrineStatusToolAdapter
 
     adapter = EndocrineStatusToolAdapter()
     status = await asyncio.to_thread(adapter.get_endocrine_status)
@@ -454,7 +445,7 @@ async def call_doctor(
         source: Requester identity, such as session or subsystem name.
         context: Optional structured context payload for the doctor.
     """
-    from openbad.toolbelt.doctor_tool import DoctorToolAdapter
+    from openbad.skills.doctor_tool import DoctorToolAdapter
 
     adapter = DoctorToolAdapter()
     result = await asyncio.to_thread(adapter.call_doctor, reason, source=source, context=context)
@@ -467,7 +458,7 @@ async def call_doctor(
 @skill_server.tool()
 async def get_tasks() -> str:
     """Retrieve the current task list from the task manager."""
-    from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+    from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
     tasks = await asyncio.to_thread(adapter.get_tasks)
@@ -487,7 +478,7 @@ async def create_task(
         description: Optional task description.
         owner: Task owner ('user' or 'agent', default 'user').
     """
-    from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+    from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.create_task, title=title, description=description, owner=owner)
@@ -509,7 +500,7 @@ async def update_task(
         description: Optional updated description.
         owner: Optional updated owner.
     """
-    from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+    from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
     result = await asyncio.to_thread(
@@ -525,7 +516,7 @@ async def complete_task(task_id: str) -> str:
     Args:
         task_id: The task ID to complete.
     """
-    from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+    from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.complete_task, task_id)
@@ -543,7 +534,7 @@ async def work_on_next_task(
         source: Requester identity, such as session or subsystem name.
         reason: Why the next task should be processed now.
     """
-    from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+    from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.work_on_next_task, source=source, reason=reason)
@@ -563,7 +554,7 @@ async def work_on_task(
         source: Requester identity, such as session or subsystem name.
         reason: Why this specific task should be processed now.
     """
-    from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+    from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.work_on_task, task_id, source=source, reason=reason)
@@ -576,7 +567,7 @@ async def work_on_task(
 @skill_server.tool()
 async def get_research_nodes() -> str:
     """List current research queue nodes."""
-    from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+    from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
     adapter = ResearchDiagnosticsToolAdapter()
     nodes = await asyncio.to_thread(adapter.get_research_nodes)
@@ -596,7 +587,7 @@ async def create_research_node(
         description: Optional description of the research question.
         priority: Priority (0 is normal, higher is more urgent).
     """
-    from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+    from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
     adapter = ResearchDiagnosticsToolAdapter()
     result = await asyncio.to_thread(
@@ -622,7 +613,7 @@ async def update_research_node(
         priority: Optional updated priority.
         source_task_id: Optional related task ID.
     """
-    from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+    from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
     adapter = ResearchDiagnosticsToolAdapter()
     result = await asyncio.to_thread(
@@ -640,7 +631,7 @@ async def complete_research_node(node_id: str) -> str:
     Args:
         node_id: The research node ID to complete.
     """
-    from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+    from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
     adapter = ResearchDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.complete_research_node, node_id)
@@ -658,7 +649,7 @@ async def work_on_next_research(
         source: Requester identity, such as session or subsystem name.
         reason: Why the next research item should be processed now.
     """
-    from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+    from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
     adapter = ResearchDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.work_on_next_research, source=source, reason=reason)
@@ -678,7 +669,7 @@ async def work_on_research(
         source: Requester identity, such as session or subsystem name.
         reason: Why this specific research item should be processed now.
     """
-    from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+    from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
 
     adapter = ResearchDiagnosticsToolAdapter()
     result = await asyncio.to_thread(adapter.work_on_research, node_id, source=source, reason=reason)

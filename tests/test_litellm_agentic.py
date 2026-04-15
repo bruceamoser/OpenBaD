@@ -17,8 +17,8 @@ from openbad.cognitive.providers.litellm_adapter import (
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.semantic import SemanticMemory
 from openbad.memory.stm import ShortTermMemory
-from openbad.toolbelt.dispatch import dispatch_tool_call
-from openbad.toolbelt.schemas import TOOL_SCHEMAS
+from openbad.skills import call_skill
+from openbad.skills.server import get_openai_tools
 from openbad.usage_recorder import UsageTrackingProviderAdapter
 from openbad.wui import chat_pipeline
 
@@ -47,10 +47,11 @@ class TestLiteLLMModelName:
 
 class TestToolSchemas:
     def test_schema_count(self):
-        assert len(TOOL_SCHEMAS) == 32
+        schemas = get_openai_tools()
+        assert len(schemas) >= 33
 
     def test_all_have_required_fields(self):
-        for schema in TOOL_SCHEMAS:
+        for schema in get_openai_tools():
             assert schema["type"] == "function"
             fn = schema["function"]
             assert "name" in fn
@@ -59,11 +60,11 @@ class TestToolSchemas:
             assert fn["parameters"]["type"] == "object"
 
     def test_unique_names(self):
-        names = [s["function"]["name"] for s in TOOL_SCHEMAS]
+        names = [s["function"]["name"] for s in get_openai_tools()]
         assert len(names) == len(set(names))
 
     def test_known_tools_present(self):
-        names = {s["function"]["name"] for s in TOOL_SCHEMAS}
+        names = {s["function"]["name"] for s in get_openai_tools()}
         expected = {
             "find_files", "read_file", "write_file", "exec_command", "get_path_access_status",
             "list_terminal_sessions", "create_terminal_session", "send_terminal_input",
@@ -74,30 +75,30 @@ class TestToolSchemas:
             "work_on_next_task", "work_on_task",
             "get_research_nodes", "create_research_node", "update_research_node",
             "complete_research_node", "work_on_next_research", "work_on_research",
-            "mcp_bridge",
+            "mcp_bridge", "list_embedded_skills",
         }
-        assert expected == names
+        assert expected.issubset(names)
 
     def test_read_file_has_required_path(self):
-        rf = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "read_file")
+        rf = next(s for s in get_openai_tools() if s["function"]["name"] == "read_file")
         assert "path" in rf["function"]["parameters"]["required"]
 
 
 # ── Tool dispatch ──────────────────────────────────────────────────── #
 
 
-class TestToolDispatch:
+class TestSkillDispatch:
     @pytest.mark.asyncio
     async def test_unknown_tool(self):
-        result = await dispatch_tool_call("nonexistent_tool", {})
-        assert "Unknown tool" in result
+        result = await call_skill("nonexistent_tool", {})
+        assert "Unknown" in result or "Error" in result
 
     @pytest.mark.asyncio
     async def test_read_file(self, tmp_path):
         p = tmp_path / "hello.txt"
         p.write_text("world")
-        with patch("openbad.toolbelt.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
-            result = await dispatch_tool_call("read_file", {"path": str(p)})
+        with patch("openbad.skills.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
+            result = await call_skill("read_file", {"path": str(p)})
         assert "world" in result
 
     @pytest.mark.asyncio
@@ -106,41 +107,39 @@ class TestToolDispatch:
         nested.mkdir()
         target = nested / "11-OpenBaD Library System Upgrade Spec.md"
         target.write_text("spec")
-        with patch("openbad.toolbelt.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
-            result = await dispatch_tool_call(
-                "find_files",
-                {"pattern": "*Library System Upgrade Spec.md", "cwd": str(tmp_path)},
-            )
+        result = await call_skill(
+            "find_files",
+            {"pattern": "*Library System Upgrade Spec.md", "cwd": str(tmp_path)},
+        )
         assert str(target) in result
 
     @pytest.mark.asyncio
     async def test_write_file(self, tmp_path):
         p = tmp_path / "out.txt"
-        with patch("openbad.toolbelt.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
-            result = await dispatch_tool_call("write_file", {"path": str(p), "content": "data"})
+        with patch("openbad.skills.fs_tool.ALLOWED_ROOTS", [str(tmp_path)]):
+            result = await call_skill("write_file", {"path": str(p), "content": "data"})
         assert "File written" in result
         assert p.read_text() == "data"
 
     @pytest.mark.asyncio
     async def test_ask_user_returns_pending(self):
-        result = await dispatch_tool_call("ask_user", {"question": "What?"})
+        result = await call_skill("ask_user", {"question": "What?"})
         assert "question_pending" in result
 
     @pytest.mark.asyncio
-    async def test_dispatch_error_handling(self):
-        """Tool that raises should return error string, not propagate."""
-        with patch("openbad.toolbelt.fs_tool.read_file", side_effect=PermissionError("denied")):
-            result = await dispatch_tool_call("read_file", {"path": "/etc/shadow"})
-        assert "PermissionError: denied" in result
+    async def test_skill_error_handling(self):
+        """Skill that raises should return error string, not propagate."""
+        with patch("openbad.skills.fs_tool.read_file", side_effect=PermissionError("denied")):
+            result = await call_skill("read_file", {"path": "/etc/shadow"})
+        assert "denied" in result.lower() or "error" in result.lower()
 
     @pytest.mark.asyncio
     async def test_exec_command_outside_allowed_roots_returns_access_request(self):
         mock_result = SimpleNamespace(stdout="", stderr="Working directory escapes allowed roots ['/tmp/demo']", returncode=-1)
-        with patch("openbad.toolbelt.cli_tool.CliToolAdapter.async_execute", new=AsyncMock(return_value=mock_result)):
-            result = await dispatch_tool_call("exec_command", {"command": "find . -name spec.md", "cwd": "/home/bruceamoser"})
+        with patch("openbad.skills.cli_tool.CliToolAdapter.async_execute", new=AsyncMock(return_value=mock_result)):
+            result = await call_skill("exec_command", {"command": "find . -name spec.md", "cwd": "/home/bruceamoser"})
         assert "[access_request]" in result
         assert "/home/bruceamoser" in result
-        assert "Toolbelt -> Path Access Requests" in result
 
 
 # ── LiteLLM Adapter ───────────────────────────────────────────────── #

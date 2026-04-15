@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from openbad.state.db import initialize_state_db
-from openbad.toolbelt.access_control import (
+from openbad.skills.access_control import (
     approve_access_request,
     create_access_request,
     deny_access_request,

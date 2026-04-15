@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from openbad.nervous_system import topics
 from openbad.tasks.models import NodeStatus
-from openbad.toolbelt.ask_user import (
+from openbad.skills.ask_user import (
     DEFERRED,
     QuestionPayload,
     ask_user,

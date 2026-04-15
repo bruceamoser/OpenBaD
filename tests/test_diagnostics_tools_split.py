@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 
-from openbad.toolbelt.doctor_tool import DoctorToolAdapter
-from openbad.toolbelt.endocrine_status_tool import EndocrineStatusToolAdapter
-from openbad.toolbelt.event_log_tool import EventLogToolAdapter
-from openbad.toolbelt.mqtt_records_tool import MqttRecordsToolAdapter
-from openbad.toolbelt.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
-from openbad.toolbelt.system_logs_tool import SystemLogsToolAdapter
-from openbad.toolbelt.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
+from openbad.skills.doctor_tool import DoctorToolAdapter
+from openbad.skills.endocrine_status_tool import EndocrineStatusToolAdapter
+from openbad.skills.event_log_tool import EventLogToolAdapter
+from openbad.skills.mqtt_records_tool import MqttRecordsToolAdapter
+from openbad.skills.research_diagnostics_tool import ResearchDiagnosticsToolAdapter
+from openbad.skills.system_logs_tool import SystemLogsToolAdapter
+from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
 
 def _make_http_get(payload: dict):

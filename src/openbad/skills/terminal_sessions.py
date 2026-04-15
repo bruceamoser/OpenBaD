@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
-from openbad.toolbelt.access_control import effective_allowed_roots
+from openbad.skills.access_control import effective_allowed_roots
 
 
 @dataclass

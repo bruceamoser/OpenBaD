@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 import json
 
 from openbad.immune_system.rules_engine import FileOperationRule
-from openbad.toolbelt.access_control import effective_allowed_roots
+from openbad.skills.access_control import effective_allowed_roots
 
 if TYPE_CHECKING:
     from openbad.endocrine.controller import EndocrineController
@@ -200,16 +200,20 @@ def find_files(
 ) -> str:
     """Find files under *cwd* matching *pattern* and return JSON paths.
 
+    Unlike read_file/write_file, find_files does NOT require the cwd to be
+    inside allowed roots.  Searching for file names is a read-only metadata
+    operation; the permission gate is on read_file/write_file.
+
     Parameters
     ----------
     pattern:
         Glob-like pattern or plain substring to search for.
     cwd:
-        Root directory to search within. Must be inside allowed roots.
+        Root directory to search within.
     limit:
         Maximum number of matches to return.
     """
-    resolved_root = _validate(cwd)
+    resolved_root = os.path.realpath(os.path.abspath(cwd))
     root = Path(resolved_root)
     needle = pattern.strip()
     max_results = max(1, min(int(limit), 200))
