@@ -283,6 +283,27 @@ create_user() {
 }
 
 # ------------------------------------------------------------------
+# Ensure openbad can traverse the invoking user's home directory
+# ------------------------------------------------------------------
+ensure_home_traversable() {
+    local owner_home=""
+    # Determine the real user who invoked sudo
+    if [[ -n "${SUDO_USER:-}" ]] && [[ "$SUDO_USER" != "root" ]]; then
+        owner_home="$(eval echo "~$SUDO_USER")"
+    fi
+    if [[ -z "$owner_home" ]] || [[ ! -d "$owner_home" ]]; then
+        return
+    fi
+    # Add o+x so the openbad user can traverse (but not list) the directory
+    local perms
+    perms="$(stat -c '%a' "$owner_home")"
+    if (( (perms & 1) == 0 )); then
+        info "Adding traverse (o+x) permission on $owner_home for $OPENBAD_USER..."
+        chmod o+x "$owner_home"
+    fi
+}
+
+# ------------------------------------------------------------------
 # Install Python package
 # ------------------------------------------------------------------
 install_package() {
@@ -665,6 +686,7 @@ main() {
 
     info "=== OpenBaD Installation ==="
     create_user
+    ensure_home_traversable
     install_package
     install_configs
     create_dirs
