@@ -455,10 +455,7 @@ install_units() {
 
     if [ -f "$CONFIG_SRC/openbad.service" ]; then
         cp "$CONFIG_SRC/openbad.service" "$SYSTEMD_DIR/openbad.service"
-        # Inject the project root so the agent can read/write repo files
-        sed -i "/^Environment=OPENBAD_CONFIG_DIR/a Environment=OPENBAD_PROJECT_ROOT=$PROJECT_ROOT" \
-            "$SYSTEMD_DIR/openbad.service"
-        info "  Installed openbad.service (OPENBAD_PROJECT_ROOT=$PROJECT_ROOT)"
+        info "  Installed openbad.service"
     else
         warn "  openbad.service not found in $CONFIG_SRC"
     fi

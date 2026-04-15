@@ -27,6 +27,7 @@
     reasoning?: string;
     provider?: string;
     model?: string;
+    accessRequest?: { request_id: string; root: string } | null;
   }
 
   interface SessionOption {
@@ -53,6 +54,29 @@
   let copiedMsgTimestamp = $state<string | null>(null);
   let onboardingHint = $derived($page.url.searchParams.get('onboarding') ?? '');
   let onboardingTransition = $state(false);
+
+  // Access request handling
+  async function approveAccessRequest(requestId: string, msgIndex: number): Promise<void> {
+    try {
+      await apiPost(`/api/toolbelt/access/requests/${requestId}/approve`, { approved_by: 'user' });
+      messages[msgIndex] = { ...messages[msgIndex], accessRequest: null, reasoning: 'Access approved. You can retry the operation now.' };
+      messages = [...messages];
+    } catch (e) {
+      messages[msgIndex] = { ...messages[msgIndex], reasoning: `Approve failed: ${e}` };
+      messages = [...messages];
+    }
+  }
+
+  async function denyAccessRequest(requestId: string, msgIndex: number): Promise<void> {
+    try {
+      await apiPost(`/api/toolbelt/access/requests/${requestId}/deny`, { denied_by: 'user' });
+      messages[msgIndex] = { ...messages[msgIndex], accessRequest: null, reasoning: 'Access denied.' };
+      messages = [...messages];
+    } catch (e) {
+      messages[msgIndex] = { ...messages[msgIndex], reasoning: `Deny failed: ${e}` };
+      messages = [...messages];
+    }
+  }
 
   const CHAT_SESSION_STORAGE_KEY = 'openbad.chat.sessionId';
 
@@ -314,6 +338,9 @@
               if (parsed.tokens_max !== undefined) {
                 tokensMax = parsed.tokens_max;
               }
+              if (parsed.access_request) {
+                assistantMsg.accessRequest = parsed.access_request;
+              }
               if (parsed.done && parsed.provider) {
                 assistantMsg.provider = parsed.provider;
               }
@@ -487,7 +514,7 @@
         </p>
       </div>
     {/if}
-    {#each messages as msg}
+    {#each messages as msg, i}
       <div class="msg {msg.role}">
         <div class="avatar">
           {msg.role === 'user' ? '👤' : '🤖'}
@@ -501,6 +528,14 @@
             {/if}
           </div>
           <div class="content">{@html renderMarkdown(msg.content)}</div>
+          {#if msg.accessRequest}
+            <div class="access-request-inline">
+              <span class="access-icon">🔒</span>
+              <span class="access-text">Access requested for <strong>{msg.accessRequest.root}</strong></span>
+              <button class="approve-btn" onclick={() => approveAccessRequest(msg.accessRequest!.request_id, i)}>Approve</button>
+              <button class="deny-btn" onclick={() => denyAccessRequest(msg.accessRequest!.request_id, i)}>Deny</button>
+            </div>
+          {/if}
           {#if msg.reasoning}
             <details class="reasoning">
               <summary>Reasoning trace</summary>
@@ -816,6 +851,40 @@
     align-self: flex-start;
     padding: 0.75rem 1rem;
   }
+
+  /* Access request inline widget */
+  .access-request-inline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-surface2, #2a2a2a);
+    border: 1px solid var(--border, #444);
+    border-radius: var(--radius-sm, 6px);
+    font-size: 0.85rem;
+  }
+  .access-icon { font-size: 1.1rem; }
+  .access-text { flex: 1; }
+  .approve-btn, .deny-btn {
+    padding: 0.25rem 0.6rem;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .approve-btn {
+    background: #22c55e;
+    color: #fff;
+  }
+  .approve-btn:hover { background: #16a34a; }
+  .deny-btn {
+    background: transparent;
+    color: #ef4444;
+    border: 1px solid #ef4444;
+  }
+  .deny-btn:hover { background: rgba(239, 68, 68, 0.1); }
   .dot {
     width: 8px;
     height: 8px;

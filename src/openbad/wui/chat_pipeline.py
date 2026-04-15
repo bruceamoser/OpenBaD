@@ -253,7 +253,11 @@ def _apply_behavior_feedback(
     return updated_assistant, updated_modulation, reasons
 
 
-def _extract_access_notice(result: str) -> str | None:
+def _extract_access_notice(result: str) -> tuple[str, dict[str, Any] | None] | None:
+    """Extract access notice text and structured request data from a tool result.
+
+    Returns (notice_text, request_dict) or None if not an access request.
+    """
     if not result.startswith("[access_request]"):
         return None
 
@@ -261,15 +265,16 @@ def _extract_access_notice(result: str) -> str | None:
     if request_match:
         request_id = request_match.group(1).strip()
         root = request_match.group(2).strip()
-        return (
+        notice = (
             "Path access approval is required before I can continue that file or terminal step. "
             f"Approve request {request_id} for {root} in Toolbelt -> Path Access Requests, then ask me to retry."
         )
+        return notice, {"request_id": request_id, "root": root}
 
     return (
         "Path access approval is required before I can continue that file or terminal step. "
         "Approve the pending request in Toolbelt -> Path Access Requests, then ask me to retry."
-    )
+    ), None
 
 
 # ── Data types ────────────────────────────────────────────────────── #
@@ -306,6 +311,7 @@ class StreamChunk:
     done: bool = False
     provider: str = ""
     model: str = ""
+    access_request: dict[str, Any] | None = None
 
 
 # ── Pipeline singleton state ──────────────────────────────────────── #
@@ -1333,10 +1339,15 @@ async def _agentic_stream(
                 result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
                 log.warning("Tool timeout request=%s tool=%s", request_id, fn_name)
 
-            access_notice = _extract_access_notice(result)
-            if access_notice:
-                access_notices.append(access_notice)
-                yield StreamChunk(reasoning=access_notice, tokens_used=total_tokens)
+            access_result = _extract_access_notice(result)
+            if access_result:
+                notice_text, request_data = access_result
+                access_notices.append(notice_text)
+                yield StreamChunk(
+                    reasoning=notice_text,
+                    tokens_used=total_tokens,
+                    access_request=request_data,
+                )
 
             working_messages.append({
                 "role": "tool",

@@ -1448,6 +1448,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
                     "token": chunk.token,
                     "reasoning": chunk.reasoning,
                     "tokens_used": chunk.tokens_used,
+                    **({"access_request": chunk.access_request} if chunk.access_request else {}),
                 }
             )
             await resp.write(f"data: {data}\n\n".encode())
