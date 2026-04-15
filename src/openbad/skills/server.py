@@ -709,6 +709,23 @@ async def mcp_bridge(
     return json.dumps(result, indent=2, default=str) if not isinstance(result, str) else result
 
 
+# ── Self-introspection ───────────────────────────────────────────────── #
+
+
+@skill_server.tool()
+async def list_embedded_skills() -> str:
+    """List all embedded skills available to you in this session.
+
+    Call this when asked about your tools, capabilities, or embedded skills.
+    These are YOUR tools — you call them directly by name.
+    """
+    tools = await skill_server.list_tools()
+    lines = [f"You have {len(tools)} embedded skills:\n"]
+    for t in tools:
+        lines.append(f"- **{t.name}**: {t.description.splitlines()[0]}")
+    return "\n".join(lines)
+
+
 # ── Public API for the agentic loop ──────────────────────────────────── #
 
 
