@@ -30,6 +30,17 @@ from openbad.cognitive.providers.base import (
 
 log = logging.getLogger(__name__)
 
+# Register local models that LiteLLM doesn't know about as supporting
+# function calling.  Without this, LiteLLM may silently drop tool
+# definitions when formatting requests to these models.
+litellm.register_model(
+    {
+        "ollama/bonsai-8b": {"supports_function_calling": True},
+        "ollama_chat/bonsai-8b": {"supports_function_calling": True},
+        "openai/Bonsai-8B.gguf": {"supports_function_calling": True},
+    }
+)
+
 
 # Map internal provider names → LiteLLM model prefix.
 # NOTE: ``github-copilot`` is deliberately mapped to ``openai`` so that
