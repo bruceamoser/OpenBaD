@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -10,8 +11,16 @@ from openbad.skills.server import async_get_openai_tools
 
 log = logging.getLogger(__name__)
 
-_MAX_TOOL_ITERATIONS = 6
+_MAX_TOOL_ITERATIONS = 16
 _TOOL_CALL_TIMEOUT_S = 20
+_MAX_CONTINUATION_NUDGES = 10
+
+_NARRATION_RE = re.compile(
+    r"\b(I will now|I'll now|let me|I'll proceed|I will proceed"
+    r"|I'm going to|I shall now|I need to|next I will|I will read"
+    r"|I will search|I will look|I will check|I will fetch)\b",
+    re.IGNORECASE,
+)
 
 _TOOLING_BASE_PROMPT = (
     "You have access to OpenBaD's embedded skills. These are built-in tools provided"
@@ -121,6 +130,7 @@ async def run_tool_agent(
     total_tokens = 0
     tool_names_used: list[str] = []
     verified_creations: list[str] = []
+    nudge_count = 0
     working_messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -148,6 +158,32 @@ async def run_tool_agent(
         tool_calls = getattr(assistant_msg, "tool_calls", None) or []
 
         if not tool_calls:
+            content = assistant_msg.content or ""
+            # Detect model narrating intent ("I will now read...") without
+            # actually calling tools.  Nudge it to act instead of narrate.
+            if (
+                iteration < _MAX_TOOL_ITERATIONS - 1
+                and nudge_count < _MAX_CONTINUATION_NUDGES
+                and _NARRATION_RE.search(content)
+            ):
+                nudge_count += 1
+                log.info(
+                    "Autonomy nudge request=%s iter=%d — narrated intent, nudging",
+                    request_id, iteration + 1,
+                )
+                if hasattr(assistant_msg, "model_dump"):
+                    working_messages.append(assistant_msg.model_dump(exclude_none=True))
+                else:
+                    working_messages.append({"role": "assistant", "content": content})
+                working_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You described what you intend to do but did not call any tools. "
+                        "Do not narrate actions — call the tools directly to perform them. "
+                        "Continue with the task now."
+                    ),
+                })
+                continue
             return ToolAgentResult(
                 content=_append_verified_creation_footer(
                     assistant_msg.content or "",

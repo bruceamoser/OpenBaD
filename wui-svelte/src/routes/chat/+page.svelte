@@ -356,6 +356,11 @@
             ...messages.slice(0, -1),
             { ...assistantMsg },
           ];
+          // Clear one-shot access_request from the template so subsequent
+          // reader.read() cycles don't re-spread stale approve/deny buttons.
+          if (assistantMsg.accessRequest) {
+            assistantMsg.accessRequest = null;
+          }
           await tick();
           scrollToBottom();
         }

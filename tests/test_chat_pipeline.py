@@ -476,6 +476,7 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
 
     text = "".join(chunk.token for chunk in chunks if chunk.token)
     reasoning = "".join(chunk.reasoning for chunk in chunks if chunk.reasoning)
-    assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" in text
+    # Notice text should only appear in reasoning, not duplicated in content
+    assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" not in text
     assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" in reasoning
 

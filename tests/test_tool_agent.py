@@ -166,3 +166,46 @@ async def test_run_tool_agent_falls_back_to_complete() -> None:
     assert result.content == "Plain response"
     assert result.tokens_used == 7
     assert result.tools_used == ()
+
+
+@pytest.mark.asyncio
+async def test_run_tool_agent_nudges_narrating_model() -> None:
+    """When the model says 'I will now read...' without calling tools, the agent
+    should nudge it to act instead of returning the narration as the final answer."""
+    adapter = SimpleNamespace()
+    tool_call = _ToolCall(
+        id="tool-1",
+        function=_ToolFunction("find_files", '{"pattern": "spec.md"}'),
+    )
+    adapter.agentic_complete = AsyncMock(
+        side_effect=[
+            # Iteration 1: model calls find_files
+            _response(tool_calls=[tool_call], tokens=10),
+            # Iteration 2: model narrates instead of calling read_file
+            _response(content="I will now read the contents of the file.", tokens=5),
+            # Iteration 3: after nudge, model actually acts
+            _response(
+                tool_calls=[_ToolCall("tool-2", _ToolFunction("read_file", '{"path": "/tmp/spec.md"}'))],
+                tokens=8,
+            ),
+            # Iteration 4: final answer with actual findings
+            _response(content="The spec has a gap in section 3.", tokens=5),
+        ]
+    )
+
+    with patch("openbad.autonomy.tool_agent.call_skill", new_callable=AsyncMock) as dispatch:
+        dispatch.side_effect = ['["/tmp/spec.md"]', "spec contents here"]
+        result = await run_tool_agent(
+            adapter,
+            "test-model",
+            provider_name="custom",
+            system_prompt="Research the topic.",
+            user_prompt="Review spec.md for gaps.",
+            request_id="req-nudge",
+        )
+
+    assert result.used_agentic is True
+    assert "The spec has a gap in section 3." in result.content
+    assert result.tools_used == ("find_files", "read_file")
+    # agentic_complete should have been called 4 times (not 2)
+    assert adapter.agentic_complete.await_count == 4

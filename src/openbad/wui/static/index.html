@@ -1,269 +1,43 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenBaD Control Surface</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css">
-</head>
-<body>
-  <div class="bg-grid"></div>
-  <main class="app-shell">
-    <aside class="side-nav reveal">
-      <div>
-        <div class="brand-mark">OB</div>
-        <h1>OpenBaD</h1>
-        <p>Runtime control surface</p>
-      </div>
-      <nav class="nav-links" aria-label="Primary navigation">
-        <button type="button" class="nav-link active" data-view-target="health">Health</button>
-        <button type="button" class="nav-link" data-view-target="chat">Chat</button>
-        <button type="button" class="nav-link" data-view-target="wiring">Wiring</button>
-        <button type="button" class="nav-link" data-view-target="models">Models <span class="nav-chip">next</span></button>
-      </nav>
-      <div class="nav-status">
-        <span id="ws-status" class="pill offline">offline</span>
-        <p id="transport-caption">Awaiting telemetry transport</p>
-      </div>
-    </aside>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenBaD Control Surface</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="/_app/immutable/entry/start.Dqmkv2mv.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/CeeeIXQK.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/CiEkSKKN.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/BajLCMyK.js" rel="modulepreload">
+		<link href="/_app/immutable/entry/app.SrWJ2gxf.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/CSCui4QA.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/Bzak7iHL.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/DPr41zni.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/v2hTRidf.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/jD3hn6FH.js" rel="modulepreload">
+		<link href="/_app/immutable/chunks/3QS9a9wa.js" rel="modulepreload">
+		
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents">
+			<script>
+				{
+					__sveltekit_iiqlz3 = {
+						base: ""
+					};
 
-    <section class="workspace">
-      <header class="workspace-header reveal">
-        <div>
-          <p class="eyebrow">Operations</p>
-          <h2 id="view-title">Health</h2>
-          <p id="view-subtitle" class="subtitle">Live runtime telemetry and subsystem health.</p>
-        </div>
-        <div class="header-actions mono">
-          <span>FSM <strong id="fsm-state">UNKNOWN</strong></span>
-          <span>Model <strong id="i-model">--</strong></span>
-        </div>
-      </header>
+					const element = document.currentScript.parentElement;
 
-      <section id="view-health" class="view-panel reveal" data-view="health">
-        <div class="panel-grid">
-          <article class="card metric-strip">
-            <div class="metric-cell pulse-target" data-metric="cpu">
-              <span class="metric-label">CPU</span>
-              <strong id="v-cpu">0.0%</strong>
-              <small id="v-cpu-meta">waiting for telemetry</small>
-            </div>
-            <div class="metric-cell pulse-target" data-metric="memory">
-              <span class="metric-label">Memory</span>
-              <strong id="v-memory">0.0%</strong>
-              <small id="v-memory-meta">waiting for telemetry</small>
-            </div>
-            <div class="metric-cell pulse-target" data-metric="disk">
-              <span class="metric-label">Disk</span>
-              <strong id="v-disk">0.0%</strong>
-              <small id="v-disk-meta">waiting for telemetry</small>
-            </div>
-            <div class="metric-cell pulse-target" data-metric="network">
-              <span class="metric-label">Network</span>
-              <strong id="v-net-tx">0 B</strong>
-              <small id="v-net-rx">RX 0 B</small>
-            </div>
-          </article>
-
-          <article class="card section-card wiring-controls-card">
-            <div class="section-head">
-              <h3>Hormonal State</h3>
-              <span class="section-note">Live endocrine levels</span>
-            </div>
-            <div id="hormones" class="stack">
-              <div class="row hormone-row">
-                <div class="label-block">
-                  <span class="label-title">Dopamine</span>
-                  <span class="label-note">reward and motivation</span>
-                </div>
-                <strong id="h-dopamine">0.00</strong>
-              </div>
-              <div class="row hormone-row">
-                <div class="label-block">
-                  <span class="label-title">Adrenaline</span>
-                  <span class="label-note">fight-or-flight energy</span>
-                </div>
-                <strong id="h-adrenaline">0.00</strong>
-              </div>
-              <div class="row hormone-row">
-                <div class="label-block">
-                  <span class="label-title">Cortisol</span>
-                  <span class="label-note">stress load</span>
-                </div>
-                <strong id="h-cortisol">0.00</strong>
-              </div>
-              <div class="row hormone-row">
-                <div class="label-block">
-                  <span class="label-title">Endorphin</span>
-                  <span class="label-note">calm and relief</span>
-                </div>
-                <strong id="h-endorphin">0.00</strong>
-              </div>
-            </div>
-          </article>
-
-          <article class="card section-card mono">
-            <div class="section-head">
-              <h3>Inference Surface</h3>
-              <span class="section-note">Provider and response health</span>
-            </div>
-            <div class="stack">
-              <div class="row"><span>Providers</span><strong id="i-provider">--</strong></div>
-              <div class="row"><span>Health</span><strong id="i-health">--</strong></div>
-              <div class="row"><span>p50</span><strong id="i-p50">0.0ms</strong></div>
-              <div class="row"><span>p99</span><strong id="i-p99">0.0ms</strong></div>
-              <div class="row"><span>Last Tokens</span><strong id="i-last-tokens">0</strong></div>
-              <div class="row"><span>Last Latency</span><strong id="i-last-latency">0.0ms</strong></div>
-              <div class="row"><span>Tier</span><strong id="v-tier">--</strong></div>
-              <div class="row"><span>Total Tokens</span><strong id="v-tokens">0</strong></div>
-            </div>
-          </article>
-
-          <article class="card section-card event-card">
-            <div class="section-head">
-              <h3>Event Stream</h3>
-              <span class="section-note">MQTT fanout activity</span>
-            </div>
-            <div id="event-log" class="log-body" aria-live="polite"></div>
-          </article>
-        </div>
-      </section>
-
-      <section id="view-chat" class="view-panel reveal hidden" data-view="chat">
-        <div class="panel-grid single-column">
-          <article class="card chat-card">
-            <div class="section-head">
-              <h3>Chat</h3>
-              <span class="section-note">Operator conversation surface</span>
-            </div>
-            <div class="chat-thread">
-              <div class="chat-bubble system">Chat surface is staged. Health and wiring are live now; model interaction hooks come next.</div>
-              <div class="chat-bubble user">Use the left rail to move between runtime health and provider wiring.</div>
-            </div>
-            <form class="chat-composer" id="chat-form">
-              <label class="sr-only" for="chat-input">Chat input</label>
-              <textarea id="chat-input" rows="4" placeholder="Chat surface will be connected in the next iteration."></textarea>
-              <button type="submit" class="primary-button" disabled>Send</button>
-            </form>
-          </article>
-        </div>
-      </section>
-
-      <section id="view-wiring" class="view-panel reveal hidden" data-view="wiring">
-        <div class="panel-grid wiring-layout">
-          <article class="card section-card wiring-controls-card">
-            <div class="section-head">
-              <h3>Provider Wiring</h3>
-              <span id="wiring-config-path" class="section-note mono">Loading config...</span>
-            </div>
-            <div class="wiring-toolbar">
-              <label for="default-provider">Default provider</label>
-              <select id="default-provider"></select>
-              <label class="toggle-row">
-                <input id="wiring-enabled" type="checkbox" checked>
-                <span>Cognitive engine enabled</span>
-              </label>
-              <button id="add-provider" type="button" class="secondary-button">Add provider</button>
-            </div>
-            <p id="wiring-status" class="inline-status">Provider wiring has not been loaded yet.</p>
-          </article>
-
-          <article class="card section-card wiring-providers-card">
-            <div class="section-head">
-              <h3>Providers</h3>
-              <span class="section-note">Verified providers available to the runtime</span>
-            </div>
-            <div id="provider-list" class="provider-list"></div>
-          </article>
-
-          <article id="provider-wizard" class="card section-card wizard-card hidden">
-            <div class="section-head">
-              <h3 id="wizard-title">Add Provider</h3>
-              <button id="close-provider-wizard" type="button" class="ghost-button">Close</button>
-            </div>
-            <div class="wizard-steps mono">
-              <span>1. Choose provider</span>
-              <span>2. Verify access</span>
-              <span>3. Select model</span>
-              <span>4. Save provider</span>
-            </div>
-            <form id="provider-wizard-form" class="wizard-form">
-              <label>
-                <span>Provider type</span>
-                <select id="wizard-provider-type">
-                  <option value="github-copilot">GitHub Copilot</option>
-                  <option value="local-openai">Local llama (OpenAI-compatible)</option>
-                </select>
-              </label>
-
-              <div id="wizard-copilot-fields" class="wizard-fields">
-                <p class="wizard-note">Copilot uses the GitHub device-flow sign-in. Start authorization to get a one-time verification code, open GitHub, enter the code, then return here to complete setup.</p>
-                <div class="wizard-actions">
-                  <button id="copilot-start-auth" type="button" class="secondary-button">Start GitHub sign-in</button>
-                  <button id="copilot-complete-auth" type="button" class="primary-button" disabled>I entered the code</button>
-                </div>
-                <div id="copilot-auth-panel" class="copilot-auth-panel hidden">
-                  <div class="copilot-code-block">
-                    <span class="copilot-code-label">Verification code</span>
-                    <strong id="copilot-user-code" class="copilot-user-code mono">----</strong>
-                  </div>
-                  <div class="wizard-actions">
-                    <button id="copilot-copy-code" type="button" class="ghost-button">Copy code</button>
-                    <button id="copilot-open-github" type="button" class="secondary-button">Open GitHub</button>
-                  </div>
-                  <p id="copilot-auth-message" class="inline-status">No active Copilot authorization yet.</p>
-                </div>
-              </div>
-
-              <div id="wizard-local-fields" class="wizard-fields hidden">
-                <label>
-                  <span>Base URL</span>
-                  <input id="wizard-base-url" type="text" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434">
-                </label>
-                <label>
-                  <span>API key env</span>
-                  <input id="wizard-api-key-env" type="text" value="" placeholder="Optional for local endpoints">
-                </label>
-                <label>
-                  <span>Timeout (ms)</span>
-                  <input id="wizard-timeout-ms" type="number" min="1000" step="1000" value="30000">
-                </label>
-              </div>
-
-              <div class="wizard-actions">
-                <button id="verify-provider" type="button" class="secondary-button">Verify provider</button>
-                <button id="save-provider" type="submit" class="primary-button" disabled>Save provider</button>
-              </div>
-
-              <label>
-                <span>Model</span>
-                <select id="wizard-model-select" disabled>
-                  <option value="">Verify provider first</option>
-                </select>
-              </label>
-            </form>
-            <p id="wizard-status" class="inline-status">Choose a provider type to begin the setup walkthrough.</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="view-models" class="view-panel reveal hidden" data-view="models">
-        <div class="panel-grid single-column">
-          <article class="card section-card placeholder-card">
-            <div class="section-head">
-              <h3>Model Surface</h3>
-              <span class="section-note">Reserved for the next pass</span>
-            </div>
-            <p>This slot is reserved for the dedicated model surface. Health, chat navigation, and wiring are in place now.</p>
-          </article>
-        </div>
-      </section>
-    </section>
-  </main>
-
-  <script src="/static/app.js" defer></script>
-</body>
+					Promise.all([
+						import("/_app/immutable/entry/start.Dqmkv2mv.js"),
+						import("/_app/immutable/entry/app.SrWJ2gxf.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element);
+					});
+				}
+			</script>
+		</div>
+  </body>
 </html>

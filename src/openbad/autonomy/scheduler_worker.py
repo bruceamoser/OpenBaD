@@ -599,7 +599,11 @@ def _process_autonomy_work(
         llm = _run_llm(
             system_prompt=(
                 "You are the OpenBaD research worker. "
-                "Investigate the topic using tools whenever they help. If the findings imply"
+                "Investigate the topic thoroughly using your tools. Read relevant files, "
+                "inspect logs, and gather concrete evidence before reaching conclusions. "
+                "Do NOT narrate what you intend to do — call the tools directly. "
+                "For example, do not say 'I will now read the file'; instead, call read_file immediately. "
+                "If the findings imply"
                 " more concrete work, create follow-up task or research entries directly via"
                 " tools. Never create a follow-up research node that duplicates the current"
                 " research title and description. There is no interactive human in this"

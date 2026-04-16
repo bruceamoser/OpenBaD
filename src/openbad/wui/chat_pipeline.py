@@ -1294,7 +1294,6 @@ async def _agentic_stream(
 
     tools = await async_get_openai_tools()
     total_tokens = 0
-    access_notices: list[str] = []
     # Work on a mutable copy so tool messages accumulate across iterations.
     working_messages = list(messages)
 
@@ -1323,9 +1322,6 @@ async def _agentic_stream(
         if not tool_calls:
             # Final answer — yield content as streamed chunks.
             content = assistant_msg.content or ""
-            if access_notices:
-                notice_block = "\n\n".join(dict.fromkeys(access_notices))
-                content = f"{notice_block}\n\n{content}".strip()
             # Yield in segments for real-time display.
             chunk_size = 40
             for i in range(0, max(len(content), 1), chunk_size):
@@ -1371,7 +1367,6 @@ async def _agentic_stream(
             access_result = _extract_access_notice(result)
             if access_result:
                 notice_text, request_data = access_result
-                access_notices.append(notice_text)
                 yield StreamChunk(
                     reasoning=notice_text,
                     tokens_used=total_tokens,
@@ -1431,9 +1426,6 @@ async def _agentic_stream(
     total_tokens += usage.total_tokens if usage else 0
     choice = response.choices[0] if response.choices else None
     content = (choice.message.content or "") if choice else ""
-    if access_notices:
-        notice_block = "\n\n".join(dict.fromkeys(access_notices))
-        content = f"{notice_block}\n\n{content}".strip()
     if content:
         yield StreamChunk(token=content, tokens_used=total_tokens)
 
