@@ -104,8 +104,8 @@ def read_file(path: str) -> str:
     Args:
         path: Absolute or relative path to the file.
     """
-    from openbad.skills.fs_tool import read_file as _read
     from openbad.skills.access_control import create_access_request
+    from openbad.skills.fs_tool import read_file as _read
 
     try:
         return _read(path)
@@ -129,8 +129,8 @@ def write_file(path: str, content: str) -> str:
         path: Absolute or relative path to the file.
         content: Content to write to the file.
     """
-    from openbad.skills.fs_tool import write_file as _write
     from openbad.skills.access_control import create_access_request
+    from openbad.skills.fs_tool import write_file as _write
 
     try:
         _write(path, content)
@@ -692,21 +692,39 @@ async def mcp_bridge(
         tool_name: Name of the tool on the MCP server.
         arguments: Arguments to pass to the MCP tool.
     """
-    from openbad.toolbelt.mcp_bridge import MCPRunner
+    from langchain_mcp_adapters.client import MultiServerMCPClient
 
-    runner = MCPRunner.stdio([server])
+    client = MultiServerMCPClient(
+        {server: {"command": server, "args": [], "transport": "stdio"}}
+    )
     try:
-        async with runner:
-            result = await runner.call_tool(tool_name, arguments or {})
+        tools = await client.get_tools()
     except FileNotFoundError:
         return json.dumps(
             {"error": f"MCP server binary '{server}' not found. "
              "Install the server or check the name."},
             indent=2,
         )
-    except OSError as exc:
+    except Exception as exc:
         return json.dumps(
-            {"error": f"Failed to start MCP server '{server}': {exc}"},
+            {"error": f"Failed to connect to MCP server '{server}': {exc}"},
+            indent=2,
+        )
+
+    matching = [t for t in tools if t.name == tool_name]
+    if not matching:
+        available = [t.name for t in tools]
+        return json.dumps(
+            {"error": f"Tool '{tool_name}' not found on server '{server}'.",
+             "available_tools": available},
+            indent=2,
+        )
+
+    try:
+        result = await matching[0].ainvoke(arguments or {})
+    except Exception as exc:
+        return json.dumps(
+            {"error": f"Tool '{tool_name}' failed: {exc}"},
             indent=2,
         )
     return json.dumps(result, indent=2, default=str) if not isinstance(result, str) else result

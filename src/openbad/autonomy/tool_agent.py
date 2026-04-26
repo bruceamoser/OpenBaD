@@ -1,27 +1,36 @@
+"""LangGraph-based tool agent for OpenBaD autonomy subsystem.
+
+Replaces the previous custom agentic loop with LangGraph's
+``create_react_agent``, using LangChain tools converted from
+OpenBaD's embedded skills.
+
+Public API
+----------
+``run_tool_agent(adapter, model_id, ...)``
+    Execute an agentic task with tools, returning a ``ToolAgentResult``.
+``build_tooling_system_prompt(base_prompt)``
+    Prepend the standard OpenBaD tool-use instructions to a system prompt.
+``ToolAgentResult``
+    Frozen dataclass returned by ``run_tool_agent``.
+"""
+
 from __future__ import annotations
 
 import json
 import logging
-import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from openbad.skills import call_skill
-from openbad.skills.server import async_get_openai_tools
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
+from openbad.frameworks.langchain_tools import async_get_openbad_tools
 
 log = logging.getLogger(__name__)
 
 _MAX_TOOL_ITERATIONS = 16
-_TOOL_CALL_TIMEOUT_S = 20
-_MAX_CONTINUATION_NUDGES = 10
-_CONTEXT_TOKEN_BUDGET = 20_000  # conservative limit for tool-agent messages
-
-_NARRATION_RE = re.compile(
-    r"\b(I will now|I'll now|let me|I'll proceed|I will proceed"
-    r"|I'm going to|I shall now|I need to|next I will|I will read"
-    r"|I will search|I will look|I will check|I will fetch)\b",
-    re.IGNORECASE,
-)
 
 _TOOLING_BASE_PROMPT = (
     "You have access to OpenBaD's embedded skills. These are built-in tools provided"
@@ -67,86 +76,59 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _record_verified_creation(
-    tool_name: str,
-    tool_args: dict[str, Any],
-    raw_result: str,
-    verified_creations: list[str],
-) -> None:
-    payload = _parse_json_object(raw_result)
-    if tool_name == "create_task":
-        task_id = str(payload.get("task_id", "")).strip()
-        if not task_id:
-            return
-        title = str(payload.get("title") or tool_args.get("title") or task_id).strip()
-        verified_creations.append(f"task '{title}' ({task_id})")
-        return
-    if tool_name == "create_research_node":
-        node_id = str(payload.get("node_id", "")).strip()
-        if not node_id:
-            return
-        title = str(payload.get("title") or tool_args.get("title") or node_id).strip()
-        verified_creations.append(f"research '{title}' ({node_id})")
+def _extract_creation_info(messages: list[Any]) -> tuple[list[str], list[str]]:
+    """Extract tool names used and verified creations from agent messages."""
+    tool_names: list[str] = []
+    verified: list[str] = []
+
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_names.append(tc["name"])
+        if hasattr(msg, "name") and hasattr(msg, "content"):
+            fn_name = getattr(msg, "name", "")
+            if fn_name in ("create_task", "create_research_node"):
+                payload = _parse_json_object(
+                    msg.content if isinstance(msg.content, str) else ""
+                )
+                if fn_name == "create_task":
+                    task_id = str(payload.get("task_id", "")).strip()
+                    if task_id:
+                        title = str(
+                            payload.get("title", task_id)
+                        ).strip()
+                        verified.append(f"task '{title}' ({task_id})")
+                elif fn_name == "create_research_node":
+                    node_id = str(payload.get("node_id", "")).strip()
+                    if node_id:
+                        title = str(
+                            payload.get("title", node_id)
+                        ).strip()
+                        verified.append(
+                            f"research '{title}' ({node_id})"
+                        )
+
+    return tool_names, verified
 
 
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4) if text else 0
+def _adapter_to_chat_model(adapter: Any, model_id: str) -> ChatOpenAI:
+    """Wrap an OpenBaD LiteLLMAdapter as a LangChain ChatOpenAI."""
+    api_base = getattr(adapter, "_api_base", None) or ""
+    api_key = getattr(adapter, "_api_key", None) or "not-needed"
+    timeout_s = getattr(adapter, "_timeout_s", 120)
 
+    # Strip the litellm provider prefix (e.g. "openai/model" → "model")
+    raw_model = model_id
+    if "/" in raw_model:
+        raw_model = raw_model.split("/", 1)[1]
 
-def _trim_messages(
-    messages: list[dict[str, Any]],
-    tools_json: str,
-    budget: int = _CONTEXT_TOKEN_BUDGET,
-) -> list[dict[str, Any]]:
-    """Trim older tool results to keep total estimated tokens under *budget*.
-
-    Preserves system + first user message and the most recent messages.
-    Truncates long tool result contents in the middle of the list first.
-    """
-    overhead = _estimate_tokens(tools_json)
-    total = overhead + sum(
-        _estimate_tokens(str(m.get("content", ""))) for m in messages
+    return ChatOpenAI(
+        model=raw_model,
+        api_key=api_key,
+        base_url=api_base,
+        timeout=timeout_s,
+        max_retries=2,
     )
-    if total <= budget:
-        return messages
-
-    # Find tool-result messages (not system/first-user) to truncate
-    for i in range(len(messages)):
-        if total <= budget:
-            break
-        msg = messages[i]
-        role = msg.get("role", "")
-        if role != "tool":
-            continue
-        content = str(msg.get("content", ""))
-        content_tokens = _estimate_tokens(content)
-        if content_tokens <= 100:
-            continue
-        # Truncate to first 200 chars + note
-        truncated = content[:200] + "\n... [truncated to fit context window]"
-        saved = content_tokens - _estimate_tokens(truncated)
-        if saved > 0:
-            messages[i] = {**msg, "content": truncated}
-            total -= saved
-
-    return messages
-
-
-def _append_verified_creation_footer(
-    content: str,
-    tools_used: list[str],
-    verified_creations: list[str],
-) -> str:
-    creation_tools = {"create_task", "create_research_node"}
-    if not any(tool_name in creation_tools for tool_name in tools_used):
-        return content.strip()
-
-    verification = "; ".join(verified_creations) if verified_creations else "none"
-    footer = f"Verified follow-up entries created via tools: {verification}."
-    base = content.strip()
-    if not base:
-        return footer
-    return f"{base}\n\n{footer}"
 
 
 async def run_tool_agent(
@@ -157,170 +139,107 @@ async def run_tool_agent(
     system_prompt: str,
     user_prompt: str,
     request_id: str,
-    tool_call_validator: Callable[[str, dict[str, Any]], str | None] | None = None,
+    tool_call_validator: Callable[
+        [str, dict[str, Any]], str | None
+    ]
+    | None = None,
 ) -> ToolAgentResult:
-    agentic_complete = getattr(adapter, "agentic_complete", None)
-    if not callable(agentic_complete):
-        prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
-        result = await adapter.complete(prompt, model_id)
+    """Run an agentic task using LangGraph's ReAct agent."""
+    tools = await async_get_openbad_tools()
+
+    # Wrap tools with validator guard if provided
+    if tool_call_validator is not None:
+        from langchain_core.tools import StructuredTool
+
+        def _wrap_tool(tool: Any) -> Any:
+            original = tool.coroutine
+
+            async def _guarded(**kwargs: Any) -> str:
+                reason = tool_call_validator(tool.name, kwargs)
+                if reason:
+                    log.info(
+                        "Tool blocked request=%s tool=%s reason=%s",
+                        request_id, tool.name, reason,
+                    )
+                    return reason
+                return await original(**kwargs)
+
+            return StructuredTool(
+                name=tool.name,
+                description=tool.description,
+                coroutine=_guarded,
+                args_schema=tool.args_schema,
+            )
+
+        tools = [_wrap_tool(t) for t in tools]
+
+    chat_model = _adapter_to_chat_model(adapter, model_id)
+
+    agent = create_react_agent(
+        model=chat_model,
+        tools=tools,
+        prompt=system_prompt,
+    )
+
+    try:
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=user_prompt)]},
+            config={"recursion_limit": _MAX_TOOL_ITERATIONS * 2},
+        )
+    except Exception:
+        log.exception("LangGraph agent failed request=%s", request_id)
         return ToolAgentResult(
-            content=result.content.strip(),
-            provider=provider_name or getattr(result, "provider", "") or "unknown",
-            model=getattr(result, "model_id", "") or model_id,
-            tokens_used=int(getattr(result, "tokens_used", 0) or 0),
-            used_agentic=False,
+            content="",
+            provider=provider_name or "unknown",
+            model=model_id,
+            used_agentic=True,
         )
 
-    total_tokens = 0
-    tool_names_used: list[str] = []
-    verified_creations: list[str] = []
-    nudge_count = 0
-    working_messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    skill_schemas = await async_get_openai_tools()
-    tools_json = json.dumps(skill_schemas)
-    for iteration in range(_MAX_TOOL_ITERATIONS):
-        _trim_messages(working_messages, tools_json)
-        response = await agentic_complete(working_messages, model_id, tools=skill_schemas)
-        usage = getattr(response, "usage", None)
-        total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
-
-        choice = response.choices[0] if getattr(response, "choices", None) else None
-        if choice is None:
-            return ToolAgentResult(
-                content="",
-                provider=provider_name or "unknown",
-                model=model_id,
-                tokens_used=total_tokens,
-                tools_used=tuple(tool_names_used),
-                verified_creations=tuple(verified_creations),
-                used_agentic=True,
-            )
-
-        assistant_msg = choice.message
-        tool_calls = getattr(assistant_msg, "tool_calls", None) or []
-
-        if not tool_calls:
-            content = assistant_msg.content or ""
-            # Detect model narrating intent ("I will now read...") without
-            # actually calling tools.  Nudge it to act instead of narrate.
-            if (
-                iteration < _MAX_TOOL_ITERATIONS - 1
-                and nudge_count < _MAX_CONTINUATION_NUDGES
-                and _NARRATION_RE.search(content)
-            ):
-                nudge_count += 1
-                log.info(
-                    "Autonomy nudge request=%s iter=%d — narrated intent, nudging",
-                    request_id, iteration + 1,
-                )
-                if hasattr(assistant_msg, "model_dump"):
-                    working_messages.append(assistant_msg.model_dump(exclude_none=True))
-                else:
-                    working_messages.append({"role": "assistant", "content": content})
-                working_messages.append({
-                    "role": "user",
-                    "content": (
-                        "You described what you intend to do but did not call any tools. "
-                        "Do not narrate actions — call the tools directly to perform them. "
-                        "Continue with the task now."
-                    ),
-                })
-                continue
-            return ToolAgentResult(
-                content=_append_verified_creation_footer(
-                    assistant_msg.content or "",
-                    tool_names_used,
-                    verified_creations,
-                ),
-                provider=provider_name or "unknown",
-                model=getattr(response, "model", "") or model_id,
-                tokens_used=total_tokens,
-                tools_used=tuple(tool_names_used),
-                verified_creations=tuple(verified_creations),
-                used_agentic=True,
-            )
-
-        if hasattr(assistant_msg, "model_dump"):
-            working_messages.append(assistant_msg.model_dump(exclude_none=True))
-        else:
-            working_messages.append({
-                "role": "assistant",
-                "content": getattr(assistant_msg, "content", "") or "",
-            })
-
-        for tool_call in tool_calls:
-            fn_name = tool_call.function.name
-            try:
-                fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-            except (json.JSONDecodeError, TypeError):
-                fn_args = {}
-
-            tool_names_used.append(fn_name)
-            log.info(
-                "Autonomy tool call request=%s iter=%d tool=%s args=%s",
-                request_id,
-                iteration + 1,
-                fn_name,
-                json.dumps(fn_args, default=str)[:200],
-            )
-            rejection_reason = tool_call_validator(fn_name, fn_args) if callable(tool_call_validator) else None
-            if rejection_reason:
-                result = rejection_reason
-                log.info(
-                    "Autonomy tool blocked request=%s iter=%d tool=%s reason=%s",
-                    request_id,
-                    iteration + 1,
-                    fn_name,
-                    rejection_reason,
-                )
-            else:
-                try:
-                    import asyncio as _aio
-
-                    result = await _aio.wait_for(
-                        call_skill(fn_name, fn_args),
-                        timeout=_TOOL_CALL_TIMEOUT_S,
-                    )
-                except TimeoutError:
-                    result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
-                    log.warning("Autonomy tool timeout request=%s tool=%s", request_id, fn_name)
-
-            _record_verified_creation(fn_name, fn_args, result, verified_creations)
-
-            working_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                }
-            )
-
-    working_messages.append(
-        {
-            "role": "user",
-            "content": (
-                "You have reached the maximum number of tool calls."
-                " Provide the best final answer you can, grounded only in the tool results"
-                " and context already gathered."
-            ),
-        }
+    all_messages = result.get("messages", [])
+    tool_names, verified_creations = _extract_creation_info(
+        all_messages
     )
-    _trim_messages(working_messages, tools_json)
-    response = await agentic_complete(working_messages, model_id)
-    usage = getattr(response, "usage", None)
-    total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
-    choice = response.choices[0] if getattr(response, "choices", None) else None
-    content = (choice.message.content or "") if choice is not None else ""
+
+    # Find the last non-tool-call AI message as final response
+    final_content = ""
+    total_tokens = 0
+    for msg in all_messages:
+        if isinstance(msg, AIMessage):
+            usage = getattr(msg, "usage_metadata", None)
+            if usage:
+                total_tokens += usage.get("total_tokens", 0)
+    for msg in reversed(all_messages):
+        if isinstance(msg, AIMessage) and not msg.tool_calls:
+            final_content = msg.content or ""
+            break
+
+    # Append creation verification footer
+    creation_tools = {"create_task", "create_research_node"}
+    if any(name in creation_tools for name in tool_names):
+        verification = (
+            "; ".join(verified_creations)
+            if verified_creations
+            else "none"
+        )
+        footer = (
+            "Verified follow-up entries created via tools: "
+            f"{verification}."
+        )
+        final_content = f"{final_content.strip()}\n\n{footer}" if final_content else footer
+
+    log.info(
+        "LangGraph agent completed request=%s tools_used=%d tokens=%d",
+        request_id,
+        len(tool_names),
+        total_tokens,
+    )
+
     return ToolAgentResult(
-        content=_append_verified_creation_footer(content, tool_names_used, verified_creations),
+        content=final_content.strip(),
         provider=provider_name or "unknown",
-        model=getattr(response, "model", "") or model_id,
+        model=model_id,
         tokens_used=total_tokens,
-        tools_used=tuple(tool_names_used),
+        tools_used=tuple(tool_names),
         verified_creations=tuple(verified_creations),
         used_agentic=True,
     )
