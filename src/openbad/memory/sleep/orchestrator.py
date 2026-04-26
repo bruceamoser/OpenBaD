@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from openbad.cognitive.config import CognitiveSystem
-from openbad.cognitive.event_loop import CognitiveEventLoop, CognitiveRequest
 from openbad.cognitive.model_router import Priority
+from openbad.cognitive.types import CognitiveHandler, CognitiveRequest
 from openbad.memory.forgetting import prune_consolidated_episodic, prune_store
 from openbad.memory.sleep.prompts import (
     EXTRACT_TAGS,
@@ -111,19 +111,19 @@ class SleepReport:
 
 
 class SleepOrchestrator:
-    """Orchestrates sleep consolidation through the cognitive event loop."""
+    """Orchestrates sleep consolidation through a cognitive handler."""
 
     def __init__(
         self,
         memory_controller: MemoryController,
-        cognitive_event_loop: CognitiveEventLoop,
+        cognitive_handler: CognitiveHandler,
         pruner: MemoryPruner | None = None,
         fsm: Any = None,
         idle_threshold_seconds: float = 300.0,
         publish_fn: Callable[[str, bytes], None] | None = None,
     ) -> None:
         self._memory_controller = memory_controller
-        self._event_loop = cognitive_event_loop
+        self._handler = cognitive_handler
         self._pruner = pruner
         self._fsm = fsm
         self._idle_threshold = idle_threshold_seconds
@@ -394,7 +394,7 @@ class SleepOrchestrator:
         prompt: str,
         context: str,
     ) -> Any:
-        response = await self._event_loop.handle_request(
+        response = await self._handler.handle_request(
             CognitiveRequest(
                 request_id=f"sleep-{stage}-{entry.entry_id}",
                 prompt=prompt,

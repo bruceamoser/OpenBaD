@@ -6,23 +6,9 @@ import asyncio
 import contextlib
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
-from openbad.cognitive.config import CognitiveSystem
-from openbad.cognitive.context_manager import (
-    CompressedContext,
-    CompressionStrategy,
-    ContextBudget,
-    ContextWindowManager,
-)
-from openbad.cognitive.event_loop import CognitiveEventLoop, CognitiveResponse
-from openbad.cognitive.model_router import FallbackChain, ModelRouter, RouteStep
-from openbad.cognitive.providers.base import (
-    CompletionResult,
-    HealthStatus,
-    ProviderAdapter,
-)
-from openbad.cognitive.providers.registry import ProviderRegistry
+from openbad.cognitive.types import CognitiveResponse
 from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.memory.config import MemoryConfig
 from openbad.memory.controller import MemoryController
@@ -43,73 +29,28 @@ from openbad.memory.sleep.prompts import (
 )
 
 
-def _mock_sleep_loop() -> CognitiveEventLoop:
-    loop = AsyncMock(spec=CognitiveEventLoop)
-    loop.handle_request = AsyncMock(
+def _mock_sleep_handler() -> AsyncMock:
+    handler = AsyncMock()
+    handler.handle_request = AsyncMock(
         side_effect=[
             CognitiveResponse(request_id="1", answer="summary one"),
             CognitiveResponse(request_id="2", answer="tag1, tag2"),
             CognitiveResponse(request_id="3", answer="0.8"),
         ]
     )
-    return loop
+    return handler
 
 
-def _real_sleep_loop() -> CognitiveEventLoop:
-    registry = ProviderRegistry()
-    adapter = AsyncMock(spec=ProviderAdapter)
-    adapter.complete = AsyncMock(
+def _real_sleep_handler() -> AsyncMock:
+    handler = AsyncMock()
+    handler.handle_request = AsyncMock(
         side_effect=[
-            CompletionResult(
-                content="summary one",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=10,
-            ),
-            CompletionResult(
-                content="tag1, tag2",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=10,
-            ),
-            CompletionResult(
-                content="0.8",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=5,
-            ),
+            CognitiveResponse(request_id="1", answer="summary one"),
+            CognitiveResponse(request_id="2", answer="tag1, tag2"),
+            CognitiveResponse(request_id="3", answer="0.8"),
         ]
     )
-    adapter.health_check = AsyncMock(
-        return_value=HealthStatus(provider="ollama", available=True, latency_ms=5)
-    )
-    registry.register("ollama", adapter)
-    router = ModelRouter(
-        registry=registry,
-        system_assignments={
-            CognitiveSystem.SLEEP: RouteStep("ollama", "bonsai-8b")
-        },
-        default_fallback_chain=FallbackChain(steps=(RouteStep("ollama", "bonsai-8b"),)),
-    )
-    ctx = MagicMock(spec=ContextWindowManager)
-    ctx.allocate = MagicMock(
-        return_value=ContextBudget(
-            max_tokens=8192,
-            system_tokens=1000,
-            context_tokens=4000,
-            response_tokens=2000,
-        )
-    )
-    ctx.compress = MagicMock(
-        return_value=CompressedContext(
-            text="compressed",
-            original_tokens=10,
-            compressed_tokens=10,
-            strategy=CompressionStrategy.TRUNCATE,
-        )
-    )
-    ctx.track_usage = MagicMock()
-    return CognitiveEventLoop(model_router=router, context_manager=ctx, strategies={})
+    return handler
 
 
 def _setup(tmp_path: Path) -> tuple[MemoryController, SleepOrchestrator]:
@@ -117,7 +58,7 @@ def _setup(tmp_path: Path) -> tuple[MemoryController, SleepOrchestrator]:
     pruner = MemoryPruner(memory_controller=mc)
     orch = SleepOrchestrator(
         memory_controller=mc,
-        cognitive_event_loop=_mock_sleep_loop(),
+        cognitive_handler=_mock_sleep_handler(),
         pruner=pruner,
     )
     return mc, orch
@@ -142,7 +83,7 @@ class TestIdleDetection:
         pruner = MemoryPruner(memory_controller=mc)
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=_mock_sleep_loop(),
+            cognitive_handler=_mock_sleep_handler(),
             pruner=pruner,
             idle_threshold_seconds=10.0,
         )
@@ -166,7 +107,7 @@ class TestPhaseTransitions:
         phases: list[str] = []
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=_mock_sleep_loop(),
+            cognitive_handler=_mock_sleep_handler(),
             pruner=pruner,
             publish_fn=lambda t, p: phases.append(p.decode()),
         )
@@ -215,11 +156,11 @@ class TestRunCycle:
 
     async def test_cycle_skips_when_provider_unavailable(self, tmp_path: Path) -> None:
         mc = MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path))
-        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop = AsyncMock()
         loop.handle_request = AsyncMock(side_effect=RuntimeError("provider unavailable"))
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=loop,
+            cognitive_handler=loop,
             pruner=MemoryPruner(memory_controller=mc),
         )
         mc.stm.write(MemoryEntry(key="s1", value="note", tier=MemoryTier.STM))
@@ -391,7 +332,7 @@ class TestEpisodicBatching:
             tier=MemoryTier.EPISODIC, context="deploy",
         ))
         # Mock needs: 1 batch summary, tags, score (3 calls total)
-        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop = AsyncMock()
         loop.handle_request = AsyncMock(
             side_effect=[
                 # batch summary for the deploy context
@@ -407,7 +348,7 @@ class TestEpisodicBatching:
         )
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=loop,
+            cognitive_handler=loop,
             pruner=MemoryPruner(memory_controller=mc),
         )
         report = await orch.run_cycle()
@@ -425,7 +366,7 @@ class TestEpisodicBatching:
             key="e1", value="test note",
             tier=MemoryTier.EPISODIC, context="notes",
         ))
-        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop = AsyncMock()
         loop.handle_request = AsyncMock(
             side_effect=[
                 CognitiveResponse(request_id="s1", answer="A test note summary"),
@@ -435,7 +376,7 @@ class TestEpisodicBatching:
         )
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=loop,
+            cognitive_handler=loop,
         )
         await orch.run_cycle()
         orig = mc.episodic.read("e1")
@@ -461,7 +402,7 @@ class TestQuality:
                 answer="CPU spiked to 98% during batch at 02:14 UTC",
             )
 
-        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop = AsyncMock()
         loop.handle_request = AsyncMock(side_effect=[
             CognitiveResponse(
                 request_id="s",
@@ -472,7 +413,7 @@ class TestQuality:
         ])
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=loop,
+            cognitive_handler=loop,
         )
         report = await orch.run_cycle()
         assert report.entries_consolidated == 1
@@ -493,7 +434,7 @@ class TestQuality:
             key="deploy-2", value="Rollback to v2.3.0 after 500 errors",
             tier=MemoryTier.EPISODIC, context="deployment",
         ))
-        loop = AsyncMock(spec=CognitiveEventLoop)
+        loop = AsyncMock()
         loop.handle_request = AsyncMock(side_effect=[
             CognitiveResponse(
                 request_id="s",
@@ -504,7 +445,7 @@ class TestQuality:
         ])
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=loop,
+            cognitive_handler=loop,
         )
         await orch.run_cycle()
         sem = mc.semantic.query("sleep/episodic/")
@@ -527,7 +468,7 @@ class TestIntegration:
         )
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=_real_sleep_loop(),
+            cognitive_handler=_real_sleep_handler(),
             pruner=MemoryPruner(memory_controller=mc),
         )
 

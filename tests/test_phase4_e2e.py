@@ -10,25 +10,11 @@ import asyncio
 import contextlib
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from openbad.cognitive.config import CognitiveSystem
-from openbad.cognitive.context_manager import (
-    CompressedContext,
-    CompressionStrategy,
-    ContextBudget,
-    ContextWindowManager,
-)
-from openbad.cognitive.event_loop import CognitiveEventLoop
-from openbad.cognitive.model_router import FallbackChain, ModelRouter, RouteStep
-from openbad.cognitive.providers.base import (
-    CompletionResult,
-    HealthStatus,
-    ProviderAdapter,
-)
-from openbad.cognitive.providers.registry import ProviderRegistry
+from openbad.cognitive.types import CognitiveResponse
 from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.memory.config import MemoryConfig
 from openbad.memory.controller import MemoryController
@@ -47,77 +33,19 @@ def _mc(tmp_path: Path, **kwargs: object) -> MemoryController:
     return MemoryController(config=MemoryConfig(ltm_storage_dir=tmp_path, **kwargs))
 
 
-def _sleep_event_loop() -> CognitiveEventLoop:
-    registry = ProviderRegistry()
-    adapter = AsyncMock(spec=ProviderAdapter)
-    adapter.complete = AsyncMock(
-        side_effect=[
-            CompletionResult(
-                content="failure summary",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=10,
-            ),
-            CompletionResult(
-                content="ops, error",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=10,
-            ),
-            CompletionResult(
-                content="0.9",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=5,
-            ),
-            CompletionResult(
-                content="success summary",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=10,
-            ),
-            CompletionResult(
-                content="ops, build",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=10,
-            ),
-            CompletionResult(
-                content="0.7",
-                model_id="bonsai-8b",
-                provider="ollama",
-                tokens_used=5,
-            ),
-        ]
-    )
-    adapter.health_check = AsyncMock(
-        return_value=HealthStatus(provider="ollama", available=True, latency_ms=5)
-    )
-    registry.register("ollama", adapter)
-    router = ModelRouter(
-        registry=registry,
-        system_assignments={CognitiveSystem.SLEEP: RouteStep("ollama", "bonsai-8b")},
-        default_fallback_chain=FallbackChain(steps=(RouteStep("ollama", "bonsai-8b"),)),
-    )
-    ctx = MagicMock(spec=ContextWindowManager)
-    ctx.allocate = MagicMock(
-        return_value=ContextBudget(
-            max_tokens=8192,
-            system_tokens=1000,
-            context_tokens=4000,
-            response_tokens=2000,
-        )
-    )
-    ctx.compress = MagicMock(
-        return_value=CompressedContext(
-            text="compressed",
-            original_tokens=10,
-            compressed_tokens=10,
-            strategy=CompressionStrategy.TRUNCATE,
-        )
-    )
-    ctx.track_usage = MagicMock()
-    return CognitiveEventLoop(model_router=router, context_manager=ctx, strategies={})
+def _sleep_handler() -> AsyncMock:
+    """Return an AsyncMock satisfying the CognitiveHandler protocol."""
+    responses = [
+        CognitiveResponse(request_id="r", answer="failure summary"),
+        CognitiveResponse(request_id="r", answer="ops, error"),
+        CognitiveResponse(request_id="r", answer="0.9"),
+        CognitiveResponse(request_id="r", answer="success summary"),
+        CognitiveResponse(request_id="r", answer="ops, build"),
+        CognitiveResponse(request_id="r", answer="0.7"),
+    ]
+    handler = AsyncMock()
+    handler.handle_request = AsyncMock(side_effect=responses)
+    return handler
 
 
 # ------------------------------------------------------------------ #
@@ -304,7 +232,7 @@ class TestFullSleepCycle:
         pruner = MemoryPruner(memory_controller=mc)
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=_sleep_event_loop(),
+            cognitive_handler=_sleep_handler(),
             pruner=pruner,
         )
 
@@ -414,7 +342,7 @@ class TestIdleAutoSleep:
         phases: list[str] = []
         orch = SleepOrchestrator(
             memory_controller=mc,
-            cognitive_event_loop=_sleep_event_loop(),
+            cognitive_handler=_sleep_handler(),
             pruner=pruner,
             idle_threshold_seconds=0.01,
             publish_fn=lambda t, p: phases.append(p.decode()),
