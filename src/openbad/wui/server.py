@@ -907,6 +907,66 @@ def _build_chat_adapter(
     )
 
 
+def _build_langchain_model(
+    provider: ProviderConfig,
+    model: str,
+) -> object:
+    """Build a LangChain ``ChatOpenAI`` for a provider config.
+
+    Returns a standard LangChain ``BaseChatModel`` that can be passed
+    directly to ``create_react_agent`` and other LangChain components
+    without adapter bridge hacks.
+
+    GitHub Copilot is handled by pointing ``ChatOpenAI`` at its token
+    endpoint.  All other providers use their ``base_url``.
+    """
+    import os
+
+    from langchain_openai import ChatOpenAI
+
+    timeout_s = max(1.0, provider.timeout_ms / 1000)
+    api_key = provider.api_key or ""
+    if not api_key and provider.api_key_env:
+        api_key = os.environ.get(provider.api_key_env, "")
+
+    if provider.name == "github-copilot":
+        copilot_token = _read_copilot_token()
+        return ChatOpenAI(
+            model=model,
+            api_key=copilot_token or "not-needed",
+            base_url="https://api.githubcopilot.com",
+            timeout=timeout_s,
+            max_retries=2,
+            default_headers={
+                "Editor-Version": "OpenBaD/1.0",
+                "Copilot-Integration-Id": "vscode-chat",
+            },
+        )
+
+    base_url = provider.base_url or ""
+    if not api_key and base_url:
+        api_key = "not-needed"
+
+    return ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout_s,
+        max_retries=2,
+    )
+
+
+def _read_copilot_token() -> str:
+    """Read the cached Copilot OAuth token, or return empty string."""
+    import json as _json
+
+    try:
+        data = _json.loads(_TOKEN_FILE.read_text())
+        return str(data.get("token", ""))
+    except Exception:
+        return ""
+
+
 async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]:
     adapter = _build_wizard_adapter(provider)
     log.info("Verifying provider %s (%s)", provider.name, provider.base_url)
@@ -1237,13 +1297,12 @@ async def _get_provider_models(request: web.Request) -> web.Response:
 def _resolve_chat_adapter(
     config: CognitiveConfig,
     system_name: str,
-) -> tuple[Any, str | None, str, bool]:
+) -> tuple[object, str | None, str, bool, object | None]:
     """Build an adapter for the given cognitive system.
 
-    Returns ``(adapter, model_id, provider_name, is_fallback)``.
-    For ``github-copilot`` a native ``GitHubCopilotProvider`` is returned
-    to bypass LiteLLM's broken device-flow authenticator.  All other
-    providers use ``LiteLLMAdapter``.
+    Returns ``(adapter, model_id, provider_name, is_fallback, chat_model)``.
+    ``chat_model`` is a LangChain ``BaseChatModel`` for use with
+    ``create_react_agent`` and other LangChain components.
     *is_fallback* is True when the assigned provider was unavailable and a
     substitute was used instead.
     """
@@ -1262,7 +1321,8 @@ def _resolve_chat_adapter(
                 if not assignment.model:
                     break
                 adapter, model = _build_chat_adapter(p, assignment.model, system_name)
-                return adapter, model, p.name, False
+                chat_model = _build_langchain_model(p, assignment.model)
+                return adapter, model, p.name, False, chat_model
 
     # Fallback: if chat assignment is stale or unverified, use first valid provider.
     for p in config.providers:
@@ -1283,14 +1343,15 @@ def _resolve_chat_adapter(
         if not fallback_model:
             continue
         adapter, model = _build_chat_adapter(p, fallback_model, system_name)
+        chat_model = _build_langchain_model(p, fallback_model)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
             log.warning(
                 "Provider fallback: system=%s assigned=%s using=%s model=%s",
                 system_name, assigned_provider, p.name, model,
             )
-        return adapter, model, p.name, used_fallback
-    return None, None, "", True
+        return adapter, model, p.name, used_fallback, chat_model
+    return None, None, "", True, None
 
 
 def _serialize_chat_turn(turn) -> dict[str, object]:
@@ -1363,12 +1424,8 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
     system_name = str(payload.get("system", "chat")).strip()
     session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
     _path, config = _read_providers_config()
-    resolved_adapter = _resolve_chat_adapter(config, system_name)
-    if len(resolved_adapter) == 4:
-        adapter, model, provider_name, _is_fallback = resolved_adapter
-    else:
-        adapter, model, provider_name = resolved_adapter
-        _is_fallback = False
+    resolved = _resolve_chat_adapter(config, system_name)
+    adapter, model, provider_name, _is_fallback, chat_model = resolved
 
     if adapter is None:
         raise web.HTTPBadRequest(
@@ -1419,6 +1476,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
             personality_modulator=modulator,
             usage_tracker=request.app.get("usage_tracker"),
             nervous_system_client=nervous_system_client,
+            chat_model=chat_model,
         ):
             if chunk.error:
                 data = json.dumps(

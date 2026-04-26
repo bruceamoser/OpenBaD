@@ -352,7 +352,8 @@ def _process_autonomy_work(
     ) -> tuple[str, str, str, tuple[str, ...]] | None:
         try:
             _cfg_path, cfg = _read_providers_config()
-            adapter, model, provider_name, _is_fallback = _resolve_chat_adapter(cfg, system_name)
+            resolved = _resolve_chat_adapter(cfg, system_name)
+            adapter, model, provider_name, _is_fallback, chat_model = resolved
             if adapter is None or model is None:
                 return None
             result = asyncio.run(
@@ -364,6 +365,7 @@ def _process_autonomy_work(
                     user_prompt=user_prompt,
                     request_id=request_id,
                     tool_call_validator=tool_call_validator,
+                    chat_model=chat_model,
                 )
             )
             usage_tracker.record(

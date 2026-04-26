@@ -699,7 +699,7 @@ async def test_resolve_chat_adapter_requires_explicit_system_model(aiohttp_clien
         },
     )
 
-    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback, _chat_model = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is None
     assert model is None
@@ -735,7 +735,7 @@ async def test_resolve_chat_adapter_falls_back_to_first_valid_provider_when_assi
         },
     )
 
-    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback, _chat_model = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is not None
     assert model == "openai/gpt-4o-mini"
@@ -780,7 +780,7 @@ async def test_resolve_chat_adapter_fallback_uses_model_from_other_system_assign
         },
     )
 
-    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback, _chat_model = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is not None
     assert model == "openai/Bonsai-8B.gguf"
@@ -1547,7 +1547,7 @@ async def test_chat_stream_route_emits_session_id_and_tokens(aiohttp_client, mon
     monkeypatch.setattr(
         srv,
         "_resolve_chat_adapter",
-        lambda _config, _system_name: (object(), "test-model", "test-provider"),
+        lambda _config, _system_name: (object(), "test-model", "test-provider", False, None),
     )
 
     async def _fake_stream_chat(*args, **kwargs):

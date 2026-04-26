@@ -1087,6 +1087,7 @@ async def stream_chat(
     personality_modulator: Any | None = None,
     usage_tracker: Any | None = None,
     nervous_system_client: NervousSystemClient_T | None = None,
+    chat_model: Any | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Full chat pipeline: scan → assemble → agentic loop → consolidate.
 
@@ -1181,13 +1182,14 @@ async def stream_chat(
     tokens_used = 0
     t0 = time.monotonic()
 
-    agentic_capable = bool(getattr(adapter, "_api_base", None))
+    agentic_capable = chat_model is not None or bool(getattr(adapter, "_api_base", None))
     use_agentic = agentic_capable and not onboarding_mode
 
     try:
         if use_agentic:
             async for chunk in _agentic_stream(
                 adapter, model_id, messages, request_id,
+                chat_model=chat_model,
             ):
                 if chunk.error:
                     yield chunk
@@ -1279,13 +1281,15 @@ async def _agentic_stream(
     model_id: str,
     messages: list[dict[str, Any]],
     request_id: str,
+    *,
+    chat_model: Any | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Run LangGraph ReAct agent with streaming to the chat UI.
 
-    Uses ``create_react_agent`` backed by ``ChatOpenAI`` pointed at the
-    provider's OpenAI-compatible endpoint.  Tool results that trigger
-    access-request approval are handled inside the tool wrappers and
-    surface to the UI via a shared ``asyncio.Queue``.
+    Uses ``create_react_agent`` backed by a LangChain ``BaseChatModel``
+    (typically ``ChatOpenAI``).  When *chat_model* is provided it is used
+    directly; otherwise a ``ChatOpenAI`` is built from the adapter's
+    internal config as a temporary compatibility shim.
 
     Yields ``StreamChunk`` objects.  The caller handles the final
     ``done=True`` chunk and memory consolidation.
@@ -1294,24 +1298,25 @@ async def _agentic_stream(
 
     from langchain_core.messages import AIMessage, HumanMessage
     from langchain_core.tools import StructuredTool
-    from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
 
     from openbad.frameworks.langchain_tools import async_get_openbad_tools
 
-    # ── Build ChatOpenAI from adapter config ──
-    api_base = getattr(adapter, "_api_base", None) or ""
-    api_key = getattr(adapter, "_api_key", None) or "not-needed"
-    timeout_s = getattr(adapter, "_timeout_s", 120)
-    raw_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
+    # ── Use provided ChatModel or build from adapter (compat shim) ──
+    if chat_model is None:
+        from langchain_openai import ChatOpenAI
 
-    chat_model = ChatOpenAI(
-        model=raw_model,
-        api_key=api_key,
-        base_url=api_base,
-        timeout=timeout_s,
-        max_retries=2,
-    )
+        api_base = getattr(adapter, "_api_base", None) or ""
+        api_key = getattr(adapter, "_api_key", None) or "not-needed"
+        timeout_s = getattr(adapter, "_timeout_s", 120)
+        raw_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
+        chat_model = ChatOpenAI(
+            model=raw_model,
+            api_key=api_key,
+            base_url=api_base,
+            timeout=timeout_s,
+            max_retries=2,
+        )
 
     # ── Shared output queue ──
     #  Both the agent event stream and tool-wrapper side-effects

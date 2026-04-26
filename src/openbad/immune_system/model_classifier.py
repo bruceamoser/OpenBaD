@@ -218,7 +218,8 @@ class ModelClassifier:
 
         try:
             _cfg_path, cfg = _read_providers_config()
-            adapter, model, provider_name, _is_fallback = _resolve_chat_adapter(cfg, "immune")
+            resolved = _resolve_chat_adapter(cfg, "immune")
+            adapter, model, provider_name, _is_fallback, chat_model = resolved
             if adapter is None or model is None:
                 append_assistant_message(
                     session_id,

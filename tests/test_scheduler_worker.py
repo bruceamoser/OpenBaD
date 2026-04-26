@@ -43,7 +43,7 @@ def test_process_research_call_dequeues_and_posts_session(monkeypatch, tmp_path:
     monkeypatch.setattr(
         worker,
         "_resolve_chat_adapter",
-        lambda _config, _system: (_Adapter(), "test-model", "test-provider", False),
+        lambda _config, _system: (_Adapter(), "test-model", "test-provider", False, None),
     )
     monkeypatch.setattr(
         worker,
@@ -125,7 +125,7 @@ def test_process_research_call_strips_interactive_followups(monkeypatch, tmp_pat
     monkeypatch.setattr(
         worker,
         "_resolve_chat_adapter",
-        lambda _config, _system: (_Adapter(), "test-model", "test-provider", False),
+        lambda _config, _system: (_Adapter(), "test-model", "test-provider", False, None),
     )
     monkeypatch.setattr(worker, "append_session_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -174,7 +174,7 @@ def test_process_research_call_leaves_requested_node_pending_on_failure(monkeypa
     monkeypatch.setattr(
         worker,
         "_resolve_chat_adapter",
-        lambda _config, _system: (None, None, "", False),
+        lambda _config, _system: (None, None, "", False, None),
     )
     monkeypatch.setattr(worker, "append_session_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "append_assistant_message", lambda *args, **kwargs: None)
@@ -240,7 +240,7 @@ def test_process_pending_autonomy_work_escalates_recent_log_errors(monkeypatch, 
     monkeypatch.setattr(
         worker,
         "_resolve_chat_adapter",
-        lambda _config, system: (_DoctorAdapter(), f"{system}-model", "test-provider", False),
+        lambda _config, system: (_DoctorAdapter(), f"{system}-model", "test-provider", False, None),
     )
     monkeypatch.setattr(worker, "append_session_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(
