@@ -202,3 +202,91 @@ def test_node_to_dict_round_trip(svc: TaskService) -> None:
 
     assert d["title"] == "Node child"
     assert d["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Query helpers
+# ---------------------------------------------------------------------------
+
+
+def test_list_active_tasks_excludes_terminal(svc: TaskService) -> None:
+    t1 = svc.create_task("Active")
+    t2 = svc.create_task("Done")
+    svc.transition_task(t2.task_id, TaskStatus.RUNNING)
+    svc.transition_task(t2.task_id, TaskStatus.DONE)
+
+    rows = svc.list_active_tasks()
+    ids = {r["task_id"] for r in rows}
+    assert t1.task_id in ids
+    assert t2.task_id not in ids
+
+
+def test_list_completed_tasks_only_terminal(svc: TaskService) -> None:
+    svc.create_task("Active")
+    t2 = svc.create_task("Done")
+    svc.transition_task(t2.task_id, TaskStatus.RUNNING)
+    svc.transition_task(t2.task_id, TaskStatus.DONE)
+
+    rows = svc.list_completed_tasks()
+    ids = {r["task_id"] for r in rows}
+    assert t2.task_id in ids
+    assert len(ids) == 1
+
+
+def test_top_pending_user_task_skips_system(svc: TaskService) -> None:
+    from openbad.tasks.models import TaskKind, TaskModel
+
+    # Create a system task directly in the store
+    sys_task = TaskModel.new("System task", kind=TaskKind.SYSTEM, owner="system")
+    svc._store.create_task(sys_task)
+
+    user_task = svc.create_task("User task", owner="user")
+    top = svc.top_pending_user_task()
+    assert top is not None
+    assert top.task_id == user_task.task_id
+
+
+def test_top_pending_user_task_none_when_empty(svc: TaskService) -> None:
+    assert svc.top_pending_user_task() is None
+
+
+def test_find_pending_system_task(svc: TaskService) -> None:
+    from openbad.tasks.models import TaskKind, TaskModel
+
+    title = "Endocrine follow-up: re-enable research"
+    sys_task = TaskModel.new(title, kind=TaskKind.SYSTEM, owner="endocrine-doctor")
+    svc._store.create_task(sys_task)
+
+    found = svc.find_pending_system_task(title=title)
+    assert found is not None
+    assert found.task_id == sys_task.task_id
+
+
+def test_find_pending_system_task_not_found(svc: TaskService) -> None:
+    assert svc.find_pending_system_task(title="nonexistent") is None
+
+
+def test_pending_system_task_exists(svc: TaskService) -> None:
+    from openbad.tasks.models import TaskKind, TaskModel
+
+    sys_task = TaskModel.new(
+        "Endocrine follow-up: re-enable research", kind=TaskKind.SYSTEM, owner="system"
+    )
+    svc._store.create_task(sys_task)
+
+    assert svc.pending_system_task_exists(title_prefix="Endocrine follow-up")
+    assert not svc.pending_system_task_exists(title_prefix="Nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# Singleton
+# ---------------------------------------------------------------------------
+
+
+def test_singleton_get_instance(tmp_path: Path) -> None:
+    TaskService.reset_instance()
+    try:
+        svc = TaskService.get_instance(tmp_path / "singleton.db")
+        assert svc is TaskService.get_instance()
+    finally:
+        TaskService.reset_instance()

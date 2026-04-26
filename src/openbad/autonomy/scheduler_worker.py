@@ -20,11 +20,12 @@ from openbad.autonomy.tool_agent import build_tooling_system_prompt, run_tool_ag
 from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
 from openbad.state.event_log import recent_events
 from openbad.tasks.models import TaskKind, TaskModel, TaskPriority, TaskStatus
+from openbad.tasks.research_queue import initialize_research_db
+from openbad.tasks.research_service import ResearchService
 from openbad.tasks.reward_endocrine import RewardEndocrineBridge, initialize_reward_db
 from openbad.tasks.reward_evaluator import RewardEvaluator
 from openbad.tasks.reward_models import RewardTrace, TraceOutcome
-from openbad.tasks.research_queue import ResearchQueue, initialize_research_db
-from openbad.tasks.store import TaskStore
+from openbad.tasks.service import TaskService
 from openbad.wui.chat_pipeline import append_assistant_message, append_session_message
 from openbad.wui.server import _provider_is_valid, _read_providers_config, _resolve_chat_adapter
 from openbad.wui.usage_tracker import UsageTracker, resolve_usage_db_path
@@ -162,7 +163,9 @@ def _process_autonomy_work(
     endocrine_runtime = EndocrineRuntime(config=load_endocrine_config())
     endocrine_runtime.decay_to()
     endocrine_config = endocrine_runtime.config
-    task_store = TaskStore(conn)
+    task_svc = TaskService.get_instance(resolved_db_path)
+    task_store = task_svc._store  # noqa: SLF001 – internal store needed for low-level ops
+    research_svc = ResearchService.get_instance(resolved_db_path)
     reward_evaluator = RewardEvaluator()
 
     class _BufferedRewardController:
@@ -382,21 +385,7 @@ def _process_autonomy_work(
             return None
 
     def _top_pending_task() -> TaskModel | None:
-        row = conn.execute(
-            """
-            SELECT task_id
-            FROM tasks
-            WHERE status = 'pending'
-              AND kind NOT IN ('scheduled', 'system')
-              AND title NOT LIKE 'Question:%'
-              AND (due_at IS NULL OR due_at <= strftime('%s','now'))
-            ORDER BY priority DESC, created_at ASC
-            LIMIT 1
-            """
-        ).fetchone()
-        if not row:
-            return None
-        return task_store.get_task(str(row[0]))
+        return task_svc.top_pending_user_task()
 
     def _requested_task(request: dict[str, object] | None) -> TaskModel | None:
         if not isinstance(request, dict):
@@ -410,16 +399,15 @@ def _process_autonomy_work(
         return _top_pending_task()
 
     def _requested_research(request: dict[str, object] | None):
-        queue = ResearchQueue(conn)
         if not isinstance(request, dict):
             return None
         node_id = str(request.get("node_id", "")).strip()
         if node_id:
-            node = queue.get(node_id)
+            node = research_svc.get(node_id)
             if node is None or node.dequeued_at is not None:
                 return None
             return node
-        return queue.peek()
+        return research_svc.peek()
 
     def _create_question_task(source_task: TaskModel, question: str) -> TaskModel:
         task = TaskModel.new(
@@ -432,25 +420,13 @@ def _process_autonomy_work(
         return task_store.create_task(task)
 
     def _create_reenable_task(system_name: str, reason: str, due_at: float) -> TaskModel:
-        existing = conn.execute(
-            """
-            SELECT task_id
-            FROM tasks
-            WHERE status = 'pending'
-              AND kind = 'system'
-              AND title = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (f"Endocrine follow-up: re-enable {system_name}",),
-        ).fetchone()
-        if existing:
-            task = task_store.get_task(str(existing[0]))
-            if task is not None:
-                return task
+        title = f"Endocrine follow-up: re-enable {system_name}"
+        existing = task_svc.find_pending_system_task(title=title)
+        if existing is not None:
+            return existing
 
         followup = TaskModel.new(
-            title=f"Endocrine follow-up: re-enable {system_name}",
+            title=title,
             description=(
                 f"ENDOCRINE_REENABLE:{system_name}\n"
                 f"Scheduled by doctor loop. Reason: {reason}"
@@ -463,21 +439,8 @@ def _process_autonomy_work(
         return task_store.create_task(followup)
 
     def _process_endocrine_followups() -> None:
-        rows = conn.execute(
-            """
-            SELECT task_id
-            FROM tasks
-            WHERE status = 'pending'
-              AND kind = 'system'
-              AND title LIKE 'Endocrine follow-up: re-enable %'
-              AND (due_at IS NULL OR due_at <= strftime('%s','now'))
-            ORDER BY created_at ASC
-            """
-        ).fetchall()
-        for row in rows:
-            follow = task_store.get_task(str(row[0]))
-            if follow is None:
-                continue
+        followups = task_svc.list_due_endocrine_followups()
+        for follow in followups:
             marker = (follow.description or "").splitlines()[0].strip()
             if not marker.startswith("ENDOCRINE_REENABLE:"):
                 continue
@@ -582,10 +545,9 @@ def _process_autonomy_work(
 
     def _process_research(node=None) -> None:
         nonlocal executed_research_id
-        queue = ResearchQueue(conn)
         requested_node = node is not None
         if node is None:
-            node = queue.dequeue()
+            node = research_svc.dequeue()
         if node is None:
             return
         research_prompt = (
@@ -640,7 +602,7 @@ def _process_autonomy_work(
         summary, provider_name, model_id, tools_used = llm
         summary = _strip_autonomy_interaction(summary)
         if requested_node:
-            queue.complete(node.node_id)
+            research_svc.complete(node.node_id)
         meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}
         tools_suffix = f"\n\n*Tools used: {', '.join(tools_used)}*" if tools_used else ""
         _post_session(

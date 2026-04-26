@@ -377,8 +377,9 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
     from openbad.tasks.heartbeat import HeartbeatStore
     from openbad.tasks.models import TaskModel
-    from openbad.tasks.research_queue import ResearchQueue, initialize_research_db
-    from openbad.tasks.store import TaskStore
+    from openbad.tasks.research_queue import initialize_research_db
+    from openbad.tasks.research_service import ResearchService
+    from openbad.tasks.service import TaskService
 
     from openbad.state.event_log import setup_logging
 
@@ -413,25 +414,10 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     policy = load_session_policy()
     endocrine_runtime = EndocrineRuntime(config=load_endocrine_config())
     endocrine_runtime.decay_to(now)
-    task_store = TaskStore(conn)
+    task_svc = TaskService.get_instance(resolved_db_path)
 
     def _top_pending_task() -> TaskModel | None:
-        row = conn.execute(
-            """
-            SELECT task_id
-            FROM tasks
-            WHERE status = 'pending'
-              AND kind NOT IN ('scheduled', 'system')
-              AND title NOT LIKE 'Question:%'
-              AND (due_at IS NULL OR due_at <= ?)
-            ORDER BY priority DESC, created_at ASC
-            LIMIT 1
-            """,
-            (now,),
-        ).fetchone()
-        if not row:
-            return None
-        return task_store.get_task(str(row[0]))
+        return task_svc.top_pending_user_task()
 
     eligible_task_id: str | None = None
     tasks_policy = session_allows(policy, "tasks", "allow_task_autonomy", True)
@@ -454,7 +440,8 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
     research_policy = session_allows(policy, "research", "allow_research_autonomy", True)
     research_gate = endocrine_runtime.gate("research")
     if research_policy and research_gate.enabled:
-        node = ResearchQueue(conn).peek()
+        research_svc = ResearchService.get_instance(resolved_db_path)
+        node = research_svc.peek()
         if node is not None:
             eligible_research_id = node.node_id
         else:

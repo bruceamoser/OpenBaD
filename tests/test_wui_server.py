@@ -1961,6 +1961,11 @@ async def test_put_telemetry_config_persists_interval(aiohttp_client, tmp_path, 
 @pytest.mark.asyncio
 async def test_post_tasks_creates_task(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
+    import openbad.tasks.service as task_svc_mod
+    from openbad.tasks.service import TaskService
+
+    TaskService.reset_instance()
+    monkeypatch.setattr(task_svc_mod, "_instance", None)
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
@@ -1983,9 +1988,13 @@ async def test_post_tasks_creates_task(aiohttp_client, tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_get_tasks_completed_returns_terminal_tasks(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
+    import openbad.tasks.service as task_svc_mod
     from openbad.tasks.models import TaskStatus
     from openbad.tasks.service import TaskService
     from openbad.state.db import initialize_state_db
+
+    TaskService.reset_instance()
+    monkeypatch.setattr(task_svc_mod, "_instance", None)
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
@@ -2015,6 +2024,11 @@ async def test_get_tasks_completed_returns_terminal_tasks(aiohttp_client, tmp_pa
 @pytest.mark.asyncio
 async def test_post_research_creates_node(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
+    import openbad.tasks.research_service as research_svc_mod
+    from openbad.tasks.research_service import ResearchService
+
+    ResearchService.reset_instance()
+    monkeypatch.setattr(research_svc_mod, "_instance", None)
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
