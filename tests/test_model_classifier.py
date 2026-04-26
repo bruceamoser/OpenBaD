@@ -158,7 +158,7 @@ class TestClassifyThreat:
             patch("openbad.immune_system.model_classifier._read_providers_config", return_value=("unused", object())),
             patch(
                 "openbad.immune_system.model_classifier._resolve_chat_adapter",
-                return_value=(object(), "immune-model", "custom", False, None),
+                return_value=(object(), "immune-model", "custom", False, None, None),
             ),
             patch(
                 "openbad.immune_system.model_classifier.run_tool_agent",

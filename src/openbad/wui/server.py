@@ -907,6 +907,48 @@ def _build_chat_adapter(
     )
 
 
+def _extract_provider_config(
+    provider: ProviderConfig,
+    model: str,
+) -> dict[str, object]:
+    """Extract common LLM config from a ProviderConfig.
+
+    Returns a dict with ``model``, ``api_key``, ``base_url``, ``timeout_s``,
+    and ``is_copilot``.  Used by both ``_build_langchain_model`` and
+    ``_build_crew_llm`` so the config extraction logic stays DRY.
+    """
+    import os
+
+    timeout_s = max(1.0, provider.timeout_ms / 1000)
+    api_key = provider.api_key or ""
+    if not api_key and provider.api_key_env:
+        api_key = os.environ.get(provider.api_key_env, "")
+
+    is_copilot = provider.name == "github-copilot"
+
+    if is_copilot:
+        copilot_token = _read_copilot_token()
+        return {
+            "model": model,
+            "api_key": copilot_token or "not-needed",
+            "base_url": "https://api.githubcopilot.com",
+            "timeout_s": timeout_s,
+            "is_copilot": True,
+        }
+
+    base_url = provider.base_url or ""
+    if not api_key and base_url:
+        api_key = "not-needed"
+
+    return {
+        "model": model,
+        "api_key": api_key,
+        "base_url": base_url,
+        "timeout_s": timeout_s,
+        "is_copilot": False,
+    }
+
+
 def _build_langchain_model(
     provider: ProviderConfig,
     model: str,
@@ -916,43 +958,51 @@ def _build_langchain_model(
     Returns a standard LangChain ``BaseChatModel`` that can be passed
     directly to ``create_react_agent`` and other LangChain components
     without adapter bridge hacks.
-
-    GitHub Copilot is handled by pointing ``ChatOpenAI`` at its token
-    endpoint.  All other providers use their ``base_url``.
     """
-    import os
-
     from langchain_openai import ChatOpenAI
 
-    timeout_s = max(1.0, provider.timeout_ms / 1000)
-    api_key = provider.api_key or ""
-    if not api_key and provider.api_key_env:
-        api_key = os.environ.get(provider.api_key_env, "")
+    cfg = _extract_provider_config(provider, model)
+    kwargs = {
+        "model": cfg["model"],
+        "api_key": cfg["api_key"],
+        "base_url": cfg["base_url"],
+        "timeout": cfg["timeout_s"],
+        "max_retries": 2,
+    }
+    if cfg["is_copilot"]:
+        kwargs["default_headers"] = {
+            "Editor-Version": "OpenBaD/1.0",
+            "Copilot-Integration-Id": "vscode-chat",
+        }
+    return ChatOpenAI(**kwargs)
 
-    if provider.name == "github-copilot":
-        copilot_token = _read_copilot_token()
-        return ChatOpenAI(
-            model=model,
-            api_key=copilot_token or "not-needed",
-            base_url="https://api.githubcopilot.com",
-            timeout=timeout_s,
-            max_retries=2,
-            default_headers={
-                "Editor-Version": "OpenBaD/1.0",
-                "Copilot-Integration-Id": "vscode-chat",
-            },
-        )
 
-    base_url = provider.base_url or ""
-    if not api_key and base_url:
-        api_key = "not-needed"
+def _build_crew_llm(
+    provider: ProviderConfig,
+    model: str,
+) -> object:
+    """Build a CrewAI ``LLM`` for a provider config.
 
-    return ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url=base_url,
-        timeout=timeout_s,
-        max_retries=2,
+    Returns a ``crewai.LLM`` instance configured identically to the
+    ``ChatOpenAI`` returned by :func:`_build_langchain_model`.  CrewAI
+    uses its own LLM wrapper around LiteLLM, so we build a parallel
+    object from the same extracted config.
+    """
+    from crewai import LLM
+
+    cfg = _extract_provider_config(provider, model)
+
+    # CrewAI LLM wants a litellm-style model string (prefix/model).
+    # For copilot or base_url providers, "openai/<model>" works.
+    crew_model = cfg["model"]
+    if cfg["base_url"] and "/" not in str(crew_model):
+        crew_model = f"openai/{crew_model}"
+
+    return LLM(
+        model=str(crew_model),
+        api_key=str(cfg["api_key"]) or None,
+        base_url=str(cfg["base_url"]) or None,
+        timeout=float(str(cfg["timeout_s"])),
     )
 
 
@@ -1297,12 +1347,15 @@ async def _get_provider_models(request: web.Request) -> web.Response:
 def _resolve_chat_adapter(
     config: CognitiveConfig,
     system_name: str,
-) -> tuple[object, str | None, str, bool, object | None]:
+) -> tuple[object, str | None, str, bool, object | None, object | None]:
     """Build an adapter for the given cognitive system.
 
-    Returns ``(adapter, model_id, provider_name, is_fallback, chat_model)``.
+    Returns ``(adapter, model_id, provider_name, is_fallback,
+    chat_model, crew_llm)``.
+
     ``chat_model`` is a LangChain ``BaseChatModel`` for use with
     ``create_react_agent`` and other LangChain components.
+    ``crew_llm`` is a ``crewai.LLM`` for use with CrewAI crews.
     *is_fallback* is True when the assigned provider was unavailable and a
     substitute was used instead.
     """
@@ -1320,9 +1373,15 @@ def _resolve_chat_adapter(
             if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
                 if not assignment.model:
                     break
-                adapter, model = _build_chat_adapter(p, assignment.model, system_name)
+                adapter, model = _build_chat_adapter(
+                    p, assignment.model, system_name,
+                )
                 chat_model = _build_langchain_model(p, assignment.model)
-                return adapter, model, p.name, False, chat_model
+                crew_llm = _build_crew_llm(p, assignment.model)
+                return (
+                    adapter, model, p.name, False,
+                    chat_model, crew_llm,
+                )
 
     # Fallback: if chat assignment is stale or unverified, use first valid provider.
     for p in config.providers:
@@ -1344,14 +1403,18 @@ def _resolve_chat_adapter(
             continue
         adapter, model = _build_chat_adapter(p, fallback_model, system_name)
         chat_model = _build_langchain_model(p, fallback_model)
+        crew_llm = _build_crew_llm(p, fallback_model)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
             log.warning(
                 "Provider fallback: system=%s assigned=%s using=%s model=%s",
                 system_name, assigned_provider, p.name, model,
             )
-        return adapter, model, p.name, used_fallback, chat_model
-    return None, None, "", True, None
+        return (
+            adapter, model, p.name, used_fallback,
+            chat_model, crew_llm,
+        )
+    return None, None, "", True, None, None
 
 
 def _serialize_chat_turn(turn) -> dict[str, object]:
@@ -1425,7 +1488,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
     session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
     _path, config = _read_providers_config()
     resolved = _resolve_chat_adapter(config, system_name)
-    adapter, model, provider_name, _is_fallback, chat_model = resolved
+    adapter, model, provider_name, _is_fallback, chat_model, _crew_llm = resolved
 
     if adapter is None:
         raise web.HTTPBadRequest(

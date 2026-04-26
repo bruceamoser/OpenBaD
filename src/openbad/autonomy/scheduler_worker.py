@@ -353,7 +353,7 @@ def _process_autonomy_work(
         try:
             _cfg_path, cfg = _read_providers_config()
             resolved = _resolve_chat_adapter(cfg, system_name)
-            adapter, model, provider_name, _is_fallback, chat_model = resolved
+            adapter, model, provider_name, _fb, chat_model, _cl = resolved
             if adapter is None or model is None:
                 return None
             result = asyncio.run(
