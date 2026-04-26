@@ -907,6 +907,116 @@ def _build_chat_adapter(
     )
 
 
+def _extract_provider_config(
+    provider: ProviderConfig,
+    model: str,
+) -> dict[str, object]:
+    """Extract common LLM config from a ProviderConfig.
+
+    Returns a dict with ``model``, ``api_key``, ``base_url``, ``timeout_s``,
+    and ``is_copilot``.  Used by both ``_build_langchain_model`` and
+    ``_build_crew_llm`` so the config extraction logic stays DRY.
+    """
+    import os
+
+    timeout_s = max(1.0, provider.timeout_ms / 1000)
+    api_key = provider.api_key or ""
+    if not api_key and provider.api_key_env:
+        api_key = os.environ.get(provider.api_key_env, "")
+
+    is_copilot = provider.name == "github-copilot"
+
+    if is_copilot:
+        copilot_token = _read_copilot_token()
+        return {
+            "model": model,
+            "api_key": copilot_token or "not-needed",
+            "base_url": "https://api.githubcopilot.com",
+            "timeout_s": timeout_s,
+            "is_copilot": True,
+        }
+
+    base_url = provider.base_url or ""
+    if not api_key and base_url:
+        api_key = "not-needed"
+
+    return {
+        "model": model,
+        "api_key": api_key,
+        "base_url": base_url,
+        "timeout_s": timeout_s,
+        "is_copilot": False,
+    }
+
+
+def _build_langchain_model(
+    provider: ProviderConfig,
+    model: str,
+) -> object:
+    """Build a LangChain ``ChatOpenAI`` for a provider config.
+
+    Returns a standard LangChain ``BaseChatModel`` that can be passed
+    directly to ``create_react_agent`` and other LangChain components
+    without adapter bridge hacks.
+    """
+    from langchain_openai import ChatOpenAI
+
+    cfg = _extract_provider_config(provider, model)
+    kwargs = {
+        "model": cfg["model"],
+        "api_key": cfg["api_key"],
+        "base_url": cfg["base_url"],
+        "timeout": cfg["timeout_s"],
+        "max_retries": 2,
+    }
+    if cfg["is_copilot"]:
+        kwargs["default_headers"] = {
+            "Editor-Version": "OpenBaD/1.0",
+            "Copilot-Integration-Id": "vscode-chat",
+        }
+    return ChatOpenAI(**kwargs)
+
+
+def _build_crew_llm(
+    provider: ProviderConfig,
+    model: str,
+) -> object:
+    """Build a CrewAI ``LLM`` for a provider config.
+
+    Returns a ``crewai.LLM`` instance configured identically to the
+    ``ChatOpenAI`` returned by :func:`_build_langchain_model`.  CrewAI
+    uses its own LLM wrapper around LiteLLM, so we build a parallel
+    object from the same extracted config.
+    """
+    from crewai import LLM
+
+    cfg = _extract_provider_config(provider, model)
+
+    # CrewAI LLM wants a litellm-style model string (prefix/model).
+    # For copilot or base_url providers, "openai/<model>" works.
+    crew_model = cfg["model"]
+    if cfg["base_url"] and "/" not in str(crew_model):
+        crew_model = f"openai/{crew_model}"
+
+    return LLM(
+        model=str(crew_model),
+        api_key=str(cfg["api_key"]) or None,
+        base_url=str(cfg["base_url"]) or None,
+        timeout=float(str(cfg["timeout_s"])),
+    )
+
+
+def _read_copilot_token() -> str:
+    """Read the cached Copilot OAuth token, or return empty string."""
+    import json as _json
+
+    try:
+        data = _json.loads(_TOKEN_FILE.read_text())
+        return str(data.get("token", ""))
+    except Exception:
+        return ""
+
+
 async def _verify_wizard_provider(provider: ProviderConfig) -> dict[str, object]:
     adapter = _build_wizard_adapter(provider)
     log.info("Verifying provider %s (%s)", provider.name, provider.base_url)
@@ -1237,13 +1347,15 @@ async def _get_provider_models(request: web.Request) -> web.Response:
 def _resolve_chat_adapter(
     config: CognitiveConfig,
     system_name: str,
-) -> tuple[Any, str | None, str, bool]:
+) -> tuple[object, str | None, str, bool, object | None, object | None]:
     """Build an adapter for the given cognitive system.
 
-    Returns ``(adapter, model_id, provider_name, is_fallback)``.
-    For ``github-copilot`` a native ``GitHubCopilotProvider`` is returned
-    to bypass LiteLLM's broken device-flow authenticator.  All other
-    providers use ``LiteLLMAdapter``.
+    Returns ``(adapter, model_id, provider_name, is_fallback,
+    chat_model, crew_llm)``.
+
+    ``chat_model`` is a LangChain ``BaseChatModel`` for use with
+    ``create_react_agent`` and other LangChain components.
+    ``crew_llm`` is a ``crewai.LLM`` for use with CrewAI crews.
     *is_fallback* is True when the assigned provider was unavailable and a
     substitute was used instead.
     """
@@ -1261,8 +1373,15 @@ def _resolve_chat_adapter(
             if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
                 if not assignment.model:
                     break
-                adapter, model = _build_chat_adapter(p, assignment.model, system_name)
-                return adapter, model, p.name, False
+                adapter, model = _build_chat_adapter(
+                    p, assignment.model, system_name,
+                )
+                chat_model = _build_langchain_model(p, assignment.model)
+                crew_llm = _build_crew_llm(p, assignment.model)
+                return (
+                    adapter, model, p.name, False,
+                    chat_model, crew_llm,
+                )
 
     # Fallback: if chat assignment is stale or unverified, use first valid provider.
     for p in config.providers:
@@ -1283,14 +1402,19 @@ def _resolve_chat_adapter(
         if not fallback_model:
             continue
         adapter, model = _build_chat_adapter(p, fallback_model, system_name)
+        chat_model = _build_langchain_model(p, fallback_model)
+        crew_llm = _build_crew_llm(p, fallback_model)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
             log.warning(
                 "Provider fallback: system=%s assigned=%s using=%s model=%s",
                 system_name, assigned_provider, p.name, model,
             )
-        return adapter, model, p.name, used_fallback
-    return None, None, "", True
+        return (
+            adapter, model, p.name, used_fallback,
+            chat_model, crew_llm,
+        )
+    return None, None, "", True, None, None
 
 
 def _serialize_chat_turn(turn) -> dict[str, object]:
@@ -1363,12 +1487,8 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
     system_name = str(payload.get("system", "chat")).strip()
     session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
     _path, config = _read_providers_config()
-    resolved_adapter = _resolve_chat_adapter(config, system_name)
-    if len(resolved_adapter) == 4:
-        adapter, model, provider_name, _is_fallback = resolved_adapter
-    else:
-        adapter, model, provider_name = resolved_adapter
-        _is_fallback = False
+    resolved = _resolve_chat_adapter(config, system_name)
+    adapter, model, provider_name, _is_fallback, chat_model, _crew_llm = resolved
 
     if adapter is None:
         raise web.HTTPBadRequest(
@@ -1419,6 +1539,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
             personality_modulator=modulator,
             usage_tracker=request.app.get("usage_tracker"),
             nervous_system_client=nervous_system_client,
+            chat_model=chat_model,
         ):
             if chunk.error:
                 data = json.dumps(
@@ -2746,35 +2867,18 @@ async def _post_endocrine_toggle(request: web.Request) -> web.Response:
 
 async def _get_tasks(_request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.store import TaskStore  # noqa: PLC0415
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        store = TaskStore(conn)
-        tasks = store.list_tasks(limit=100)
-        return web.json_response({
-            "tasks": [
-                {
-                    "task_id": t.task_id,
-                    "title": t.title,
-                    "description": t.description,
-                    "status": t.status,
-                    "kind": t.kind,
-                    "horizon": t.horizon,
-                    "priority": t.priority,
-                    "owner": t.owner,
-                    "created_at": t.created_at,
-                    "updated_at": t.updated_at,
-                }
-                for t in tasks
-            ]
-        })
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
+
+        svc = TaskService.get_instance()
+        rows = svc.list_active_tasks(limit=200)
+        return web.json_response({"tasks": rows})
     except Exception as exc:  # noqa: BLE001
         return web.json_response({"tasks": [], "error": str(exc)})
 
 
 async def _get_tasks_completed(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
 
         limit_raw = request.query.get("limit")
         limit = 50
@@ -2784,37 +2888,9 @@ async def _get_tasks_completed(request: web.Request) -> web.Response:
             except ValueError as exc:
                 raise web.HTTPBadRequest(text="limit must be an integer") from exc
 
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        rows = conn.execute(
-            """
-            SELECT task_id, title, description, status, kind, horizon, priority,
-                   owner, created_at, updated_at
-            FROM tasks
-            WHERE status IN ('done', 'failed', 'cancelled')
-            ORDER BY updated_at DESC, created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return web.json_response(
-            {
-                "tasks": [
-                    {
-                        "task_id": row["task_id"],
-                        "title": row["title"],
-                        "description": row["description"],
-                        "status": row["status"],
-                        "kind": row["kind"],
-                        "horizon": row["horizon"],
-                        "priority": row["priority"],
-                        "owner": row["owner"],
-                        "created_at": row["created_at"],
-                        "updated_at": row["updated_at"],
-                    }
-                    for row in rows
-                ]
-            }
-        )
+        svc = TaskService.get_instance()
+        rows = svc.list_completed_tasks(limit=limit)
+        return web.json_response({"tasks": rows})
     except web.HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -2823,9 +2899,7 @@ async def _get_tasks_completed(request: web.Request) -> web.Response:
 
 async def _post_tasks(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.models import TaskModel  # noqa: PLC0415
-        from openbad.tasks.store import TaskStore  # noqa: PLC0415
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
 
         payload = await request.json()
         if not isinstance(payload, dict):
@@ -2838,30 +2912,10 @@ async def _post_tasks(request: web.Request) -> web.Response:
         description = str(payload.get("description", "")).strip()
         owner = str(payload.get("owner", "user")).strip() or "user"
 
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        store = TaskStore(conn)
-        task = TaskModel.new(
-            title,
-            description=description,
-            owner=owner,
-        )
-        store.create_task(task)
+        svc = TaskService.get_instance()
+        task = svc.create_task(title, description=description, owner=owner)
 
-        return web.json_response(
-            {
-                "task_id": task.task_id,
-                "title": task.title,
-                "description": task.description,
-                "status": task.status,
-                "kind": task.kind,
-                "horizon": task.horizon,
-                "priority": task.priority,
-                "owner": task.owner,
-                "created_at": task.created_at,
-                "updated_at": task.updated_at,
-            },
-            status=201,
-        )
+        return web.json_response(task.to_dict(), status=201)
     except web.HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -2870,7 +2924,6 @@ async def _post_tasks(request: web.Request) -> web.Response:
 
 async def _patch_task(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
         from openbad.tasks.service import TaskService  # noqa: PLC0415
 
         task_id = request.match_info["task_id"]
@@ -2878,8 +2931,7 @@ async def _patch_task(request: web.Request) -> web.Response:
         if not isinstance(payload, dict):
             raise web.HTTPBadRequest(text="request body must be an object")
 
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        svc = TaskService(conn)
+        svc = TaskService.get_instance()
         task = svc.update_task(
             task_id,
             title=None if payload.get("title") is None else str(payload.get("title")).strip(),
@@ -2897,12 +2949,10 @@ async def _patch_task(request: web.Request) -> web.Response:
 
 async def _post_task_complete(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
         from openbad.tasks.service import TaskService  # noqa: PLC0415
 
         task_id = request.match_info["task_id"]
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        svc = TaskService(conn)
+        svc = TaskService.get_instance()
         task = svc.complete_task(task_id)
         return web.json_response(task.to_dict())
     except KeyError as exc:
@@ -2919,40 +2969,18 @@ async def _post_task_complete(request: web.Request) -> web.Response:
 
 async def _get_research(_request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.research_queue import (  # noqa: PLC0415
-            ResearchQueue,
-            initialize_research_db,
-        )
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        initialize_research_db(conn)
-        queue = ResearchQueue(conn)
-        nodes = queue.list_pending()
-        return web.json_response({
-            "nodes": [
-                {
-                    "node_id": n.node_id,
-                    "title": n.title,
-                    "description": n.description,
-                    "priority": n.priority,
-                    "source_task_id": n.source_task_id,
-                    "enqueued_at": n.enqueued_at.isoformat() if n.enqueued_at else None,
-                    "status": "pending",
-                }
-                for n in nodes
-            ]
-        })
+        from openbad.tasks.research_service import ResearchService  # noqa: PLC0415
+
+        svc = ResearchService.get_instance()
+        nodes = svc.list_pending()
+        return web.json_response({"nodes": [n.to_dict() for n in nodes]})
     except Exception as exc:  # noqa: BLE001
         return web.json_response({"nodes": [], "error": str(exc)})
 
 
 async def _post_research(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.research_queue import (  # noqa: PLC0415
-            ResearchQueue,
-            initialize_research_db,
-        )
+        from openbad.tasks.research_service import ResearchService  # noqa: PLC0415
 
         payload = await request.json()
         if not isinstance(payload, dict):
@@ -2975,28 +3003,15 @@ async def _post_research(request: web.Request) -> web.Response:
         except (TypeError, ValueError) as exc:
             raise web.HTTPBadRequest(text="priority must be an integer") from exc
 
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        initialize_research_db(conn)
-        queue = ResearchQueue(conn)
-        node = queue.enqueue(
+        svc = ResearchService.get_instance()
+        node = svc.enqueue(
             title,
             description=description,
             priority=priority,
             source_task_id=source_task_id,
         )
 
-        return web.json_response(
-            {
-                "node_id": node.node_id,
-                "title": node.title,
-                "description": node.description,
-                "priority": node.priority,
-                "source_task_id": node.source_task_id,
-                "enqueued_at": node.enqueued_at.isoformat() if node.enqueued_at else None,
-                "status": "pending",
-            },
-            status=201,
-        )
+        return web.json_response(node.to_dict(), status=201)
     except web.HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -3005,11 +3020,7 @@ async def _post_research(request: web.Request) -> web.Response:
 
 async def _patch_research(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.research_queue import (  # noqa: PLC0415
-            ResearchQueue,
-            initialize_research_db,
-        )
+        from openbad.tasks.research_service import ResearchService  # noqa: PLC0415
 
         research_id = request.match_info["research_id"]
         payload = await request.json()
@@ -3021,10 +3032,8 @@ async def _patch_research(request: web.Request) -> web.Response:
         except (TypeError, ValueError) as exc:
             raise web.HTTPBadRequest(text="priority must be an integer") from exc
 
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        initialize_research_db(conn)
-        queue = ResearchQueue(conn)
-        node = queue.update(
+        svc = ResearchService.get_instance()
+        node = svc.update(
             research_id,
             title=None if payload.get("title") is None else str(payload.get("title")).strip(),
             description=None if payload.get("description") is None else str(payload.get("description")),
@@ -3046,17 +3055,11 @@ async def _patch_research(request: web.Request) -> web.Response:
 
 async def _post_research_complete(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.research_queue import (  # noqa: PLC0415
-            ResearchQueue,
-            initialize_research_db,
-        )
+        from openbad.tasks.research_service import ResearchService  # noqa: PLC0415
 
         research_id = request.match_info["research_id"]
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        initialize_research_db(conn)
-        queue = ResearchQueue(conn)
-        node = queue.complete(research_id)
+        svc = ResearchService.get_instance()
+        node = svc.complete(research_id)
         return web.json_response(node.to_dict())
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc)) from exc
@@ -3066,11 +3069,7 @@ async def _post_research_complete(request: web.Request) -> web.Response:
 
 async def _get_research_completed(request: web.Request) -> web.Response:
     try:
-        from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db  # noqa: PLC0415
-        from openbad.tasks.research_queue import (  # noqa: PLC0415
-            ResearchQueue,
-            initialize_research_db,
-        )
+        from openbad.tasks.research_service import ResearchService  # noqa: PLC0415
 
         limit_raw = request.query.get("limit")
         limit = 50
@@ -3080,25 +3079,9 @@ async def _get_research_completed(request: web.Request) -> web.Response:
             except ValueError as exc:
                 raise web.HTTPBadRequest(text="limit must be an integer") from exc
 
-        conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
-        initialize_research_db(conn)
-        queue = ResearchQueue(conn)
-        nodes = queue.list_completed(limit=limit)
-        return web.json_response({
-            "nodes": [
-                {
-                    "node_id": n.node_id,
-                    "title": n.title,
-                    "description": n.description,
-                    "priority": n.priority,
-                    "source_task_id": n.source_task_id,
-                    "enqueued_at": n.enqueued_at.isoformat() if n.enqueued_at else None,
-                    "dequeued_at": n.dequeued_at.isoformat() if n.dequeued_at else None,
-                    "status": "completed",
-                }
-                for n in nodes
-            ]
-        })
+        svc = ResearchService.get_instance()
+        nodes = svc.list_completed(limit=limit)
+        return web.json_response({"nodes": [n.to_dict() for n in nodes]})
     except web.HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

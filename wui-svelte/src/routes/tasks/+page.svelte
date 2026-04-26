@@ -13,8 +13,8 @@
     horizon: string;
     priority: number;
     owner?: string;
-    created_at: string;
-    updated_at: string;
+    created_at: number;
+    updated_at: number;
   }
 
   interface SessionMessage {
@@ -74,9 +74,10 @@
     return STATUS_COLOR[s.toLowerCase()] ?? 'var(--text-dim)';
   }
 
-  function fmtTime(ts: string): string {
-    const d = new Date(ts);
-    return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+  function fmtTime(ts: number | string): string {
+    const ms = typeof ts === 'number' ? ts * 1000 : Number(ts) * 1000;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
   }
 
   async function load(): Promise<void> {

@@ -23,7 +23,6 @@ from aiohttp import web
 
 from openbad.tasks.models import TaskStatus
 from openbad.tasks.service import TaskService
-from openbad.tasks.store import TaskStore
 
 _APP_KEY = "task_api_service"
 
@@ -163,9 +162,9 @@ async def _complete_task(request: web.Request) -> web.Response:
 
 
 async def _list_task_events(request: web.Request) -> web.Response:
-    store: TaskStore = request.app[_APP_KEY + "_store"]
+    svc: TaskService = request.app[_APP_KEY]
     task_id = request.match_info["task_id"]
-    events = store.list_events(task_id)
+    events = svc.list_events(task_id)
     return web.json_response({"task_id": task_id, "events": events})
 
 
@@ -185,7 +184,6 @@ def setup_task_routes(app: web.Application, conn: sqlite3.Connection) -> None:
         An open SQLite connection to the state database.
     """
     app[_APP_KEY] = TaskService(conn)
-    app[_APP_KEY + "_store"] = TaskStore(conn)
 
     app.router.add_get("/api/tasks", _list_tasks)
     app.router.add_post("/api/tasks", _create_task)

@@ -699,7 +699,7 @@ async def test_resolve_chat_adapter_requires_explicit_system_model(aiohttp_clien
         },
     )
 
-    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback, _chat_model, _crew_llm = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is None
     assert model is None
@@ -735,7 +735,7 @@ async def test_resolve_chat_adapter_falls_back_to_first_valid_provider_when_assi
         },
     )
 
-    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback, _chat_model, _crew_llm = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is not None
     assert model == "openai/gpt-4o-mini"
@@ -780,7 +780,7 @@ async def test_resolve_chat_adapter_fallback_uses_model_from_other_system_assign
         },
     )
 
-    adapter, model, provider_name, is_fallback = srv._resolve_chat_adapter(config, "chat")
+    adapter, model, provider_name, is_fallback, _chat_model, _crew_llm = srv._resolve_chat_adapter(config, "chat")
 
     assert adapter is not None
     assert model == "openai/Bonsai-8B.gguf"
@@ -1547,7 +1547,7 @@ async def test_chat_stream_route_emits_session_id_and_tokens(aiohttp_client, mon
     monkeypatch.setattr(
         srv,
         "_resolve_chat_adapter",
-        lambda _config, _system_name: (object(), "test-model", "test-provider"),
+        lambda _config, _system_name: (object(), "test-model", "test-provider", False, None, None),
     )
 
     async def _fake_stream_chat(*args, **kwargs):
@@ -1961,6 +1961,11 @@ async def test_put_telemetry_config_persists_interval(aiohttp_client, tmp_path, 
 @pytest.mark.asyncio
 async def test_post_tasks_creates_task(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
+    import openbad.tasks.service as task_svc_mod
+    from openbad.tasks.service import TaskService
+
+    TaskService.reset_instance()
+    monkeypatch.setattr(task_svc_mod, "_instance", None)
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
@@ -1983,9 +1988,13 @@ async def test_post_tasks_creates_task(aiohttp_client, tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_get_tasks_completed_returns_terminal_tasks(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
+    import openbad.tasks.service as task_svc_mod
     from openbad.tasks.models import TaskStatus
     from openbad.tasks.service import TaskService
     from openbad.state.db import initialize_state_db
+
+    TaskService.reset_instance()
+    monkeypatch.setattr(task_svc_mod, "_instance", None)
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)
@@ -2015,6 +2024,11 @@ async def test_get_tasks_completed_returns_terminal_tasks(aiohttp_client, tmp_pa
 @pytest.mark.asyncio
 async def test_post_research_creates_node(aiohttp_client, tmp_path, monkeypatch):
     import openbad.state.db as state_db
+    import openbad.tasks.research_service as research_svc_mod
+    from openbad.tasks.research_service import ResearchService
+
+    ResearchService.reset_instance()
+    monkeypatch.setattr(research_svc_mod, "_instance", None)
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(state_db, "DEFAULT_STATE_DB_PATH", db_path)

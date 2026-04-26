@@ -200,3 +200,73 @@ class TestRoleFiltering:
         assert "write_file" not in sleep_tools
         assert "exec_command" not in sleep_tools
         assert "create_task" not in sleep_tools
+
+
+# ── CrewAI tool adapter tests ────────────────────────────────────────── #
+
+
+class TestLangchainToCrewTool:
+    def test_wraps_name_and_description(self) -> None:
+        from openbad.frameworks.langchain_tools import langchain_to_crew_tool
+
+        mcp = _fake_mcp_tool(name="web_search", description="Search the web")
+        lc_tool = _mcp_tool_to_langchain(mcp)
+        crew_tool = langchain_to_crew_tool(lc_tool)
+
+        assert crew_tool.name == "web_search"
+        assert "Search the web" in crew_tool.description
+
+    def test_run_delegates_to_langchain_invoke(self) -> None:
+        from openbad.frameworks.langchain_tools import langchain_to_crew_tool
+
+        mcp = _fake_mcp_tool(name="echo_tool", description="Echo")
+        lc_tool = _mcp_tool_to_langchain(mcp)
+
+        crew_tool = langchain_to_crew_tool(lc_tool)
+
+        with patch.object(type(lc_tool), "invoke", return_value="echoed: hello") as mock_invoke:
+            result = crew_tool._run(query="hello")
+
+        assert result == "echoed: hello"
+        mock_invoke.assert_called_once()
+        # The invoke call receives (self, input_dict) — verify the dict arg
+        call_args = mock_invoke.call_args[0]
+        assert {"query": "hello"} in call_args
+
+    def test_is_crewai_base_tool(self) -> None:
+        from crewai.tools import BaseTool as CrewBaseTool
+
+        from openbad.frameworks.langchain_tools import langchain_to_crew_tool
+
+        mcp = _fake_mcp_tool()
+        lc_tool = _mcp_tool_to_langchain(mcp)
+        crew_tool = langchain_to_crew_tool(lc_tool)
+        assert isinstance(crew_tool, CrewBaseTool)
+
+
+class TestAsyncGetCrewTools:
+    @pytest.mark.asyncio
+    async def test_returns_crew_tools_for_role(self) -> None:
+        from openbad.frameworks import langchain_tools
+        from openbad.frameworks.langchain_tools import async_get_crew_tools
+
+        mcp_web = _fake_mcp_tool(name="web_search", description="Search")
+        mcp_extra = _fake_mcp_tool(name="exec_command", description="Exec")
+        langchain_tools._tools_cache = [
+            _mcp_tool_to_langchain(mcp_web),
+            _mcp_tool_to_langchain(mcp_extra),
+        ]
+
+        crew_tools = await async_get_crew_tools("doctor")
+        # doctor role does NOT have web_search or exec_command
+        names = {t.name for t in crew_tools}
+        assert "exec_command" not in names
+
+    @pytest.mark.asyncio
+    async def test_empty_for_unknown_role(self) -> None:
+        from openbad.frameworks import langchain_tools
+        from openbad.frameworks.langchain_tools import async_get_crew_tools
+
+        langchain_tools._tools_cache = []
+        crew_tools = await async_get_crew_tools("nonexistent")
+        assert crew_tools == []

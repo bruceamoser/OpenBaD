@@ -259,3 +259,37 @@ def clear_tools_cache() -> None:
     """Reset the tool cache — useful in tests."""
     global _tools_cache  # noqa: PLW0603
     _tools_cache = None
+
+
+# ── CrewAI tool adapter ──────────────────────────────────────────────── #
+
+
+def langchain_to_crew_tool(lc_tool: BaseTool) -> Any:
+    """Convert a LangChain ``BaseTool`` to a CrewAI ``BaseTool``.
+
+    CrewAI's ``BaseTool`` is **not** a subclass of LangChain's, so we
+    create a thin subclass that delegates ``_run`` to the LangChain tool.
+    """
+    from crewai.tools import BaseTool as CrewBaseTool
+
+    lc = lc_tool  # closure
+
+    class _Adapted(CrewBaseTool):
+        name: str = lc.name
+        description: str = lc.description or ""
+
+        def _run(self, **kwargs: Any) -> str:
+            # LangChain StructuredTool.invoke expects a dict of kwargs.
+            return lc.invoke(kwargs)
+
+    return _Adapted()
+
+
+async def async_get_crew_tools(role: str) -> list[Any]:
+    """Return CrewAI-compatible tools for *role*.
+
+    Fetches the LangChain tools for the role, then wraps each one via
+    :func:`langchain_to_crew_tool`.
+    """
+    lc_tools = await async_get_tools_for_role(role)
+    return [langchain_to_crew_tool(t) for t in lc_tools]

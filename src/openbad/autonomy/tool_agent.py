@@ -112,7 +112,11 @@ def _extract_creation_info(messages: list[Any]) -> tuple[list[str], list[str]]:
 
 
 def _adapter_to_chat_model(adapter: Any, model_id: str) -> ChatOpenAI:
-    """Wrap an OpenBaD LiteLLMAdapter as a LangChain ChatOpenAI."""
+    """Wrap an OpenBaD LiteLLMAdapter as a LangChain ChatOpenAI.
+
+    .. deprecated::
+        Pass *chat_model* to :func:`run_tool_agent` instead.
+    """
     api_base = getattr(adapter, "_api_base", None) or ""
     api_key = getattr(adapter, "_api_key", None) or "not-needed"
     timeout_s = getattr(adapter, "_timeout_s", 120)
@@ -143,6 +147,7 @@ async def run_tool_agent(
         [str, dict[str, Any]], str | None
     ]
     | None = None,
+    chat_model: Any | None = None,
 ) -> ToolAgentResult:
     """Run an agentic task using LangGraph's ReAct agent."""
     tools = await async_get_openbad_tools()
@@ -173,7 +178,8 @@ async def run_tool_agent(
 
         tools = [_wrap_tool(t) for t in tools]
 
-    chat_model = _adapter_to_chat_model(adapter, model_id)
+    if chat_model is None:
+        chat_model = _adapter_to_chat_model(adapter, model_id)
 
     agent = create_react_agent(
         model=chat_model,
