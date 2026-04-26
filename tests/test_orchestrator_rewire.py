@@ -14,10 +14,7 @@ from openbad.frameworks.langchain_model import OpenBaDChatModel
 class TestOrchestratorFrameworkLayer:
     @pytest.fixture()
     def orchestrator(self):
-        with (
-            patch("openbad.cognitive.orchestrator.UsageRecorder"),
-            patch("openbad.cognitive.orchestrator.CognitiveEventLoop"),
-        ):
+        with patch("openbad.cognitive.orchestrator.UsageRecorder"):
             from openbad.cognitive.orchestrator import CognitiveOrchestrator
 
             registry = MagicMock()
@@ -32,10 +29,7 @@ class TestOrchestratorFrameworkLayer:
         assert orchestrator.callbacks == []
 
     def test_callbacks_injectable(self):
-        with (
-            patch("openbad.cognitive.orchestrator.UsageRecorder"),
-            patch("openbad.cognitive.orchestrator.CognitiveEventLoop"),
-        ):
+        with patch("openbad.cognitive.orchestrator.UsageRecorder"):
             from openbad.cognitive.orchestrator import CognitiveOrchestrator
 
             mock_cb = MagicMock()
@@ -48,9 +42,6 @@ class TestOrchestratorFrameworkLayer:
         cb1 = orchestrator.callbacks
         cb2 = orchestrator.callbacks
         assert cb1 is not cb2
-
-    def test_event_loop_still_available(self, orchestrator) -> None:
-        assert orchestrator.event_loop is not None
 
 
 # ── Daemon framework integration ─────────────────────────────────────── #

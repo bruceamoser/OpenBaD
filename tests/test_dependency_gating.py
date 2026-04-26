@@ -7,7 +7,6 @@ import pytest
 from openbad.state.db import initialize_state_db
 from openbad.tasks.gating import DependencyGate, RetryPolicy
 from openbad.tasks.models import NodeModel, NodeStatus, TaskModel
-from openbad.tasks.planner import plan_task
 from openbad.tasks.store import TaskStore
 
 # ---------------------------------------------------------------------------
@@ -109,21 +108,6 @@ def test_unmet_dependencies_returns_blocking_nodes(
     unmet = gate.unmet_dependencies(task.task_id, succ.node_id)
 
     assert unmet == [pred.node_id]
-
-
-def test_linear_chain_ready_in_order(gate: DependencyGate, store: TaskStore) -> None:
-    """Using plan_task: only the first node of a chain is initially ready."""
-    from openbad.tasks.models import TaskKind
-
-    task = TaskModel.new("Planned task", kind=TaskKind.RESEARCH)
-    store.create_task(task)
-    result = plan_task(task, store)
-
-    first, second, third = result.nodes
-
-    assert gate.is_ready(task.task_id, first.node_id) is True
-    assert gate.is_ready(task.task_id, second.node_id) is False
-    assert gate.is_ready(task.task_id, third.node_id) is False
 
 
 # ---------------------------------------------------------------------------

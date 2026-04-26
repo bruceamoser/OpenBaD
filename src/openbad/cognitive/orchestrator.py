@@ -1,8 +1,7 @@
-"""Cognitive orchestrator — wires event loop + router + context manager + strategies.
+"""Cognitive orchestrator — wires router + context manager + framework layer.
 
-Also initialises the LangChain / LangGraph / CrewAI framework layer when
-available, providing ``OpenBaDChatModel`` and LangGraph workflow dispatch
-alongside the legacy ``CognitiveEventLoop``.
+Initialises the LangChain / LangGraph / CrewAI framework layer,
+providing ``OpenBaDChatModel`` and LangGraph workflow dispatch.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 
 from openbad.cognitive.context_manager import ContextWindowManager
-from openbad.cognitive.event_loop import CognitiveEventLoop
 from openbad.cognitive.model_router import ModelRouter, Priority
 from openbad.cognitive.providers.registry import ProviderRegistry
 from openbad.cognitive.reasoning.base import ReasoningStrategy
@@ -27,7 +25,7 @@ class CognitiveOrchestrator:
     """High-level coordinator for the cognitive module.
 
     Wires together the model router, context manager, reasoning strategies,
-    the event loop, and the framework layer (LangChain/LangGraph/CrewAI).
+    and the framework layer (LangChain/LangGraph/CrewAI).
     """
 
     def __init__(
@@ -45,22 +43,10 @@ class CognitiveOrchestrator:
         self._ctx = context_manager
         self._strategies = strategies or {}
         self._usage_recorder = UsageRecorder()
-        self._event_loop = CognitiveEventLoop(
-            model_router=router,
-            context_manager=context_manager,
-            strategies=self._strategies,
-            publish_fn=publish_fn,
-            validate_fn=validate_fn,
-            usage_recorder=self._usage_recorder,
-        )
 
         # ── Framework layer ──
         self._chat_model = OpenBaDChatModel(router=router)
         self._callbacks: list[BaseCallbackHandler] = callbacks or []
-
-    @property
-    def event_loop(self) -> CognitiveEventLoop:
-        return self._event_loop
 
     @property
     def chat_model(self) -> OpenBaDChatModel:
@@ -74,11 +60,9 @@ class CognitiveOrchestrator:
 
     async def start(self) -> None:
         """Start the cognitive module."""
-        await self._event_loop.start()
         log.info("CognitiveOrchestrator started (framework layer active)")
 
     async def stop(self) -> None:
         """Stop the cognitive module."""
-        await self._event_loop.stop()
         self._usage_recorder.close()
         log.info("CognitiveOrchestrator stopped")

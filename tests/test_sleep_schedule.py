@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from openbad.cognitive.config import CognitiveSystem
-from openbad.cognitive.event_loop import CognitiveRequest
+from openbad.cognitive.types import CognitiveRequest
 from openbad.memory.sleep.schedule import (
     SleepScheduleConfig,
     SleepScheduler,

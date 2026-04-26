@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from openbad.cognitive.config import CognitiveSystem
-from openbad.cognitive.event_loop import CognitiveRequest, CognitiveResponse
+from openbad.cognitive.types import CognitiveRequest, CognitiveResponse
 
 logger = logging.getLogger(__name__)
 

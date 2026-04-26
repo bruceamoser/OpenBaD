@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openbad.cognitive.context_manager import ContextWindowManager
-from openbad.cognitive.event_loop import CognitiveEventLoop, CognitiveRequest, CognitiveResponse
 from openbad.cognitive.model_router import (
     FallbackChain,
     ModelRouter,
@@ -214,51 +212,6 @@ class TestIdentityEndToEnd:
 
 
 # ------------------------------------------------------------------ #
-# 5. Cognitive event loop → routes to provider → returns result
-# ------------------------------------------------------------------ #
-
-
-@pytest.mark.integration
-class TestCognitiveRouting:
-    @pytest.mark.asyncio
-    async def test_event_loop_routes_to_provider(self) -> None:
-        registry = ProviderRegistry()
-        fake = FakeProvider("ollama", ["The answer is 42."])
-        registry.register("ollama", fake)
-
-        chains = {
-            Priority.MEDIUM: FallbackChain(
-                steps=(RouteStep("ollama", "llama3.2"),),
-            ),
-        }
-        router = ModelRouter(registry, chains=chains)
-        ctx_mgr = ContextWindowManager()
-
-        published: list[dict] = []
-
-        async def publish(topic: str, payload: dict) -> None:
-            published.append(payload)
-
-        loop = CognitiveEventLoop(
-            model_router=router,
-            context_manager=ctx_mgr,
-            strategies={},
-            publish_fn=publish,
-        )
-
-        request = CognitiveRequest(
-            request_id="req-1",
-            prompt="What is the meaning of life?",
-        )
-        response = await loop.handle_request(request)
-
-        assert isinstance(response, CognitiveResponse)
-        assert response.answer
-        assert response.provider == "ollama"
-        assert not response.timed_out
-
-
-# ------------------------------------------------------------------ #
 # 6. Model router fallback (primary unavailable → fallback)
 # ------------------------------------------------------------------ #
 
@@ -289,51 +242,6 @@ class TestRouterFallback:
         adapter, model_id, decision = await router.route(Priority.HIGH)
         assert decision.provider == "ollama"
         assert model_id == "llama3.2"
-
-
-# ------------------------------------------------------------------ #
-# 7. Context window overflow → compression before model call
-# ------------------------------------------------------------------ #
-
-
-@pytest.mark.integration
-class TestContextCompression:
-    @pytest.mark.asyncio
-    async def test_compression_before_model_call(self) -> None:
-        registry = ProviderRegistry()
-        fake = FakeProvider("ollama", ["Compressed answer."])
-        registry.register("ollama", fake)
-
-        chains = {
-            Priority.MEDIUM: FallbackChain(
-                steps=(RouteStep("ollama", "llama3.2"),),
-            ),
-        }
-        router = ModelRouter(registry, chains=chains)
-        ctx_mgr = ContextWindowManager(
-            model_limits={"llama3.2": 512},
-            default_limit=512,
-        )
-
-        loop = CognitiveEventLoop(
-            model_router=router,
-            context_manager=ctx_mgr,
-            strategies={},
-        )
-
-        # Very large context that exceeds the budget
-        big_context = "word " * 2000
-
-        request = CognitiveRequest(
-            request_id="req-overflow",
-            prompt="Summarize this",
-            context=big_context,
-        )
-        response = await loop.handle_request(request)
-
-        assert isinstance(response, CognitiveResponse)
-        assert response.answer
-        assert not response.error
 
 
 # ------------------------------------------------------------------ #
