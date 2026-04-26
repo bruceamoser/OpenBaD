@@ -335,9 +335,9 @@ install_package() {
     fi
 
     "$VENV_DIR/bin/python" -m pip install --upgrade pip
-    # Reinstall the package (picks up code changes regardless of version),
-    # then ensure all dependency constraints are satisfied without trying
-    # to upgrade already-compatible packages (avoids resolver backtracking).
+    # Ensure critical compiled deps satisfy current constraints before
+    # the full install, so pip doesn't backtrack the entire dep tree.
+    "$VENV_DIR/bin/python" -m pip install 'protobuf>=6.0'
     "$VENV_DIR/bin/python" -m pip install --force-reinstall --no-deps "$PROJECT_ROOT"
     "$VENV_DIR/bin/python" -m pip install "$PROJECT_ROOT"
 
