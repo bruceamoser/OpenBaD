@@ -33,8 +33,6 @@ from openbad.cognitive.context_manager import (
 from openbad.cognitive.providers.base import ProviderAdapter
 from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
 from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter
-from openbad.skills import call_skill
-from openbad.skills.server import async_get_openai_tools
 from openbad.identity.onboarding import (
     INTERVIEW_SYSTEM_PROMPT,
     USER_INTERVIEW_SYSTEM_PROMPT,
@@ -1069,58 +1067,6 @@ def _flatten_messages(messages: list[dict[str, str]]) -> str:
 
 _MAX_TOOL_ITERATIONS = 5
 _TOOL_CALL_TIMEOUT_S = 30.0
-_MAX_NARRATION_NUDGES = 3
-_CONTEXT_TOKEN_BUDGET = 20_000  # conservative limit for agentic messages
-
-_NARRATION_RE = re.compile(
-    r"\b(I will now|I'll now|let me|I'll proceed|I will proceed"
-    r"|I'm going to|I shall now|I need to|next I will|I will read"
-    r"|I will search|I will look|I will check|I will fetch"
-    r"|I will execute|let me execute|let me proceed)\b",
-    re.IGNORECASE,
-)
-
-
-def _estimate_tokens(text: str) -> int:
-    """Quick token estimate (~4 chars per token)."""
-    return max(1, len(text) // 4) if text else 0
-
-
-def _trim_chat_messages(
-    messages: list[dict[str, Any]],
-    tools_json: str,
-    budget: int = _CONTEXT_TOKEN_BUDGET,
-) -> list[dict[str, Any]]:
-    """Trim older tool results to stay under *budget* estimated tokens.
-
-    Preserves system + first user message and most recent messages.
-    Truncates long tool result contents in the middle of the list first.
-    """
-    overhead = _estimate_tokens(tools_json)
-    total = overhead + sum(
-        _estimate_tokens(str(m.get("content", ""))) for m in messages
-    )
-    if total <= budget:
-        return messages
-
-    for i in range(len(messages)):
-        if total <= budget:
-            break
-        msg = messages[i]
-        role = msg.get("role", "")
-        if role != "tool":
-            continue
-        content = str(msg.get("content", ""))
-        content_tokens = _estimate_tokens(content)
-        if content_tokens <= 100:
-            continue
-        truncated = content[:200] + "\n... [truncated to fit context window]"
-        saved = content_tokens - _estimate_tokens(truncated)
-        if saved > 0:
-            messages[i] = {**msg, "content": truncated}
-            total -= saved
-
-    return messages
 
 
 # ── Streaming pipeline ────────────────────────────────────────────── #
@@ -1235,8 +1181,8 @@ async def stream_chat(
     tokens_used = 0
     t0 = time.monotonic()
 
-    agentic_complete = getattr(adapter, "agentic_complete", None)
-    use_agentic = callable(agentic_complete) and not onboarding_mode
+    agentic_capable = bool(getattr(adapter, "_api_base", None))
+    use_agentic = agentic_capable and not onboarding_mode
 
     try:
         if use_agentic:
@@ -1334,187 +1280,227 @@ async def _agentic_stream(
     messages: list[dict[str, Any]],
     request_id: str,
 ) -> AsyncIterator[StreamChunk]:
-    """Run the agentic tool-calling loop.
+    """Run LangGraph ReAct agent with streaming to the chat UI.
 
-    Non-streaming completions for tool-calling turns; streams the final
-    text answer for real-time display.
+    Uses ``create_react_agent`` backed by ``ChatOpenAI`` pointed at the
+    provider's OpenAI-compatible endpoint.  Tool results that trigger
+    access-request approval are handled inside the tool wrappers and
+    surface to the UI via a shared ``asyncio.Queue``.
 
-    Yields StreamChunk objects. The caller is responsible for the final
+    Yields ``StreamChunk`` objects.  The caller handles the final
     ``done=True`` chunk and memory consolidation.
     """
     import asyncio as _asyncio
 
-    tools = await async_get_openai_tools()
-    tools_json = json.dumps(tools)
-    total_tokens = 0
-    nudge_count = 0
-    # Work on a mutable copy so tool messages accumulate across iterations.
-    working_messages = list(messages)
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.tools import StructuredTool
+    from langchain_openai import ChatOpenAI
+    from langgraph.prebuilt import create_react_agent
 
-    for iteration in range(_MAX_TOOL_ITERATIONS):
-        log.debug(
-            "Agentic iteration %d/%d request=%s",
-            iteration + 1, _MAX_TOOL_ITERATIONS, request_id,
-        )
+    from openbad.frameworks.langchain_tools import async_get_openbad_tools
 
-        _trim_chat_messages(working_messages, tools_json)
+    # ── Build ChatOpenAI from adapter config ──
+    api_base = getattr(adapter, "_api_base", None) or ""
+    api_key = getattr(adapter, "_api_key", None) or "not-needed"
+    timeout_s = getattr(adapter, "_timeout_s", 120)
+    raw_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
 
-        response = await adapter.agentic_complete(
-            working_messages, model_id, tools=tools,
-        )
+    chat_model = ChatOpenAI(
+        model=raw_model,
+        api_key=api_key,
+        base_url=api_base,
+        timeout=timeout_s,
+        max_retries=2,
+    )
 
-        usage = getattr(response, "usage", None)
-        iter_tokens = usage.total_tokens if usage else 0
-        total_tokens += iter_tokens
+    # ── Shared output queue ──
+    #  Both the agent event stream and tool-wrapper side-effects
+    #  (access-request notifications) flow through this queue so
+    #  the consumer sees them in order.
+    _sentinel = object()
+    output_q: _asyncio.Queue[Any] = _asyncio.Queue()
 
-        choice = response.choices[0] if response.choices else None
-        if choice is None:
-            yield StreamChunk(error="Empty response from provider", done=True)
-            return
+    # ── Wrap tools with timeout + access-request handling ──
+    base_tools = await async_get_openbad_tools()
 
-        assistant_msg = choice.message
-        tool_calls = getattr(assistant_msg, "tool_calls", None) or []
+    def _wrap_tool(tool: Any) -> StructuredTool:
+        original = tool.coroutine
+        tool_name = tool.name
 
-        if not tool_calls:
-            content = assistant_msg.content or ""
-            # Narration nudge: model says "I will now..." without calling
-            # tools — push it to actually make the tool call.
-            if (
-                iteration < _MAX_TOOL_ITERATIONS - 1
-                and nudge_count < _MAX_NARRATION_NUDGES
-                and _NARRATION_RE.search(content)
-            ):
-                nudge_count += 1
-                log.info(
-                    "Chat narration nudge request=%s iter=%d",
-                    request_id, iteration + 1,
-                )
-                if hasattr(assistant_msg, "model_dump"):
-                    working_messages.append(
-                        assistant_msg.model_dump(exclude_none=True)
-                    )
-                else:
-                    working_messages.append(
-                        {"role": "assistant", "content": content}
-                    )
-                working_messages.append({
-                    "role": "user",
-                    "content": (
-                        "You described what you intend to do but did not"
-                        " call any tools. Do not narrate actions — call"
-                        " the tools directly to perform them. Continue"
-                        " with the task now."
-                    ),
-                })
-                continue
-
-            # Final answer — yield content as streamed chunks.
-            chunk_size = 40
-            for i in range(0, max(len(content), 1), chunk_size):
-                segment = content[i : i + chunk_size]
-                if segment:
-                    yield StreamChunk(token=segment, tokens_used=total_tokens)
-            return
-
-        # ── Tool-calling turn ──
-        # Add assistant message (with tool_calls) to context.
-        working_messages.append(assistant_msg.model_dump(exclude_none=True))
-
-        # Yield a progress indicator for the UI.
-        tool_names = [tc.function.name for tc in tool_calls]
-        yield StreamChunk(
-            reasoning=f"Using tools: {', '.join(tool_names)}",
-            tokens_used=total_tokens,
-        )
-
-        # Execute each tool call with a timeout.
-        for tc in tool_calls:
-            fn_name = tc.function.name
-            try:
-                fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except (json.JSONDecodeError, TypeError):
-                fn_args = {}
-
-            log.info(
-                "Tool call request=%s iter=%d tool=%s args=%s",
-                request_id, iteration + 1, fn_name,
-                json.dumps(fn_args, default=str)[:200],
-            )
-
+        async def _guarded(**kwargs: Any) -> str:
             try:
                 result = await _asyncio.wait_for(
-                    call_skill(fn_name, fn_args),
-                    timeout=_TOOL_CALL_TIMEOUT_S,
+                    original(**kwargs), timeout=_TOOL_CALL_TIMEOUT_S,
                 )
             except TimeoutError:
-                result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
-                log.warning("Tool timeout request=%s tool=%s", request_id, fn_name)
-
-            access_result = _extract_access_notice(result)
-            if access_result:
-                notice_text, request_data = access_result
-                yield StreamChunk(
-                    reasoning=notice_text,
-                    tokens_used=total_tokens,
-                    access_request=request_data,
+                log.warning(
+                    "Tool timeout request=%s tool=%s", request_id, tool_name,
                 )
+                return f"Tool {tool_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
 
-                # Wait for the user to approve/deny in the UI, then retry
-                if request_data and request_data.get("request_id"):
+            access = _extract_access_notice(result)
+            if access:
+                notice, req_data = access
+                await output_q.put(
+                    ("side", StreamChunk(
+                        reasoning=notice, access_request=req_data,
+                    ))
+                )
+                if req_data and req_data.get("request_id"):
                     decision = await _wait_for_access_decision(
-                        request_data["request_id"], timeout=120.0,
+                        req_data["request_id"], timeout=120.0,
                     )
                     if decision == "approved":
-                        yield StreamChunk(
-                            reasoning="Access approved — retrying...",
-                            tokens_used=total_tokens,
+                        await output_q.put(
+                            ("side", StreamChunk(
+                                reasoning="Access approved — retrying...",
+                            ))
                         )
                         try:
                             result = await _asyncio.wait_for(
-                                call_skill(fn_name, fn_args),
+                                original(**kwargs),
                                 timeout=_TOOL_CALL_TIMEOUT_S,
                             )
                         except TimeoutError:
-                            result = f"Tool {fn_name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
+                            result = (
+                                f"Tool {tool_name} timed out"
+                                f" after {_TOOL_CALL_TIMEOUT_S}s"
+                            )
                     elif decision == "denied":
-                        result = f"Access to {request_data.get('root', 'path')} was denied by the user."
-                        yield StreamChunk(
-                            reasoning="Access denied.",
-                            tokens_used=total_tokens,
+                        result = (
+                            f"Access to {req_data.get('root', 'path')}"
+                            " was denied by the user."
+                        )
+                        await output_q.put(
+                            ("side", StreamChunk(reasoning="Access denied."))
                         )
                     else:
-                        result = "Access request timed out waiting for user response."
-                        yield StreamChunk(
-                            reasoning="Access request timed out.",
-                            tokens_used=total_tokens,
+                        result = (
+                            "Access request timed out waiting"
+                            " for user response."
                         )
+                        await output_q.put(
+                            ("side", StreamChunk(
+                                reasoning="Access request timed out.",
+                            ))
+                        )
+            return result
 
-            working_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
+        return StructuredTool(
+            name=tool.name,
+            description=tool.description,
+            coroutine=_guarded,
+            args_schema=tool.args_schema,
+        )
 
-    # Exhausted iterations — ask the model for a final summary without tools.
-    log.warning(
-        "Agentic loop hit max iterations (%d) request=%s",
-        _MAX_TOOL_ITERATIONS, request_id,
+    wrapped_tools = [_wrap_tool(t) for t in base_tools]
+
+    # ── Convert messages to LangChain format ──
+    system_prompt = ""
+    lc_messages: list[Any] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = str(msg.get("content", ""))
+        if role == "system":
+            system_prompt = content
+        elif role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            lc_messages.append(AIMessage(content=content))
+
+    agent = create_react_agent(
+        model=chat_model,
+        tools=wrapped_tools,
+        prompt=system_prompt or None,
     )
-    working_messages.append({
-        "role": "user",
-        "content": (
-            "You have reached the maximum number of tool calls."
-            " Summarize what you found and provide your best answer."
-        ),
-    })
-    _trim_chat_messages(working_messages, tools_json)
-    response = await adapter.agentic_complete(working_messages, model_id)
-    usage = getattr(response, "usage", None)
-    total_tokens += usage.total_tokens if usage else 0
-    choice = response.choices[0] if response.choices else None
-    content = (choice.message.content or "") if choice else ""
-    if content:
-        yield StreamChunk(token=content, tokens_used=total_tokens)
+
+    # ── Run agent in background task ──
+    async def _run() -> None:
+        try:
+            async for event in agent.astream_events(
+                {"messages": lc_messages},
+                version="v2",
+                config={"recursion_limit": _MAX_TOOL_ITERATIONS * 2},
+            ):
+                await output_q.put(("event", event))
+        except Exception as exc:
+            await output_q.put(("error", exc))
+        await output_q.put(("done", _sentinel))
+
+    agent_task = _asyncio.create_task(_run())
+    total_tokens = 0
+    content_buffer: list[str] = []
+
+    try:
+        while True:
+            tag, payload = await output_q.get()
+
+            # ── Side-effect from tool wrapper (access request) ──
+            if tag == "side":
+                payload.tokens_used = total_tokens
+                yield payload
+                continue
+
+            # ── Agent finished ──
+            if tag == "done":
+                # Flush any remaining buffered content.
+                if content_buffer:
+                    for seg in content_buffer:
+                        yield StreamChunk(
+                            token=seg, tokens_used=total_tokens,
+                        )
+                    content_buffer.clear()
+                break
+
+            # ── Agent error ──
+            if tag == "error":
+                log.exception(
+                    "LangGraph chat agent failed request=%s: %s",
+                    request_id, payload,
+                )
+                yield StreamChunk(
+                    error=f"Agent error: {payload}", done=True,
+                )
+                return
+
+            # ── Normal event from astream_events ──
+            event = payload
+            kind = event.get("event", "")
+
+            if kind == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk:
+                    text = getattr(chunk, "content", "") or ""
+                    if text:
+                        content_buffer.append(text)
+
+            elif kind == "on_chat_model_end":
+                output = event.get("data", {}).get("output")
+                if output:
+                    usage = getattr(output, "usage_metadata", None)
+                    if usage:
+                        total_tokens += usage.get("total_tokens", 0)
+                    # Only flush content when this is the final
+                    # answer (no tool calls).
+                    tool_calls = getattr(output, "tool_calls", [])
+                    if not tool_calls and content_buffer:
+                        for seg in content_buffer:
+                            yield StreamChunk(
+                                token=seg, tokens_used=total_tokens,
+                            )
+                content_buffer.clear()
+
+            elif kind == "on_tool_start":
+                tool_name = event.get("name", "unknown")
+                yield StreamChunk(
+                    reasoning=f"Using tools: {tool_name}",
+                    tokens_used=total_tokens,
+                )
+    finally:
+        if not agent_task.done():
+            agent_task.cancel()
+            with suppress(_asyncio.CancelledError):
+                await agent_task
 
 
 # ──────────────────────────────────────────────────────────────────────────────

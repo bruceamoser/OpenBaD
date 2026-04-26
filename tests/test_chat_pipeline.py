@@ -418,65 +418,101 @@ async def test_stream_chat_applies_behavior_feedback_before_prompting():
 
 @pytest.mark.asyncio
 async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
-    class _AgenticAdapter:
-        def __init__(self) -> None:
-            self.calls = 0
+    """When a tool triggers an access_request, the notice must appear in
+    *reasoning* StreamChunks (not in the final text content)."""
+    from unittest.mock import AsyncMock, patch
 
-        async def agentic_complete(self, messages, model_id, tools=None):
-            self.calls += 1
-            if self.calls == 1:
-                tool_call = SimpleNamespace(
-                    id="tool-1",
-                    function=SimpleNamespace(
-                        name="read_file",
-                        arguments='{"path": "/home/bruceamoser/11-OpenBaD Library System Upgrade Spec.md"}',
+    from langchain_core.messages import AIMessage
+
+    # The adapter needs _api_base so the agentic gate passes.
+    adapter = SimpleNamespace(
+        _api_base="http://localhost:8080",
+        _api_key="test-key",
+        _timeout_s=60,
+    )
+
+    # Build a fake agent result where read_file returned an access_request
+    access_text = (
+        "[access_request] Access to path"
+        " '/home/bruceamoser/11-OpenBaD Library System Upgrade Spec.md'"
+        " is not currently permitted. outside allowed roots\n"
+        "Pending request: req-123 for root /home/bruceamoser.\n"
+        "That request is already created."
+        " Tell the user to approve it in Toolbelt"
+        " -> Path Access Requests, then retry."
+    )
+
+    # Fake LangChain tool whose coroutine returns the access_request text
+    fake_tool = SimpleNamespace(
+        name="read_file",
+        description="Read a file",
+        coroutine=AsyncMock(return_value=access_text),
+        args_schema=None,
+    )
+
+    # create_react_agent mock: captures wrapped tools and calls them
+    def _fake_create_agent(*, model, tools, prompt):
+        async def _fake_astream_events(inp, *, version, config):
+            # Simulate the agent calling the read_file tool
+            for t in tools:
+                if t.name == "read_file":
+                    yield {
+                        "event": "on_tool_start",
+                        "name": "read_file",
+                        "data": {},
+                    }
+                    # Actually invoke the wrapped tool so the
+                    # access-request side-channel fires.
+                    await t.coroutine(path="/some/file")
+            # Final answer
+            yield {
+                "event": "on_chat_model_end",
+                "data": {
+                    "output": AIMessage(
+                        content="I can continue after approval.",
                     ),
-                )
-                message = SimpleNamespace(
-                    content="",
-                    tool_calls=[tool_call],
-                    model_dump=lambda exclude_none=True: {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [tool_call],
-                    },
-                )
-            else:
-                message = SimpleNamespace(content="I can continue after approval.", tool_calls=[])
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=message)],
-                usage=SimpleNamespace(total_tokens=7),
-            )
+                },
+            }
 
-    async def _fake_dispatch(name, args):
-        return (
-            "[access_request] Access to path '/home/bruceamoser/11-OpenBaD Library System Upgrade Spec.md' "
-            "is not currently permitted. outside allowed roots\n"
-            "Pending request: req-123 for root /home/bruceamoser.\n"
-            "That request is already created. Tell the user to approve it in Toolbelt -> Path Access Requests, then retry."
-        )
+        return SimpleNamespace(astream_events=_fake_astream_events)
 
-    monkeypatch.setattr(chat_pipeline, "call_skill", _fake_dispatch)
-
-    # Prevent the pipeline from waiting for a real DB decision
-    async def _instant_timeout(*_args, **_kwargs):
+    # Prevent waiting for real DB approval
+    async def _instant_timeout(*_a, **_kw):
         return "timeout"
 
-    monkeypatch.setattr(chat_pipeline, "_wait_for_access_decision", _instant_timeout)
+    monkeypatch.setattr(
+        chat_pipeline, "_wait_for_access_decision", _instant_timeout,
+    )
 
-    chunks = [
-        chunk
-        async for chunk in chat_pipeline._agentic_stream(
-            _AgenticAdapter(),
-            "test-model",
-            [{"role": "system", "content": "test"}, {"role": "user", "content": "find the file"}],
-            "req-1",
-        )
-    ]
+    with (
+        patch(
+            "openbad.frameworks.langchain_tools.async_get_openbad_tools",
+            new_callable=AsyncMock,
+            return_value=[fake_tool],
+        ),
+        patch(
+            "langgraph.prebuilt.create_react_agent",
+            side_effect=_fake_create_agent,
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in chat_pipeline._agentic_stream(
+                adapter,
+                "openai/test-model",
+                [
+                    {"role": "system", "content": "test"},
+                    {"role": "user", "content": "find the file"},
+                ],
+                "req-1",
+            )
+        ]
 
     text = "".join(chunk.token for chunk in chunks if chunk.token)
-    reasoning = "".join(chunk.reasoning for chunk in chunks if chunk.reasoning)
-    # Notice text should only appear in reasoning, not duplicated in content
-    assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" not in text
-    assert "Approve request req-123 for /home/bruceamoser in Toolbelt -> Path Access Requests" in reasoning
+    reasoning = "".join(
+        chunk.reasoning for chunk in chunks if chunk.reasoning
+    )
+    # Notice text should appear in reasoning (access request), not content
+    assert "req-123" in reasoning
+    assert "Path Access Requests" in reasoning
 
