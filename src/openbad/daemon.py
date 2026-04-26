@@ -14,6 +14,7 @@ from pathlib import Path
 import yaml
 
 from openbad.endocrine.controller import EndocrineController
+from openbad.frameworks.crew_mqtt_bridge import CrewMQTTBridge
 from openbad.interoception.disk_network import DiskNetworkMonitor
 from openbad.interoception.monitor import TelemetryMonitor
 from openbad.nervous_system import topics
@@ -62,6 +63,7 @@ class Daemon:
         self._telemetry: TelemetryMonitor | None = None
         self._disk_network: DiskNetworkMonitor | None = None
         self._stop_event: asyncio.Event | None = None
+        self._crew_bridge: CrewMQTTBridge | None = None
         self._scheduler_worker_lock = threading.Lock()
 
     # -- public --------------------------------------------------------- #
@@ -81,6 +83,10 @@ class Daemon:
     @property
     def client(self) -> NervousSystemClient | None:
         return self._client
+
+    @property
+    def crew_bridge(self) -> CrewMQTTBridge | None:
+        return self._crew_bridge
 
     async def start(self) -> None:
         """Connect to MQTT, initialise subsystems, enter the main loop."""
@@ -104,7 +110,13 @@ class Daemon:
         # 3. Endocrine controller
         self._endocrine = EndocrineController()
 
-        # 4. Interoception publishers for vitals panels and dashboards
+        # 4. CrewAI ↔ MQTT activation bridge
+        self._crew_bridge = CrewMQTTBridge(
+            self._client, self._endocrine, self._fsm
+        )
+        self._crew_bridge.subscribe()
+
+        # 5. Interoception publishers for vitals panels and dashboards
         telemetry_interval_s = _load_hardware_telemetry_interval()
         self._telemetry = TelemetryMonitor(self._client, interval=telemetry_interval_s)
         self._telemetry.start()
@@ -148,6 +160,7 @@ class Daemon:
             self._telemetry.stop()
             self._telemetry = None
 
+        self._crew_bridge = None
         self._endocrine = None
         self._fsm = None
 
