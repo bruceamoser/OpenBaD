@@ -335,7 +335,7 @@ install_package() {
     fi
 
     "$VENV_DIR/bin/python" -m pip install --upgrade pip
-    "$VENV_DIR/bin/python" -m pip install --upgrade --upgrade-strategy eager "$PROJECT_ROOT"
+    "$VENV_DIR/bin/python" -m pip install --upgrade "$PROJECT_ROOT"
 
     # Keep CLI path stable for systemd and operators.
     ln -sf "$VENV_DIR/bin/openbad" "$OPENBAD_BIN"
