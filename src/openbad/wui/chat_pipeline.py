@@ -1069,6 +1069,58 @@ def _flatten_messages(messages: list[dict[str, str]]) -> str:
 
 _MAX_TOOL_ITERATIONS = 5
 _TOOL_CALL_TIMEOUT_S = 30.0
+_MAX_NARRATION_NUDGES = 3
+_CONTEXT_TOKEN_BUDGET = 20_000  # conservative limit for agentic messages
+
+_NARRATION_RE = re.compile(
+    r"\b(I will now|I'll now|let me|I'll proceed|I will proceed"
+    r"|I'm going to|I shall now|I need to|next I will|I will read"
+    r"|I will search|I will look|I will check|I will fetch"
+    r"|I will execute|let me execute|let me proceed)\b",
+    re.IGNORECASE,
+)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Quick token estimate (~4 chars per token)."""
+    return max(1, len(text) // 4) if text else 0
+
+
+def _trim_chat_messages(
+    messages: list[dict[str, Any]],
+    tools_json: str,
+    budget: int = _CONTEXT_TOKEN_BUDGET,
+) -> list[dict[str, Any]]:
+    """Trim older tool results to stay under *budget* estimated tokens.
+
+    Preserves system + first user message and most recent messages.
+    Truncates long tool result contents in the middle of the list first.
+    """
+    overhead = _estimate_tokens(tools_json)
+    total = overhead + sum(
+        _estimate_tokens(str(m.get("content", ""))) for m in messages
+    )
+    if total <= budget:
+        return messages
+
+    for i in range(len(messages)):
+        if total <= budget:
+            break
+        msg = messages[i]
+        role = msg.get("role", "")
+        if role != "tool":
+            continue
+        content = str(msg.get("content", ""))
+        content_tokens = _estimate_tokens(content)
+        if content_tokens <= 100:
+            continue
+        truncated = content[:200] + "\n... [truncated to fit context window]"
+        saved = content_tokens - _estimate_tokens(truncated)
+        if saved > 0:
+            messages[i] = {**msg, "content": truncated}
+            total -= saved
+
+    return messages
 
 
 # ── Streaming pipeline ────────────────────────────────────────────── #
@@ -1293,7 +1345,9 @@ async def _agentic_stream(
     import asyncio as _asyncio
 
     tools = await async_get_openai_tools()
+    tools_json = json.dumps(tools)
     total_tokens = 0
+    nudge_count = 0
     # Work on a mutable copy so tool messages accumulate across iterations.
     working_messages = list(messages)
 
@@ -1302,6 +1356,8 @@ async def _agentic_stream(
             "Agentic iteration %d/%d request=%s",
             iteration + 1, _MAX_TOOL_ITERATIONS, request_id,
         )
+
+        _trim_chat_messages(working_messages, tools_json)
 
         response = await adapter.agentic_complete(
             working_messages, model_id, tools=tools,
@@ -1320,9 +1376,39 @@ async def _agentic_stream(
         tool_calls = getattr(assistant_msg, "tool_calls", None) or []
 
         if not tool_calls:
-            # Final answer — yield content as streamed chunks.
             content = assistant_msg.content or ""
-            # Yield in segments for real-time display.
+            # Narration nudge: model says "I will now..." without calling
+            # tools — push it to actually make the tool call.
+            if (
+                iteration < _MAX_TOOL_ITERATIONS - 1
+                and nudge_count < _MAX_NARRATION_NUDGES
+                and _NARRATION_RE.search(content)
+            ):
+                nudge_count += 1
+                log.info(
+                    "Chat narration nudge request=%s iter=%d",
+                    request_id, iteration + 1,
+                )
+                if hasattr(assistant_msg, "model_dump"):
+                    working_messages.append(
+                        assistant_msg.model_dump(exclude_none=True)
+                    )
+                else:
+                    working_messages.append(
+                        {"role": "assistant", "content": content}
+                    )
+                working_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You described what you intend to do but did not"
+                        " call any tools. Do not narrate actions — call"
+                        " the tools directly to perform them. Continue"
+                        " with the task now."
+                    ),
+                })
+                continue
+
+            # Final answer — yield content as streamed chunks.
             chunk_size = 40
             for i in range(0, max(len(content), 1), chunk_size):
                 segment = content[i : i + chunk_size]
@@ -1421,6 +1507,7 @@ async def _agentic_stream(
             " Summarize what you found and provide your best answer."
         ),
     })
+    _trim_chat_messages(working_messages, tools_json)
     response = await adapter.agentic_complete(working_messages, model_id)
     usage = getattr(response, "usage", None)
     total_tokens += usage.total_tokens if usage else 0
