@@ -40,3 +40,39 @@ cognitive:
     high_timeout_ms: 15000
     medium_timeout_ms: 10000
     low_timeout_ms: 5000
+
+  # ── Framework integration (LangChain / LangGraph / CrewAI) ──
+  frameworks:
+    crews:
+      user_facing:
+        verbose: false
+        max_iterations: 10
+        allow_delegation: true
+      internal:
+        verbose: false
+        max_iterations: 15
+        allow_delegation: false
+      maintenance:
+        verbose: false
+        max_iterations: 20
+        allow_delegation: true
+
+    langgraph:
+      checkpoint_format: json
+      checkpoint_retention_hours: 168  # 7 days
+
+    agents:
+      chat:
+        priority: medium
+      task:
+        priority: medium
+      research:
+        priority: low
+      doctor:
+        priority: critical
+      sleep:
+        priority: low
+      immune:
+        priority: high
+      explorer:
+        priority: low

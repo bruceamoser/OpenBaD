@@ -28,3 +28,15 @@ chains:
   low:
     - provider: ollama
       model: llama3.2
+
+# Agent-to-priority mappings for CrewAI agent model routing.
+# Each agent is assigned a routing priority that determines which
+# fallback chain is used for its LLM calls.
+agent_priorities:
+  chat: medium
+  task: medium
+  research: low
+  doctor: critical
+  sleep: low
+  immune: high
+  explorer: low
