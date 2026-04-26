@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 _MAX_TOOL_ITERATIONS = 16
 _TOOL_CALL_TIMEOUT_S = 20
 _MAX_CONTINUATION_NUDGES = 10
+_CONTEXT_TOKEN_BUDGET = 20_000  # conservative limit for tool-agent messages
 
 _NARRATION_RE = re.compile(
     r"\b(I will now|I'll now|let me|I'll proceed|I will proceed"
@@ -88,6 +89,49 @@ def _record_verified_creation(
         verified_creations.append(f"research '{title}' ({node_id})")
 
 
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4) if text else 0
+
+
+def _trim_messages(
+    messages: list[dict[str, Any]],
+    tools_json: str,
+    budget: int = _CONTEXT_TOKEN_BUDGET,
+) -> list[dict[str, Any]]:
+    """Trim older tool results to keep total estimated tokens under *budget*.
+
+    Preserves system + first user message and the most recent messages.
+    Truncates long tool result contents in the middle of the list first.
+    """
+    overhead = _estimate_tokens(tools_json)
+    total = overhead + sum(
+        _estimate_tokens(str(m.get("content", ""))) for m in messages
+    )
+    if total <= budget:
+        return messages
+
+    # Find tool-result messages (not system/first-user) to truncate
+    for i in range(len(messages)):
+        if total <= budget:
+            break
+        msg = messages[i]
+        role = msg.get("role", "")
+        if role != "tool":
+            continue
+        content = str(msg.get("content", ""))
+        content_tokens = _estimate_tokens(content)
+        if content_tokens <= 100:
+            continue
+        # Truncate to first 200 chars + note
+        truncated = content[:200] + "\n... [truncated to fit context window]"
+        saved = content_tokens - _estimate_tokens(truncated)
+        if saved > 0:
+            messages[i] = {**msg, "content": truncated}
+            total -= saved
+
+    return messages
+
+
 def _append_verified_creation_footer(
     content: str,
     tools_used: list[str],
@@ -137,7 +181,9 @@ async def run_tool_agent(
     ]
 
     skill_schemas = await async_get_openai_tools()
+    tools_json = json.dumps(skill_schemas)
     for iteration in range(_MAX_TOOL_ITERATIONS):
+        _trim_messages(working_messages, tools_json)
         response = await agentic_complete(working_messages, model_id, tools=skill_schemas)
         usage = getattr(response, "usage", None)
         total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
@@ -263,6 +309,7 @@ async def run_tool_agent(
             ),
         }
     )
+    _trim_messages(working_messages, tools_json)
     response = await agentic_complete(working_messages, model_id)
     usage = getattr(response, "usage", None)
     total_tokens += int(getattr(usage, "total_tokens", 0) or 0)

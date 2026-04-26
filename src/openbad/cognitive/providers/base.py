@@ -50,7 +50,7 @@ class ProviderConfig:
     api_key: str = ""
     api_key_env: str = ""
     default_model: str = ""
-    timeout_ms: int = 30_000
+    timeout_ms: int = 120_000
     max_retries: int = 2
 
 
