@@ -695,8 +695,20 @@ async def mcp_bridge(
     from openbad.toolbelt.mcp_bridge import MCPRunner
 
     runner = MCPRunner.stdio([server])
-    async with runner:
-        result = await runner.call_tool(tool_name, arguments or {})
+    try:
+        async with runner:
+            result = await runner.call_tool(tool_name, arguments or {})
+    except FileNotFoundError:
+        return json.dumps(
+            {"error": f"MCP server binary '{server}' not found. "
+             "Install the server or check the name."},
+            indent=2,
+        )
+    except OSError as exc:
+        return json.dumps(
+            {"error": f"Failed to start MCP server '{server}': {exc}"},
+            indent=2,
+        )
     return json.dumps(result, indent=2, default=str) if not isinstance(result, str) else result
 
 

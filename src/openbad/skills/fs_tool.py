@@ -278,21 +278,33 @@ def find_files(
     results: list[str] = []
     if any(c in needle for c in "*?[]"):
         glob_pattern = needle if "/" in needle or needle.startswith("**") else f"**/{needle}"
-        for candidate in root.glob(glob_pattern):
-            if candidate.is_file():
-                results.append(str(candidate.resolve(strict=False)))
-                if len(results) >= max_results:
-                    break
+        try:
+            for candidate in root.glob(glob_pattern):
+                try:
+                    if candidate.is_file():
+                        results.append(str(candidate.resolve(strict=False)))
+                        if len(results) >= max_results:
+                            break
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
     else:
         lowered = needle.lower()
-        for candidate in root.rglob("*"):
-            if not candidate.is_file():
-                continue
-            if lowered not in candidate.name.lower():
-                continue
-            results.append(str(candidate.resolve(strict=False)))
-            if len(results) >= max_results:
-                break
+        try:
+            for candidate in root.rglob("*"):
+                try:
+                    if not candidate.is_file():
+                        continue
+                    if lowered not in candidate.name.lower():
+                        continue
+                    results.append(str(candidate.resolve(strict=False)))
+                    if len(results) >= max_results:
+                        break
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
 
     return json.dumps(sorted(dict.fromkeys(results)), indent=2)
 
