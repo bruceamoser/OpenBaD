@@ -35,9 +35,8 @@ class MqttRecordsToolAdapter:
         url = f"{self._config.base_url.rstrip('/')}/api/mqtt/log?{params}"
         try:
             data = json.loads(self._http_get(url, self._config.timeout).decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("mqtt records fetch failed")
-            return []
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch MQTT records: {exc}") from exc
         messages = data.get("messages", []) if isinstance(data, dict) else []
         return messages if isinstance(messages, list) else []
 

@@ -38,9 +38,8 @@ class DoctorToolAdapter:
         url = f"{self._config.base_url.rstrip('/')}/api/endocrine/status"
         try:
             data = json.loads(self._http_get(url, self._config.timeout).decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("doctor status fetch failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch doctor status: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def call_doctor(
@@ -58,9 +57,8 @@ class DoctorToolAdapter:
         }
         try:
             self._publisher(topics.DOCTOR_CALL, json.dumps(payload).encode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("doctor call publish failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to publish doctor call: {exc}") from exc
         return {"queued": True, "topic": topics.DOCTOR_CALL, **payload}
 
     @staticmethod

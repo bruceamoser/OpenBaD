@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -42,9 +43,8 @@ class ResearchDiagnosticsToolAdapter:
         url = f"{self._config.base_url.rstrip('/')}/api/research"
         try:
             data = json.loads(self._http_get(url, self._config.timeout).decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("research fetch failed")
-            return []
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch research nodes: {exc}") from exc
         nodes = data.get("nodes", []) if isinstance(data, dict) else []
         return nodes if isinstance(nodes, list) else []
 
@@ -67,9 +67,8 @@ class ResearchDiagnosticsToolAdapter:
             data = json.loads(
                 self._http_post(url, self._config.timeout, payload).decode("utf-8")
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("research create failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to create research node: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def update_research_node(
@@ -91,23 +90,23 @@ class ResearchDiagnosticsToolAdapter:
             }.items()
             if value is not None
         }
-        url = f"{self._config.base_url.rstrip('/')}/api/research/{node_id}"
+        encoded_id = urllib.parse.quote(node_id, safe="")
+        url = f"{self._config.base_url.rstrip('/')}/api/research/{encoded_id}"
         try:
             data = json.loads(
                 self._http_patch(url, self._config.timeout, payload).decode("utf-8")
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("research update failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to update research node {node_id!r}: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def complete_research_node(self, node_id: str) -> dict[str, Any]:
-        url = f"{self._config.base_url.rstrip('/')}/api/research/{node_id}/complete"
+        encoded_id = urllib.parse.quote(node_id, safe="")
+        url = f"{self._config.base_url.rstrip('/')}/api/research/{encoded_id}/complete"
         try:
             data = json.loads(self._http_post(url, self._config.timeout, {}).decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("research complete failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to complete research node {node_id!r}: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def work_on_next_research(
@@ -124,9 +123,8 @@ class ResearchDiagnosticsToolAdapter:
         }
         try:
             self._publisher(topics.RESEARCH_WORK_REQUEST, json.dumps(payload).encode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("research work publish failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to publish research work request: {exc}") from exc
         return {"queued": True, "topic": topics.RESEARCH_WORK_REQUEST, **payload}
 
     def work_on_research(
@@ -145,9 +143,10 @@ class ResearchDiagnosticsToolAdapter:
         }
         try:
             self._publisher(topics.RESEARCH_WORK_REQUEST, json.dumps(payload).encode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("specific research work publish failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to publish work request for research {node_id!r}: {exc}",
+            ) from exc
         return {"queued": True, "topic": topics.RESEARCH_WORK_REQUEST, **payload}
 
     @staticmethod

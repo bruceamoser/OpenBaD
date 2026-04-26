@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -42,9 +43,8 @@ class TasksDiagnosticsToolAdapter:
         url = f"{self._config.base_url.rstrip('/')}/api/tasks"
         try:
             data = json.loads(self._http_get(url, self._config.timeout).decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("tasks fetch failed")
-            return []
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch tasks: {exc}") from exc
         tasks = data.get("tasks", []) if isinstance(data, dict) else []
         return tasks if isinstance(tasks, list) else []
 
@@ -65,9 +65,8 @@ class TasksDiagnosticsToolAdapter:
             data = json.loads(
                 self._http_post(url, self._config.timeout, payload).decode("utf-8")
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("task create failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to create task: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def update_task(
@@ -87,23 +86,23 @@ class TasksDiagnosticsToolAdapter:
             }.items()
             if value is not None
         }
-        url = f"{self._config.base_url.rstrip('/')}/api/tasks/{task_id}"
+        encoded_id = urllib.parse.quote(task_id, safe="")
+        url = f"{self._config.base_url.rstrip('/')}/api/tasks/{encoded_id}"
         try:
             data = json.loads(
                 self._http_patch(url, self._config.timeout, payload).decode("utf-8")
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("task update failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to update task {task_id!r}: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def complete_task(self, task_id: str) -> dict[str, Any]:
-        url = f"{self._config.base_url.rstrip('/')}/api/tasks/{task_id}/complete"
+        encoded_id = urllib.parse.quote(task_id, safe="")
+        url = f"{self._config.base_url.rstrip('/')}/api/tasks/{encoded_id}/complete"
         try:
             data = json.loads(self._http_post(url, self._config.timeout, {}).decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("task complete failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to complete task {task_id!r}: {exc}") from exc
         return data if isinstance(data, dict) else {}
 
     def work_on_next_task(
@@ -120,9 +119,8 @@ class TasksDiagnosticsToolAdapter:
         }
         try:
             self._publisher(topics.TASK_WORK_REQUEST, json.dumps(payload).encode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("task work publish failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to publish task work request: {exc}") from exc
         return {"queued": True, "topic": topics.TASK_WORK_REQUEST, **payload}
 
     def work_on_task(
@@ -141,9 +139,10 @@ class TasksDiagnosticsToolAdapter:
         }
         try:
             self._publisher(topics.TASK_WORK_REQUEST, json.dumps(payload).encode("utf-8"))
-        except Exception:  # noqa: BLE001
-            logger.exception("specific task work publish failed")
-            return {}
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to publish work request for task {task_id!r}: {exc}",
+            ) from exc
         return {"queued": True, "topic": topics.TASK_WORK_REQUEST, **payload}
 
     @staticmethod

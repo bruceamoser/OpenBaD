@@ -75,9 +75,8 @@ class EventLogToolAdapter:
             data = json.loads(
                 self._http_get(url, self._config.timeout).decode("utf-8"),
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("event log fetch failed")
-            return []
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch events: {exc}") from exc
         events = data.get("events", []) if isinstance(data, dict) else []
         return events if isinstance(events, list) else []
 
