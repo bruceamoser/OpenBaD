@@ -335,7 +335,11 @@ install_package() {
     fi
 
     "$VENV_DIR/bin/python" -m pip install --upgrade pip
-    "$VENV_DIR/bin/python" -m pip install --upgrade "$PROJECT_ROOT"
+    # Reinstall the package (picks up code changes regardless of version),
+    # then ensure all dependency constraints are satisfied without trying
+    # to upgrade already-compatible packages (avoids resolver backtracking).
+    "$VENV_DIR/bin/python" -m pip install --force-reinstall --no-deps "$PROJECT_ROOT"
+    "$VENV_DIR/bin/python" -m pip install "$PROJECT_ROOT"
 
     # Keep CLI path stable for systemd and operators.
     ln -sf "$VENV_DIR/bin/openbad" "$OPENBAD_BIN"
