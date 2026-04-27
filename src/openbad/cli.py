@@ -173,63 +173,54 @@ def restart() -> None:
 @click.option(
     "--skip-services",
     is_flag=True,
-    help="Pass --skip-services to the installer (dev mode).",
+    help="Skip systemd unit sync and service restart (dev mode).",
 )
-def update(skip_services: bool) -> None:
+@click.option(
+    "--deps",
+    is_flag=True,
+    help="Also update dependencies from the GitHub release wheels tarball.",
+)
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Run the full install.sh bootstrap script.",
+)
+def update(skip_services: bool, deps: bool, full: bool) -> None:
     """Pull latest code, reinstall, and restart services.
 
-    Runs ``scripts/install.sh`` from the project root to update the
-    Python package, configuration files, and systemd units, then
-    restarts all managed services.
+    \b
+    Three modes (fastest → slowest):
+      openbad update          Quick: git pull + no-deps install + restart (~5s)
+      openbad update --deps   Also update deps from GitHub release wheels
+      openbad update --full   Run the full scripts/install.sh bootstrap
     """
+    from openbad.updater import deps_update, full_update, quick_update
+
     project_root = _find_project_root()
     if project_root is None:
         raise click.ClickException(
-            "Install script not found. Run from a git checkout of the OpenBaD repository "
+            "Project root not found. Run from a git checkout of the OpenBaD repository "
             "or set OPENBAD_PROJECT_ROOT."
         )
 
-    install_script = project_root / "scripts" / "install.sh"
-
-    # 1. git pull (best effort — may be a non-git install)
-    click.echo("Pulling latest changes...")
-    git_bin = shutil.which("git")
-    if git_bin:
-        pull = subprocess.run(  # noqa: S603
-            [git_bin, "-C", str(project_root), "pull", "--ff-only"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if pull.returncode == 0:
-            click.echo(pull.stdout.strip() or "Already up to date.")
-        else:
-            click.echo(f"git pull skipped: {pull.stderr.strip()}")
-    else:
-        click.echo("git not found, skipping pull.")
-
-    # 2. Run install script
-    click.echo("Running install script...")
-    cmd: list[str] = [str(install_script)]
-    if skip_services:
-        cmd.append("--skip-services")
     try:
-        subprocess.run(  # noqa: S603
-            cmd,
-            check=True,
-            cwd=str(project_root),
-        )
+        if full:
+            full_update(project_root, skip_services=skip_services)
+        elif deps:
+            deps_update(project_root, skip_services=skip_services)
+        else:
+            quick_update(project_root, skip_services=skip_services)
     except subprocess.CalledProcessError as exc:
         raise click.ClickException(
-            f"Install script failed with exit code {exc.returncode}"
+            f"Update failed with exit code {exc.returncode}"
         ) from exc
     except PermissionError as exc:
         raise click.ClickException(
             "Permission denied. Run 'sudo openbad update' to update system services."
         ) from exc
 
-    click.echo("Update complete.")
     _ensure_heartbeat_timer()
+
 
 
 @main.command(name="health")
