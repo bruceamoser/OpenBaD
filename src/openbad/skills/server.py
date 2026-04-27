@@ -436,19 +436,31 @@ async def get_endocrine_status() -> str:
 async def call_doctor(
     reason: str,
     source: str = "session",
-    context: dict[str, Any] | None = None,
+    context: str | dict[str, Any] | None = None,
 ) -> str:
     """Request a doctor visit over the embedded MQTT bus with a reason and optional context.
 
     Args:
         reason: Why the doctor should be called.
         source: Requester identity, such as session or subsystem name.
-        context: Optional structured context payload for the doctor.
+        context: Optional context payload (JSON string or dict).
     """
     from openbad.skills.doctor_tool import DoctorToolAdapter
 
+    # LLMs may pass context as a JSON string instead of a dict.
+    parsed_context: dict[str, Any] | None = None
+    if isinstance(context, dict):
+        parsed_context = context
+    elif isinstance(context, str) and context.strip():
+        try:
+            parsed_context = json.loads(context)
+            if not isinstance(parsed_context, dict):
+                parsed_context = {"raw": context}
+        except (json.JSONDecodeError, ValueError):
+            parsed_context = {"raw": context}
+
     adapter = DoctorToolAdapter()
-    result = await asyncio.to_thread(adapter.call_doctor, reason, source=source, context=context)
+    result = await asyncio.to_thread(adapter.call_doctor, reason, source=source, context=parsed_context)
     return json.dumps(result, indent=2, default=str)
 
 

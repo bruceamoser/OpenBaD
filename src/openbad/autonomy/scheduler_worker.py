@@ -311,15 +311,21 @@ def _process_autonomy_work(
                         "adrenaline": min(0.02 * error_count + 0.05 * critical_count, 0.16),
                     },
                 )
-            doctor_policy = session_allows(policy, "doctor", "allow_endocrine_doctor", True)
-            if doctor_policy:
-                _process_doctor(
-                    {
-                        "source": "log-health",
-                        "reason": reason,
-                        "context": summary,
-                    }
-                )
+            # Only escalate to the doctor if endocrine levels actually
+            # crossed an activation threshold.  Previously this called
+            # _process_doctor on every task/research tick that had log
+            # errors, creating a feedback loop (doctor errors → more
+            # errors → more doctor calls).
+            if endocrine_runtime.has_any_activation():
+                doctor_policy = session_allows(policy, "doctor", "allow_endocrine_doctor", True)
+                if doctor_policy:
+                    _process_doctor(
+                        {
+                            "source": "log-health",
+                            "reason": reason,
+                            "context": summary,
+                        }
+                    )
             return
 
         reason = "Observed runtime warning accumulation in persistent event log"
