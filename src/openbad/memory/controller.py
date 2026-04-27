@@ -6,6 +6,7 @@ STM to LTM, and exposes a unified query API across all memory tiers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -16,13 +17,49 @@ from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.memory.config import MemoryConfig
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.procedural import ProceduralMemory, Skill
-from openbad.memory.semantic import SemanticMemory
+from openbad.memory.semantic import SemanticMemory, hash_embedding
 from openbad.memory.stm import ShortTermMemory
 
 logger = logging.getLogger(__name__)
 
 # Type for an optional MQTT publish callback
 PublishFn = Callable[[str, bytes], None]
+
+
+def make_ollama_embed_fn(
+    base_url: str = "http://localhost:11434",
+    model: str = "nomic-embed-text",
+) -> Callable[[str], list[float]]:
+    """Create a sync embedding function backed by OllamaProvider.
+
+    Falls back to ``hash_embedding`` when Ollama is unreachable.
+    """
+    from openbad.cognitive.providers.ollama import OllamaProvider
+
+    provider = OllamaProvider(base_url=base_url)
+
+    def _embed(text: str) -> list[float]:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        try:
+            if loop and loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(
+                        asyncio.run, provider.embed([text], model_id=model)
+                    ).result(timeout=30)
+            else:
+                result = asyncio.run(provider.embed([text], model_id=model))
+            return result[0]
+        except Exception:
+            logger.debug("Ollama embed unavailable, falling back to hash_embedding")
+            return hash_embedding(text, dim=768)
+
+    return _embed
 
 
 class MemoryController:

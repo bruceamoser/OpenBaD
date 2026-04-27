@@ -82,3 +82,9 @@ class ProviderAdapter(ABC):
     @abstractmethod
     async def health_check(self) -> HealthStatus:
         """Check provider availability."""
+
+    async def embed(
+        self, texts: list[str], model_id: str | None = None
+    ) -> list[list[float]]:
+        """Return embedding vectors for *texts*."""
+        raise NotImplementedError("Embedding not supported by this provider")

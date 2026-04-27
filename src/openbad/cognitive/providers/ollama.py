@@ -138,6 +138,13 @@ class OllamaProvider(ProviderAdapter):
         except (aiohttp.ClientError, TimeoutError, OSError):
             return HealthStatus(provider="ollama", available=False)
 
+    async def embed(
+        self, texts: list[str], model_id: str | None = None
+    ) -> list[list[float]]:
+        model = model_id or "nomic-embed-text"
+        data = await self._post("/api/embed", {"model": model, "input": texts})
+        return data["embeddings"]
+
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
