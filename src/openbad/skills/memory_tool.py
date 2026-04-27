@@ -41,45 +41,26 @@ class MemoryToolAdapter:
     def recall(self, query: str, top_k: int = 5) -> list[RecallResult]:
         """Search across episodic + semantic stores.
 
-        Returns ranked results by relevance.
+        Delegates to ``MemoryController.recall()`` which provides library
+        ref annotations.  Returns ranked results by relevance.
         """
+        raw = self._ctrl.recall(query, top_k=top_k)
         results: list[RecallResult] = []
-
-        # Semantic search (scored)
-        if self._ctrl.semantic is not None:
-            try:
-                semantic_hits = self._ctrl.semantic.search(
-                    query, top_k=top_k,
+        for item in raw:
+            value = item["value"]
+            annotations = item.get("library_annotations")
+            if annotations:
+                value = value + "\n" + "\n".join(annotations)
+            results.append(
+                RecallResult(
+                    key=item["key"],
+                    value=value,
+                    tier=item["tier"],
+                    score=item["score"],
+                    metadata=item["metadata"],
                 )
-                for entry, score in semantic_hits:
-                    results.append(RecallResult(
-                        key=entry.key,
-                        value=str(entry.value),
-                        tier=MemoryTier.SEMANTIC.value,
-                        score=score,
-                        metadata=entry.metadata,
-                    ))
-            except Exception:
-                logger.exception("Semantic recall failed")
-
-        # Episodic prefix search (unscored — use timestamp proximity)
-        if self._ctrl.episodic is not None:
-            try:
-                episodic_hits = self._ctrl.episodic.query(query)
-                for entry in episodic_hits[:top_k]:
-                    results.append(RecallResult(
-                        key=entry.key,
-                        value=str(entry.value),
-                        tier=MemoryTier.EPISODIC.value,
-                        score=0.0,
-                        metadata=entry.metadata,
-                    ))
-            except Exception:
-                logger.exception("Episodic recall failed")
-
-        # Sort by score descending (semantic results rank higher)
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:top_k]
+            )
+        return results
 
     def store(
         self,

@@ -20,7 +20,13 @@ class MemoryTier(Enum):
 
 @dataclass
 class MemoryEntry:
-    """A single entry in the memory system."""
+    """A single entry in the memory system.
+
+    **Library refs convention** — Semantic entries that reference Library
+    books should include ``metadata={"library_refs": ["book-uuid-1", ...]}``.
+    When recalled, these pointers are expanded into annotations so the LLM
+    knows exhaustive documentation is available in the Library.
+    """
 
     key: str
     value: Any

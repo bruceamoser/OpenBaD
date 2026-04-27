@@ -187,6 +187,49 @@ class MemoryController:
             "procedural": self.procedural.query(prefix),
         }
 
+    def recall(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Recall memories ranked by relevance, with library ref annotations.
+
+        Searches semantic (scored) and episodic (recency) stores, then
+        annotates results whose ``metadata["library_refs"]`` contain book
+        IDs so the LLM knows exhaustive documentation is available.
+        """
+        results: list[dict[str, Any]] = []
+
+        # Semantic search — scored
+        try:
+            for entry, score in self.semantic.search(query, top_k=top_k):
+                item: dict[str, Any] = {
+                    "key": entry.key,
+                    "value": str(entry.value),
+                    "tier": MemoryTier.SEMANTIC.value,
+                    "score": score,
+                    "metadata": entry.metadata,
+                }
+                _annotate_library_refs(item, entry)
+                results.append(item)
+        except Exception:
+            logger.exception("Semantic recall failed")
+
+        # Episodic prefix search — unscored, ordered by recency
+        try:
+            for entry in self.episodic.query(query)[:top_k]:
+                item = {
+                    "key": entry.key,
+                    "value": str(entry.value),
+                    "tier": MemoryTier.EPISODIC.value,
+                    "score": 0.0,
+                    "metadata": entry.metadata,
+                }
+                _annotate_library_refs(item, entry)
+                results.append(item)
+        except Exception:
+            logger.exception("Episodic recall failed")
+
+        # Semantic scored results first, then episodic
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:top_k]
+
     # ------------------------------------------------------------------ #
     # Stats
     # ------------------------------------------------------------------ #
@@ -204,3 +247,22 @@ class MemoryController:
     def flush_stm(self) -> list[str]:
         """Flush all STM entries. Returns list of flushed keys."""
         return self.stm.flush()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _annotate_library_refs(item: dict[str, Any], entry: MemoryEntry) -> None:
+    """Append library pointer annotations when ``library_refs`` exist."""
+    refs = entry.metadata.get("library_refs")
+    if not refs:
+        return
+    annotations = []
+    for book_id in refs:
+        annotations.append(
+            f"[Knowledge Node: {entry.key}. Detail: {entry.value}.\n"
+            f" Exhaustive documentation available in Library Book ID: {book_id}]"
+        )
+    item["library_annotations"] = annotations
