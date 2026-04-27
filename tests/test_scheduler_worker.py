@@ -5,8 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from openbad.autonomy.endocrine_runtime import EndocrineRuntime
+from openbad.autonomy.scheduler_worker import (
+    _classify_research_complexity,
+    _classify_task_complexity,
+)
 from openbad.endocrine.config import EndocrineConfig
 from openbad.state.db import initialize_state_db
+from openbad.tasks.models import TaskKind, TaskModel, TaskPriority
 from openbad.tasks.research_queue import ResearchQueue, initialize_research_db
 
 
@@ -295,3 +300,207 @@ def test_research_tool_validator_blocks_self_duplicate() -> None:
             "description": "Smoke test forcing immune analyst follow-up behavior",
         },
     ) is None
+
+
+# ── Task complexity classification ──────────────────────────────────── #
+
+
+def _make_task(title: str, description: str = "") -> TaskModel:
+    return TaskModel.new(
+        title=title,
+        description=description,
+        kind=TaskKind.USER_REQUESTED,
+        priority=int(TaskPriority.NORMAL),
+        owner="test",
+    )
+
+
+class TestClassifyTaskComplexity:
+    def test_simple_task(self) -> None:
+        task = _make_task("Check status", "Report current system status")
+        assert _classify_task_complexity(task) is False
+
+    def test_explicit_crew_flag(self) -> None:
+        task = _make_task("Complex work", "Do things [crew]")
+        assert _classify_task_complexity(task) is True
+
+    def test_keyword_multistep(self) -> None:
+        task = _make_task(
+            "Refactor module",
+            "Multi-step refactor of the authentication module",
+        )
+        assert _classify_task_complexity(task) is True
+
+    def test_keyword_pipeline(self) -> None:
+        task = _make_task("Build pipeline", "Integrate the data pipeline")
+        assert _classify_task_complexity(task) is True
+
+    def test_long_description(self) -> None:
+        task = _make_task("Complex task", "x " * 300)
+        assert _classify_task_complexity(task) is True
+
+    def test_checklist_subtasks(self) -> None:
+        task = _make_task(
+            "Multi-item work",
+            "Steps:\n- [ ] Step one\n- [ ] Step two\n- [x] Done",
+        )
+        assert _classify_task_complexity(task) is True
+
+    def test_single_checklist_item_is_simple(self) -> None:
+        task = _make_task(
+            "Simple checkbox",
+            "Steps:\n- [ ] Just one thing",
+        )
+        assert _classify_task_complexity(task) is False
+
+
+class TestClassifyResearchComplexity:
+    def test_simple_research(self) -> None:
+        assert _classify_research_complexity(
+            "Check dependency license", "Look up the license."
+        ) is False
+
+    def test_explicit_crew_flag(self) -> None:
+        assert _classify_research_complexity(
+            "Deep dive", "Do analysis [crew]"
+        ) is True
+
+    def test_keyword_synthesize(self) -> None:
+        assert _classify_research_complexity(
+            "Synthesize findings",
+            "Compare and synthesize results from multiple sources.",
+        ) is True
+
+    def test_keyword_comprehensive(self) -> None:
+        assert _classify_research_complexity(
+            "Comprehensive audit", "Audit the codebase."
+        ) is True
+
+    def test_long_description(self) -> None:
+        assert _classify_research_complexity(
+            "Deep research", "y " * 300
+        ) is True
+
+
+class TestCrewDispatchIntegration:
+    """Test that _process_task routes to crew for complex tasks."""
+
+    def test_complex_task_attempts_crew(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Complex task should attempt crew dispatch."""
+        import openbad.autonomy.scheduler_worker as worker
+
+        db_path = tmp_path / "state.db"
+        conn = initialize_state_db(db_path)
+        from openbad.tasks.research_queue import initialize_research_db
+        from openbad.tasks.reward_endocrine import initialize_reward_db
+
+        initialize_research_db(conn)
+        initialize_reward_db(conn)
+
+        monkeypatch.setattr(
+            worker,
+            "EndocrineRuntime",
+            lambda *, config: EndocrineRuntime(
+                config=config, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            worker, "load_endocrine_config", lambda: EndocrineConfig()
+        )
+        monkeypatch.setattr(
+            worker,
+            "load_session_policy",
+            lambda: {"tasks": {"allow_task_autonomy": True}},
+        )
+        monkeypatch.setattr(
+            worker,
+            "_read_providers_config",
+            lambda: (Path("unused"), object()),
+        )
+
+        # Mock _resolve_chat_adapter to provide chat_model + crew_llm
+        mock_chat_model = SimpleNamespace()
+        mock_crew_llm = SimpleNamespace()
+        monkeypatch.setattr(
+            worker,
+            "_resolve_chat_adapter",
+            lambda _cfg, _sys: (
+                None, "test-model", "test-provider", False,
+                mock_chat_model, mock_crew_llm,
+            ),
+        )
+        monkeypatch.setattr(
+            worker,
+            "append_assistant_message",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            worker,
+            "append_session_message",
+            lambda *a, **kw: None,
+        )
+
+        monkeypatch.setattr(
+            worker,
+            "recent_events",
+            lambda **kw: [],
+        )
+
+        class _UsageTracker:
+            def __init__(self, db_path=None) -> None:
+                pass
+
+            def record(self, **kwargs) -> None:
+                pass
+
+            def record_detail(self, **kwargs) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(worker, "UsageTracker", _UsageTracker)
+
+        # Create a complex task
+        from openbad.tasks.service import TaskService
+
+        svc = TaskService.get_instance(db_path)
+        task = svc.create_task(
+            title="Refactor authentication module",
+            description=(
+                "Multi-step refactor of the authentication module.\n"
+                "- [ ] Audit current code\n"
+                "- [ ] Design new architecture\n"
+                "- [ ] Implement changes"
+            ),
+            owner="test-user",
+        )
+
+        crew_called = []
+
+        def _mock_create_crew(
+            user_message, *, llm_factory=None, tools_factory=None
+        ):
+            crew_called.append(user_message)
+            mock_crew = SimpleNamespace(
+                kickoff=lambda: SimpleNamespace(
+                    raw="Crew completed the refactor."
+                ),
+            )
+            return mock_crew
+
+        monkeypatch.setattr(
+            "openbad.frameworks.crews.user_facing"
+            ".create_user_facing_crew",
+            _mock_create_crew,
+        )
+
+        result = worker.process_task_call(
+            {"task_id": task.task_id}, db_path=db_path
+        )
+
+        assert result["executed_task_id"] == task.task_id
+        assert len(crew_called) == 1
+        assert "Refactor authentication" in crew_called[0]

@@ -42,6 +42,54 @@ _AUTONOMY_INTERACTIVE_PATTERNS = (
 )
 
 
+_COMPLEXITY_KEYWORDS = re.compile(
+    r"\b(multi[- ]?step|pipeline|integrate|refactor|migrate|redesign|architect)\b",
+    re.IGNORECASE,
+)
+_COMPLEXITY_DESC_THRESHOLD = 500  # characters
+_COMPLEXITY_SUBTASK_THRESHOLD = 2
+
+
+def _classify_task_complexity(task: TaskModel) -> bool:
+    """Return True if a task should be dispatched to a CrewAI crew."""
+    desc = task.description or ""
+
+    # Explicit flag
+    if "[crew]" in desc.lower():
+        return True
+
+    # Keyword heuristic
+    if _COMPLEXITY_KEYWORDS.search(desc):
+        return True
+
+    # Length heuristic
+    if len(desc) > _COMPLEXITY_DESC_THRESHOLD:
+        return True
+
+    # Subtask count (markdown checklist items)
+    checklist_items = re.findall(r"^[\s]*[-*]\s+\[[ x]\]", desc, re.MULTILINE)
+    return len(checklist_items) >= _COMPLEXITY_SUBTASK_THRESHOLD
+
+
+def _classify_research_complexity(title: str, description: str) -> bool:
+    """Return True if research should use CrewAI crew instead of single agent."""
+    desc = description or ""
+
+    if "[crew]" in desc.lower():
+        return True
+
+    if len(desc) > _COMPLEXITY_DESC_THRESHOLD:
+        return True
+
+    multi_source_kw = re.compile(
+        r"\b(compare|synthesize|multiple\s+sources|cross[- ]?reference|comprehensive)\b",
+        re.IGNORECASE,
+    )
+    return bool(
+        multi_source_kw.search(desc) or multi_source_kw.search(title)
+    )
+
+
 def _normalize_research_field(value: str | None) -> str:
     return " ".join((value or "").strip().lower().split())
 
@@ -422,6 +470,104 @@ def _process_autonomy_work(
             log.exception("LLM call failed for system=%s", system_name)
             return None
 
+    def _get_crew_factories(
+        system_name: str,
+    ) -> tuple[Any | None, Any | None]:
+        """Return (llm_factory, tools_factory) for CrewAI crews.
+
+        llm_factory: (priority: str) -> crewai.LLM
+        tools_factory: (tool_role: str) -> list[tool]
+        """
+        try:
+            _cfg_path, cfg = _read_providers_config()
+            resolved = _resolve_chat_adapter(cfg, system_name)
+            _adapter, _model, _pname, _fb, _cm, crew_llm = resolved
+            if crew_llm is None:
+                return None, None
+        except Exception:
+            log.exception("Failed to resolve crew LLM for system=%s", system_name)
+            return None, None
+
+        def llm_factory(priority: str) -> Any:
+            return crew_llm
+
+        def tools_factory(tool_role: str) -> list[Any]:
+            from openbad.frameworks.langchain_tools import async_get_crew_tools
+
+            try:
+                return asyncio.run(async_get_crew_tools(tool_role))
+            except Exception:
+                log.exception("Failed to get crew tools for role=%s", tool_role)
+                return []
+
+        return llm_factory, tools_factory
+
+    def _run_task_crew(task_to_run: TaskModel) -> tuple[str, str, str] | None:
+        """Dispatch a complex task to the User-Facing Crew.
+
+        Returns (summary, provider_name, model_id) or None on failure.
+        """
+        from openbad.frameworks.crews.user_facing import create_user_facing_crew
+
+        llm_factory, tools_factory = _get_crew_factories("tasks")
+        if llm_factory is None:
+            return None
+
+        combined = f"{task_to_run.title}\n\n{task_to_run.description}".strip()
+        crew = create_user_facing_crew(
+            combined,
+            llm_factory=llm_factory,
+            tools_factory=tools_factory,
+        )
+        try:
+            result = crew.kickoff()
+            raw = str(result.raw if hasattr(result, "raw") else result)
+            return raw.strip(), "crew", "user-facing"
+        except Exception:
+            log.exception("User-facing crew failed for task=%s", task_to_run.task_id)
+            return None
+
+    def _run_research_crew(
+        topic: str,
+        description: str,
+    ) -> tuple[str, str, str] | None:
+        """Dispatch complex research to the Maintenance Crew.
+
+        Returns (summary, provider_name, model_id) or None on failure.
+        """
+        from openbad.frameworks.crews.maintenance import create_maintenance_crew
+
+        llm_factory, tools_factory = _get_crew_factories("research")
+        if llm_factory is None:
+            return None
+
+        cortisol = endocrine_runtime.levels.get("cortisol", 0.0)
+        dopamine = endocrine_runtime.levels.get("dopamine", 0.0)
+        fsm_state = "IDLE"
+        try:
+            fsm_state = endocrine_runtime.fsm_state or "IDLE"
+        except Exception:
+            pass
+
+        crew = create_maintenance_crew(
+            f"{topic}\n\n{description}".strip(),
+            cortisol=cortisol,
+            dopamine=dopamine,
+            fsm_state=fsm_state,
+            llm_factory=llm_factory,
+            tools_factory=tools_factory,
+        )
+        if crew is None:
+            return None
+
+        try:
+            result = crew.kickoff()
+            raw = str(result.raw if hasattr(result, "raw") else result)
+            return raw.strip(), "crew", "maintenance"
+        except Exception:
+            log.exception("Maintenance crew failed for research topic=%s", topic)
+            return None
+
     def _top_pending_task() -> TaskModel | None:
         return task_svc.top_pending_user_task()
 
@@ -523,46 +669,62 @@ def _process_autonomy_work(
             return
 
         task_store.update_task_status(task_to_run.task_id, TaskStatus.RUNNING)
-        llm = _run_llm(
-            system_prompt=(
-                "You are the autonomous OpenBaD task worker. "
-                "Complete the assigned task in a non-destructive way. Use tools whenever"
-                " they improve execution or diagnosis. There is no interactive human in this"
-                " session. Do not ask the operator questions, do not ask what to do next, and"
-                " do not end with invitations for follow-up."
-                " IMPORTANT: Do NOT create new tasks as follow-up unless the task description"
-                " explicitly requests spawning sub-tasks. A simple test or verification task"
-                " does not need follow-up tasks. Just complete the work and report what you did."
-                " Return a concise execution summary."
-            ),
-            user_prompt=(
-                f"Task: {task_to_run.title}\nDescription: {task_to_run.description}"
-            ),
-            system_name="tasks",
-            session_id=task_session_id,
-            request_id=task_to_run.task_id,
-            tools_role="task",
-        )
-        if llm is None:
-            task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
-            task_store.append_event(
-                task_to_run.task_id,
-                "autonomy_failed",
-                payload={"reason": "provider_unavailable", "owner": task_to_run.owner},
-            )
-            _post_session(task_session_id, f"Task {task_to_run.task_id} failed: no provider available.")
-            _apply_reward(
-                outcome=TraceOutcome.FAILURE,
-                node_id=task_to_run.task_id,
-                task_id=task_to_run.task_id,
-                source="tasks",
-                reason=f"Reward evaluation for failed task {task_to_run.task_id}",
-                context={"system": "tasks", "owner": task_to_run.owner, "failure": "provider_unavailable"},
-            )
-            return
 
-        summary, provider_name, model_id, tools_used = llm
-        summary = _strip_autonomy_interaction(summary)
+        is_complex = _classify_task_complexity(task_to_run)
+        crew_result = None
+        llm = None
+
+        if is_complex:
+            log.info("Task %s classified as complex — dispatching to crew", task_to_run.task_id)
+            crew_result = _run_task_crew(task_to_run)
+
+        if crew_result is not None:
+            summary, provider_name, model_id = crew_result
+            summary = _strip_autonomy_interaction(summary)
+            tools_used: tuple[str, ...] = ()
+        else:
+            if is_complex:
+                log.warning("Crew dispatch failed for task %s — falling back to ReAct agent", task_to_run.task_id)
+            llm = _run_llm(
+                system_prompt=(
+                    "You are the autonomous OpenBaD task worker. "
+                    "Complete the assigned task in a non-destructive way. Use tools whenever"
+                    " they improve execution or diagnosis. There is no interactive human in this"
+                    " session. Do not ask the operator questions, do not ask what to do next, and"
+                    " do not end with invitations for follow-up."
+                    " IMPORTANT: Do NOT create new tasks as follow-up unless the task description"
+                    " explicitly requests spawning sub-tasks. A simple test or verification task"
+                    " does not need follow-up tasks. Just complete the work and report what you did."
+                    " Return a concise execution summary."
+                ),
+                user_prompt=(
+                    f"Task: {task_to_run.title}\nDescription: {task_to_run.description}"
+                ),
+                system_name="tasks",
+                session_id=task_session_id,
+                request_id=task_to_run.task_id,
+                tools_role="task",
+            )
+            if llm is None:
+                task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
+                task_store.append_event(
+                    task_to_run.task_id,
+                    "autonomy_failed",
+                    payload={"reason": "provider_unavailable", "owner": task_to_run.owner},
+                )
+                _post_session(task_session_id, f"Task {task_to_run.task_id} failed: no provider available.")
+                _apply_reward(
+                    outcome=TraceOutcome.FAILURE,
+                    node_id=task_to_run.task_id,
+                    task_id=task_to_run.task_id,
+                    source="tasks",
+                    reason=f"Reward evaluation for failed task {task_to_run.task_id}",
+                    context={"system": "tasks", "owner": task_to_run.owner, "failure": "provider_unavailable"},
+                )
+                return
+
+            summary, provider_name, model_id, tools_used = llm
+            summary = _strip_autonomy_interaction(summary)
         task_store.update_task_status(task_to_run.task_id, TaskStatus.DONE)
         task_store.append_event(
             task_to_run.task_id,
@@ -600,49 +762,64 @@ def _process_autonomy_work(
         except Exception:
             log.exception("Failed to post research prompt to session")
 
-        llm = _run_llm(
-            system_prompt=(
-                "You are the OpenBaD research worker. Your job is to INVESTIGATE and"
-                " PRODUCE FINDINGS — not to delegate, plan, or create more research nodes.\n\n"
-                "## What you MUST do\n"
-                "1. Use `web_search` to find information about the topic.\n"
-                "2. Use `web_fetch` to read promising pages in full.\n"
-                "3. Use `read_file` and `find_files` to check existing code or docs for context.\n"
-                "4. Synthesise your findings into a concrete, detailed research report.\n\n"
-                "## Rules\n"
-                "- Call tools directly. Do NOT narrate intentions — act immediately.\n"
-                "- You MUST call `web_search` at least once. Do not skip internet research.\n"
-                "- Do NOT create a new research node or task unless you have ALREADY completed"
-                " your research and discovered a specific, actionable follow-up that is"
-                " clearly different from the current topic.\n"
-                "- NEVER create a research node that restates or paraphrases the current topic.\n"
-                "- There is no human in this session. Do not ask questions or offer choices.\n"
-                "- Return a concise report with concrete findings, evidence, and citations."
-            ),
-            user_prompt=(
-                f"Research title: {node.title}\nDescription: {node.description}"
-            ),
-            system_name="research",
-            session_id=research_session_id,
-            request_id=node.node_id,
-            tool_call_validator=_build_research_tool_validator(node),
-            tools_role="research",
-        )
-        if llm is None:
-            log.warning("Research node %s: provider unavailable; leaving pending for retry", node.node_id)
-            _post_session(research_session_id, f"Research node {node.node_id} attempted but provider was unavailable. Will retry.")
-            _apply_reward(
-                outcome=TraceOutcome.FAILURE,
-                node_id=node.node_id,
-                task_id=node.source_task_id or f"research:{node.node_id}",
-                source="research",
-                reason=f"Reward evaluation for failed research node {node.node_id}",
-                context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "provider_unavailable"},
-            )
-            return
+        is_complex_research = _classify_research_complexity(node.title or "", node.description or "")
+        crew_result = None
+        llm = None
 
-        summary, provider_name, model_id, tools_used = llm
-        summary = _strip_autonomy_interaction(summary)
+        if is_complex_research:
+            log.info("Research node %s classified as complex — dispatching to crew", node.node_id)
+            crew_result = _run_research_crew(node.title or "", node.description or "")
+
+        if crew_result is not None:
+            summary, provider_name, model_id = crew_result
+            summary = _strip_autonomy_interaction(summary)
+            tools_used: tuple[str, ...] = ()
+        else:
+            if is_complex_research:
+                log.warning("Crew dispatch failed for research %s — falling back to ReAct agent", node.node_id)
+            llm = _run_llm(
+                system_prompt=(
+                    "You are the OpenBaD research worker. Your job is to INVESTIGATE and"
+                    " PRODUCE FINDINGS — not to delegate, plan, or create more research nodes.\n\n"
+                    "## What you MUST do\n"
+                    "1. Use `web_search` to find information about the topic.\n"
+                    "2. Use `web_fetch` to read promising pages in full.\n"
+                    "3. Use `read_file` and `find_files` to check existing code or docs for context.\n"
+                    "4. Synthesise your findings into a concrete, detailed research report.\n\n"
+                    "## Rules\n"
+                    "- Call tools directly. Do NOT narrate intentions — act immediately.\n"
+                    "- You MUST call `web_search` at least once. Do not skip internet research.\n"
+                    "- Do NOT create a new research node or task unless you have ALREADY completed"
+                    " your research and discovered a specific, actionable follow-up that is"
+                    " clearly different from the current topic.\n"
+                    "- NEVER create a research node that restates or paraphrases the current topic.\n"
+                    "- There is no human in this session. Do not ask questions or offer choices.\n"
+                    "- Return a concise report with concrete findings, evidence, and citations."
+                ),
+                user_prompt=(
+                    f"Research title: {node.title}\nDescription: {node.description}"
+                ),
+                system_name="research",
+                session_id=research_session_id,
+                request_id=node.node_id,
+                tool_call_validator=_build_research_tool_validator(node),
+                tools_role="research",
+            )
+            if llm is None:
+                log.warning("Research node %s: provider unavailable; leaving pending for retry", node.node_id)
+                _post_session(research_session_id, f"Research node {node.node_id} attempted but provider was unavailable. Will retry.")
+                _apply_reward(
+                    outcome=TraceOutcome.FAILURE,
+                    node_id=node.node_id,
+                    task_id=node.source_task_id or f"research:{node.node_id}",
+                    source="research",
+                    reason=f"Reward evaluation for failed research node {node.node_id}",
+                    context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "provider_unavailable"},
+                )
+                return
+
+            summary, provider_name, model_id, tools_used = llm
+            summary = _strip_autonomy_interaction(summary)
 
         # Guard: if the LLM returned empty content and used no tools,
         # the research didn't actually happen — leave pending for retry.
