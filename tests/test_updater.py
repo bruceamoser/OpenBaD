@@ -203,6 +203,7 @@ def test_quick_update_calls_all_steps(fake_project: Path, tmp_path: Path) -> Non
     with (
         patch.object(updater, "git_pull", return_value="up to date") as mock_pull,
         patch.object(updater, "pip_install_no_deps") as mock_pip,
+        patch.object(updater, "download_and_install_wui", return_value=True) as mock_wui,
         patch.object(updater, "CONFIG_DIR", cfg_dir),
         patch.object(updater, "SYSTEMD_DIR", sd_dir),
         patch.object(updater, "systemd_reload") as mock_reload,
@@ -213,6 +214,7 @@ def test_quick_update_calls_all_steps(fake_project: Path, tmp_path: Path) -> Non
 
     mock_pull.assert_called_once_with(fake_project)
     mock_pip.assert_called_once_with(fake_project)
+    mock_wui.assert_called_once_with(fake_project)
     mock_reload.assert_called_once()
     mock_restart.assert_called_once()
 
@@ -223,6 +225,7 @@ def test_quick_update_skip_services(fake_project: Path, tmp_path: Path) -> None:
     with (
         patch.object(updater, "git_pull", return_value="up to date"),
         patch.object(updater, "pip_install_no_deps"),
+        patch.object(updater, "download_and_install_wui", return_value=True),
         patch.object(updater, "CONFIG_DIR", cfg_dir),
         patch.object(updater, "restart_services") as mock_restart,
         patch.object(updater, "sync_units") as mock_sync_units,
@@ -231,3 +234,31 @@ def test_quick_update_skip_services(fake_project: Path, tmp_path: Path) -> None:
 
     mock_restart.assert_not_called()
     mock_sync_units.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# download_and_install_wui
+# ------------------------------------------------------------------
+
+
+def test_build_wui_from_source(fake_project: Path, tmp_path: Path) -> None:
+    """Fallback builds from wui-svelte/ when no release is available."""
+    wui_src = fake_project / "wui-svelte"
+    wui_src.mkdir()
+    build_out = wui_src / "build"
+    build_out.mkdir()
+    (build_out / "index.html").write_text("<html></html>")
+
+    wui_build = tmp_path / "wui_build"
+
+    with (
+        patch.object(updater, "_get_release_data", return_value=None),
+        patch.object(updater, "WUI_BUILD_DIR", wui_build),
+        patch("shutil.which", return_value="/usr/bin/npm"),
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess([], 0)
+        result = updater.download_and_install_wui(fake_project)
+
+    assert result is True
+    assert (wui_build / "index.html").exists()

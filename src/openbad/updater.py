@@ -179,13 +179,21 @@ def get_latest_release_tag() -> str | None:
         return None
 
 
-def _find_wheels_asset(release_data: dict) -> dict | None:
-    """Find the wheels tarball asset in a release."""
+def _find_release_asset(
+    release_data: dict,
+    suffix: str,
+) -> dict | None:
+    """Find an asset in a release by name suffix."""
     for asset in release_data.get("assets", []):
         name = asset.get("name", "")
-        if name.startswith("openbad-") and name.endswith("-wheels.tar.gz"):
+        if name.startswith("openbad-") and name.endswith(suffix):
             return asset
     return None
+
+
+def _find_wheels_asset(release_data: dict) -> dict | None:
+    """Find the wheels tarball asset in a release."""
+    return _find_release_asset(release_data, "-wheels.tar.gz")
 
 
 def download_and_install_deps(tag: str | None = None) -> bool:
@@ -194,14 +202,8 @@ def download_and_install_deps(tag: str | None = None) -> bool:
     If *tag* is ``None``, uses the latest release.
     Returns ``True`` on success, ``False`` if no tarball is available.
     """
-    url = f"{GITHUB_API}/releases/tags/{tag}" if tag else f"{GITHUB_API}/releases/latest"
-
-    req = urllib_request.Request(url, headers={"Accept": "application/json"})  # noqa: S310
-    try:
-        with urllib_request.urlopen(req, timeout=15) as resp:  # noqa: S310
-            release = json.loads(resp.read())
-    except (urllib_error.URLError, json.JSONDecodeError, OSError) as exc:
-        log.warning("Cannot reach GitHub releases: %s", exc)
+    release = _get_release_data(tag)
+    if not release:
         return False
 
     asset = _find_wheels_asset(release)
@@ -246,6 +248,100 @@ def download_and_install_deps(tag: str | None = None) -> bool:
     return True
 
 
+WUI_BUILD_DIR = Path(__file__).resolve().parent / "wui" / "build"
+
+
+def _get_release_data(tag: str | None = None) -> dict | None:
+    """Fetch release JSON from GitHub API."""
+    url = (
+        f"{GITHUB_API}/releases/tags/{tag}"
+        if tag
+        else f"{GITHUB_API}/releases/latest"
+    )
+    req = urllib_request.Request(  # noqa: S310
+        url, headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=15) as resp:  # noqa: S310
+            return json.loads(resp.read())
+    except (urllib_error.URLError, json.JSONDecodeError, OSError) as exc:
+        log.warning("Cannot reach GitHub releases: %s", exc)
+        return None
+
+
+def download_and_install_wui(
+    project_root: Path,
+    tag: str | None = None,
+) -> bool:
+    """Download the WUI tarball from a GitHub release and install.
+
+    Falls back to building from source if npm is available.
+    Returns ``True`` on success.
+    """
+    release = _get_release_data(tag)
+    asset = _find_release_asset(release, "-wui.tar.gz") if release else None
+
+    if asset:
+        return _install_wui_from_asset(asset)
+
+    # Fallback: build from source if wui-svelte exists locally
+    return _build_wui_from_source(project_root)
+
+
+def _install_wui_from_asset(asset: dict) -> bool:
+    """Download and extract a WUI tarball into the build dir."""
+    download_url = asset["browser_download_url"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tarball = Path(tmpdir) / "wui.tar.gz"
+        req = urllib_request.Request(download_url)  # noqa: S310
+        with (
+            urllib_request.urlopen(req, timeout=60) as resp,  # noqa: S310
+            tarball.open("wb") as f,
+        ):
+            shutil.copyfileobj(resp, f)
+
+        with tarfile.open(tarball, "r:gz") as tf:
+            for member in tf.getmembers():
+                if member.name.startswith("/") or ".." in member.name:
+                    raise ValueError(
+                        f"Unsafe path in WUI tarball: {member.name}"
+                    )
+            # Replace existing build
+            if WUI_BUILD_DIR.exists():
+                shutil.rmtree(WUI_BUILD_DIR)
+            WUI_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+            tf.extractall(WUI_BUILD_DIR)  # noqa: S202
+    return True
+
+
+def _build_wui_from_source(project_root: Path) -> bool:
+    """Build the WUI from wui-svelte/ and copy to build dir."""
+    wui_src = project_root / "wui-svelte"
+    npm = shutil.which("npm")
+    if not npm or not wui_src.exists():
+        log.info("Cannot build WUI from source (npm or wui-svelte missing)")
+        return False
+
+    subprocess.run(  # noqa: S603
+        [npm, "ci", "--silent"],
+        check=True,
+        cwd=str(wui_src),
+    )
+    subprocess.run(  # noqa: S603
+        [npm, "run", "build"],
+        check=True,
+        cwd=str(wui_src),
+    )
+    src_build = wui_src / "build"
+    if not src_build.exists():
+        log.warning("WUI build produced no output")
+        return False
+    if WUI_BUILD_DIR.exists():
+        shutil.rmtree(WUI_BUILD_DIR)
+    shutil.copytree(src_build, WUI_BUILD_DIR)
+    return True
+
+
 # ------------------------------------------------------------------
 # High-level update orchestrators
 # ------------------------------------------------------------------
@@ -263,6 +359,12 @@ def quick_update(project_root: Path, *, skip_services: bool = False) -> None:
 
     click.echo("Installing package (no dependency resolution)...")
     pip_install_no_deps(project_root)
+
+    click.echo("Updating WUI frontend...")
+    if download_and_install_wui(project_root):
+        click.echo("  WUI updated.")
+    else:
+        click.echo("  WUI update skipped (no release or npm).")
 
     click.echo("Syncing configuration files...")
     new_configs = sync_configs(project_root)
@@ -307,6 +409,12 @@ def deps_update(project_root: Path, *, skip_services: bool = False) -> None:
             check=True,
             cwd=str(project_root),
         )
+
+    click.echo("Updating WUI frontend...")
+    if download_and_install_wui(project_root, tag=tag):
+        click.echo("  WUI updated from release.")
+    else:
+        click.echo("  WUI update skipped.")
 
     click.echo("Syncing configuration files...")
     sync_configs(project_root)

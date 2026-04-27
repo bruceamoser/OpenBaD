@@ -46,13 +46,24 @@ pip download \
 # Include the openbad wheel itself
 cp dist/*.whl wheels/
 
-# Bundle
+# Bundle wheels
 TARBALL="dist/openbad-${VERSION}-wheels.tar.gz"
 echo "Creating ${TARBALL}..."
 tar czf "$TARBALL" -C wheels .
 
+# Build WUI
+WUI_TARBALL="dist/openbad-${VERSION}-wui.tar.gz"
+if command -v npm &>/dev/null && [ -d wui-svelte ]; then
+    echo "Building SvelteKit frontend..."
+    cd wui-svelte && npm ci --silent && npm run build && cd ..
+    tar czf "$WUI_TARBALL" -C wui-svelte/build .
+    echo "WUI tarball: ${WUI_TARBALL} ($(du -h "$WUI_TARBALL" | cut -f1))"
+else
+    echo "Skipping WUI build (npm not found or wui-svelte missing)"
+fi
+
 echo "=== Done ==="
-echo "Tarball: ${TARBALL} ($(du -h "$TARBALL" | cut -f1))"
+echo "Wheels tarball: ${TARBALL} ($(du -h "$TARBALL" | cut -f1))"
 echo "Wheels:  $(ls wheels/*.whl | wc -l) packages"
 
 # Cleanup
