@@ -17,6 +17,7 @@
     { href: '/mqtt',      label: 'MQTT',      icon: '📡' },
     { href: '/tasks',     label: 'Tasks',     icon: '📋' },
     { href: '/research',  label: 'Research',  icon: '🔬' },
+    { href: '/library',   label: 'Library',   icon: '📚' },
     { href: '/usage',     label: 'Usage',     icon: '◔' },
     { href: '/providers', label: 'Providers', icon: '⚙' },
     { href: '/senses',    label: 'Senses',    icon: '👁' },
