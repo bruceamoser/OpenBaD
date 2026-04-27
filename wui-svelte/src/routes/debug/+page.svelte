@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import Card from '$lib/components/Card.svelte';
-  import { endocrineLevels, fsmState } from '$lib/stores/websocket';
+  import { fsmState } from '$lib/stores/websocket';
   import { get as apiGet } from '$lib/api/client';
 
   interface SystemEvent {
@@ -73,11 +73,6 @@
   onMount(() => { loadEvents(); });
   onDestroy(() => { if (refreshTimer !== undefined) clearInterval(refreshTimer); });
 
-  // Live subsystem state
-  let dopamine = $derived($endocrineLevels?.dopamine ?? 0);
-  let adrenaline = $derived($endocrineLevels?.adrenaline ?? 0);
-  let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
-  let endorphin = $derived($endocrineLevels?.endorphin ?? 0);
   let fsmCurrent = $derived($fsmState?.current_state ?? 'IDLE');
 </script>
 
@@ -95,18 +90,6 @@
       <span class="live-sub">← {$fsmState.previous_state} via {$fsmState.trigger_event}</span>
     {/if}
   </div>
-  {#each [
-    { name: 'Dopamine', val: dopamine, emoji: '🧠', color: 'var(--mauve)' },
-    { name: 'Adrenaline', val: adrenaline, emoji: '⚡', color: 'var(--yellow)' },
-    { name: 'Cortisol', val: cortisol, emoji: '🔥', color: 'var(--red)' },
-    { name: 'Endorphin', val: endorphin, emoji: '✨', color: 'var(--green)' },
-  ] as h}
-    <div class="live-card">
-      <span class="live-label">{h.emoji} {h.name}</span>
-      <div class="live-bar"><div class="live-fill" style="width:{h.val * 100}%; background:{h.color}"></div></div>
-      <span class="live-pct" style="color:{h.color}">{(h.val * 100).toFixed(0)}%</span>
-    </div>
-  {/each}
 </div>
 
 <!-- Unified Event Log -->
@@ -184,9 +167,6 @@
   .live-label { font-weight: 600; white-space: nowrap; }
   .live-value { font-weight: 700; color: var(--blue); }
   .live-sub { font-size: 0.72rem; color: var(--text-dim); }
-  .live-bar { width: 4rem; height: 6px; background: var(--bg-surface2, var(--bg)); border-radius: 3px; overflow: hidden; }
-  .live-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
-  .live-pct { font-weight: 700; font-size: 0.8rem; font-variant-numeric: tabular-nums; min-width: 2.5rem; text-align: right; }
 
   /* Toolbar */
   .log-toolbar {

@@ -48,3 +48,4 @@ htmlcov/
 .env
 .env.local
 data/state.db
+build-root-old/

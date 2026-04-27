@@ -179,6 +179,7 @@ _HEARTBEAT_CONFIG_PATH = Path("/var/lib/openbad/heartbeat.yaml")
 _HEARTBEAT_CONFIG_DEFAULT = {"interval_seconds": 60}
 _TELEMETRY_CONFIG_PATH = Path("/var/lib/openbad/telemetry.yaml")
 _TELEMETRY_CONFIG_DEFAULT = {"interval_seconds": 5}
+_ENDOCRINE_CONFIG_PATH = Path("/var/lib/openbad/endocrine.yaml")
 
 
 def _heartbeat_timer_status() -> str:
@@ -2861,6 +2862,117 @@ async def _post_endocrine_toggle(request: web.Request) -> web.Response:
     return web.json_response(_runtime_snapshot())
 
 
+async def _get_endocrine_config(_request: web.Request) -> web.Response:
+    """GET /api/endocrine/config — return editable endocrine configuration."""
+    from openbad.tasks.reward_endocrine import RewardEndocrineConfig  # noqa: PLC0415
+
+    cfg = load_endocrine_config()
+    reward = RewardEndocrineConfig.default()
+
+    hormones: dict[str, dict[str, object]] = {}
+    for name in ("dopamine", "adrenaline", "cortisol", "endorphin"):
+        hcfg = getattr(cfg, name)
+        hormones[name] = {
+            "increment": hcfg.increment,
+            "activation_threshold": hcfg.activation_threshold,
+            "escalation_threshold": hcfg.escalation_threshold,
+            "half_life_seconds": hcfg.half_life_seconds,
+        }
+
+    reward_mappings: dict[str, list[dict[str, object]]] = {}
+    for outcome, mappings in reward.mappings.items():
+        reward_mappings[outcome.value] = [
+            {"hormone": m.hormone, "amount": m.amount} for m in mappings
+        ]
+
+    return web.json_response({
+        "hormones": hormones,
+        "publish_interval_seconds": cfg.publish_interval_seconds,
+        "significant_change_delta": cfg.significant_change_delta,
+        "reward_mappings": reward_mappings,
+    })
+
+
+async def _put_endocrine_config(request: web.Request) -> web.Response:
+    """PUT /api/endocrine/config — update endocrine configuration."""
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="body must be an object")
+
+    hormones_raw = payload.get("hormones", {})
+    if not isinstance(hormones_raw, dict):
+        raise web.HTTPBadRequest(text="hormones must be an object")
+
+    # Build the YAML-compatible config dict
+    endocrine_dict: dict[str, object] = {}
+
+    for scalar in ("publish_interval_seconds", "significant_change_delta"):
+        if scalar in payload:
+            try:
+                endocrine_dict[scalar] = float(payload[scalar])
+            except (TypeError, ValueError) as exc:
+                raise web.HTTPBadRequest(text=f"{scalar} must be a number") from exc
+
+    valid_hormones = {"dopamine", "adrenaline", "cortisol", "endorphin"}
+    valid_fields = {"increment", "activation_threshold", "escalation_threshold", "half_life_seconds"}
+
+    for name in valid_hormones:
+        hraw = hormones_raw.get(name)
+        if not isinstance(hraw, dict):
+            continue
+        hdict: dict[str, object] = {}
+        for field_name in valid_fields:
+            if field_name in hraw:
+                val = hraw[field_name]
+                if val is None and field_name == "escalation_threshold":
+                    continue  # omit None escalation thresholds from YAML
+                try:
+                    fval = float(val)
+                except (TypeError, ValueError) as exc:
+                    raise web.HTTPBadRequest(
+                        text=f"hormones.{name}.{field_name} must be a number"
+                    ) from exc
+                if field_name in ("activation_threshold", "escalation_threshold"):
+                    if not 0.0 <= fval <= 1.0:
+                        raise web.HTTPBadRequest(
+                            text=f"hormones.{name}.{field_name} must be between 0 and 1"
+                        )
+                if field_name == "half_life_seconds" and fval < 1:
+                    raise web.HTTPBadRequest(
+                        text=f"hormones.{name}.{field_name} must be >= 1"
+                    )
+                if field_name == "increment" and fval < 0:
+                    raise web.HTTPBadRequest(
+                        text=f"hormones.{name}.{field_name} must be >= 0"
+                    )
+                hdict[field_name] = fval
+        if hdict:
+            endocrine_dict[name] = hdict
+
+    # Write to /var/lib/openbad/endocrine.yaml
+    cfg_to_write = {"endocrine": endocrine_dict}
+    try:
+        _ENDOCRINE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ENDOCRINE_CONFIG_PATH.write_text(yaml.dump(cfg_to_write, default_flow_style=False))
+    except OSError as exc:
+        raise web.HTTPInternalServerError(text=f"Could not save: {exc}") from exc
+
+    # Return the freshly-loaded config
+    return await _get_endocrine_config(_request=request)
+
+
+async def _post_endocrine_reset_levels(request: web.Request) -> web.Response:
+    """POST /api/endocrine/reset — reset all hormone levels to zero."""
+    runtime = EndocrineRuntime(config=load_endocrine_config())
+    runtime.apply_adjustment(
+        source="user",
+        reason="Manual reset from UI",
+        deltas={h: -runtime.levels.get(h, 0.0) for h in ("dopamine", "adrenaline", "cortisol", "endorphin")},
+    )
+    runtime.set_mood_tags([])
+    return web.json_response(_runtime_snapshot())
+
+
 # ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
@@ -3408,6 +3520,9 @@ def create_app(
     app.router.add_get("/api/endocrine/status", _get_endocrine_status)
     app.router.add_get("/api/endocrine/activity", _get_endocrine_activity)
     app.router.add_post("/api/endocrine/toggle", _post_endocrine_toggle)
+    app.router.add_get("/api/endocrine/config", _get_endocrine_config)
+    app.router.add_put("/api/endocrine/config", _put_endocrine_config)
+    app.router.add_post("/api/endocrine/reset", _post_endocrine_reset_levels)
     app.router.add_get("/api/tasks", _get_tasks)
     app.router.add_get("/api/tasks/completed", _get_tasks_completed)
     app.router.add_post("/api/tasks", _post_tasks)

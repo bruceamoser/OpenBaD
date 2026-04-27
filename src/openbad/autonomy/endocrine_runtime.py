@@ -476,6 +476,7 @@ def load_endocrine_config() -> EndocrineConfig:
 
     path_candidates.extend(
         [
+            Path("/var/lib/openbad/endocrine.yaml"),
             config_dir / "endocrine.yaml",
             home_dir / ".config" / "openbad" / "endocrine.yaml",
             Path("config/endocrine.yaml"),

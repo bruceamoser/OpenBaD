@@ -6,7 +6,6 @@
     memoryTelemetry,
     diskTelemetry,
     networkTelemetry,
-    endocrineLevels,
     fsmState,
   } from '$lib/stores/websocket';
 
@@ -26,10 +25,6 @@
   let disk = $derived($diskTelemetry?.usage_percent ?? 0);
   let netTx = $derived($networkTelemetry?.bytes_sent ?? 0);
   let netRx = $derived($networkTelemetry?.bytes_recv ?? 0);
-  let dopamine = $derived($endocrineLevels?.dopamine ?? 0);
-  let adrenaline = $derived($endocrineLevels?.adrenaline ?? 0);
-  let cortisol = $derived($endocrineLevels?.cortisol ?? 0);
-  let endorphin = $derived($endocrineLevels?.endorphin ?? 0);
 
   $effect(() => {
     if (currentFsm && currentFsm !== prevFsm && prevFsm) {
@@ -59,12 +54,6 @@
     }
   }
 
-  function hormoneColor(val: number): string {
-    if (val < 0.3) return 'var(--green)';
-    if (val < 0.7) return 'var(--yellow)';
-    return 'var(--red)';
-  }
-
   function sparklinePath(data: number[], w: number, h: number): string {
     if (data.length < 2) return '';
     const step = w / (data.length - 1);
@@ -89,13 +78,11 @@
   }
 
   let overallHealth = $derived(() => {
-    const highCortisol = cortisol > 0.7;
-    const highAdrenaline = adrenaline > 0.7;
     const highCpu = cpu > 90;
     const highMem = mem > 90;
     const emergency = currentFsm === 'EMERGENCY';
-    if (emergency || (highCortisol && highAdrenaline)) return { label: 'Critical', color: 'var(--red)', icon: '🔴' };
-    if (highCortisol || highAdrenaline || highCpu || highMem || currentFsm === 'THROTTLED') return { label: 'Stressed', color: 'var(--yellow)', icon: '🟡' };
+    if (emergency) return { label: 'Critical', color: 'var(--red)', icon: '🔴' };
+    if (highCpu || highMem || currentFsm === 'THROTTLED') return { label: 'Stressed', color: 'var(--yellow)', icon: '🟡' };
     return { label: 'Healthy', color: 'var(--green)', icon: '🟢' };
   });
 </script>
@@ -131,31 +118,6 @@
         {/each}
       </div>
     {/if}
-  </div>
-
-  <!-- Endocrine — horizontal cards -->
-  <div class="endocrine-panel">
-    <h3 class="panel-heading">Endocrine System</h3>
-    <div class="hormones-grid">
-      {#each [
-        { name: 'Dopamine', val: dopamine, emoji: '🧠', desc: 'Reward & exploration drive' },
-        { name: 'Adrenaline', val: adrenaline, emoji: '⚡', desc: 'Urgency & threat response' },
-        { name: 'Cortisol', val: cortisol, emoji: '🔥', desc: 'Sustained stress level' },
-        { name: 'Endorphin', val: endorphin, emoji: '✨', desc: 'Recovery & resilience' },
-      ] as h}
-        <div class="hormone-card">
-          <div class="hormone-top">
-            <span class="hormone-emoji">{h.emoji}</span>
-            <span class="hormone-name">{h.name}</span>
-            <span class="hormone-pct" style="color:{hormoneColor(h.val)}">{(h.val * 100).toFixed(0)}%</span>
-          </div>
-          <div class="hormone-bar-track">
-            <div class="hormone-bar-fill" style="width:{h.val * 100}%; background:{hormoneColor(h.val)}"></div>
-          </div>
-          <span class="hormone-desc">{h.desc}</span>
-        </div>
-      {/each}
-    </div>
   </div>
 
   <!-- CPU + Memory sparklines -->
@@ -305,66 +267,6 @@
     color: var(--text-dim);
     opacity: 0.7;
     margin-right: 0.25rem;
-  }
-
-  /* Endocrine Panel */
-  .endocrine-panel {
-    padding: 1rem 1.15rem;
-    background: var(--bg-surface1);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-  .panel-heading {
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
-    margin: 0 0 0.75rem;
-  }
-  .hormones-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 0.75rem;
-  }
-  @media (max-width: 900px) {
-    .hormones-grid { grid-template-columns: repeat(2, 1fr); }
-  }
-  @media (max-width: 500px) {
-    .hormones-grid { grid-template-columns: 1fr; }
-  }
-  .hormone-card {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    padding: 0.65rem 0.75rem;
-    background: var(--bg-base);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border);
-  }
-  .hormone-top {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-  .hormone-emoji { font-size: 1rem; }
-  .hormone-name { font-size: 0.82rem; font-weight: 600; flex: 1; }
-  .hormone-pct { font-size: 0.9rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .hormone-bar-track {
-    height: 6px;
-    background: var(--bg-surface2, var(--bg));
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .hormone-bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.4s ease;
-  }
-  .hormone-desc {
-    font-size: 0.7rem;
-    color: var(--text-dim);
-    line-height: 1.3;
   }
 
   /* Resource Sparklines */
