@@ -1262,6 +1262,18 @@ async def stream_chat(
 
     # ── 6. Consolidate: record assistant response in memory ──
     response_text = "".join(full_response)
+
+    if usage_tracker is not None:
+        usage_tracker.record_detail(
+            request_id=request_id,
+            provider=provider_name or "unknown",
+            model=model_id,
+            system=system.value,
+            session_id=session_id,
+            tokens=tokens_used,
+            input_text=message[:5000],
+            output_text=response_text[:5000],
+        )
     _write_turn(
         session_id,
         ConversationTurn(role="assistant", content=response_text, timestamp=time.time()),

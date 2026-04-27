@@ -62,6 +62,7 @@ class ToolAgentResult:
     tools_used: tuple[str, ...] = ()
     verified_creations: tuple[str, ...] = ()
     used_agentic: bool = False
+    tool_details: tuple[dict[str, object], ...] = ()
 
 
 def build_tooling_system_prompt(base_prompt: str) -> str:
@@ -109,6 +110,38 @@ def _extract_creation_info(messages: list[Any]) -> tuple[list[str], list[str]]:
                         )
 
     return tool_names, verified
+
+
+def _extract_tool_details(messages: list[Any]) -> list[dict[str, object]]:
+    """Extract tool call details (name, args, result) from agent messages."""
+    from langchain_core.messages import ToolMessage
+
+    # Build a map of tool_call_id -> (name, args) from AIMessage tool_calls
+    call_map: dict[str, dict[str, object]] = {}
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                call_id = tc.get("id", "")
+                args = tc.get("args", {})
+                # Truncate large arg values
+                safe_args = {}
+                for k, v in (args if isinstance(args, dict) else {}).items():
+                    s = str(v)
+                    safe_args[k] = s[:500] if len(s) > 500 else v
+                call_map[call_id] = {"name": tc["name"], "args": safe_args}
+
+    details: list[dict[str, object]] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            call_id = getattr(msg, "tool_call_id", "")
+            info = call_map.get(call_id, {})
+            result_text = str(msg.content) if msg.content else ""
+            details.append({
+                "name": info.get("name", getattr(msg, "name", "unknown")),
+                "args": info.get("args", {}),
+                "result": result_text[:2000] if len(result_text) > 2000 else result_text,
+            })
+    return details
 
 
 def _adapter_to_chat_model(adapter: Any, model_id: str) -> ChatOpenAI:
@@ -211,6 +244,7 @@ async def run_tool_agent(
     tool_names, verified_creations = _extract_creation_info(
         all_messages
     )
+    tool_details = _extract_tool_details(all_messages)
 
     # Find the last non-tool-call AI message as final response
     final_content = ""
@@ -254,4 +288,5 @@ async def run_tool_agent(
         tools_used=tuple(tool_names),
         verified_creations=tuple(verified_creations),
         used_agentic=True,
+        tool_details=tuple(tool_details),
     )

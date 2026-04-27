@@ -387,6 +387,17 @@ def _process_autonomy_work(
                 request_id=request_id,
                 session_id=session_id,
             )
+            usage_tracker.record_detail(
+                request_id=request_id,
+                provider=result.provider or provider_name or "unknown",
+                model=result.model or model,
+                system=system_name,
+                session_id=session_id,
+                tokens=int(result.tokens_used),
+                input_text=user_prompt[:5000],
+                output_text=result.content[:5000],
+                tools=list(result.tool_details),
+            )
             return result.content.strip(), result.provider or provider_name or "", result.model or model, result.tools_used
         except Exception:
             log.exception("LLM call failed for system=%s", system_name)

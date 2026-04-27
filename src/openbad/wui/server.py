@@ -1645,6 +1645,54 @@ async def _get_usage(request: web.Request) -> web.Response:
     )
 
 
+async def _get_usage_requests(request: web.Request) -> web.Response:
+    """GET /api/usage/requests — paginated list of recent requests."""
+    tracker = request.app.get("usage_tracker")
+    if tracker is None:
+        raise web.HTTPServiceUnavailable(text="UsageTracker not available")
+    try:
+        page = int(request.rel_url.query.get("page", "1"))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        per_page = min(50, int(request.rel_url.query.get("per_page", "10")))
+    except (ValueError, TypeError):
+        per_page = 10
+    policy = load_session_policy(SESSION_POLICY_PATH)
+    session_catalog = {
+        str(item["session_id"]): {
+            "key": str(item["key"]),
+            "label": str(item["label"]),
+        }
+        for item in list_sessions(policy)
+    }
+    result = tracker.list_requests(page=page, per_page=per_page)
+    for item in result["items"]:
+        item.update(_session_metadata(str(item.get("session_id", "")), session_catalog))
+    return web.json_response(result)
+
+
+async def _get_usage_request_detail(request: web.Request) -> web.Response:
+    """GET /api/usage/requests/{request_id} — full detail for one request."""
+    tracker = request.app.get("usage_tracker")
+    if tracker is None:
+        raise web.HTTPServiceUnavailable(text="UsageTracker not available")
+    request_id = request.match_info["request_id"]
+    detail = tracker.get_request_detail(request_id)
+    if detail is None:
+        raise web.HTTPNotFound(text="Request not found")
+    policy = load_session_policy(SESSION_POLICY_PATH)
+    session_catalog = {
+        str(item["session_id"]): {
+            "key": str(item["key"]),
+            "label": str(item["label"]),
+        }
+        for item in list_sessions(policy)
+    }
+    detail.update(_session_metadata(str(detail.get("session_id", "")), session_catalog))
+    return web.json_response(detail)
+
+
 async def _get_version(_request: web.Request) -> web.Response:
     return web.json_response({"version": openbad.__version__})
 
@@ -3479,6 +3527,8 @@ def create_app(
     app.router.add_get("/api/chat/history", _get_chat_history)
     app.router.add_post("/api/chat/stream", _post_chat_stream)
     app.router.add_get("/api/usage", _get_usage)
+    app.router.add_get("/api/usage/requests", _get_usage_requests)
+    app.router.add_get("/api/usage/requests/{request_id}", _get_usage_request_detail)
     app.router.add_get("/api/version", _get_version)
     app.router.add_get("/api/insights", _get_insights)
     app.router.add_post("/api/insights/dismiss", _post_insights_dismiss)

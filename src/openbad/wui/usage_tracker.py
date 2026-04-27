@@ -6,6 +6,7 @@ aggregated by provider, model, and cognitive system over time.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -29,10 +30,26 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 """
 
+_CREATE_REQUEST_DETAILS_TABLE = """
+CREATE TABLE IF NOT EXISTS request_details (
+    request_id TEXT PRIMARY KEY,
+    timestamp REAL NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    system TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    tokens INTEGER NOT NULL,
+    input_text TEXT NOT NULL DEFAULT '',
+    output_text TEXT NOT NULL DEFAULT '',
+    tools_json TEXT NOT NULL DEFAULT '[]'
+);
+"""
+
 _CREATE_USAGE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events (timestamp);",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_provider_model ON usage_events (provider, model);",
     "CREATE INDEX IF NOT EXISTS idx_usage_events_system ON usage_events (system);",
+    "CREATE INDEX IF NOT EXISTS idx_request_details_ts ON request_details (timestamp);",
 )
 
 
@@ -83,6 +100,7 @@ class UsageTracker:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_USAGE_TABLE)
+        self._conn.execute(_CREATE_REQUEST_DETAILS_TABLE)
         for statement in _CREATE_USAGE_INDEXES:
             self._conn.execute(statement)
         self._conn.commit()
@@ -128,6 +146,120 @@ class UsageTracker:
             ),
         )
         self._conn.commit()
+
+    def record_detail(
+        self,
+        *,
+        request_id: str,
+        provider: str,
+        model: str,
+        system: str,
+        session_id: str,
+        tokens: int,
+        input_text: str = "",
+        output_text: str = "",
+        tools: list[dict[str, object]] | None = None,
+        timestamp: float | None = None,
+    ) -> None:
+        """Store per-request detail for the request inspector UI."""
+        if not request_id:
+            return
+        ts = timestamp if timestamp is not None else time.time()
+        tools_json = json.dumps(tools or [], default=str)
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO request_details (
+                request_id, timestamp, provider, model, system,
+                session_id, tokens, input_text, output_text, tools_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id, ts, provider or "unknown", model or "unknown",
+                system or "unknown", session_id, tokens,
+                input_text[:10000], output_text[:10000], tools_json[:50000],
+            ),
+        )
+        self._conn.commit()
+
+    def list_requests(
+        self,
+        *,
+        page: int = 1,
+        per_page: int = 10,
+    ) -> dict[str, object]:
+        """Return a paginated list of request details, newest first."""
+        offset = (max(1, page) - 1) * per_page
+        count_row = self._conn.execute(
+            "SELECT COUNT(*) AS total FROM request_details"
+        ).fetchone()
+        total = int(count_row["total"])
+        rows = self._conn.execute(
+            """
+            SELECT request_id, timestamp, provider, model, system,
+                   session_id, tokens, input_text, output_text, tools_json
+            FROM request_details
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            (per_page, offset),
+        ).fetchall()
+        items = []
+        for row in rows:
+            tools_raw = row["tools_json"] or "[]"
+            try:
+                tools_list = json.loads(tools_raw)
+            except (json.JSONDecodeError, TypeError):
+                tools_list = []
+            items.append({
+                "request_id": row["request_id"],
+                "timestamp": float(row["timestamp"]),
+                "provider": row["provider"],
+                "model": row["model"],
+                "system": row["system"],
+                "session_id": row["session_id"],
+                "tokens": int(row["tokens"]),
+                "tool_count": len(tools_list),
+                "tool_names": [t.get("name", "") for t in tools_list if isinstance(t, dict)],
+                "input_preview": (row["input_text"] or "")[:200],
+                "output_preview": (row["output_text"] or "")[:200],
+            })
+        return {
+            "items": items,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": max(1, (total + per_page - 1) // per_page),
+        }
+
+    def get_request_detail(self, request_id: str) -> dict[str, object] | None:
+        """Return full detail for a single request."""
+        row = self._conn.execute(
+            """
+            SELECT request_id, timestamp, provider, model, system,
+                   session_id, tokens, input_text, output_text, tools_json
+            FROM request_details
+            WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            tools_list = json.loads(row["tools_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            tools_list = []
+        return {
+            "request_id": row["request_id"],
+            "timestamp": float(row["timestamp"]),
+            "provider": row["provider"],
+            "model": row["model"],
+            "system": row["system"],
+            "session_id": row["session_id"],
+            "tokens": int(row["tokens"]),
+            "input_text": row["input_text"] or "",
+            "output_text": row["output_text"] or "",
+            "tools": tools_list,
+        }
 
     def _sum_since(self, since: float) -> int:
         row = self._conn.execute(
