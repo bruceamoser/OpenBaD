@@ -990,8 +990,18 @@ def assemble_context(
     system_tokens = estimate_tokens(system_prompt)
     message_tokens = estimate_tokens(message)
 
-    # Reserve tokens: system + current message + response headroom
-    available = max(0, budget.context_tokens - system_tokens - message_tokens)
+    # Reserve tokens: system + current message + tool definitions + response headroom.
+    # Tool definitions (~1200 tokens for chat role) are injected by
+    # LangGraph's bind_tools and don't appear in our messages array,
+    # so we must account for them here.
+    _TOOL_DEFINITION_RESERVE = 1500
+    available = max(
+        0,
+        budget.context_tokens
+        - system_tokens
+        - message_tokens
+        - _TOOL_DEFINITION_RESERVE,
+    )
 
     supporting_context = ""
     supporting_tokens = 0
@@ -1421,6 +1431,15 @@ async def _agentic_stream(
         prompt=system_prompt or None,
     )
 
+    log.info(
+        "LangGraph agent created request=%s tools=%d system_prompt_len=%d "
+        "messages=%d",
+        request_id,
+        len(wrapped_tools),
+        len(system_prompt),
+        len(lc_messages),
+    )
+
     # ── Run agent in background task ──
     async def _run() -> None:
         try:
@@ -1429,6 +1448,17 @@ async def _agentic_stream(
                 version="v2",
                 config={"recursion_limit": _MAX_TOOL_ITERATIONS * 2},
             ):
+                kind = event.get("event", "")
+                if kind in (
+                    "on_tool_start", "on_tool_end",
+                    "on_chat_model_end",
+                ):
+                    log.debug(
+                        "Agent event request=%s kind=%s name=%s",
+                        request_id,
+                        kind,
+                        event.get("name", ""),
+                    )
                 await output_q.put(("event", event))
         except Exception as exc:
             await output_q.put(("error", exc))
