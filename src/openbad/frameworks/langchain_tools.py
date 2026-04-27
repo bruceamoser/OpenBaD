@@ -90,6 +90,10 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "get_tasks",
         "get_research_nodes",
         "get_endocrine_status",
+        "read_memory",
+        "write_memory",
+        "prune_memory",
+        "query_semantic",
     },
     "immune": {
         "get_mqtt_records",
