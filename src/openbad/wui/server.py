@@ -3581,6 +3581,18 @@ def create_app(
     app.router.add_get("/api/events", _get_system_events)
     app.router.add_get("/api/capabilities", _get_capabilities)
 
+    # Library API (backed by state.db)
+    from openbad.state.db import initialize_state_db  # noqa: PLC0415
+    from openbad.wui.library_api import setup_library_routes  # noqa: PLC0415
+
+    _lib_conn = initialize_state_db()
+    setup_library_routes(app, _lib_conn)
+
+    async def _close_library_conn(app: web.Application) -> None:  # noqa: ARG001
+        _lib_conn.close()
+
+    app.on_cleanup.append(_close_library_conn)
+
     # SvelteKit static assets + SPA fallback for client-side routing
     _app_dir = BUILD_DIR / "_app"
     if _app_dir.is_dir():
