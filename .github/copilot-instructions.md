@@ -36,9 +36,15 @@
 ### 6. Merge
 - Merge strategy: **Squash and merge**.
 - Ensure the squashed commit message includes `Closes #<issue-number>`.
-- Delete the feature branch after merge.
+- Delete the feature branch after merge (both remote and local).
 
-### 7. Move to Next Issue
+### 7. Branch Cleanup
+- After merging, delete the remote branch: `git push origin --delete feature/<branch>`.
+- Delete the local branch: `git branch -d feature/<branch>`.
+- Prune stale remote-tracking refs: `git remote prune origin`.
+- Periodically verify no stale branches remain: `git branch -r --list 'origin/feature/*'`.
+
+### 8. Move to Next Issue
 - Pull latest `main`.
 - Pick the next issue by priority and dependency order.
 - **Continue working through issues automatically** — do not stop to ask for permission between issues.
