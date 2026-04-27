@@ -629,66 +629,47 @@ def _process_autonomy_work(
         nonlocal executed_doctor
         doctor_now = time.time()
         levels = endocrine_runtime.levels
-        source_recent = endocrine_runtime.source_contributions(window_seconds=900, now=doctor_now)
-        severity = endocrine_runtime.current_severity()
         request_payload = request if isinstance(request, dict) else {}
-        request_source = str(request_payload.get("source", "unknown")).strip() or "unknown"
-        request_reason = str(request_payload.get("reason", "doctor call requested")).strip() or "doctor call requested"
-        request_context = request_payload.get("context", {})
-        if not isinstance(request_context, dict):
-            request_context = {"raw_context": request_context}
-        hormone_names = ("dopamine", "adrenaline", "cortisol", "endorphin")
-        activation_thresholds = {
-            hormone: getattr(endocrine_config, hormone).activation_threshold
-            for hormone in hormone_names
-        }
-        escalation_thresholds = {
-            hormone: getattr(endocrine_config, hormone).escalation_threshold
-            for hormone in hormone_names
-        }
+        request_source = str(
+            request_payload.get("source", "unknown")
+        ).strip() or "unknown"
+        request_reason = str(
+            request_payload.get("reason", "doctor call requested")
+        ).strip() or "doctor call requested"
 
-        # Summarize source contributions to reduce token usage.
-        # Instead of serializing every individual adjustment, aggregate
-        # totals per source per hormone.
-        contrib_summary: dict[str, dict[str, float]] = {}
-        for source_name, contribs in source_recent.items():
-            totals: dict[str, float] = {}
-            if isinstance(contribs, list):
-                for entry in contribs:
-                    if isinstance(entry, dict):
-                        for h in hormone_names:
-                            totals[h] = totals.get(h, 0.0) + float(entry.get(h, 0.0))
-            elif isinstance(contribs, dict):
-                totals = {h: float(contribs.get(h, 0.0)) for h in hormone_names}
-            # Round to 3 decimals and omit zero contributions
-            contrib_summary[source_name] = {h: round(v, 3) for h, v in totals.items() if abs(v) > 0.001}
-        # Drop sources with no net contribution
-        contrib_summary = {k: v for k, v in contrib_summary.items() if v}
-
+        # Minimal prompt — doctor uses tools to gather evidence.
         doctor_prompt = (
-            "Evaluate hormone levels and decide actions. "
-            "Return strict JSON: {summary, mood_tags, actions}. "
-            "Actions: disable_system(system,duration_minutes,reason), "
-            "enable_system(system,reason), adjust(source,reason,deltas). "
-            "Only disable/enable if justified by thresholds.\n\n"
-            f"Source: {request_source}\n"
-            f"Reason: {request_reason}\n"
-            f"Context: {json.dumps(request_context, sort_keys=True)}\n"
-            f"Levels: {json.dumps(levels, sort_keys=True)}\n"
-            f"Severity: {json.dumps(severity, sort_keys=True)}\n"
-            f"Thresholds: activation={json.dumps(activation_thresholds, sort_keys=True)}, "
-            f"escalation={json.dumps(escalation_thresholds, sort_keys=True)}\n"
-            f"15m contribution totals by source: {json.dumps(contrib_summary, sort_keys=True)}"
+            f"Doctor call from '{request_source}': {request_reason}\n"
+            "Investigate and respond with strict JSON."
         )
         llm = _run_llm(
             system_prompt=(
-                "You are the OpenBaD endocrine doctor. "
-                "BEFORE making decisions, use your tools to inspect system logs "
-                "(get_system_logs), recent events (read_events), and MQTT records "
-                "(get_mqtt_records) to understand what is happening. Look for errors, "
-                "repeated failures, resource pressure, or anomalies that explain the "
-                "current hormone state. Report your findings in the summary. "
-                "Final output must be strict JSON matching the requested schema exactly."
+                "You are the OpenBaD endocrine doctor.\n"
+                "A doctor call has been triggered. Your job:\n"
+                "1. Call get_endocrine_status to review current"
+                " hormone levels, severity, and subsystem gates.\n"
+                "2. Call get_system_logs to check for errors or"
+                " anomalies.\n"
+                "3. Call read_events to review recent system"
+                " activity.\n"
+                "4. Based on your findings, decide what actions"
+                " to take.\n\n"
+                "Return strict JSON with keys:\n"
+                "- summary (string): what you found and why\n"
+                "- mood_tags (array of strings)\n"
+                "- actions (array of objects), each one of:\n"
+                '  {"type":"disable_system",'
+                '"system":"chat|tasks|research",'
+                '"duration_minutes":int,"reason":string}\n'
+                '  {"type":"enable_system",'
+                '"system":"chat|tasks|research",'
+                '"reason":string}\n'
+                '  {"type":"adjust","source":"doctor",'
+                '"reason":string,'
+                '"deltas":{dopamine,adrenaline,cortisol,'
+                "endorphin}}\n"
+                "Only disable/enable systems if justified by"
+                " threshold breaches you observe."
             ),
             user_prompt=doctor_prompt,
             system_name="doctor",
