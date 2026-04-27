@@ -458,6 +458,113 @@ create_dirs() {
 }
 
 # ------------------------------------------------------------------
+# Install SearXNG (local metasearch engine for web_search skill)
+# ------------------------------------------------------------------
+SEARXNG_HOME="/opt/searxng"
+SEARXNG_VENV="$SEARXNG_HOME/venv"
+SEARXNG_SRC="$SEARXNG_HOME/src"
+SEARXNG_ETC="$SEARXNG_HOME/etc"
+
+install_searxng() {
+    if [[ "$SKIP_SERVICES" == "true" ]]; then
+        warn "Skipping SearXNG installation (--skip-services set)."
+        return
+    fi
+
+    info "Installing SearXNG metasearch engine..."
+
+    # Create searxng user if not exists
+    if ! id -u searxng &>/dev/null; then
+        useradd --system --home-dir "$SEARXNG_HOME" --shell /usr/sbin/nologin searxng
+        info "  Created searxng user"
+    fi
+
+    # Create directories
+    mkdir -p "$SEARXNG_HOME" "$SEARXNG_ETC"
+
+    # Create venv if not present
+    if [[ ! -d "$SEARXNG_VENV" ]]; then
+        python3 -m venv "$SEARXNG_VENV"
+        info "  Created venv at $SEARXNG_VENV"
+    fi
+
+    # Clone or update source
+    if [[ -d "$SEARXNG_SRC/.git" ]]; then
+        info "  Updating SearXNG source..."
+        git -C "$SEARXNG_SRC" pull --ff-only 2>/dev/null || true
+    else
+        rm -rf "$SEARXNG_SRC"
+        git clone --depth 1 https://github.com/searxng/searxng.git "$SEARXNG_SRC"
+        info "  Cloned SearXNG source"
+    fi
+
+    # Install dependencies then SearXNG (--no-build-isolation required
+    # because setup.py imports searx at the top level which needs msgspec)
+    "$SEARXNG_VENV/bin/pip" install -q -r "$SEARXNG_SRC/requirements.txt" 2>&1
+    "$SEARXNG_VENV/bin/pip" install -q --no-deps --no-build-isolation "$SEARXNG_SRC" 2>&1
+    info "  Installed SearXNG package"
+
+    # Write settings.yml if not already present
+    if [[ ! -f "$SEARXNG_ETC/settings.yml" ]]; then
+        cat > "$SEARXNG_ETC/settings.yml" <<'SETTINGS'
+use_default_settings: true
+
+general:
+  instance_name: "OpenBaD Search"
+
+search:
+  safe_search: 0
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+server:
+  port: 8888
+  bind_address: "127.0.0.1"
+  secret_key: "$(openssl rand -hex 32)"
+  limiter: false
+  image_proxy: false
+  method: "GET"
+
+ui:
+  static_use_hash: true
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: bing
+    engine: bing
+    shortcut: b
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+  - name: github
+    engine: github
+    shortcut: gh
+  - name: arxiv
+    engine: arxiv
+    shortcut: ax
+  - name: stackoverflow
+    engine: stackoverflow
+    shortcut: so
+SETTINGS
+        # Generate a real secret key
+        local secret_key
+        secret_key="$(openssl rand -hex 32)"
+        sed -i "s/\$(openssl rand -hex 32)/$secret_key/" "$SEARXNG_ETC/settings.yml"
+        info "  Wrote settings.yml"
+    fi
+
+    chown -R searxng:searxng "$SEARXNG_HOME"
+    info "SearXNG installation complete"
+}
+
+# ------------------------------------------------------------------
 # Install systemd units
 # ------------------------------------------------------------------
 install_units() {
@@ -559,6 +666,7 @@ start_services() {
     ensure_systemd_ready
 
     info "Starting services..."
+    restart_or_start_service openbad-searxng.service
     if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
         restart_or_start_service "$EXTERNAL_BROKER_UNIT"
     else
@@ -639,12 +747,14 @@ uninstall() {
         systemctl stop openbad-wui.service 2>/dev/null || true
         systemctl stop openbad.service 2>/dev/null || true
         systemctl stop openbad-broker.service 2>/dev/null || true
+        systemctl stop openbad-searxng.service 2>/dev/null || true
         systemctl disable openbad-telemetry-watch.path 2>/dev/null || true
         systemctl disable openbad-heartbeat-watch.path 2>/dev/null || true
         systemctl disable openbad-heartbeat.timer 2>/dev/null || true
         systemctl disable openbad-wui.service 2>/dev/null || true
         systemctl disable openbad.service 2>/dev/null || true
         systemctl disable openbad-broker.service 2>/dev/null || true
+        systemctl disable openbad-searxng.service 2>/dev/null || true
     else
         warn "systemd not detected; skipping service stop/disable."
     fi
@@ -715,6 +825,7 @@ main() {
     install_package
     install_configs
     create_dirs
+    install_searxng
     install_units
     start_services
     validate_installation
