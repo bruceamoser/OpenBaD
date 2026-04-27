@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 
 from openbad.autonomy.session_policy import load_session_policy, session_id_for
 from openbad.cognitive.config import CognitiveSystem
 from openbad.cognitive.providers.base import CompletionResult, HealthStatus, ModelInfo, ProviderAdapter
 from openbad.wui.usage_tracker import UsageTracker, resolve_usage_db_path
+
+_log = logging.getLogger(__name__)
 
 _POLICY_SESSION_KEYS = {"chat", "tasks", "research", "doctor", "immune"}
 _SYSTEM_SESSION_IDS = {
@@ -190,3 +196,44 @@ class UsageTrackingProviderAdapter(ProviderAdapter):
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._adapter, name)
+
+
+class UsageTrackingCallbackHandler(BaseCallbackHandler):
+    """LangChain callback handler that records token usage for observability.
+
+    Replaces ``UsageTrackingProviderAdapter`` — instead of wrapping the
+    provider, this is attached as a callback to any ``BaseChatModel``.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str = "unknown",
+        model: str = "unknown",
+        system: str | CognitiveSystem = "chat",
+        session_id: str = "",
+    ) -> None:
+        super().__init__()
+        self.provider = provider
+        self.model = model
+        self.system = system
+        self.session_id = session_id
+
+    def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        total_tokens = 0
+        if response.llm_output and isinstance(response.llm_output, dict):
+            usage = response.llm_output.get("token_usage", {})
+            if isinstance(usage, dict):
+                total_tokens = int(usage.get("total_tokens", 0))
+        if total_tokens > 0:
+            try:
+                record_usage_event(
+                    provider=self.provider,
+                    model=self.model,
+                    system=self.system,
+                    tokens=total_tokens,
+                    request_id=f"callback:{uuid4().hex}",
+                    session_id=self.session_id,
+                )
+            except Exception:
+                _log.debug("Failed to record usage via callback", exc_info=True)

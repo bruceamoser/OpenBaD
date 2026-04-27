@@ -6,7 +6,7 @@ OpenBaD's embedded skills.
 
 Public API
 ----------
-``run_tool_agent(adapter, model_id, ...)``
+``run_tool_agent(chat_model, ...)``
     Execute an agentic task with tools, returning a ``ToolAgentResult``.
 ``build_tooling_system_prompt(base_prompt)``
     Prepend the standard OpenBaD tool-use instructions to a system prompt.
@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from openbad.frameworks.langchain_tools import async_get_openbad_tools
@@ -144,32 +143,8 @@ def _extract_tool_details(messages: list[Any]) -> list[dict[str, object]]:
     return details
 
 
-def _adapter_to_chat_model(adapter: Any, model_id: str) -> ChatOpenAI:
-    """Wrap an OpenBaD LiteLLMAdapter as a LangChain ChatOpenAI.
-
-    .. deprecated::
-        Pass *chat_model* to :func:`run_tool_agent` instead.
-    """
-    api_base = getattr(adapter, "_api_base", None) or ""
-    api_key = getattr(adapter, "_api_key", None) or "not-needed"
-    timeout_s = getattr(adapter, "_timeout_s", 120)
-
-    # Strip the litellm provider prefix (e.g. "openai/model" → "model")
-    raw_model = model_id
-    if "/" in raw_model:
-        raw_model = raw_model.split("/", 1)[1]
-
-    return ChatOpenAI(
-        model=raw_model,
-        api_key=api_key,
-        base_url=api_base,
-        timeout=timeout_s,
-        max_retries=2,
-    )
-
-
 async def run_tool_agent(
-    adapter: Any,
+    chat_model: Any,
     model_id: str,
     *,
     provider_name: str,
@@ -180,10 +155,12 @@ async def run_tool_agent(
         [str, dict[str, Any]], str | None
     ]
     | None = None,
-    chat_model: Any | None = None,
     tools_role: str | None = None,
 ) -> ToolAgentResult:
-    """Run an agentic task using LangGraph's ReAct agent."""
+    """Run an agentic task using LangGraph's ReAct agent.
+
+    *chat_model* must be a LangChain ``BaseChatModel`` (e.g. ``ChatOpenAI``).
+    """
     if tools_role:
         from openbad.frameworks.langchain_tools import async_get_tools_for_role
 
@@ -216,9 +193,6 @@ async def run_tool_agent(
             )
 
         tools = [_wrap_tool(t) for t in tools]
-
-    if chat_model is None:
-        chat_model = _adapter_to_chat_model(adapter, model_id)
 
     agent = create_react_agent(
         model=chat_model,

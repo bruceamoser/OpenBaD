@@ -30,9 +30,6 @@ from openbad.cognitive.context_manager import (
     ContextWindowManager,
     estimate_tokens,
 )
-from openbad.cognitive.providers.base import ProviderAdapter
-from openbad.cognitive.providers.github_copilot import GitHubCopilotProvider
-from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter
 from openbad.identity.onboarding import (
     INTERVIEW_SYSTEM_PROMPT,
     USER_INTERVIEW_SYSTEM_PROMPT,
@@ -1083,7 +1080,7 @@ _TOOL_CALL_TIMEOUT_S = 30.0
 
 
 async def stream_chat(
-    adapter: ProviderAdapter,
+    chat_model: Any,
     model_id: str,
     message: str,
     session_id: str,
@@ -1097,16 +1094,12 @@ async def stream_chat(
     personality_modulator: Any | None = None,
     usage_tracker: Any | None = None,
     nervous_system_client: NervousSystemClient_T | None = None,
-    chat_model: Any | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Full chat pipeline: scan → assemble → agentic loop → consolidate.
 
     Yields StreamChunk objects as content arrives. The final chunk has done=True.
 
-    When the adapter is a LiteLLMAdapter, tools are provided via the ``tools``
-    parameter and the LLM can invoke them in a loop (max 5 iterations).
-    Tool-calling turns use non-streaming completion; the final text answer
-    is streamed for real-time display.
+    *chat_model* must be a LangChain ``BaseChatModel`` (e.g. ``ChatOpenAI``).
     """
     request_id = uuid.uuid4().hex[:12]
     start_timestamp = time.time()
@@ -1187,19 +1180,17 @@ async def stream_chat(
         context.total_tokens, len(context.conversation_history),
     )
 
-    # ── 4. Agentic loop (LiteLLM) or legacy streaming ──
+    # ── 4. Agentic loop ──
     full_response: list[str] = []
     tokens_used = 0
     t0 = time.monotonic()
 
-    agentic_capable = chat_model is not None or bool(getattr(adapter, "_api_base", None))
-    use_agentic = agentic_capable and not onboarding_mode
+    use_agentic = not onboarding_mode
 
     try:
         if use_agentic:
             async for chunk in _agentic_stream(
-                adapter, model_id, messages, request_id,
-                chat_model=chat_model,
+                chat_model, model_id, messages, request_id,
             ):
                 if chunk.error:
                     yield chunk
@@ -1211,12 +1202,18 @@ async def stream_chat(
                 if chunk.done:
                     break
         else:
-            # Legacy path: plain streaming without tools
+            # Onboarding mode: simple non-agentic completion
+            from langchain_core.messages import HumanMessage as _HM
+
             prompt = _flatten_messages(messages)
-            async for token in adapter.stream(prompt, model_id=model_id):
+            result = await chat_model.agenerate(
+                [[_HM(content=prompt)]],
+            )
+            for gen in result.generations[0]:
+                content = gen.message.content if hasattr(gen, "message") else gen.text
                 tokens_used += 1
-                full_response.append(token)
-                yield StreamChunk(token=token, tokens_used=tokens_used)
+                full_response.append(content)
+                yield StreamChunk(token=content, tokens_used=tokens_used)
     except Exception as e:
         log.exception("Stream error request=%s", request_id)
         _publish_error(
@@ -1299,19 +1296,15 @@ async def stream_chat(
 
 
 async def _agentic_stream(
-    adapter: LiteLLMAdapter | GitHubCopilotProvider,
+    chat_model: Any,
     model_id: str,
     messages: list[dict[str, Any]],
     request_id: str,
-    *,
-    chat_model: Any | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Run LangGraph ReAct agent with streaming to the chat UI.
 
     Uses ``create_react_agent`` backed by a LangChain ``BaseChatModel``
-    (typically ``ChatOpenAI``).  When *chat_model* is provided it is used
-    directly; otherwise a ``ChatOpenAI`` is built from the adapter's
-    internal config as a temporary compatibility shim.
+    (typically ``ChatOpenAI``).
 
     Yields ``StreamChunk`` objects.  The caller handles the final
     ``done=True`` chunk and memory consolidation.
@@ -1323,22 +1316,6 @@ async def _agentic_stream(
     from langgraph.prebuilt import create_react_agent
 
     from openbad.frameworks.langchain_tools import async_get_tools_for_role
-
-    # ── Use provided ChatModel or build from adapter (compat shim) ──
-    if chat_model is None:
-        from langchain_openai import ChatOpenAI
-
-        api_base = getattr(adapter, "_api_base", None) or ""
-        api_key = getattr(adapter, "_api_key", None) or "not-needed"
-        timeout_s = getattr(adapter, "_timeout_s", 120)
-        raw_model = model_id.split("/", 1)[1] if "/" in model_id else model_id
-        chat_model = ChatOpenAI(
-            model=raw_model,
-            api_key=api_key,
-            base_url=api_base,
-            timeout=timeout_s,
-            max_retries=2,
-        )
 
     # ── Shared output queue ──
     #  Both the agent event stream and tool-wrapper side-effects
