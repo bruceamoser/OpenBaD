@@ -61,6 +61,9 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "web_search",
         "web_fetch",
         "ask_user",
+        "search_library",
+        "read_book",
+        "draft_book",
     },
     "research": {
         "web_search",
@@ -74,6 +77,8 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "work_on_next_research",
         "get_research_nodes",
         "read_events",
+        "search_library",
+        "read_book",
     },
     "doctor": {
         "call_doctor",
@@ -94,6 +99,10 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "write_memory",
         "prune_memory",
         "query_semantic",
+        "search_library",
+        "read_book",
+        "draft_book",
+        "link_books",
     },
     "immune": {
         "get_mqtt_records",
@@ -110,6 +119,8 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "create_research_node",
         "read_events",
         "get_endocrine_status",
+        "search_library",
+        "read_book",
     },
 }
 
