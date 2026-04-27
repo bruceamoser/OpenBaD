@@ -16,6 +16,7 @@ error node and never calls the LLM.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -75,12 +76,33 @@ def immune_scan(state: ChatState) -> dict[str, Any]:
 
 
 def memory_retrieval(state: ChatState) -> dict[str, Any]:
-    """Query memory stores for relevant context."""
-    # Stub: in production, this queries STM, episodic, and semantic memory.
-    # Wired up when integrated with chat_pipeline.py.
+    """Query STM, episodic, and semantic memory for relevant context."""
+    from openbad.wui.chat_pipeline import (
+        _get_conversation_history,
+        _get_episodic_context,
+        _get_semantic_context,
+    )
+
+    session_id = state.get("session_id", "")
+    user_message = state.get("user_message", "")
+
+    # Retrieve conversation history from SQLite
+    history = _get_conversation_history(session_id)
+    history_dicts = [
+        {"role": t.role, "content": t.content}
+        for t in history
+    ]
+
+    # Retrieve cross-session context
+    episodic_ctx = _get_episodic_context(session_id, user_message)
+    semantic_ctx = _get_semantic_context(session_id, user_message)
+
+    parts = [p for p in (episodic_ctx, semantic_ctx) if p]
+    memory_context = "\n\n".join(parts)
+
     return {
-        "memory_context": "",
-        "conversation_history": [],
+        "memory_context": memory_context,
+        "conversation_history": history_dicts,
     }
 
 
@@ -128,9 +150,33 @@ def llm_stream(state: ChatState) -> dict[str, Any]:
 
 
 def memory_persist(state: ChatState) -> dict[str, Any]:
-    """Persist conversation turns to memory stores."""
-    # Stub: in production, writes user turn + assistant turn to
-    # SQLite, STM, and semantic memory.
+    """Persist user and assistant turns to STM + episodic + semantic memory."""
+    from openbad.wui.chat_pipeline import ConversationTurn, _write_turn
+
+    session_id = state.get("session_id", "")
+    user_message = state.get("user_message", "")
+    response_text = state.get("response_text", "")
+
+    if session_id and user_message:
+        _write_turn(
+            session_id,
+            ConversationTurn(
+                role="user",
+                content=user_message,
+                timestamp=time.time(),
+            ),
+        )
+
+    if session_id and response_text:
+        _write_turn(
+            session_id,
+            ConversationTurn(
+                role="assistant",
+                content=response_text,
+                timestamp=time.time(),
+            ),
+        )
+
     return {"done": True}
 
 
