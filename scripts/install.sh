@@ -526,6 +526,13 @@ install_units() {
         warn "  openbad-telemetry-watch.path not found in $CONFIG_SRC"
     fi
 
+    if [ -f "$CONFIG_SRC/openbad-searxng.service" ]; then
+        cp "$CONFIG_SRC/openbad-searxng.service" "$SYSTEMD_DIR/openbad-searxng.service"
+        info "  Installed openbad-searxng.service"
+    else
+        warn "  openbad-searxng.service not found in $CONFIG_SRC"
+    fi
+
     systemctl daemon-reload
     info "Enabling services..."
     if [[ "$BROKER_SERVICE_MODE" == "external" ]]; then
@@ -538,6 +545,7 @@ install_units() {
     systemctl enable openbad-heartbeat.timer
     systemctl enable openbad-heartbeat-watch.path
     systemctl enable openbad-telemetry-watch.path
+    systemctl enable openbad-searxng.service 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------

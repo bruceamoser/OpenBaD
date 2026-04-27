@@ -308,9 +308,9 @@ def web_search(query: str) -> str:
     Args:
         query: The search query.
     """
-    from openbad.skills.web_search import WebSearchToolAdapter
+    from openbad.skills.web_search import WebSearchToolAdapter, WebSearchConfig
 
-    adapter = WebSearchToolAdapter()
+    adapter = WebSearchToolAdapter(WebSearchConfig(backend="searxng"))
     results = adapter.search(query)
     return json.dumps(
         [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in results],

@@ -1,9 +1,10 @@
 [Unit]
 Description=OpenBaD Agent Daemon
 Documentation=https://github.com/bruceamoser/OpenBaD
-After=openbad-broker.service network-online.target
+After=openbad-broker.service openbad-searxng.service network-online.target
 Wants=network-online.target
 Wants=openbad-broker.service
+Wants=openbad-searxng.service
 
 [Service]
 Type=simple

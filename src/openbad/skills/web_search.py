@@ -34,7 +34,7 @@ class SearchResult:
 class WebSearchConfig:
     """Configuration for the web search adapter."""
 
-    backend: str = "duckduckgo"
+    backend: str = "searxng"
     searxng_base_url: str = "http://localhost:8888"
     max_results: int = 5
     max_requests_per_minute: int = 10

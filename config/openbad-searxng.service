@@ -1,0 +1,28 @@
+[Unit]
+Description=OpenBaD SearXNG Search Service
+Documentation=https://docs.searxng.org
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=searxng
+Group=searxng
+ExecStart=/opt/searxng/venv/bin/python3 -m searx.webapp
+Environment=SEARXNG_SETTINGS_PATH=/opt/searxng/etc/settings.yml
+WorkingDirectory=/opt/searxng
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/searxng
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
