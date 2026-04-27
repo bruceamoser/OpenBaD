@@ -3593,6 +3593,13 @@ def create_app(
 
     app.on_cleanup.append(_close_library_conn)
 
+    # Memory Inspector API
+    from openbad.memory.controller import MemoryController  # noqa: PLC0415
+    from openbad.wui.memory_api import setup_memory_routes  # noqa: PLC0415
+
+    _mem_ctrl = MemoryController()
+    setup_memory_routes(app, _mem_ctrl)
+
     # SvelteKit static assets + SPA fallback for client-side routing
     _app_dir = BUILD_DIR / "_app"
     if _app_dir.is_dir():
