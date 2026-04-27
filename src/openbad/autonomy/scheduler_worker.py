@@ -493,10 +493,11 @@ def _process_autonomy_work(
                 "Complete the assigned task in a non-destructive way. Use tools whenever"
                 " they improve execution or diagnosis. There is no interactive human in this"
                 " session. Do not ask the operator questions, do not ask what to do next, and"
-                " do not end with invitations for follow-up. When the task reveals additional"
-                " concrete follow-up work, create task or research entries directly via tools"
-                " instead of only describing them. Return a concise execution summary of what"
-                " you completed and what follow-up entries you created."
+                " do not end with invitations for follow-up."
+                " IMPORTANT: Do NOT create new tasks as follow-up unless the task description"
+                " explicitly requests spawning sub-tasks. A simple test or verification task"
+                " does not need follow-up tasks. Just complete the work and report what you did."
+                " Return a concise execution summary."
             ),
             user_prompt=(
                 f"Task: {task_to_run.title}\nDescription: {task_to_run.description}"
