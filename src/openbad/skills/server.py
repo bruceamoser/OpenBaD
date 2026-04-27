@@ -839,6 +839,53 @@ def query_semantic(query: str, top_k: int = 5) -> str:
     return "\n".join(lines)
 
 
+# ── Library skills ───────────────────────────────────────────────────── #
+
+
+@skill_server.tool()
+def search_library(query: str, top_k: int = 5) -> str:
+    """Search the Library for relevant content by semantic similarity.
+
+    Returns the top matching text chunks with book title and ID.
+    """
+    from openbad.skills.library_tool import search_library as _search
+
+    return _search(query, top_k=top_k)
+
+
+@skill_server.tool()
+def read_book(book_id: str) -> str:
+    """Read a Library book — returns full content, summary, and edges."""
+    from openbad.skills.library_tool import read_book as _read
+
+    return _read(book_id)
+
+
+@skill_server.tool()
+def draft_book(section_id: str, title: str, content: str) -> str:
+    """Create a new book in the Library.
+
+    Auto-chunks the content and enqueues background embedding.
+    """
+    from openbad.skills.library_tool import draft_book as _draft
+
+    return _draft(section_id, title, content)
+
+
+@skill_server.tool()
+def link_books(
+    source_id: str, target_id: str, relation_type: str
+) -> str:
+    """Create a citation edge between two Library books.
+
+    relation_type must be one of: supersedes, relies_on, contradicts,
+    references.
+    """
+    from openbad.skills.library_tool import link_books as _link
+
+    return _link(source_id, target_id, relation_type)
+
+
 # ── Public API for the agentic loop ──────────────────────────────────── #
 
 
