@@ -124,7 +124,7 @@
   async function loadConfig(): Promise<void> {
     try {
       config = await apiGet<EndocrineConfig>('/api/endocrine/config');
-      editConfig = structuredClone(config);
+      editConfig = JSON.parse(JSON.stringify(config));
     } catch (err) {
       error = String(err);
     }
@@ -137,7 +137,7 @@
     error = '';
     try {
       config = await apiPut<EndocrineConfig>('/api/endocrine/config', editConfig);
-      editConfig = structuredClone(config);
+      editConfig = JSON.parse(JSON.stringify(config));
       saveMsg = 'Configuration saved. Changes take effect on next heartbeat tick.';
       setTimeout(() => { saveMsg = ''; }, 5000);
     } catch (err) {
@@ -148,7 +148,7 @@
   }
 
   function resetConfig(): void {
-    if (config) editConfig = structuredClone(config);
+    if (config) editConfig = JSON.parse(JSON.stringify(config));
   }
 
   /* ── Actions ───────────────────────────────────────────── */
