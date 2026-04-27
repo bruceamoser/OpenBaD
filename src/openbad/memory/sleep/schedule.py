@@ -156,11 +156,13 @@ class SleepScheduler:
         fsm: Any,
         orchestrator: Any = None,
         get_last_activity: Callable[[], float] | None = None,
+        get_cortisol: Callable[[], float] | None = None,
     ) -> None:
         self._config = config
         self._fsm = fsm
         self._orchestrator = orchestrator
         self._get_last_activity = get_last_activity
+        self._get_cortisol = get_cortisol
         self._sleeping = False
         self._task: asyncio.Task[None] | None = None
         self._manual_wake = False
@@ -188,6 +190,34 @@ class SleepScheduler:
         logger.info("Manual wake override triggered")
         return True
 
+    # Cortisol threshold above which sleep is suppressed
+    CORTISOL_SUPPRESS: float = 0.70
+
+    def _is_cortisol_blocked(self) -> bool:
+        """Return True if cortisol is too high for sleep."""
+        if self._get_cortisol is None:
+            return False
+        return self._get_cortisol() >= self.CORTISOL_SUPPRESS
+
+    def on_endorphin_signal(self, level: float) -> bool:
+        """Handle an endorphin signal that may trigger a nap.
+
+        Returns True if sleep was triggered, False if blocked.
+        """
+        if self._sleeping:
+            return False
+        if not self._config.allow_daytime_naps and not self._config.is_in_window():
+            logger.debug("Endorphin nap blocked: daytime naps disabled")
+            return False
+        if self._is_cortisol_blocked():
+            logger.debug("Endorphin nap blocked: cortisol too high")
+            return False
+        if level < 0.60:
+            return False
+        logger.info("Endorphin signal (%.2f) triggering sleep", level)
+        self._enter_sleep()
+        return True
+
     async def start(self, check_interval: float = 60.0) -> None:
         """Run the scheduler loop."""
         if not self._config.enabled:
@@ -204,6 +234,9 @@ class SleepScheduler:
                     continue
 
                 if self._config.is_in_window(now) and not self._sleeping:
+                    if self._is_cortisol_blocked():
+                        logger.debug("Sleep window active but cortisol too high; deferring")
+                        continue
                     if not self._is_idle():
                         logger.debug("Sleep window active but user is not idle; deferring")
                         continue

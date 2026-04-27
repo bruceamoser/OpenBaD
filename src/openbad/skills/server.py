@@ -759,6 +759,86 @@ async def list_embedded_skills() -> str:
     return "\n".join(lines)
 
 
+# ── Memory Tools ─────────────────────────────────────────────────────── #
+
+
+def _get_memory_adapter() -> Any:
+    """Lazily obtain the singleton MemoryToolAdapter."""
+    from openbad.memory.controller import MemoryController
+    from openbad.skills.memory_tool import MemoryToolAdapter
+
+    if not hasattr(_get_memory_adapter, "_instance"):
+        ctrl = MemoryController()
+        _get_memory_adapter._instance = MemoryToolAdapter(ctrl)  # type: ignore[attr-defined]
+    return _get_memory_adapter._instance  # type: ignore[attr-defined]
+
+
+@skill_server.tool()
+def read_memory(query: str, top_k: int = 5) -> str:
+    """Search across episodic and semantic long-term memory.
+
+    Returns the most relevant entries for the given query.
+    """
+    adapter = _get_memory_adapter()
+    results = adapter.recall(query, top_k=top_k)
+    if not results:
+        return "No memory entries found."
+    lines = [f"Found {len(results)} entries:\n"]
+    for r in results:
+        lines.append(
+            f"- [{r.tier}] {r.key}: {r.value[:200]}"
+            + (f" (score={r.score:.2f})" if r.score else "")
+        )
+    return "\n".join(lines)
+
+
+@skill_server.tool()
+def write_memory(
+    content: str,
+    tier: str = "episodic",
+    key: str = "",
+    context: str = "",
+) -> str:
+    """Store content to a memory tier (episodic, semantic, or stm).
+
+    Returns the entry ID of the stored content.
+    """
+    adapter = _get_memory_adapter()
+    metadata = {"context": context} if context else {}
+    entry_id = adapter.store(
+        content, tier=tier, key=key or None, metadata=metadata,
+    )
+    return f"Stored to {tier}: {entry_id}" if entry_id else "Failed to store."
+
+
+@skill_server.tool()
+def prune_memory(key: str) -> str:
+    """Mark a memory entry for forgetting during the next sleep cycle.
+
+    The entry will be pruned during the next consolidation.
+    """
+    adapter = _get_memory_adapter()
+    ok = adapter.forget(key)
+    return f"Marked {key} for pruning." if ok else f"Entry {key} not found."
+
+
+@skill_server.tool()
+def query_semantic(query: str, top_k: int = 5) -> str:
+    """Search semantic long-term memory by similarity.
+
+    Returns entries ranked by cosine similarity to the query.
+    """
+    adapter = _get_memory_adapter()
+    results = adapter.recall(query, top_k=top_k)
+    semantic = [r for r in results if r.tier == "semantic"]
+    if not semantic:
+        return "No semantic memory entries found."
+    lines = [f"Found {len(semantic)} semantic entries:\n"]
+    for r in semantic:
+        lines.append(f"- {r.key}: {r.value[:200]} (score={r.score:.2f})")
+    return "\n".join(lines)
+
+
 # ── Public API for the agentic loop ──────────────────────────────────── #
 
 
