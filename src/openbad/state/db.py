@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+import sqlite_vec
+
 DEFAULT_STATE_DB_PATH = Path("data/state.db")
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
@@ -66,6 +68,9 @@ def initialize_state_db(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
 
     effective_dir = migrations_dir if migrations_dir is not None else _MIGRATIONS_DIR
 
