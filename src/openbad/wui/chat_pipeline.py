@@ -1065,7 +1065,7 @@ def _flatten_messages(messages: list[dict[str, str]]) -> str:
 
 # ── Agentic loop constants ────────────────────────────────────────── #
 
-_MAX_TOOL_ITERATIONS = 5
+_MAX_TOOL_ITERATIONS = 16
 _TOOL_CALL_TIMEOUT_S = 30.0
 
 
@@ -1300,7 +1300,7 @@ async def _agentic_stream(
     from langchain_core.tools import StructuredTool
     from langgraph.prebuilt import create_react_agent
 
-    from openbad.frameworks.langchain_tools import async_get_openbad_tools
+    from openbad.frameworks.langchain_tools import async_get_tools_for_role
 
     # ── Use provided ChatModel or build from adapter (compat shim) ──
     if chat_model is None:
@@ -1326,7 +1326,9 @@ async def _agentic_stream(
     output_q: _asyncio.Queue[Any] = _asyncio.Queue()
 
     # ── Wrap tools with timeout + access-request handling ──
-    base_tools = await async_get_openbad_tools()
+    # Use role-filtered tools to reduce context size and prevent
+    # the model from hallucinating calls to tools it shouldn't use.
+    base_tools = await async_get_tools_for_role("chat")
 
     def _wrap_tool(tool: Any) -> StructuredTool:
         original = tool.coroutine
@@ -1485,22 +1487,50 @@ async def _agentic_stream(
                     usage = getattr(output, "usage_metadata", None)
                     if usage:
                         total_tokens += usage.get("total_tokens", 0)
-                    # Only flush content when this is the final
-                    # answer (no tool calls).
                     tool_calls = getattr(output, "tool_calls", [])
-                    if not tool_calls and content_buffer:
-                        for seg in content_buffer:
-                            yield StreamChunk(
-                                token=seg, tokens_used=total_tokens,
-                            )
+                    if tool_calls:
+                        # Intermediate turn — show buffered content
+                        # as reasoning so the user sees the agent's
+                        # chain of thought before tool calls.
+                        if content_buffer:
+                            reasoning_text = "".join(content_buffer)
+                            if reasoning_text.strip():
+                                yield StreamChunk(
+                                    reasoning=reasoning_text.strip(),
+                                    tokens_used=total_tokens,
+                                )
+                    else:
+                        # Final answer — flush content as tokens.
+                        if content_buffer:
+                            for seg in content_buffer:
+                                yield StreamChunk(
+                                    token=seg,
+                                    tokens_used=total_tokens,
+                                )
                 content_buffer.clear()
 
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "unknown")
                 yield StreamChunk(
-                    reasoning=f"Using tools: {tool_name}",
+                    reasoning=f"Calling tool: {tool_name}",
                     tokens_used=total_tokens,
                 )
+
+            elif kind == "on_tool_end":
+                tool_name = event.get("name", "unknown")
+                raw = event.get("data", {}).get("output", "")
+                result_text = str(raw) if raw else ""
+                # Truncate long results to keep the stream readable.
+                preview = (
+                    result_text[:300] + "…"
+                    if len(result_text) > 300
+                    else result_text
+                )
+                if preview.strip():
+                    yield StreamChunk(
+                        reasoning=f"Tool {tool_name} returned: {preview}",
+                        tokens_used=total_tokens,
+                    )
     finally:
         if not agent_task.done():
             agent_task.cancel()

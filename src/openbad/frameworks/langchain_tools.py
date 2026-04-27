@@ -40,6 +40,8 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "get_tasks",
         "get_research_nodes",
         "read_events",
+        "create_task",
+        "create_research_node",
     },
     "task": {
         "read_file",
