@@ -8,47 +8,60 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from openbad.cognitive.providers.base import ProviderAdapter
 from openbad.nervous_system import topics
-from openbad.wui.chat_pipeline import stream_chat
+from openbad.wui.chat_pipeline import StreamChunk, stream_chat
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    pass
 
 
 @pytest.fixture(autouse=True)
 def mock_memory_dirs(tmp_path: Path) -> None:
-    """Mock memory directories to avoid permissions issues."""
+    """Mock memory directories and state DB to avoid permissions issues."""
+    import sqlite3
+
     import openbad.wui.chat_pipeline as cp
 
     cp._DATA_DIR = tmp_path
     cp._MEMORY_DIR = tmp_path / "memory"
     cp._MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
+    conn = sqlite3.connect(str(tmp_path / "state.db"))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS session_messages (
+            message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'assistant',
+            content TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )"""
+    )
+    conn.commit()
+    cp._state_conn = conn
 
-class MockProvider(ProviderAdapter):
-    """Mock provider for testing."""
 
-    def __init__(self, tokens: list[str] | None = None) -> None:
-        self.tokens = tokens or ["Hello", " world", "!"]
-        self.model_id = "mock-model"
+def _mock_chat_model():
+    """Return a MagicMock standing in for a BaseChatModel."""
+    return MagicMock()
 
-    async def stream(self, prompt: str, *, model_id: str = "") -> AsyncIterator[str]:
-        for token in self.tokens:
-            yield token
 
-    async def complete(self, prompt: str, *, model_id: str = "") -> str:
-        return "".join(self.tokens)
+async def _fake_agentic_stream(chat_model, model_id, messages, request_id, tokens=None):
+    """Fake _agentic_stream that yields canned chunks."""
+    for tok in (tokens or ["Hello", " world", "!"]):
+        yield StreamChunk(token=tok, tokens_used=1)
+    yield StreamChunk(done=True, tokens_used=3)
 
-    async def health_check(self) -> bool:
-        return True
 
-    async def list_models(self) -> list[str]:
-        return ["mock-model"]
+async def _failing_agentic_stream(chat_model, model_id, messages, request_id):
+    """Fake _agentic_stream that raises."""
+    raise ValueError("Test error")
+    yield  # noqa: F841
 
 
 # ------------------------------------------------------------------ #
@@ -62,19 +75,23 @@ async def test_publishes_input_event_on_user_message() -> None:
     mock_client = Mock()
     mock_client.is_connected = True
 
-    adapter = MockProvider()
+    chat_model = _mock_chat_model()
     chunks = []
-    async for chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=mock_client,
-    ):
-        chunks.append(chunk)
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
+        async for chunk in stream_chat(
+            chat_model,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=mock_client,
+        ):
+            chunks.append(chunk)
 
     # Should have called publish for COGNITIVE_INPUT
-    calls = [c for c in mock_client.publish.call_args_list if topics.COGNITIVE_INPUT in str(c)]
+    calls = [
+        c for c in mock_client.publish_bytes.call_args_list
+        if topics.COGNITIVE_INPUT in str(c)
+    ]
     assert len(calls) >= 1, "Should publish COGNITIVE_INPUT event"
 
     # Verify payload structure
@@ -96,19 +113,23 @@ async def test_publishes_output_event_on_completion() -> None:
     mock_client = Mock()
     mock_client.is_connected = True
 
-    adapter = MockProvider(tokens=["Test", " response"])
+    chat_model = _mock_chat_model()
     chunks = []
-    async for chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=mock_client,
-    ):
-        chunks.append(chunk)
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
+        async for chunk in stream_chat(
+            chat_model,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=mock_client,
+        ):
+            chunks.append(chunk)
 
     # Should have called publish for COGNITIVE_OUTPUT
-    calls = [c for c in mock_client.publish.call_args_list if topics.COGNITIVE_OUTPUT in str(c)]
+    calls = [
+        c for c in mock_client.publish_bytes.call_args_list
+        if topics.COGNITIVE_OUTPUT in str(c)
+    ]
     assert len(calls) >= 1, "Should publish COGNITIVE_OUTPUT event"
 
     # Verify payload structure
@@ -131,34 +152,23 @@ async def test_publishes_error_event_on_failure() -> None:
     mock_client = Mock()
     mock_client.is_connected = True
 
-    # Create adapter that raises error
-    class FailingProvider(ProviderAdapter):
-        async def stream(self, prompt: str, *, model_id: str = "") -> AsyncIterator[str]:
-            raise ValueError("Test error")
-            yield  # Unreachable but needed for type checker
-
-        async def complete(self, prompt: str, *, model_id: str = "") -> str:
-            return ""
-
-        async def health_check(self) -> bool:
-            return True
-
-        async def list_models(self) -> list[str]:
-            return []
-
-    adapter = FailingProvider()
+    chat_model = _mock_chat_model()
     chunks = []
-    async for chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=mock_client,
-    ):
-        chunks.append(chunk)
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _failing_agentic_stream):
+        async for chunk in stream_chat(
+            chat_model,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=mock_client,
+        ):
+            chunks.append(chunk)
 
     # Should have called publish for COGNITIVE_ERROR
-    calls = [c for c in mock_client.publish.call_args_list if topics.COGNITIVE_ERROR in str(c)]
+    calls = [
+        c for c in mock_client.publish_bytes.call_args_list
+        if topics.COGNITIVE_ERROR in str(c)
+    ]
     assert len(calls) >= 1, "Should publish COGNITIVE_ERROR event"
 
     # Verify payload structure
@@ -182,16 +192,17 @@ async def test_publishes_error_event_on_failure() -> None:
 @pytest.mark.asyncio
 async def test_works_without_nervous_system_client() -> None:
     """Chat should work normally when no nervous system client provided."""
-    adapter = MockProvider(tokens=["Hello", "!"])
+    chat_model = _mock_chat_model()
     chunks = []
-    async for chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=None,  # No client
-    ):
-        chunks.append(chunk)
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
+        async for chunk in stream_chat(
+            chat_model,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=None,  # No client
+        ):
+            chunks.append(chunk)
 
     # Should still complete successfully
     assert len(chunks) >= 2
@@ -204,21 +215,22 @@ async def test_works_when_broker_disconnected() -> None:
     mock_client = Mock()
     mock_client.is_connected = False  # Disconnected
 
-    adapter = MockProvider()
+    chat_model = _mock_chat_model()
     chunks = []
-    async for chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=mock_client,
-    ):
-        chunks.append(chunk)
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
+        async for chunk in stream_chat(
+            chat_model,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=mock_client,
+        ):
+            chunks.append(chunk)
 
     # Should complete without calling publish
     assert len(chunks) >= 2
     assert chunks[-1].done is True
-    assert mock_client.publish.call_count == 0
+    assert mock_client.publish_bytes.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -226,20 +238,19 @@ async def test_continues_on_publish_failure() -> None:
     """Chat should continue if event publishing raises an exception."""
     mock_client = Mock()
     mock_client.is_connected = True
-    mock_client.publish.side_effect = Exception("MQTT publish failed")
+    mock_client.publish_bytes.side_effect = Exception("MQTT publish failed")
 
-    adapter = MockProvider()
+    adapter = _mock_chat_model()
     chunks = []
-    async for chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=mock_client,
-    ):
-        chunks.append(chunk)
-
-    # Should complete despite publish failures
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
+        async for chunk in stream_chat(
+            adapter,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=mock_client,
+        ):
+            chunks.append(chunk)
     assert len(chunks) >= 2
     assert chunks[-1].done is True
 
@@ -286,21 +297,22 @@ async def test_event_timestamps_in_order() -> None:
     mock_client = Mock()
     mock_client.is_connected = True
 
-    adapter = MockProvider()
-    async for _chunk in stream_chat(
-        adapter,
-        "mock-model",
-        "Hello",
-        "test-session",
-        nervous_system_client=mock_client,
-    ):
-        pass
+    chat_model = _mock_chat_model()
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
+        async for _chunk in stream_chat(
+            chat_model,
+            "mock-model",
+            "Hello",
+            "test-session",
+            nervous_system_client=mock_client,
+        ):
+            pass
 
     import json
 
     # Extract timestamps
     timestamps = []
-    for call in mock_client.publish.call_args_list:
+    for call in mock_client.publish_bytes.call_args_list:
         topic, payload_bytes = call[0]
         if topic.startswith("agent/cognitive/"):
             payload = json.loads(payload_bytes.decode())

@@ -70,7 +70,7 @@ from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.sleep.schedule import SleepScheduleConfig
 from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.sensory.config import load_sensory_config
-from openbad.usage_recorder import UsageTrackingProviderAdapter
+from openbad.usage_recorder import UsageTrackingProviderAdapter  # still used by _build_wizard_adapter
 from openbad.wui.bridge import MqttWebSocketBridge
 from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
 from openbad.wui.usage_tracker import UsageTracker, resolve_usage_db_path
@@ -1348,17 +1348,14 @@ async def _get_provider_models(request: web.Request) -> web.Response:
 def _resolve_chat_adapter(
     config: CognitiveConfig,
     system_name: str,
-) -> tuple[object, str | None, str, bool, object | None, object | None]:
-    """Build an adapter for the given cognitive system.
+) -> tuple[object | None, str | None, str, bool, object | None, object | None]:
+    """Build LangChain and CrewAI model objects for the given cognitive system.
 
-    Returns ``(adapter, model_id, provider_name, is_fallback,
+    Returns ``(chat_model, model_id, provider_name, is_fallback,
     chat_model, crew_llm)``.
 
-    ``chat_model`` is a LangChain ``BaseChatModel`` for use with
-    ``create_react_agent`` and other LangChain components.
-    ``crew_llm`` is a ``crewai.LLM`` for use with CrewAI crews.
-    *is_fallback* is True when the assigned provider was unavailable and a
-    substitute was used instead.
+    The first element is kept for backwards compatibility with callers that
+    unpack six values, but it mirrors *chat_model* (element 4).
     """
     try:
         system = CognitiveSystem(system_name.lower())
@@ -1374,13 +1371,11 @@ def _resolve_chat_adapter(
             if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
                 if not assignment.model:
                     break
-                adapter, model = _build_chat_adapter(
-                    p, assignment.model, system_name,
-                )
                 chat_model = _build_langchain_model(p, assignment.model)
                 crew_llm = _build_crew_llm(p, assignment.model)
+                model_id = litellm_model_name(p.name, assignment.model)
                 return (
-                    adapter, model, p.name, False,
+                    chat_model, model_id, p.name, False,
                     chat_model, crew_llm,
                 )
 
@@ -1402,17 +1397,17 @@ def _resolve_chat_adapter(
 
         if not fallback_model:
             continue
-        adapter, model = _build_chat_adapter(p, fallback_model, system_name)
         chat_model = _build_langchain_model(p, fallback_model)
         crew_llm = _build_crew_llm(p, fallback_model)
+        model_id = litellm_model_name(p.name, fallback_model)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
             log.warning(
                 "Provider fallback: system=%s assigned=%s using=%s model=%s",
-                system_name, assigned_provider, p.name, model,
+                system_name, assigned_provider, p.name, fallback_model,
             )
         return (
-            adapter, model, p.name, used_fallback,
+            chat_model, model_id, p.name, used_fallback,
             chat_model, crew_llm,
         )
     return None, None, "", True, None, None
@@ -1489,9 +1484,9 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
     session_id = str(payload.get("session_id", "")).strip() or uuid4().hex
     _path, config = _read_providers_config()
     resolved = _resolve_chat_adapter(config, system_name)
-    adapter, model, provider_name, _is_fallback, chat_model, _crew_llm = resolved
+    chat_model, model, provider_name, _is_fallback, _cm, _crew_llm = resolved
 
-    if adapter is None:
+    if chat_model is None:
         raise web.HTTPBadRequest(
             text=f"No provider/model configured for system '{system_name}'. "
             "Assign both on the Providers page."
@@ -1527,7 +1522,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
         nervous_system_client = getattr(bridge, "_mqtt", None) if bridge else None
 
         async for chunk in stream_chat(
-            adapter,
+            chat_model,
             model,
             message,
             session_id,
@@ -1540,7 +1535,6 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
             personality_modulator=modulator,
             usage_tracker=request.app.get("usage_tracker"),
             nervous_system_client=nervous_system_client,
-            chat_model=chat_model,
         ):
             if chunk.error:
                 data = json.dumps(

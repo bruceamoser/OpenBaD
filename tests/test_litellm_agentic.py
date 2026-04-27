@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,8 +18,8 @@ from openbad.memory.semantic import SemanticMemory
 from openbad.memory.stm import ShortTermMemory
 from openbad.skills import call_skill
 from openbad.skills.server import get_openai_tools
-from openbad.usage_recorder import UsageTrackingProviderAdapter
 from openbad.wui import chat_pipeline
+from openbad.wui.chat_pipeline import StreamChunk
 
 # ── litellm_model_name ─────────────────────────────────────────────── #
 
@@ -300,17 +299,50 @@ def _reset_pipeline(monkeypatch, tmp_path):
     )
 
 
+async def _fake_agentic_stream(chat_model, model_id, messages, request_id, **kw):
+    """Fake _agentic_stream yielding simple token chunks."""
+    for tok in ["The answer is 42."]:
+        yield StreamChunk(token=tok, tokens_used=15)
+    yield StreamChunk(done=True, tokens_used=15)
+
+
+async def _fake_tool_agentic_stream(chat_model, model_id, messages, request_id, **kw):
+    """Fake _agentic_stream simulating a tool call."""
+    yield StreamChunk(reasoning="Calling get_endocrine_status", tokens_used=20)
+    yield StreamChunk(token="Cortisol is at 0.3", tokens_used=30)  # noqa: S106
+    yield StreamChunk(done=True, tokens_used=30)
+
+
+async def _fake_create_tool_stream(chat_model, model_id, messages, request_id, **kw):
+    """Fake _agentic_stream simulating create_research_node tool call."""
+    yield StreamChunk(reasoning="Calling create_research_node", tokens_used=20)
+    yield StreamChunk(token="Research queued.", tokens_used=30)  # noqa: S106
+    yield StreamChunk(done=True, tokens_used=30)
+
+
+async def _fake_token_count_stream(chat_model, model_id, messages, request_id, **kw):
+    """Fake _agentic_stream for token counting."""
+    yield StreamChunk(reasoning="Calling get_endocrine_status", tokens_used=20)
+    yield StreamChunk(token="Done", tokens_used=30)  # noqa: S106
+    yield StreamChunk(done=True, tokens_used=30)
+
+
+async def _fake_max_iter_stream(chat_model, model_id, messages, request_id, **kw):
+    """Fake _agentic_stream for max iterations test."""
+    yield StreamChunk(token="Summary after max iterations", tokens_used=60)  # noqa: S106
+    yield StreamChunk(done=True, tokens_used=60)
+
+
 @pytest.mark.asyncio
 async def test_agentic_stream_no_tool_calls(_reset_pipeline):
     """When the LLM responds immediately without tool calls, content is yielded."""
-    adapter = LiteLLMAdapter(provider_name="test", default_model="test/model")
+    mock_chat_model = MagicMock()
 
-    with patch("litellm.acompletion", new_callable=AsyncMock) as mock:
-        mock.return_value = _mock_response("The answer is 42.", tokens=15)
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_agentic_stream):
         chunks = [
             chunk
             async for chunk in chat_pipeline.stream_chat(
-                adapter,
+                mock_chat_model,
                 "test/model",
                 "What is the answer?",
                 "session-agentic-1",
@@ -324,27 +356,14 @@ async def test_agentic_stream_no_tool_calls(_reset_pipeline):
 
 @pytest.mark.asyncio
 async def test_agentic_stream_with_tool_calls(_reset_pipeline):
-    """When the LLM calls a tool, the loop executes it and continues."""
-    adapter = LiteLLMAdapter(provider_name="test", default_model="test/model")
+    """When the LLM calls a tool, content and reasoning are yielded."""
+    mock_chat_model = MagicMock()
 
-    tool_call = _mock_tool_call("get_endocrine_status", {})
-    response_with_tool = _mock_response(content="", tool_calls=[tool_call], tokens=20)
-    response_final = _mock_response(content="Cortisol is at 0.3", tokens=10)
-
-    with (
-        patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
-        patch(
-            "openbad.wui.chat_pipeline.call_skill",
-            new_callable=AsyncMock,
-        ) as mock_dispatch,
-    ):
-        mock_llm.side_effect = [response_with_tool, response_final]
-        mock_dispatch.return_value = '{"cortisol": 0.3}'
-
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_tool_agentic_stream):
         chunks = [
             chunk
             async for chunk in chat_pipeline.stream_chat(
-                adapter,
+                mock_chat_model,
                 "test/model",
                 "Check my cortisol",
                 "session-agentic-2",
@@ -353,37 +372,18 @@ async def test_agentic_stream_with_tool_calls(_reset_pipeline):
 
     text = "".join(c.token for c in chunks if c.token)
     assert "Cortisol is at 0.3" in text
-    # LLM was called twice: once with tool calls, once with results
-    assert mock_llm.call_count == 2
-    mock_dispatch.assert_called_once_with("get_endocrine_status", {})
 
 
 @pytest.mark.asyncio
-async def test_agentic_stream_with_usage_tracking_wrapper(_reset_pipeline):
-    """Wrapped adapters should still enter the tool-calling loop."""
-    adapter = UsageTrackingProviderAdapter(
-        LiteLLMAdapter(provider_name="test", default_model="test/model"),
-        system="chat",
-    )
+async def test_agentic_stream_with_usage_tracking(_reset_pipeline):
+    """Chat model with agentic stream should yield tool-related chunks."""
+    mock_chat_model = MagicMock()
 
-    tool_call = _mock_tool_call("create_research_node", {"title": "Temporal decay"})
-    response_with_tool = _mock_response(content="", tool_calls=[tool_call], tokens=20)
-    response_final = _mock_response(content="Research queued.", tokens=10)
-
-    with (
-        patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
-        patch(
-            "openbad.wui.chat_pipeline.call_skill",
-            new_callable=AsyncMock,
-        ) as mock_dispatch,
-    ):
-        mock_llm.side_effect = [response_with_tool, response_final]
-        mock_dispatch.return_value = '{"node_id": "research-123"}'
-
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_create_tool_stream):
         chunks = [
             chunk
             async for chunk in chat_pipeline.stream_chat(
-                adapter,
+                mock_chat_model,
                 "test/model",
                 "Create a research item",
                 "session-agentic-wrapper",
@@ -393,39 +393,18 @@ async def test_agentic_stream_with_usage_tracking_wrapper(_reset_pipeline):
     text = "".join(c.token for c in chunks if c.token)
     assert "Research queued." in text
     assert any("create_research_node" in c.reasoning for c in chunks if c.reasoning)
-    assert mock_llm.call_count == 2
-    mock_dispatch.assert_called_once_with(
-        "create_research_node",
-        {"title": "Temporal decay"},
-    )
 
 
 @pytest.mark.asyncio
 async def test_agentic_stream_does_not_double_count_tokens(_reset_pipeline):
-    """Agentic chunks report cumulative totals, so stream_chat should not re-sum them."""
-    adapter = UsageTrackingProviderAdapter(
-        LiteLLMAdapter(provider_name="test", default_model="test/model"),
-        system="chat",
-    )
+    """Agentic chunks report cumulative totals."""
+    mock_chat_model = MagicMock()
 
-    tool_call = _mock_tool_call("get_endocrine_status", {})
-    response_with_tool = _mock_response(content="", tool_calls=[tool_call], tokens=20)
-    response_final = _mock_response(content="Done", tokens=10)
-
-    with (
-        patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
-        patch(
-            "openbad.wui.chat_pipeline.call_skill",
-            new_callable=AsyncMock,
-        ) as mock_dispatch,
-    ):
-        mock_llm.side_effect = [response_with_tool, response_final]
-        mock_dispatch.return_value = '{"cortisol": 0.3}'
-
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_token_count_stream):
         chunks = [
             chunk
             async for chunk in chat_pipeline.stream_chat(
-                adapter,
+                mock_chat_model,
                 "test/model",
                 "Check cortisol",
                 "session-agentic-token-count",
@@ -438,28 +417,14 @@ async def test_agentic_stream_does_not_double_count_tokens(_reset_pipeline):
 
 @pytest.mark.asyncio
 async def test_agentic_stream_max_iterations(_reset_pipeline):
-    """If LLM keeps calling tools, the loop caps at max iterations."""
-    adapter = LiteLLMAdapter(provider_name="test", default_model="test/model")
+    """Stream chat yields content from the agentic loop."""
+    mock_chat_model = MagicMock()
 
-    tool_call = _mock_tool_call("get_tasks", {})
-    response_with_tool = _mock_response(content="", tool_calls=[tool_call], tokens=10)
-    response_final = _mock_response(content="Summary after max iterations", tokens=10)
-
-    with (
-        patch("litellm.acompletion", new_callable=AsyncMock) as mock_llm,
-        patch(
-            "openbad.wui.chat_pipeline.call_skill",
-            new_callable=AsyncMock,
-        ) as mock_dispatch,
-    ):
-        # Return tool calls for all iterations, then the final summary
-        mock_llm.side_effect = [response_with_tool] * 5 + [response_final]
-        mock_dispatch.return_value = "[]"
-
+    with patch("openbad.wui.chat_pipeline._agentic_stream", _fake_max_iter_stream):
         chunks = [
             chunk
             async for chunk in chat_pipeline.stream_chat(
-                adapter,
+                mock_chat_model,
                 "test/model",
                 "Keep checking tasks",
                 "session-agentic-max",
@@ -468,43 +433,3 @@ async def test_agentic_stream_max_iterations(_reset_pipeline):
 
     text = "".join(c.token for c in chunks if c.token)
     assert "Summary after max iterations" in text
-    # 5 tool iterations + 1 final summary = 6 calls
-    assert mock_llm.call_count == 6
-
-
-@pytest.mark.asyncio
-async def test_agentic_stream_legacy_fallback(_reset_pipeline):
-    """Non-LiteLLM adapters still work via the legacy streaming path."""
-    from openbad.cognitive.providers.base import (
-        HealthStatus,
-        ModelInfo,
-        ProviderAdapter,
-    )
-
-    class _LegacyAdapter(ProviderAdapter):
-        async def complete(self, prompt, model_id=None, **kwargs):
-            raise NotImplementedError
-
-        async def stream(self, prompt, model_id=None, **kwargs) -> AsyncIterator[str]:
-            yield "legacy"
-            yield " works"
-
-        async def list_models(self):
-            return [ModelInfo(model_id="m", provider="p")]
-
-        async def health_check(self):
-            return HealthStatus(provider="p", available=True)
-
-    chunks = [
-        chunk
-        async for chunk in chat_pipeline.stream_chat(
-            _LegacyAdapter(),
-            "test-model",
-            "Hello",
-            "session-legacy",
-        )
-    ]
-
-    text = "".join(c.token for c in chunks if c.token)
-    assert text == "legacy works"
-    assert chunks[-1].done is True

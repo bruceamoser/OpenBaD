@@ -383,19 +383,18 @@ def _process_autonomy_work(
         try:
             _cfg_path, cfg = _read_providers_config()
             resolved = _resolve_chat_adapter(cfg, system_name)
-            adapter, model, provider_name, _fb, chat_model, _cl = resolved
-            if adapter is None or model is None:
+            _adapter, model, provider_name, _fb, chat_model, _cl = resolved
+            if chat_model is None or model is None:
                 return None
             result = asyncio.run(
                 run_tool_agent(
-                    adapter,
+                    chat_model,
                     model,
                     provider_name=provider_name,
                     system_prompt=build_tooling_system_prompt(system_prompt),
                     user_prompt=user_prompt,
                     request_id=request_id,
                     tool_call_validator=tool_call_validator,
-                    chat_model=chat_model,
                     tools_role=tools_role,
                 )
             )

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from openbad.autonomy.tool_agent import (
     ToolAgentResult,
-    _adapter_to_chat_model,
     _extract_creation_info,
     build_tooling_system_prompt,
     run_tool_agent,
@@ -68,26 +66,6 @@ def test_extract_creation_info_empty_on_no_creation() -> None:
     assert verified == []
 
 
-def test_adapter_to_chat_model_strips_prefix() -> None:
-    adapter = SimpleNamespace(
-        _api_base="http://localhost:8080",
-        _api_key="test-key",
-        _timeout_s=60,
-    )
-    model = _adapter_to_chat_model(adapter, "openai/Ternary-Bonsai-8B")
-    assert model.model_name == "Ternary-Bonsai-8B"
-
-
-def test_adapter_to_chat_model_no_prefix() -> None:
-    adapter = SimpleNamespace(
-        _api_base="http://localhost:8080",
-        _api_key="test-key",
-        _timeout_s=60,
-    )
-    model = _adapter_to_chat_model(adapter, "my-model")
-    assert model.model_name == "my-model"
-
-
 # ------------------------------------------------------------------ #
 #  Integration-style tests (mocked LangGraph agent)
 # ------------------------------------------------------------------ #
@@ -108,11 +86,7 @@ def _fake_agent_result(content: str, tool_names: list[str] | None = None):
 
 @pytest.mark.asyncio
 async def test_run_tool_agent_returns_result() -> None:
-    adapter = SimpleNamespace(
-        _api_base="http://localhost:8080",
-        _api_key="test-key",
-        _timeout_s=60,
-    )
+    mock_chat_model = MagicMock()
     fake_result = _fake_agent_result("Hello from the agent.", tool_names=["find_files"])
 
     with (
@@ -128,7 +102,7 @@ async def test_run_tool_agent_returns_result() -> None:
         mock_create.return_value = mock_agent
 
         result = await run_tool_agent(
-            adapter,
+            mock_chat_model,
             "openai/test-model",
             provider_name="custom",
             system_prompt="Do the work.",
@@ -145,11 +119,7 @@ async def test_run_tool_agent_returns_result() -> None:
 
 @pytest.mark.asyncio
 async def test_run_tool_agent_creation_footer() -> None:
-    adapter = SimpleNamespace(
-        _api_base="http://localhost:8080",
-        _api_key="test-key",
-        _timeout_s=60,
-    )
+    mock_chat_model = MagicMock()
     messages = [
         HumanMessage(content="test"),
         AIMessage(content="", tool_calls=[{"name": "create_task", "args": {}, "id": "tc-1"}]),
@@ -175,7 +145,7 @@ async def test_run_tool_agent_creation_footer() -> None:
         mock_create.return_value = mock_agent
 
         result = await run_tool_agent(
-            adapter,
+            mock_chat_model,
             "openai/test-model",
             provider_name="custom",
             system_prompt="Do the work.",
@@ -190,11 +160,7 @@ async def test_run_tool_agent_creation_footer() -> None:
 
 @pytest.mark.asyncio
 async def test_run_tool_agent_handles_exception() -> None:
-    adapter = SimpleNamespace(
-        _api_base="http://localhost:8080",
-        _api_key="test-key",
-        _timeout_s=60,
-    )
+    mock_chat_model = MagicMock()
 
     with (
         patch(
@@ -209,7 +175,7 @@ async def test_run_tool_agent_handles_exception() -> None:
         mock_create.return_value = mock_agent
 
         result = await run_tool_agent(
-            adapter,
+            mock_chat_model,
             "openai/test-model",
             provider_name="custom",
             system_prompt="Do the work.",

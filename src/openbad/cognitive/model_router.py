@@ -11,7 +11,6 @@ from typing import Any
 import yaml
 
 from openbad.cognitive.config import CognitiveSystem
-from openbad.cognitive.providers.base import ProviderAdapter
 from openbad.cognitive.providers.registry import ProviderRegistry
 
 
@@ -137,10 +136,11 @@ class ModelRouter:
         *,
         system: CognitiveSystem | None = None,
         cortisol: float = 0.0,
-    ) -> tuple[ProviderAdapter, str, RoutingDecision]:
+    ) -> tuple[Any, Any, RoutingDecision]:
         """Select the best provider/model for the given priority.
 
-        Returns (adapter, model_id, decision).
+        Returns ``(chat_model, crew_llm, decision)`` where both model
+        objects have the model_id baked in.
         Raises ``RuntimeError`` if no provider is available.
         """
         if system is not None:
@@ -160,12 +160,14 @@ class ModelRouter:
         chain = self._chains.get(effective_priority, fallback)
 
         for idx, step in enumerate(chain):
-            adapter = self._registry.get(step.provider)
-            if adapter is None:
+            key = f"{step.provider}/{step.model_id}"
+            models = self._registry.get_models(key)
+            if models is None:
                 continue
-            if not await self._is_healthy(step.provider, adapter):
+            if not await self._is_healthy(step.provider):
                 continue
 
+            chat_model, crew_llm = models
             decision = RoutingDecision(
                 priority=priority,
                 provider=step.provider,
@@ -178,7 +180,7 @@ class ModelRouter:
                 decision,
                 assigned_step=chain.steps[0] if len(chain) > 0 else None,
             )
-            return adapter, step.model_id, decision
+            return chat_model, crew_llm, decision
 
         msg = f"No available provider for priority {priority.name}"
         raise RuntimeError(msg)
@@ -233,7 +235,7 @@ class ModelRouter:
         system: CognitiveSystem,
         priority: Priority,
         cortisol: float,
-    ) -> tuple[ProviderAdapter, str, RoutingDecision]:
+    ) -> tuple[Any, Any, RoutingDecision]:
         assigned_step = self._system_assignments.get(system)
         if assigned_step is None:
             msg = f"No provider assignment configured for system {system.value}"
@@ -246,12 +248,14 @@ class ModelRouter:
             candidates.append(step)
 
         for idx, step in enumerate(candidates):
-            adapter = self._registry.get(step.provider)
-            if adapter is None:
+            key = f"{step.provider}/{step.model_id}"
+            models = self._registry.get_models(key)
+            if models is None:
                 continue
-            if not await self._is_healthy(step.provider, adapter):
+            if not await self._is_healthy(step.provider):
                 continue
 
+            chat_model, crew_llm = models
             decision = RoutingDecision(
                 priority=priority,
                 provider=step.provider,
@@ -261,7 +265,7 @@ class ModelRouter:
                 cortisol_downgrade=idx > 0 and cortisol > self._cortisol_threshold,
             )
             self._record_fallback_outcome(decision, assigned_step=assigned_step)
-            return adapter, step.model_id, decision
+            return chat_model, crew_llm, decision
 
         msg = f"No available provider for system {system.value}"
         raise RuntimeError(msg)
@@ -326,19 +330,18 @@ class ModelRouter:
                 priority=int(decision.priority),
             )
 
-    async def _is_healthy(self, name: str, adapter: ProviderAdapter) -> bool:
+    async def _is_healthy(self, name: str) -> bool:
         h = self._health.get(name)
         now = time.monotonic()
-        if h and (now - h.last_check) < self._health_ttl_s:
+        if h is None:
+            return True  # No health record means assumed healthy.
+        if (now - h.last_check) < self._health_ttl_s:
             return h.available
-
-        status = await adapter.health_check()
-        self._health[name] = ProviderHealth(
-            available=status.available,
-            last_check=now,
-            avg_latency_ms=status.latency_ms,
-        )
-        return status.available
+        if not h.available and self._health_ttl_s > 0:
+            # TTL expired — give the provider another chance.
+            h.available = True
+            h.last_check = now
+        return h.available
 
 
 # ------------------------------------------------------------------ #
