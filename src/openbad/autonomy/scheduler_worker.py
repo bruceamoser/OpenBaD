@@ -684,8 +684,107 @@ def _process_autonomy_work(
                 extra_metadata={"doctor_revelation": True, "health_decision": True},
             )
 
+    def _process_reconcile_task(task_to_run: TaskModel) -> None:
+        """Handle a Library Reconciliation task."""
+        from openbad.active_inference.reconciliation import parse_reconcile_metadata
+
+        meta = parse_reconcile_metadata(task_to_run)
+        book_id = meta.get("book_id", "")
+        new_fact = meta.get("new_fact", "")
+        if not book_id:
+            task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
+            task_store.append_event(
+                task_to_run.task_id,
+                "reconcile_failed",
+                payload={"reason": "missing_book_id"},
+            )
+            return
+
+        task_store.update_task_status(task_to_run.task_id, TaskStatus.RUNNING)
+
+        try:
+            from openbad.library.store import LibraryStore
+
+            lib_store = LibraryStore(conn)
+            book = lib_store.get_book(book_id)
+            if book is None:
+                task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
+                task_store.append_event(
+                    task_to_run.task_id,
+                    "reconcile_failed",
+                    payload={"reason": "book_not_found", "book_id": book_id},
+                )
+                return
+
+            llm = _run_llm(
+                system_prompt=(
+                    "You are rewriting a Library book section to incorporate new information. "
+                    "Preserve existing accurate content. Only update or extend what the new "
+                    "fact changes. Return ONLY the updated book content, no commentary."
+                ),
+                user_prompt=(
+                    f"Current book content:\n{book.content}\n\n"
+                    f"New fact to incorporate:\n{new_fact}"
+                ),
+                system_name="tasks",
+                session_id=task_session_id,
+                request_id=task_to_run.task_id,
+                tools_role="sleep",
+            )
+            if llm is None:
+                task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
+                task_store.append_event(
+                    task_to_run.task_id,
+                    "reconcile_failed",
+                    payload={"reason": "provider_unavailable"},
+                )
+                return
+
+            updated_content, provider_name, model_id, _tools = llm
+            updated_content = _strip_autonomy_interaction(updated_content)
+            lib_store.update_book(book_id, updated_content, summary=book.summary)
+
+            task_store.update_task_status(task_to_run.task_id, TaskStatus.DONE)
+            task_store.append_event(
+                task_to_run.task_id,
+                "reconcile_completed",
+                payload={
+                    "book_id": book_id,
+                    "provider": provider_name,
+                    "model": model_id,
+                },
+            )
+            _apply_reward(
+                outcome=TraceOutcome.SUCCESS,
+                node_id=task_to_run.task_id,
+                task_id=task_to_run.task_id,
+                source="tasks",
+                reason=f"Library reconciliation completed for book {book_id}",
+                context={"system": "tasks", "reconcile": True},
+            )
+        except Exception:
+            log.exception("Reconcile task failed for %s", book_id)
+            task_store.update_task_status(task_to_run.task_id, TaskStatus.FAILED)
+            task_store.append_event(
+                task_to_run.task_id,
+                "reconcile_failed",
+                payload={"reason": "exception", "book_id": book_id},
+            )
+
     def _process_task(task_to_run: TaskModel) -> None:
         nonlocal executed_task_id
+
+        # Handle library reconciliation tasks
+        from openbad.active_inference.reconciliation import (
+            is_reconcile_task,
+            parse_reconcile_metadata,
+        )
+
+        if is_reconcile_task(task_to_run):
+            _process_reconcile_task(task_to_run)
+            executed_task_id = task_to_run.task_id
+            return
+
         combined = f"{task_to_run.title}\n\n{task_to_run.description}".strip()
         allow_destructive = session_allows(policy, "tasks", "allow_destructive", False)
         if is_destructive_request(combined) and not allow_destructive:
