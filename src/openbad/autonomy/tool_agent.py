@@ -148,9 +148,15 @@ async def run_tool_agent(
     ]
     | None = None,
     chat_model: Any | None = None,
+    tools_role: str | None = None,
 ) -> ToolAgentResult:
     """Run an agentic task using LangGraph's ReAct agent."""
-    tools = await async_get_openbad_tools()
+    if tools_role:
+        from openbad.frameworks.langchain_tools import async_get_tools_for_role
+
+        tools = await async_get_tools_for_role(tools_role)
+    else:
+        tools = await async_get_openbad_tools()
 
     # Wrap tools with validator guard if provided
     if tool_call_validator is not None:

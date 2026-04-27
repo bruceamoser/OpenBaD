@@ -12,6 +12,7 @@
 
   const NAV_ITEMS = [
     { href: '/',          label: 'Health',    icon: '❤' },
+    { href: '/endocrine', label: 'Endocrine', icon: '🧬' },
     { href: '/chat',      label: 'Chat',      icon: '💬' },
     { href: '/mqtt',      label: 'MQTT',      icon: '📡' },
     { href: '/tasks',     label: 'Tasks',     icon: '📋' },
