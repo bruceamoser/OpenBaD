@@ -568,7 +568,7 @@ def _process_autonomy_work(
         nonlocal executed_research_id
         requested_node = node is not None
         if node is None:
-            node = research_svc.dequeue()
+            node = research_svc.peek()
         if node is None:
             return
         research_prompt = (
@@ -608,9 +608,8 @@ def _process_autonomy_work(
             tools_role="research",
         )
         if llm is None:
-            if requested_node:
-                log.warning("Research node %s failed before completion; leaving pending for retry", node.node_id)
-            _post_session(research_session_id, f"Research node {node.node_id} dequeued but provider was unavailable.")
+            log.warning("Research node %s: provider unavailable; leaving pending for retry", node.node_id)
+            _post_session(research_session_id, f"Research node {node.node_id} attempted but provider was unavailable. Will retry.")
             _apply_reward(
                 outcome=TraceOutcome.FAILURE,
                 node_id=node.node_id,
@@ -623,8 +622,23 @@ def _process_autonomy_work(
 
         summary, provider_name, model_id, tools_used = llm
         summary = _strip_autonomy_interaction(summary)
-        if requested_node:
-            research_svc.complete(node.node_id)
+
+        # Guard: if the LLM returned empty content and used no tools,
+        # the research didn't actually happen — leave pending for retry.
+        if not summary.strip() and not tools_used:
+            log.warning("Research node %s: LLM returned empty result with no tool use; leaving pending", node.node_id)
+            _post_session(research_session_id, f"Research node {node.node_id}: LLM returned empty result. Will retry.")
+            _apply_reward(
+                outcome=TraceOutcome.FAILURE,
+                node_id=node.node_id,
+                task_id=node.source_task_id or f"research:{node.node_id}",
+                source="research",
+                reason=f"Reward evaluation for empty research node {node.node_id}",
+                context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "empty_result"},
+            )
+            return
+
+        research_svc.complete(node.node_id)
         meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}
         tools_suffix = f"\n\n*Tools used: {', '.join(tools_used)}*" if tools_used else ""
         _post_session(
