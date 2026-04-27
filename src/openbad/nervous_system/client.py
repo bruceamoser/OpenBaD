@@ -118,8 +118,12 @@ class NervousSystemClient:
 
     def disconnect(self) -> None:
         """Cleanly disconnect from the broker."""
-        self._mqtt.loop_stop()
+        # Flush any pending outgoing messages before stopping the loop.
+        # paho's loop thread must be running for queued QoS>0 publishes
+        # to reach the broker, so we disconnect first (queues DISCONNECT
+        # packet) then stop the loop thread which processes the queue.
         self._mqtt.disconnect()
+        self._mqtt.loop_stop()
         self._connected.clear()
         logger.info("Disconnected from MQTT broker")
 

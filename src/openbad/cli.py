@@ -517,6 +517,19 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
             }
         ).encode()
 
+    dispatched = sum([
+        task_payload is not None,
+        research_payload is not None,
+        doctor_payload is not None,
+    ])
+    if dispatched:
+        log.info(
+            "Heartbeat dispatching: task=%s research=%s doctor=%s",
+            eligible_task_id,
+            eligible_research_id,
+            eligible_doctor,
+        )
+
     try:
         client = NervousSystemClient.get_instance(host=mqtt_host, port=mqtt_port)
         client.connect(timeout=3.0)
@@ -527,6 +540,9 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
             client.publish_bytes(topics.RESEARCH_WORK_REQUEST, research_payload)
         if doctor_payload is not None:
             client.publish_bytes(topics.DOCTOR_CALL, doctor_payload)
+        # Allow time for QoS 1 messages to be ACKed before disconnecting.
+        if dispatched:
+            time.sleep(0.3)
         client.disconnect()
         NervousSystemClient.reset_instance()
     except Exception:  # noqa: BLE001, S110

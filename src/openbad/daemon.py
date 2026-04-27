@@ -284,6 +284,7 @@ class Daemon:
             logger.exception("Invalid task work payload")
             return
 
+        logger.info("Received task work request: %s", request.get("task_id", "??"))
         if not self._scheduler_worker_lock.acquire(blocking=False):
             logger.info("Scheduler worker already active; skipping overlapping task work request")
             return
@@ -304,6 +305,7 @@ class Daemon:
             logger.exception("Invalid research work payload")
             return
 
+        logger.info("Received research work request: %s", request.get("node_id", "??"))
         if not self._scheduler_worker_lock.acquire(blocking=False):
             logger.info("Scheduler worker already active; skipping overlapping research work request")
             return
