@@ -568,6 +568,43 @@ def _process_autonomy_work(
             log.exception("Maintenance crew failed for research topic=%s", topic)
             return None
 
+    def _run_doctor_crew(
+        request_source: str,
+        request_reason: str,
+    ) -> tuple[str, str, str] | None:
+        """Dispatch a doctor call to the Internal Crew.
+
+        Returns (summary, provider_name, model_id) or None on failure.
+        """
+        from openbad.frameworks.crews.internal import create_internal_crew
+
+        llm_factory, tools_factory = _get_crew_factories("doctor")
+        if llm_factory is None:
+            return None
+
+        adrenaline = endocrine_runtime.levels.get("adrenaline", 0.0)
+        alert_payload = (
+            f"Doctor call from '{request_source}': {request_reason}\n"
+            f"Current endocrine levels: {endocrine_runtime.levels}"
+        )
+
+        crew = create_internal_crew(
+            alert_payload,
+            adrenaline=adrenaline,
+            llm_factory=llm_factory,
+            tools_factory=tools_factory,
+        )
+        try:
+            result = crew.kickoff()
+            raw = str(result.raw if hasattr(result, "raw") else result)
+            return raw.strip(), "crew", "internal"
+        except Exception:
+            log.exception(
+                "Internal crew failed for doctor call: %s",
+                request_source,
+            )
+            return None
+
     def _top_pending_task() -> TaskModel | None:
         return task_svc.top_pending_user_task()
 
@@ -867,63 +904,97 @@ def _process_autonomy_work(
             request_payload.get("reason", "doctor call requested")
         ).strip() or "doctor call requested"
 
-        # Minimal prompt — doctor uses tools to gather evidence.
-        doctor_prompt = (
-            f"Doctor call from '{request_source}': {request_reason}\n"
-            "Investigate and respond with strict JSON."
-        )
-        llm = _run_llm(
-            system_prompt=(
-                "You are the OpenBaD endocrine doctor.\n"
-                "A doctor call has been triggered. Your job:\n"
-                "1. Call get_endocrine_status to review current"
-                " hormone levels, severity, and subsystem gates.\n"
-                "2. Call get_system_logs to check for errors or"
-                " anomalies.\n"
-                "3. Call read_events to review recent system"
-                " activity.\n"
-                "4. Based on your findings, decide what actions"
-                " to take.\n\n"
-                "Return strict JSON with keys:\n"
-                "- summary (string): what you found and why\n"
-                "- mood_tags (array of strings)\n"
-                "- actions (array of objects), each one of:\n"
-                '  {"type":"disable_system",'
-                '"system":"chat|tasks|research",'
-                '"duration_minutes":int,"reason":string}\n'
-                '  {"type":"enable_system",'
-                '"system":"chat|tasks|research",'
-                '"reason":string}\n'
-                '  {"type":"adjust","source":"doctor",'
-                '"reason":string,'
-                '"deltas":{dopamine,adrenaline,cortisol,'
-                "endorphin}}\n"
-                "Only disable/enable systems if justified by"
-                " threshold breaches you observe."
-            ),
-            user_prompt=doctor_prompt,
-            system_name="doctor",
-            session_id=doctor_session_id,
-            request_id=f"doctor-{int(doctor_now)}",
-            tools_role="doctor",
-        )
+        # ── Primary path: Internal Crew (Immune → Doctor) ──
+        crew_result = _run_doctor_crew(request_source, request_reason)
+
         parsed: dict[str, object] | None = None
         provider_name = ""
         model_id = ""
         tools_used: tuple[str, ...] = ()
-        if llm is not None:
-            summary, provider_name, model_id, tools_used = llm
+
+        if crew_result is not None:
+            summary, provider_name, model_id = crew_result
             parsed = _parse_doctor_payload(summary)
+            if parsed is None:
+                # Crew returned non-JSON; wrap as summary
+                parsed = {
+                    "summary": summary,
+                    "mood_tags": [],
+                    "actions": [],
+                }
             endocrine_runtime.add_doctor_note(
                 {
-                    "source": "llm",
+                    "source": "crew",
                     "provider": provider_name,
                     "model": model_id,
-                    "summary": str(parsed.get("summary", "")).strip() if isinstance(parsed, dict) else "",
+                    "summary": str(
+                        parsed.get("summary", "")
+                    ).strip()
+                    if isinstance(parsed, dict)
+                    else "",
                     "raw": summary,
                 },
                 now=doctor_now,
             )
+        else:
+            # ── Fallback: direct LLM call ──
+            log.warning(
+                "Doctor crew dispatch failed — "
+                "falling back to direct LLM"
+            )
+            doctor_prompt = (
+                f"Doctor call from '{request_source}': "
+                f"{request_reason}\n"
+                "Investigate and respond with strict JSON."
+            )
+            llm = _run_llm(
+                system_prompt=(
+                    "You are the OpenBaD endocrine doctor.\n"
+                    "A doctor call has been triggered. Your job:\n"
+                    "1. Call get_endocrine_status to review current"
+                    " hormone levels, severity, and subsystem gates.\n"
+                    "2. Call get_system_logs to check for errors or"
+                    " anomalies.\n"
+                    "3. Call read_events to review recent system"
+                    " activity.\n"
+                    "4. Based on your findings, decide what actions"
+                    " to take.\n\n"
+                    "Return strict JSON with keys:\n"
+                    "- summary (string): what you found and why\n"
+                    "- mood_tags (array of strings)\n"
+                    "- actions (array of objects), each one of:\n"
+                    '  {"type":"disable_system",'
+                    '"system":"chat|tasks|research",'
+                    '"duration_minutes":int,"reason":string}\n'
+                    '  {"type":"enable_system",'
+                    '"system":"chat|tasks|research",'
+                    '"reason":string}\n'
+                    '  {"type":"adjust","source":"doctor",'
+                    '"reason":string,'
+                    '"deltas":{dopamine,adrenaline,cortisol,'
+                    "endorphin}}\n"
+                    "Only disable/enable systems if justified by"
+                    " threshold breaches you observe."
+                ),
+                user_prompt=doctor_prompt,
+                system_name="doctor",
+                session_id=doctor_session_id,
+                request_id=f"doctor-{int(doctor_now)}",
+                tools_role="doctor",
+            )
+            if llm is not None:
+                summary, provider_name, model_id, tools_used = llm
+                parsed = _parse_doctor_payload(summary)
+                endocrine_runtime.add_doctor_note(
+                    {
+                        "source": "llm",
+                        "provider": provider_name,
+                        "model": model_id,
+                        "summary": str(parsed.get("summary", "")).strip() if isinstance(parsed, dict) else "",
+                        "raw": summary,
+                    },
+                    now=doctor_now,
+                )
 
         if parsed is None and levels.get("cortisol", 0.0) >= 0.8:
             parsed = {

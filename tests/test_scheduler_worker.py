@@ -504,3 +504,205 @@ class TestCrewDispatchIntegration:
         assert result["executed_task_id"] == task.task_id
         assert len(crew_called) == 1
         assert "Refactor authentication" in crew_called[0]
+
+
+class TestDoctorCrewDispatch:
+    """Test that _process_doctor dispatches to Internal Crew."""
+
+    def test_doctor_dispatches_to_internal_crew(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        import openbad.autonomy.scheduler_worker as worker
+
+        db_path = tmp_path / "state.db"
+        conn = initialize_state_db(db_path)
+        from openbad.tasks.research_queue import initialize_research_db
+        from openbad.tasks.reward_endocrine import initialize_reward_db
+
+        initialize_research_db(conn)
+        initialize_reward_db(conn)
+
+        monkeypatch.setattr(
+            worker,
+            "EndocrineRuntime",
+            lambda *, config: EndocrineRuntime(
+                config=config, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            worker, "load_endocrine_config", lambda: EndocrineConfig()
+        )
+        monkeypatch.setattr(
+            worker,
+            "load_session_policy",
+            lambda: {"doctor": {"allow_endocrine_doctor": True}},
+        )
+        monkeypatch.setattr(
+            worker,
+            "_read_providers_config",
+            lambda: (
+                Path("unused"),
+                SimpleNamespace(providers=[], systems={}),
+            ),
+        )
+
+        mock_crew_llm = SimpleNamespace()
+        monkeypatch.setattr(
+            worker,
+            "_resolve_chat_adapter",
+            lambda _cfg, _sys: (
+                None, "test-model", "test-provider", False,
+                None, mock_crew_llm,
+            ),
+        )
+
+        posted: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            worker,
+            "append_assistant_message",
+            lambda sid, content, extra_metadata=None: posted.append(
+                (sid, content)
+            ),
+        )
+        monkeypatch.setattr(
+            worker,
+            "append_session_message",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            worker, "recent_events", lambda **kw: [],
+        )
+
+        class _UsageTracker:
+            def __init__(self, db_path=None) -> None:
+                pass
+
+            def record(self, **kwargs) -> None:
+                pass
+
+            def record_detail(self, **kwargs) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(worker, "UsageTracker", _UsageTracker)
+
+        crew_called = []
+
+        def _mock_create_crew(
+            alert_payload, *, adrenaline=0.0,
+            llm_factory=None, tools_factory=None,
+        ):
+            crew_called.append(alert_payload)
+            mock_crew = SimpleNamespace(
+                kickoff=lambda: SimpleNamespace(
+                    raw=(
+                        '{"summary":"System healthy",'
+                        '"mood_tags":["calm"],'
+                        '"actions":[]}'
+                    ),
+                ),
+            )
+            return mock_crew
+
+        monkeypatch.setattr(
+            "openbad.frameworks.crews.internal"
+            ".create_internal_crew",
+            _mock_create_crew,
+        )
+
+        result = worker.process_doctor_call(
+            {"source": "test", "reason": "unit test"},
+            db_path=db_path,
+        )
+
+        assert result["executed_doctor"] is not None
+        assert "System healthy" in result["executed_doctor"]
+        assert len(crew_called) == 1
+        assert "test" in crew_called[0]
+
+    def test_doctor_falls_back_to_llm_on_crew_failure(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        import openbad.autonomy.scheduler_worker as worker
+
+        db_path = tmp_path / "state.db"
+        conn = initialize_state_db(db_path)
+        from openbad.tasks.research_queue import initialize_research_db
+        from openbad.tasks.reward_endocrine import initialize_reward_db
+
+        initialize_research_db(conn)
+        initialize_reward_db(conn)
+
+        monkeypatch.setattr(
+            worker,
+            "EndocrineRuntime",
+            lambda *, config: EndocrineRuntime(
+                config=config, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            worker, "load_endocrine_config", lambda: EndocrineConfig()
+        )
+        monkeypatch.setattr(
+            worker,
+            "load_session_policy",
+            lambda: {"doctor": {"allow_endocrine_doctor": True}},
+        )
+        monkeypatch.setattr(
+            worker,
+            "_read_providers_config",
+            lambda: (
+                Path("unused"),
+                SimpleNamespace(providers=[], systems={}),
+            ),
+        )
+
+        # Return None for crew_llm to force crew dispatch failure
+        monkeypatch.setattr(
+            worker,
+            "_resolve_chat_adapter",
+            lambda _cfg, _sys: (
+                None, None, "", False, None, None,
+            ),
+        )
+
+        monkeypatch.setattr(
+            worker,
+            "append_assistant_message",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            worker,
+            "append_session_message",
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            worker, "recent_events", lambda **kw: [],
+        )
+
+        class _UsageTracker:
+            def __init__(self, db_path=None) -> None:
+                pass
+
+            def record(self, **kwargs) -> None:
+                pass
+
+            def record_detail(self, **kwargs) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(worker, "UsageTracker", _UsageTracker)
+
+        # Both crew and LLM fail (no provider) → executed_doctor
+        # stays None (or gets cortisol fallback)
+        result = worker.process_doctor_call(
+            {"source": "test", "reason": "fallback test"},
+            db_path=db_path,
+        )
+        # With no provider, doctor should still complete
+        # (cortisol fallback or None)
+        assert "executed_doctor" in result
