@@ -16,6 +16,11 @@ cognitive:
     sleep:
       provider: ollama
       model: bonsai-8b
+  # Embedding configuration for Library & SemanticMemory
+  embedding:
+    provider: ollama
+    model: nomic-embed-text
+    dimensions: 768
   # Shared fallback chain used when the assigned system provider is unavailable.
   default_fallback_chain:
     - provider: ollama
