@@ -14,6 +14,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from openbad.nervous_system.schemas.cognitive_pb2 import EscalationRequest
 from openbad.nervous_system.schemas.common_pb2 import Header
@@ -157,6 +158,76 @@ class EscalationGateway:
         return False
 
     # -- introspection ------------------------------------------------------
+
+    @property
+    def escalation_log(self) -> list[EscalationContext]:
+        with self._lock:
+            return list(self._escalation_log)
+
+
+# ── Escalation consumer ──────────────────────────────────────────────── #
+
+
+def consume_escalation(
+    payload: bytes,
+    *,
+    task_store: Any | None = None,
+    research_store: Any | None = None,
+) -> str | None:
+    """Consume an escalation event and create a task or research entry.
+
+    Called by the scheduler or MQTT subscriber when an escalation
+    message arrives on ``agent/cognitive/escalation``.
+
+    Returns the created task/research ID, or None on failure.
+    """
+    try:
+        msg = EscalationRequest()
+        msg.ParseFromString(payload)
+    except Exception:
+        logger.exception("Failed to parse escalation protobuf")
+        return None
+
+    reason = msg.reason or "Escalated from reflex arc"
+    reflex_id = msg.reflex_id or "unknown"
+    priority = msg.priority
+
+    # High-priority escalations → task, low → research
+    if priority >= 2 or "emergency" in reason.lower():
+        if task_store is not None:
+            from openbad.tasks.models import TaskKind, TaskModel, TaskPriority
+
+            task = TaskModel.new(
+                title=f"Escalation: {reason[:80]}",
+                description=(
+                    f"Reflex escalation from {reflex_id}.\n"
+                    f"Reason: {reason}\n"
+                    f"Priority: {priority}"
+                ),
+                kind=TaskKind.SYSTEM,
+                priority=int(TaskPriority.HIGH),
+                owner="escalation-consumer",
+            )
+            created = task_store.create_task(task)
+            logger.info(
+                "Escalation → task %s: %s", created.task_id, reason
+            )
+            return created.task_id
+    else:
+        if research_store is not None:
+            node = research_store.enqueue(
+                f"Investigate: {reason[:80]}",
+                description=(
+                    f"Reflex escalation from {reflex_id}.\n"
+                    f"Reason: {reason}"
+                ),
+            )
+            logger.info(
+                "Escalation → research %s: %s", node.node_id, reason
+            )
+            return node.node_id
+
+    return None
 
     @property
     def escalation_log(self) -> list[EscalationContext]:
