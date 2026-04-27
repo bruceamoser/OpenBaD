@@ -337,10 +337,11 @@ class ModelRouter:
             return True  # No health record means assumed healthy.
         if (now - h.last_check) < self._health_ttl_s:
             return h.available
-        # TTL expired — give the provider another chance.
-        h.available = True
-        h.last_check = now
-        return True
+        if not h.available and self._health_ttl_s > 0:
+            # TTL expired — give the provider another chance.
+            h.available = True
+            h.last_check = now
+        return h.available
 
 
 # ------------------------------------------------------------------ #

@@ -17,11 +17,6 @@ from openbad.cognitive.model_router import (
     Priority,
     RouteStep,
 )
-from openbad.cognitive.providers.base import (
-    CompletionResult,
-    HealthStatus,
-    ProviderAdapter,
-)
 from openbad.cognitive.providers.registry import ProviderRegistry
 from openbad.identity.grounding import (
     IdentityGrounder,
@@ -42,32 +37,11 @@ from openbad.immune_system.rules_engine import RulesEngine
 # ------------------------------------------------------------------ #
 
 
-class FakeProvider(ProviderAdapter):
-    """Minimal provider that returns canned responses."""
-
-    def __init__(
-        self, name: str = "fake", responses: list[str] | None = None,
-    ) -> None:
-        self._name = name
-        self._responses = responses or ["Mock answer."]
-        self._idx = 0
-
-    async def complete(self, prompt: str, model_id: str | None = None, **kw):  # noqa: ANN003
-        text = self._responses[self._idx % len(self._responses)]
-        self._idx += 1
-        return CompletionResult(
-            content=text, model_id=model_id or "mock", provider=self._name,
-            tokens_used=10, latency_ms=5.0,
-        )
-
-    async def stream(self, prompt: str, model_id: str | None = None, **kw):  # noqa: ANN003
-        yield "chunk"
-
-    async def list_models(self):
-        return []
-
-    async def health_check(self):
-        return HealthStatus(provider=self._name, available=True)
+def _mock_chat_model(name: str = "fake"):
+    """Return a MagicMock standing in for a BaseChatModel."""
+    m = MagicMock()
+    m.__name__ = name
+    return m
 
 
 # ------------------------------------------------------------------ #
@@ -222,13 +196,17 @@ class TestRouterFallback:
     async def test_fallback_on_primary_unavailable(self) -> None:
         registry = ProviderRegistry()
 
-        # Primary: unhealthy
-        primary = FakeProvider("anthropic")
-        registry.register("anthropic", primary)
-
-        # Fallback: healthy
-        fallback = FakeProvider("ollama", ["Fallback answer"])
-        registry.register("ollama", fallback)
+        # Register models for both providers
+        registry.register_models(
+            "anthropic/claude-sonnet",
+            _mock_chat_model("anthropic"),
+            MagicMock(),
+        )
+        registry.register_models(
+            "ollama/llama3.2",
+            _mock_chat_model("ollama"),
+            MagicMock(),
+        )
 
         chains = {
             Priority.HIGH: FallbackChain(steps=(
@@ -239,9 +217,9 @@ class TestRouterFallback:
         router = ModelRouter(registry, chains=chains)
         router.mark_unhealthy("anthropic")
 
-        adapter, model_id, decision = await router.route(Priority.HIGH)
+        chat_model, crew_llm, decision = await router.route(Priority.HIGH)
         assert decision.provider == "ollama"
-        assert model_id == "llama3.2"
+        assert decision.model_id == "llama3.2"
 
 
 # ------------------------------------------------------------------ #

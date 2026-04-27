@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+)
+from langchain_core.outputs import ChatGeneration, LLMResult
 
 from openbad.cognitive.model_router import (
     FallbackChain,
@@ -14,60 +18,34 @@ from openbad.cognitive.model_router import (
     Priority,
     RouteStep,
 )
-from openbad.cognitive.providers.base import (
-    CompletionResult,
-    HealthStatus,
-    ProviderAdapter,
-)
 from openbad.cognitive.providers.registry import ProviderRegistry
-from openbad.frameworks.langchain_model import OpenBaDChatModel, _messages_to_prompt
+from openbad.frameworks.langchain_model import OpenBaDChatModel
 
 # ── Helpers ───────────────────────────────────────────────────────────── #
 
 
-class FakeAdapter(ProviderAdapter):
-    """Minimal provider adapter for testing."""
-
-    def __init__(self, content: str = "Hello!", tokens: int = 10) -> None:
-        self._content = content
-        self._tokens = tokens
-
-    async def complete(
-        self, prompt: str, model_id: str | None = None, **kw: Any,
-    ) -> CompletionResult:
-        return CompletionResult(
-            content=self._content,
-            model_id=model_id or "test-model",
-            provider="fake",
-            tokens_used=self._tokens,
-            latency_ms=42.0,
-        )
-
-    async def stream(
-        self, prompt: str, model_id: str | None = None, **kw: Any,
-    ) -> AsyncIterator[str]:
-        for token in self._content.split():
-            yield token
-
-    async def list_models(self) -> list:
-        return []
-
-    async def health_check(self) -> HealthStatus:
-        return HealthStatus(provider="fake", available=True)
+def _fake_chat_model(content: str = "Hello!", tokens: int = 10) -> MagicMock:
+    """Build a mock BaseChatModel that returns canned results."""
+    mock = AsyncMock()
+    # agenerate returns LLMResult with generations
+    llm_result = LLMResult(
+        generations=[[ChatGeneration(message=AIMessage(content=content))]],
+        llm_output={"token_usage": {"total_tokens": tokens}},
+    )
+    mock.agenerate = AsyncMock(return_value=llm_result)
+    # astream yields AIMessageChunk objects
+    async def _astream(messages, **kw):
+        for word in content.split():
+            yield AIMessageChunk(content=word)
+    mock.astream = _astream
+    return mock
 
 
-class UnhealthyAdapter(FakeAdapter):
-    """Adapter that reports unhealthy."""
-
-    async def health_check(self) -> HealthStatus:
-        return HealthStatus(provider="unhealthy", available=False)
-
-
-def _make_registry(*adapters: tuple[str, ProviderAdapter]) -> ProviderRegistry:
-    """Build a ProviderRegistry with pre-registered adapters."""
+def _make_registry(*models: tuple[str, MagicMock]) -> ProviderRegistry:
+    """Build a ProviderRegistry with pre-registered models."""
     registry = ProviderRegistry()
-    for name, adapter in adapters:
-        registry.register(name, adapter)
+    for provider_model, chat_model in models:
+        registry.register_models(provider_model, chat_model, MagicMock())
     return registry
 
 
@@ -100,24 +78,9 @@ def _make_model(
 # ── Tests ─────────────────────────────────────────────────────────────── #
 
 
-class TestMessageConversion:
-    def test_flatten_messages(self) -> None:
-        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-
-        msgs = [
-            SystemMessage(content="Be helpful."),
-            HumanMessage(content="Hi"),
-            AIMessage(content="Hello!"),
-        ]
-        prompt = _messages_to_prompt(msgs)
-        assert "[system] Be helpful." in prompt
-        assert "[user] Hi" in prompt
-        assert "[assistant] Hello!" in prompt
-
-
 class TestLLMType:
     def test_llm_type(self) -> None:
-        registry = _make_registry(("fake", FakeAdapter()))
+        registry = _make_registry(("fake/m1", _fake_chat_model()))
         router = _make_router(registry, chains={
             Priority.MEDIUM: FallbackChain(steps=(RouteStep("fake", "m1"),)),
         })
@@ -128,14 +91,12 @@ class TestLLMType:
 class TestRoutingDelegation:
     @pytest.mark.asyncio
     async def test_routes_to_provider(self) -> None:
-        adapter = FakeAdapter(content="Routed response", tokens=15)
-        registry = _make_registry(("primary", adapter))
+        cm = _fake_chat_model(content="Routed response", tokens=15)
+        registry = _make_registry(("primary/gpt-4", cm))
         router = _make_router(registry, chains={
             Priority.HIGH: FallbackChain(steps=(RouteStep("primary", "gpt-4"),)),
         })
         model = _make_model(router, priority=Priority.HIGH)
-
-        from langchain_core.messages import HumanMessage
 
         result = await model.ainvoke([HumanMessage(content="test")])
         assert result.content == "Routed response"
@@ -143,22 +104,20 @@ class TestRoutingDelegation:
     @pytest.mark.asyncio
     async def test_priority_override_via_kwargs(self) -> None:
         """Priority can be overridden per-call via model kwargs."""
-        fast_adapter = FakeAdapter(content="fast", tokens=5)
-        slow_adapter = FakeAdapter(content="slow", tokens=50)
-        registry = _make_registry(("fast", fast_adapter), ("slow", slow_adapter))
+        fast_cm = _fake_chat_model(content="fast", tokens=5)
+        slow_cm = _fake_chat_model(content="slow", tokens=50)
+        registry = _make_registry(("fast/small", fast_cm), ("slow/large", slow_cm))
         router = _make_router(registry, chains={
             Priority.LOW: FallbackChain(steps=(RouteStep("fast", "small"),)),
             Priority.HIGH: FallbackChain(steps=(RouteStep("slow", "large"),)),
         })
         model = _make_model(router, priority=Priority.LOW)
 
-        from langchain_core.messages import HumanMessage
-
-        # Default priority is LOW → fast adapter
+        # Default priority is LOW → fast model
         result = await model.ainvoke([HumanMessage(content="q")])
         assert result.content == "fast"
 
-        # Override to HIGH → slow adapter
+        # Override to HIGH → slow model
         result = await model.ainvoke([HumanMessage(content="q")], priority=Priority.HIGH)
         assert result.content == "slow"
 
@@ -167,9 +126,9 @@ class TestCortisolDowngrade:
     @pytest.mark.asyncio
     async def test_cortisol_downgrades_priority(self) -> None:
         """High cortisol should downgrade routing to cheaper models."""
-        cheap_adapter = FakeAdapter(content="cheap", tokens=3)
-        expensive_adapter = FakeAdapter(content="expensive", tokens=100)
-        registry = _make_registry(("cheap", cheap_adapter), ("expensive", expensive_adapter))
+        cheap_cm = _fake_chat_model(content="cheap", tokens=3)
+        expensive_cm = _fake_chat_model(content="expensive", tokens=100)
+        registry = _make_registry(("cheap/small", cheap_cm), ("expensive/big", expensive_cm))
         router = _make_router(
             registry,
             chains={
@@ -181,8 +140,6 @@ class TestCortisolDowngrade:
 
         # No cortisol → HIGH priority → expensive
         model = _make_model(router, priority=Priority.HIGH, cortisol=0.0)
-        from langchain_core.messages import HumanMessage
-
         result = await model.ainvoke([HumanMessage(content="q")])
         assert result.content == "expensive"
 
@@ -196,18 +153,17 @@ class TestFallbackChain:
     @pytest.mark.asyncio
     async def test_falls_back_on_unhealthy(self) -> None:
         """When primary is unhealthy, falls back to next in chain."""
-        unhealthy = UnhealthyAdapter(content="unreachable")
-        fallback = FakeAdapter(content="fallback", tokens=8)
-        registry = _make_registry(("primary", unhealthy), ("backup", fallback))
+        primary_cm = _fake_chat_model(content="unreachable")
+        fallback_cm = _fake_chat_model(content="fallback", tokens=8)
+        registry = _make_registry(("primary/m1", primary_cm), ("backup/m2", fallback_cm))
         router = _make_router(registry, chains={
             Priority.HIGH: FallbackChain(steps=(
                 RouteStep("primary", "m1"),
                 RouteStep("backup", "m2"),
             )),
         })
+        router.mark_unhealthy("primary")
         model = _make_model(router, priority=Priority.HIGH)
-
-        from langchain_core.messages import HumanMessage
 
         result = await model.ainvoke([HumanMessage(content="test")])
         assert result.content == "fallback"
@@ -216,14 +172,12 @@ class TestFallbackChain:
 class TestStreaming:
     @pytest.mark.asyncio
     async def test_astream_yields_chunks(self) -> None:
-        adapter = FakeAdapter(content="Hello world from OpenBaD", tokens=4)
-        registry = _make_registry(("streamer", adapter))
+        cm = _fake_chat_model(content="Hello world from OpenBaD", tokens=4)
+        registry = _make_registry(("streamer/m1", cm))
         router = _make_router(registry, chains={
             Priority.MEDIUM: FallbackChain(steps=(RouteStep("streamer", "m1"),)),
         })
         model = _make_model(router)
-
-        from langchain_core.messages import HumanMessage
 
         chunks = []
         async for chunk in model.astream([HumanMessage(content="test")]):
@@ -237,14 +191,12 @@ class TestStreaming:
 class TestUsageRecording:
     @pytest.mark.asyncio
     async def test_records_usage(self) -> None:
-        adapter = FakeAdapter(content="tracked", tokens=25)
-        registry = _make_registry(("tracked", adapter))
+        cm = _fake_chat_model(content="tracked", tokens=25)
+        registry = _make_registry(("tracked/m1", cm))
         router = _make_router(registry, chains={
             Priority.MEDIUM: FallbackChain(steps=(RouteStep("tracked", "m1"),)),
         })
         model = _make_model(router, system_name="test-system")
-
-        from langchain_core.messages import HumanMessage
 
         with patch("openbad.frameworks.langchain_model.record_usage_event") as mock_record:
             await model.ainvoke([HumanMessage(content="test")])
@@ -257,7 +209,7 @@ class TestUsageRecording:
 
 class TestIdentifyingParams:
     def test_identifying_params(self) -> None:
-        registry = _make_registry(("fake", FakeAdapter()))
+        registry = _make_registry(("fake/m1", _fake_chat_model()))
         router = _make_router(registry)
         model = _make_model(router, priority=Priority.HIGH, cortisol=0.5, system_name="chat")
         params = model._identifying_params
@@ -269,14 +221,12 @@ class TestIdentifyingParams:
 class TestGenerationInfo:
     @pytest.mark.asyncio
     async def test_generation_info_includes_routing(self) -> None:
-        adapter = FakeAdapter(content="info-test", tokens=12)
-        registry = _make_registry(("prov", adapter))
+        cm = _fake_chat_model(content="info-test", tokens=12)
+        registry = _make_registry(("prov/m1", cm))
         router = _make_router(registry, chains={
             Priority.MEDIUM: FallbackChain(steps=(RouteStep("prov", "m1"),)),
         })
         model = _make_model(router)
-
-        from langchain_core.messages import HumanMessage
 
         result = await model._agenerate([HumanMessage(content="test")])
         gen_info = result.generations[0].generation_info

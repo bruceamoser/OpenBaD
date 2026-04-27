@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,7 +17,6 @@ from openbad.cognitive.model_router import (
     configure_chains,
     load_routing_config,
 )
-from openbad.cognitive.providers.base import HealthStatus, ProviderAdapter
 from openbad.cognitive.providers.registry import ProviderRegistry
 
 # ---------------------------------------------------------------- #
@@ -25,16 +24,20 @@ from openbad.cognitive.providers.registry import ProviderRegistry
 # ---------------------------------------------------------------- #
 
 
-def _mock_adapter(healthy: bool = True, latency: float = 50.0) -> ProviderAdapter:
-    adapter = AsyncMock(spec=ProviderAdapter)
-    adapter.health_check = AsyncMock(
-        return_value=HealthStatus(provider="mock", available=healthy, latency_ms=latency)
-    )
-    return adapter
+def _mock_chat_model(name: str = "mock") -> object:
+    """Return a mock BaseChatModel stand-in."""
+    m = MagicMock()
+    m._provider_name = name
+    return m
+
+
+def _mock_crew_llm(name: str = "mock") -> object:
+    """Return a mock crewai.LLM stand-in."""
+    return MagicMock()
 
 
 def _build_router(
-    providers: dict[str, ProviderAdapter] | None = None,
+    providers: dict[str, tuple[object, object]] | None = None,
     chains: dict[Priority, FallbackChain] | None = None,
     system_assignments: dict[CognitiveSystem, RouteStep] | None = None,
     default_fallback_chain: FallbackChain | None = None,
@@ -47,8 +50,8 @@ def _build_router(
     fallback_escalation_after: int = 5,
 ) -> ModelRouter:
     reg = ProviderRegistry()
-    for name, adapter in (providers or {}).items():
-        reg.register(name, adapter)
+    for key, (chat_model, crew_llm) in (providers or {}).items():
+        reg.register_models(key, chat_model, crew_llm)
     return ModelRouter(
         registry=reg,
         chains=chains,
@@ -64,6 +67,14 @@ def _build_router(
     )
 
 
+def _models_for(*names: str) -> dict[str, tuple[object, object]]:
+    """Build a providers dict with mock models keyed by 'provider/model'."""
+    result = {}
+    for name in names:
+        result[name] = (_mock_chat_model(name), _mock_crew_llm(name))
+    return result
+
+
 # ---------------------------------------------------------------- #
 # Priority routing
 # ---------------------------------------------------------------- #
@@ -77,13 +88,14 @@ class TestPriorityRouting:
             ),
         }
         router = _build_router(
-            providers={"anthropic": _mock_adapter(), "ollama": _mock_adapter()},
+            providers=_models_for("anthropic/claude", "ollama/llama"),
             chains=chains,
         )
-        adapter, model, decision = await router.route(Priority.CRITICAL)
+        chat_model, crew_llm, decision = await router.route(Priority.CRITICAL)
         assert decision.provider == "anthropic"
-        assert model == "claude"
+        assert decision.model_id == "claude"
         assert decision.fallback_index == 0
+        assert chat_model is not None
 
     async def test_low_routes_to_ollama(self) -> None:
         chains = {
@@ -92,11 +104,11 @@ class TestPriorityRouting:
             ),
         }
         router = _build_router(
-            providers={"ollama": _mock_adapter()}, chains=chains,
+            providers=_models_for("ollama/llama"), chains=chains,
         )
-        adapter, model, decision = await router.route(Priority.LOW)
+        chat_model, crew_llm, decision = await router.route(Priority.LOW)
         assert decision.provider == "ollama"
-        assert model == "llama"
+        assert decision.model_id == "llama"
 
     async def test_medium_prefers_ollama_then_openai(self) -> None:
         chains = {
@@ -105,10 +117,10 @@ class TestPriorityRouting:
             ),
         }
         router = _build_router(
-            providers={"ollama": _mock_adapter(), "openai": _mock_adapter()},
+            providers=_models_for("ollama/llama", "openai/gpt"),
             chains=chains,
         )
-        _, model, decision = await router.route(Priority.MEDIUM)
+        _, _, decision = await router.route(Priority.MEDIUM)
         assert decision.provider == "ollama"
 
 
@@ -125,13 +137,11 @@ class TestFallback:
             ),
         }
         router = _build_router(
-            providers={
-                "openai": _mock_adapter(healthy=False),
-                "ollama": _mock_adapter(),
-            },
+            providers=_models_for("openai/gpt", "ollama/llama"),
             chains=chains,
         )
-        _, model, decision = await router.route(Priority.HIGH)
+        router.mark_unhealthy("openai")
+        _, _, decision = await router.route(Priority.HIGH)
         assert decision.provider == "ollama"
         assert decision.fallback_index == 1
 
@@ -142,7 +152,7 @@ class TestFallback:
             ),
         }
         router = _build_router(
-            providers={"ollama": _mock_adapter()}, chains=chains,
+            providers=_models_for("ollama/llama"), chains=chains,
         )
         _, _, decision = await router.route(Priority.HIGH)
         assert decision.provider == "ollama"
@@ -160,10 +170,7 @@ class TestFallback:
     async def test_system_assignment_uses_shared_fallback_chain(self) -> None:
         endocrine = MagicMock()
         router = _build_router(
-            providers={
-                "anthropic": _mock_adapter(healthy=False),
-                "ollama": _mock_adapter(),
-            },
+            providers=_models_for("anthropic/claude-opus-4", "ollama/bonsai-8b"),
             system_assignments={
                 CognitiveSystem.REASONING: RouteStep("anthropic", "claude-opus-4")
             },
@@ -173,13 +180,14 @@ class TestFallback:
             endocrine_controller=endocrine,
             fallback_release_per_step=0.2,
         )
+        router.mark_unhealthy("anthropic")
 
-        _, model, decision = await router.route(
+        _, _, decision = await router.route(
             Priority.HIGH,
             system=CognitiveSystem.REASONING,
         )
 
-        assert model == "bonsai-8b"
+        assert decision.model_id == "bonsai-8b"
         assert decision.provider == "ollama"
         assert decision.system == "reasoning"
         assert decision.fallback_index == 1
@@ -189,10 +197,7 @@ class TestFallback:
 
     async def test_system_primary_resets_consecutive_fallbacks(self) -> None:
         router = _build_router(
-            providers={
-                "anthropic": _mock_adapter(healthy=False),
-                "ollama": _mock_adapter(),
-            },
+            providers=_models_for("anthropic/claude-sonnet-4", "ollama/llama3.2"),
             system_assignments={
                 CognitiveSystem.CHAT: RouteStep("anthropic", "claude-sonnet-4")
             },
@@ -200,6 +205,7 @@ class TestFallback:
                 steps=(RouteStep("ollama", "llama3.2"),)
             ),
         )
+        router.mark_unhealthy("anthropic")
 
         await router.route(Priority.MEDIUM, system=CognitiveSystem.CHAT)
         telemetry = router.get_fallback_telemetry()
@@ -210,7 +216,7 @@ class TestFallback:
         )
 
         router = _build_router(
-            providers={"anthropic": _mock_adapter()},
+            providers=_models_for("anthropic/claude-sonnet-4"),
             system_assignments={
                 CognitiveSystem.CHAT: RouteStep("anthropic", "claude-sonnet-4")
             },
@@ -227,10 +233,7 @@ class TestFallback:
         endocrine = MagicMock()
         escalation = MagicMock()
         router = _build_router(
-            providers={
-                "anthropic": _mock_adapter(healthy=False),
-                "ollama": _mock_adapter(),
-            },
+            providers=_models_for("anthropic/claude-haiku-4", "ollama/llama3.2"),
             system_assignments={
                 CognitiveSystem.REACTIONS: RouteStep("anthropic", "claude-haiku-4")
             },
@@ -241,6 +244,7 @@ class TestFallback:
             escalation_gateway=escalation,
             fallback_escalation_after=2,
         )
+        router.mark_unhealthy("anthropic")
 
         await router.route(Priority.HIGH, system=CognitiveSystem.REACTIONS)
         escalation.escalate.assert_not_called()
@@ -268,7 +272,7 @@ class TestCortisolDowngrade:
             ),
         }
         router = _build_router(
-            providers={"openai": _mock_adapter(), "ollama": _mock_adapter()},
+            providers=_models_for("openai/gpt", "ollama/llama"),
             chains=chains,
             cortisol_threshold=0.5,
         )
@@ -283,7 +287,7 @@ class TestCortisolDowngrade:
             ),
         }
         router = _build_router(
-            providers={"openai": _mock_adapter()},
+            providers=_models_for("openai/gpt"),
             chains=chains,
             cortisol_threshold=0.8,
         )
@@ -298,7 +302,7 @@ class TestCortisolDowngrade:
             ),
         }
         router = _build_router(
-            providers={"ollama": _mock_adapter()},
+            providers=_models_for("ollama/llama"),
             chains=chains,
             cortisol_threshold=0.5,
         )
@@ -323,7 +327,7 @@ class TestBudgetExhaustion:
             ),
         }
         router = _build_router(
-            providers={"openai": _mock_adapter(), "ollama": _mock_adapter()},
+            providers=_models_for("openai/gpt", "ollama/llama"),
             chains=chains,
             budget_limit=10.0,
         )
@@ -339,7 +343,7 @@ class TestBudgetExhaustion:
             ),
         }
         router = _build_router(
-            providers={"openai": _mock_adapter()},
+            providers=_models_for("openai/gpt"),
             chains=chains,
             budget_limit=100.0,
         )
@@ -379,7 +383,7 @@ class TestHealthCache:
             ),
         }
         router = _build_router(
-            providers={"openai": _mock_adapter(), "ollama": _mock_adapter()},
+            providers=_models_for("openai/gpt", "ollama/llama"),
             chains=chains,
             health_ttl_s=300,
         )
