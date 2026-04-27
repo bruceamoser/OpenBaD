@@ -46,6 +46,17 @@ def _normalize_research_field(value: str | None) -> str:
     return " ".join((value or "").strip().lower().split())
 
 
+def _titles_overlap(a: str, b: str) -> bool:
+    """Check if two normalised titles share enough words to be near-duplicates."""
+    words_a = set(a.split()) - {"the", "a", "an", "and", "or", "of", "for", "in", "on", "to", "with"}
+    words_b = set(b.split()) - {"the", "a", "an", "and", "or", "of", "for", "in", "on", "to", "with"}
+    if not words_a or not words_b:
+        return a == b
+    overlap = words_a & words_b
+    smaller = min(len(words_a), len(words_b))
+    return len(overlap) / smaller >= 0.6
+
+
 def _build_research_tool_validator(node) -> Callable[[str, dict[str, Any]], str | None]:
     current_title = _normalize_research_field(getattr(node, "title", ""))
     current_description = _normalize_research_field(getattr(node, "description", ""))
@@ -55,10 +66,19 @@ def _build_research_tool_validator(node) -> Callable[[str, dict[str, Any]], str 
             return None
         requested_title = _normalize_research_field(str(tool_args.get("title", "")))
         requested_description = _normalize_research_field(str(tool_args.get("description", "")))
+        # Block exact duplicate
         if requested_title == current_title and requested_description == current_description:
             return (
-                "Blocked tool call: refusing to create a duplicate research node with the same"
+                "Blocked: refusing to create a duplicate research node with the same"
                 " title and description as the node currently being processed."
+                " You should be RESEARCHING this topic, not delegating it."
+            )
+        # Block near-duplicate title (paraphrased)
+        if _titles_overlap(requested_title, current_title):
+            return (
+                "Blocked: the requested research node title is too similar to the"
+                " current node. Do not create paraphrased duplicates."
+                " Use web_search and web_fetch to investigate the topic yourself."
             )
         return None
 
@@ -583,20 +603,22 @@ def _process_autonomy_work(
 
         llm = _run_llm(
             system_prompt=(
-                "You are the OpenBaD research worker. "
-                "Investigate the topic thoroughly using your tools. Read relevant files, "
-                "inspect logs, and gather concrete evidence before reaching conclusions. "
-                "Do NOT narrate what you intend to do — call the tools directly. "
-                "For example, do not say 'I will now read the file'; instead, call read_file immediately. "
-                "If the findings imply"
-                " more concrete work, create follow-up task or research entries directly via"
-                " tools. Never create a follow-up research node that duplicates the current"
-                " research title and description. There is no interactive human in this"
-                " session. Do not ask questions, do not ask what should be worked on next,"
-                " and do not emit recommendation lists for a human to choose from. If more"
-                " work is warranted, create follow-up task or research entries directly and"
-                " report what you created. Return a concise research result and concrete"
-                " findings only."
+                "You are the OpenBaD research worker. Your job is to INVESTIGATE and"
+                " PRODUCE FINDINGS — not to delegate, plan, or create more research nodes.\n\n"
+                "## What you MUST do\n"
+                "1. Use `web_search` to find information about the topic.\n"
+                "2. Use `web_fetch` to read promising pages in full.\n"
+                "3. Use `read_file` and `find_files` to check existing code or docs for context.\n"
+                "4. Synthesise your findings into a concrete, detailed research report.\n\n"
+                "## Rules\n"
+                "- Call tools directly. Do NOT narrate intentions — act immediately.\n"
+                "- You MUST call `web_search` at least once. Do not skip internet research.\n"
+                "- Do NOT create a new research node or task unless you have ALREADY completed"
+                " your research and discovered a specific, actionable follow-up that is"
+                " clearly different from the current topic.\n"
+                "- NEVER create a research node that restates or paraphrases the current topic.\n"
+                "- There is no human in this session. Do not ask questions or offer choices.\n"
+                "- Return a concise report with concrete findings, evidence, and citations."
             ),
             user_prompt=(
                 f"Research title: {node.title}\nDescription: {node.description}"
