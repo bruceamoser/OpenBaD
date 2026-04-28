@@ -199,6 +199,15 @@ AGENT_ESCALATION = "agent/escalation"
 
 
 # ---------------------------------------------------------------------------
+# External peripherals (Phase 12 — Corsair integration)
+# ---------------------------------------------------------------------------
+EXTERNAL_INBOUND = "sensory/external/{platform}/inbound"
+EXTERNAL_OUTBOUND = "motor/external/{platform}/outbound"
+EXTERNAL_INBOUND_ALL = "sensory/external/+/inbound"
+PERIPHERALS_HEALTH = "system/peripherals/{name}/health"
+
+
+# ---------------------------------------------------------------------------
 # Helper: resolve topic templates
 # ---------------------------------------------------------------------------
 def topic_for(template: str, /, **kwargs: str) -> str:

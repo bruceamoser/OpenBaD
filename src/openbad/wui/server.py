@@ -3602,6 +3602,11 @@ def create_app(
     app.router.add_get("/api/events", _get_system_events)
     app.router.add_get("/api/capabilities", _get_capabilities)
 
+    # Corsair webhook ingress bridge
+    from openbad.peripherals.webhook import setup_webhook_routes  # noqa: PLC0415
+
+    setup_webhook_routes(app)
+
     # Library API (backed by state.db)
     from openbad.state.db import initialize_state_db  # noqa: PLC0415
     from openbad.wui.library_api import setup_library_routes  # noqa: PLC0415
