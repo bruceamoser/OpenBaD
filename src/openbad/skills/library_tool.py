@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
+import uuid as _uuid
 
 from openbad.library.store import LibraryStore
 from openbad.state.db import initialize_state_db
@@ -111,9 +113,14 @@ def draft_book(section_id: str, title: str, content: str) -> str:
 
     Auto-chunks the content synchronously and enqueues background
     embedding so the cognitive router is not blocked.
+    Also creates a semantic memory "card catalog" entry with a
+    ``library_refs`` pointer so recall can annotate results.
     """
     store = _get_store()
     book_id = store.create_book(section_id, title, content, author="system")
+
+    # Create semantic card catalog entry
+    _create_card_catalog_entry(store._conn, book_id, title, content)
 
     # Enqueue background embedding
     try:
@@ -149,3 +156,63 @@ def link_books(
         "relation_type": relation_type,
         "status": "linked",
     })
+
+
+# ------------------------------------------------------------------
+# Card catalog: semantic memory ↔ library book pointer
+# ------------------------------------------------------------------
+
+_SUMMARY_MAX_CHARS = 500
+
+
+def _create_card_catalog_entry(
+    conn: sqlite3.Connection,
+    book_id: str,
+    title: str,
+    content: str,
+) -> None:
+    """Create or update a semantic engram that points at a Library book.
+
+    The engram key is ``library/{book_id}`` so it is deterministic and
+    idempotent.  The ``library_refs`` metadata field enables
+    ``recall()`` to annotate results with book availability.
+    """
+    now = time.time()
+    engram_id = _uuid.uuid4().hex[:16]
+    key = f"library/{book_id}"
+    summary = content[:_SUMMARY_MAX_CHARS]
+    metadata = json.dumps({"library_refs": [book_id]})
+
+    try:
+        conn.execute(
+            """INSERT INTO engrams
+               (engram_id, tier, key, concept, content, confidence,
+                access_count, last_access_at, created_at, updated_at,
+                context, metadata, state)
+               VALUES (?, 'semantic', ?, ?, ?, 0.7, 0, ?, ?, ?, ?,
+                       ?, 'active')
+               ON CONFLICT(engram_id) DO UPDATE SET
+                 content  = excluded.content,
+                 concept  = excluded.concept,
+                 metadata = excluded.metadata,
+                 updated_at = excluded.updated_at""",
+            (
+                engram_id,
+                key,
+                title,
+                summary,
+                now,
+                now,
+                now,
+                f"Library book: {title}",
+                metadata,
+            ),
+        )
+        conn.commit()
+        log.debug("Card catalog entry for book %s (%s)", book_id, title)
+    except Exception:
+        log.warning(
+            "Could not create card catalog entry for book %s",
+            book_id,
+            exc_info=True,
+        )
