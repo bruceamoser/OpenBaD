@@ -3607,6 +3607,11 @@ def create_app(
 
     setup_webhook_routes(app)
 
+    # Transducer management API (plugin catalog, config, health)
+    from openbad.wui.transducer_api import setup_transducer_routes  # noqa: PLC0415
+
+    setup_transducer_routes(app)
+
     # Library API (backed by state.db)
     from openbad.state.db import initialize_state_db  # noqa: PLC0415
     from openbad.wui.library_api import setup_library_routes  # noqa: PLC0415
