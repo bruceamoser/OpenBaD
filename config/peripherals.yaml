@@ -1,0 +1,27 @@
+# Peripheral Transducers — Corsair Integration
+# See: 12-OpenBaD Peripheral Transducers & Systemd.md
+
+corsair:
+  # Path to the compiled Corsair MCP entry point.
+  entry_point: /opt/openbad/peripherals/corsair/dist/corsair.js
+  # HMAC secret for validating inbound webhook payloads.
+  # Override in /etc/openbad/peripherals.yaml for production.
+  webhook_secret: ""
+
+  plugins:
+    # Each plugin maps to a Corsair integration package.
+    # enabled: whether the sidecar should load this plugin on startup.
+    # credentials_file: path (relative to data/config/peripherals/) where
+    #   the plugin's API tokens are stored (0600 permissions).
+    #
+    # Example:
+    # - name: discord
+    #   enabled: false
+    #   credentials_file: discord.json
+    # - name: slack
+    #   enabled: false
+    #   credentials_file: slack.json
+    # - name: gmail
+    #   enabled: false
+    #   credentials_file: gmail.json
+    []
