@@ -3593,12 +3593,25 @@ def create_app(
 
     app.on_cleanup.append(_close_library_conn)
 
-    # Memory Inspector API
-    from openbad.memory.controller import MemoryController  # noqa: PLC0415
+    # Memory Inspector API — reuses the chat_pipeline singletons so the
+    # inspector sees the exact same data the LLM does at runtime.
+    from openbad.memory.procedural import ProceduralMemory  # noqa: PLC0415
+    from openbad.wui.chat_pipeline import (  # noqa: PLC0415
+        _get_episodic,
+        _get_semantic,
+        _get_stm,
+    )
     from openbad.wui.memory_api import setup_memory_routes  # noqa: PLC0415
 
-    _mem_ctrl = MemoryController()
-    setup_memory_routes(app, _mem_ctrl)
+    _PROC_DIR = Path("/var/lib/openbad/memory/procedural")
+    _PROC_DIR.mkdir(parents=True, exist_ok=True)
+    setup_memory_routes(
+        app,
+        stm=_get_stm(),
+        episodic=_get_episodic(),
+        semantic=_get_semantic(),
+        procedural=ProceduralMemory(storage_path=_PROC_DIR / "skills.json"),
+    )
 
     # SvelteKit static assets + SPA fallback for client-side routing
     _app_dir = BUILD_DIR / "_app"

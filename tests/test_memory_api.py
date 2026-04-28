@@ -6,8 +6,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient
 
-from openbad.memory.config import MemoryConfig
-from openbad.memory.controller import MemoryController
+from openbad.memory.episodic import EpisodicMemory
+from openbad.memory.procedural import ProceduralMemory
+from openbad.memory.semantic import SemanticMemory
+from openbad.memory.stm import ShortTermMemory
 from openbad.wui.memory_api import setup_memory_routes
 
 # ---------------------------------------------------------------------------
@@ -16,15 +18,35 @@ from openbad.wui.memory_api import setup_memory_routes
 
 
 @pytest.fixture()
-def ctrl(tmp_path) -> MemoryController:
-    cfg = MemoryConfig(ltm_storage_dir=tmp_path)
-    return MemoryController(config=cfg)
+def stm() -> ShortTermMemory:
+    return ShortTermMemory(max_tokens=32768, default_ttl=7200.0)
 
 
 @pytest.fixture()
-def app(ctrl: MemoryController) -> web.Application:
+def episodic(tmp_path) -> EpisodicMemory:
+    return EpisodicMemory(storage_path=tmp_path / "episodic.json")
+
+
+@pytest.fixture()
+def semantic(tmp_path) -> SemanticMemory:
+    return SemanticMemory(storage_path=tmp_path / "semantic.json")
+
+
+@pytest.fixture()
+def procedural(tmp_path) -> ProceduralMemory:
+    return ProceduralMemory(storage_path=tmp_path / "procedural.json")
+
+
+@pytest.fixture()
+def app(stm, episodic, semantic, procedural) -> web.Application:
     a = web.Application()
-    setup_memory_routes(a, ctrl)
+    setup_memory_routes(
+        a,
+        stm=stm,
+        episodic=episodic,
+        semantic=semantic,
+        procedural=procedural,
+    )
     return a
 
 
@@ -53,10 +75,12 @@ async def test_stats_empty(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_stats_with_entries(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, stm: ShortTermMemory, episodic: EpisodicMemory,
 ) -> None:
-    ctrl.write_stm("s1", "hello")
-    ctrl.write_episodic("e1", "event")
+    from openbad.memory.base import MemoryEntry, MemoryTier
+
+    stm.write(MemoryEntry(key="s1", value="hello", tier=MemoryTier.STM))
+    episodic.write(MemoryEntry(key="e1", value="event", tier=MemoryTier.EPISODIC))
     resp = await client.get("/api/memory/stats")
     data = await resp.json()
     assert data["stm"]["entry_count"] == 1
@@ -79,10 +103,12 @@ async def test_stm_empty(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_stm_with_entries(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, stm: ShortTermMemory,
 ) -> None:
-    ctrl.write_stm("key1", "value1")
-    ctrl.write_stm("key2", "value2")
+    from openbad.memory.base import MemoryEntry, MemoryTier
+
+    stm.write(MemoryEntry(key="key1", value="value1", tier=MemoryTier.STM))
+    stm.write(MemoryEntry(key="key2", value="value2", tier=MemoryTier.STM))
     resp = await client.get("/api/memory/stm")
     data = await resp.json()
     assert len(data["entries"]) == 2
@@ -110,10 +136,12 @@ async def test_episodic_empty(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_episodic_with_entries(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, episodic: EpisodicMemory,
 ) -> None:
-    ctrl.write_episodic("ep1", "event one")
-    ctrl.write_episodic("ep2", "event two")
+    from openbad.memory.base import MemoryEntry, MemoryTier
+
+    episodic.write(MemoryEntry(key="ep1", value="event one", tier=MemoryTier.EPISODIC))
+    episodic.write(MemoryEntry(key="ep2", value="event two", tier=MemoryTier.EPISODIC))
     resp = await client.get("/api/memory/episodic")
     data = await resp.json()
     assert len(data["entries"]) == 2
@@ -135,9 +163,11 @@ async def test_semantic_empty(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_semantic_with_entries(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, semantic: SemanticMemory,
 ) -> None:
-    ctrl.write_semantic("fact1", "water is wet")
+    from openbad.memory.base import MemoryEntry, MemoryTier
+
+    semantic.write(MemoryEntry(key="fact1", value="water is wet", tier=MemoryTier.SEMANTIC))
     resp = await client.get("/api/memory/semantic")
     data = await resp.json()
     assert len(data["entries"]) == 1
@@ -160,12 +190,13 @@ async def test_procedural_empty(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_procedural_with_skill(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, procedural: ProceduralMemory,
 ) -> None:
+    from openbad.memory.base import MemoryEntry, MemoryTier
     from openbad.memory.procedural import Skill
 
     skill = Skill(name="greet", description="Say hello", capabilities=["chat"])
-    ctrl.write_procedural("greet", skill)
+    procedural.write(MemoryEntry(key="greet", value=skill, tier=MemoryTier.PROCEDURAL))
     resp = await client.get("/api/memory/procedural")
     data = await resp.json()
     assert len(data["entries"]) == 1
@@ -182,9 +213,11 @@ async def test_procedural_with_skill(
 
 @pytest.mark.asyncio
 async def test_get_entry_found(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, stm: ShortTermMemory,
 ) -> None:
-    ctrl.write_stm("lookup", "found me")
+    from openbad.memory.base import MemoryEntry, MemoryTier
+
+    stm.write(MemoryEntry(key="lookup", value="found me", tier=MemoryTier.STM))
     resp = await client.get("/api/memory/entry/lookup")
     assert resp.status == 200
     data = await resp.json()
@@ -215,9 +248,11 @@ async def test_recall_empty(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_recall_with_data(
-    client: TestClient, ctrl: MemoryController,
+    client: TestClient, semantic: SemanticMemory,
 ) -> None:
-    ctrl.write_semantic("water", "water is H2O")
+    from openbad.memory.base import MemoryEntry, MemoryTier
+
+    semantic.write(MemoryEntry(key="water", value="water is H2O", tier=MemoryTier.SEMANTIC))
     resp = await client.post(
         "/api/memory/recall", json={"query": "water", "top_k": 5},
     )
