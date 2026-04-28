@@ -11,7 +11,7 @@
 
   interface Transition { from: string; to: string; ts: string; }
 
-  const FSM_STATES = ['IDLE', 'ACTIVE', 'THROTTLED', 'SLEEP', 'EMERGENCY'];
+  const FSM_STATES = ['IDLE', 'ACTIVE', 'RESEARCHING', 'EXECUTING_TASK', 'DIAGNOSING', 'THROTTLED', 'SLEEP', 'EMERGENCY'];
   let transitions: Transition[] = $state([]);
   let cpuHistory: number[] = $state([]);
   let memHistory: number[] = $state([]);
@@ -45,12 +45,15 @@
 
   function fsmColor(state: string): string {
     switch (state) {
-      case 'IDLE':      return 'var(--green)';
-      case 'ACTIVE':    return 'var(--blue)';
-      case 'THROTTLED': return 'var(--yellow)';
-      case 'SLEEP':     return 'var(--mauve)';
-      case 'EMERGENCY': return 'var(--red)';
-      default:          return 'var(--text-dim)';
+      case 'IDLE':           return 'var(--green)';
+      case 'ACTIVE':         return 'var(--blue)';
+      case 'RESEARCHING':    return 'var(--teal)';
+      case 'EXECUTING_TASK': return 'var(--sapphire)';
+      case 'DIAGNOSING':     return 'var(--peach)';
+      case 'THROTTLED':      return 'var(--yellow)';
+      case 'SLEEP':          return 'var(--mauve)';
+      case 'EMERGENCY':      return 'var(--red)';
+      default:               return 'var(--text-dim)';
     }
   }
 
@@ -81,8 +84,10 @@
     const highCpu = cpu > 90;
     const highMem = mem > 90;
     const emergency = currentFsm === 'EMERGENCY';
+    const busy = ['RESEARCHING', 'EXECUTING_TASK', 'DIAGNOSING'].includes(currentFsm);
     if (emergency) return { label: 'Critical', color: 'var(--red)', icon: '🔴' };
     if (highCpu || highMem || currentFsm === 'THROTTLED') return { label: 'Stressed', color: 'var(--yellow)', icon: '🟡' };
+    if (busy) return { label: 'Working', color: 'var(--teal)', icon: '🔵' };
     return { label: 'Healthy', color: 'var(--green)', icon: '🟢' };
   });
 </script>
