@@ -1,0 +1,19 @@
+{
+  "name": "openbad-corsair",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenBaD Corsair MCP sidecar — external integration layer",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/corsair.js"
+  },
+  "dependencies": {
+    "corsair": "^1.0.0",
+    "@corsair-dev/mcp": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}

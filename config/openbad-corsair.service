@@ -1,0 +1,38 @@
+[Unit]
+Description=OpenBaD Corsair MCP Sidecar
+Documentation=https://github.com/bruceamoser/OpenBaD
+After=openbad-broker.service network-online.target
+Wants=network-online.target
+Wants=openbad-broker.service
+
+[Service]
+Type=simple
+User=openbad
+Group=openbad
+ExecStart=/usr/bin/node /opt/openbad/peripherals/corsair/dist/corsair.js
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=always
+RestartSec=5s
+TimeoutStopSec=15s
+
+# Environment
+Environment=OPENBAD_PERIPHERALS_CONFIG=/etc/openbad/peripherals.yaml
+Environment=NODE_ENV=production
+WorkingDirectory=/opt/openbad/peripherals/corsair
+
+# Security hardening (match openbad.service)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/openbad /var/log/openbad
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
