@@ -143,6 +143,87 @@ def _strip_autonomy_interaction(text: str) -> str:
     return "\n\n".join(kept).strip()
 
 
+# ---------------------------------------------------------------------------
+# Library persistence for research findings
+# ---------------------------------------------------------------------------
+
+_research_section_id: str | None = None
+
+
+def _ensure_research_section() -> str:
+    """Return the section_id for research findings, creating the hierarchy if needed."""
+    global _research_section_id  # noqa: PLW0603
+    if _research_section_id is not None:
+        return _research_section_id
+
+    from openbad.library.store import LibraryStore
+    from openbad.state.db import initialize_state_db
+
+    conn = initialize_state_db()
+    store = LibraryStore(conn)
+
+    # Look for an existing "Research" library.
+    row = conn.execute(
+        "SELECT library_id FROM libraries WHERE name = ?",
+        ("Research",),
+    ).fetchone()
+    if row:
+        library_id = row["library_id"]
+    else:
+        library_id = store.create_library(
+            "Research",
+            "Autonomous research findings",
+        )
+
+    # Shelf: "Autonomous Research"
+    row = conn.execute(
+        "SELECT shelf_id FROM shelves"
+        " WHERE library_id = ? AND name = ?",
+        (library_id, "Autonomous Research"),
+    ).fetchone()
+    if row:
+        shelf_id = row["shelf_id"]
+    else:
+        shelf_id = store.create_shelf(
+            library_id,
+            "Autonomous Research",
+            "Results from the autonomous research pipeline",
+        )
+
+    # Section: "Findings"
+    row = conn.execute(
+        "SELECT section_id FROM sections"
+        " WHERE shelf_id = ? AND name = ?",
+        (shelf_id, "Findings"),
+    ).fetchone()
+    if row:
+        section_id = row["section_id"]
+    else:
+        section_id = store.create_section(shelf_id, "Findings")
+
+    _research_section_id = section_id
+    return section_id
+
+
+def _save_research_to_library(node: object, summary: str) -> None:
+    """Persist completed research findings as a Library book."""
+    try:
+        from openbad.skills.library_tool import draft_book
+
+        section_id = _ensure_research_section()
+        title = getattr(node, "title", "") or "Untitled Research"
+        if title.startswith("[synthesis] "):
+            title = title.removeprefix("[synthesis] ")
+        draft_book(section_id, title, summary)
+        log.info(
+            "Saved research '%s' to library section %s",
+            title,
+            section_id,
+        )
+    except Exception:
+        log.exception("Failed to save research findings to library")
+
+
 def _parse_event_timestamp(raw: object) -> float | None:
     text = str(raw or "").strip()
     if not text:
@@ -1091,6 +1172,11 @@ def _process_autonomy_work(
             except (KeyError, ValueError):
                 pass
         research_svc.complete(node.node_id)
+
+        # Persist synthesis results (or standalone results) to the Library.
+        if summary.strip() and (is_synthesis or not node.is_child):
+            _save_research_to_library(node, summary)
+
         meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}
         tools_suffix = f"\n\n*Tools used: {', '.join(tools_used)}*" if tools_used else ""
         _post_session(
