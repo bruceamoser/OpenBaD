@@ -1,7 +1,7 @@
 memory:
   stm_max_tokens: 32768
   stm_ttl_seconds: 3600.0
-  ltm_backend: json
+  ltm_backend: sqlite
   ltm_storage_dir: data/memory
   pruning_interval_seconds: 3600.0
   forgetting_half_life_hours: 168.0
