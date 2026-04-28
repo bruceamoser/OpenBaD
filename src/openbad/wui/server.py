@@ -1004,6 +1004,7 @@ def _build_crew_llm(
         api_key=str(cfg["api_key"]) or None,
         base_url=str(cfg["base_url"]) or None,
         timeout=float(str(cfg["timeout_s"])),
+        thinking=False,
     )
 
 
