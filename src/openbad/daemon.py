@@ -16,12 +16,14 @@ from openbad.endocrine.controller import EndocrineController
 from openbad.frameworks.crew_mqtt_bridge import CrewMQTTBridge
 from openbad.interoception.disk_network import DiskNetworkMonitor
 from openbad.interoception.monitor import TelemetryMonitor
+from openbad.memory.base import MemoryEntry, MemoryTier
 from openbad.nervous_system import topics
 from openbad.nervous_system.client import NervousSystemClient
 from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus
 from openbad.nervous_system.schemas.common_pb2 import Header
 from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
 from openbad.nervous_system.schemas.telemetry_pb2 import TokenTelemetry
+from openbad.plugins.observations.external_signals import ExternalSignalPlugin
 from openbad.reflex_arc.fsm import AgentFSM
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,7 @@ class Daemon:
         self._disk_network: DiskNetworkMonitor | None = None
         self._stop_event: asyncio.Event | None = None
         self._crew_bridge: CrewMQTTBridge | None = None
+        self._external_signal_plugin: ExternalSignalPlugin | None = None
 
     # -- public --------------------------------------------------------- #
 
@@ -100,6 +103,12 @@ class Daemon:
         self._client.subscribe(topics.TASK_WORK_REQUEST, bytes, self._on_task_work_request)
         self._client.subscribe(topics.RESEARCH_WORK_REQUEST, bytes, self._on_research_work_request)
         self._client.subscribe(topics.DOCTOR_CALL, bytes, self._on_doctor_call)
+        self._client.subscribe(
+            topics.EXTERNAL_INBOUND_ALL, bytes, self._on_external_inbound,
+        )
+
+        # External signal observation plugin (records inbound messages)
+        self._external_signal_plugin = ExternalSignalPlugin()
 
         # 2. Finite state machine
         self._fsm = AgentFSM(client=self._client)
@@ -325,3 +334,49 @@ class Daemon:
         finally:
             if self._fsm is not None:
                 self._fsm.finish_work()
+
+    def _on_external_inbound(self, topic: str, payload: bytes) -> None:
+        """Handle an inbound external message from the Corsair webhook bridge.
+
+        Writes the message to STM and increments the external-signal counter
+        so the active inference engine can compute surprise.
+        """
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except Exception:
+            logger.exception("Invalid external inbound payload")
+            return
+
+        # Extract platform from topic: sensory/external/{platform}/inbound
+        parts = topic.split("/")
+        platform = parts[2] if len(parts) >= 4 else "unknown"
+
+        # Record observation for active inference
+        if self._external_signal_plugin is not None:
+            self._external_signal_plugin.record()
+
+        # Write to Short-Term Memory
+        try:
+            from openbad.memory.cognitive_store import CognitiveMemoryStore
+            from openbad.state.db import initialize_state_db
+
+            conn = initialize_state_db()
+            stm = CognitiveMemoryStore(conn, MemoryTier.STM)
+            stm.write(
+                MemoryEntry(
+                    key=f"external:{platform}:{time.time():.0f}",
+                    value=json.dumps(data),
+                    tier=MemoryTier.STM,
+                    ttl_seconds=300.0,
+                    context=f"External inbound from {platform}",
+                    metadata={
+                        "platform": platform,
+                        "sender": data.get("sender", ""),
+                        "timestamp": data.get("timestamp", time.time()),
+                        "content_summary": str(data.get("data", ""))[:200],
+                        "event": data.get("event", ""),
+                    },
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to write external signal to STM")
