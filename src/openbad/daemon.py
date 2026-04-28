@@ -7,7 +7,6 @@ import json
 import logging
 import signal
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -64,7 +63,6 @@ class Daemon:
         self._disk_network: DiskNetworkMonitor | None = None
         self._stop_event: asyncio.Event | None = None
         self._crew_bridge: CrewMQTTBridge | None = None
-        self._scheduler_worker_lock = threading.Lock()
 
     # -- public --------------------------------------------------------- #
 
@@ -244,8 +242,13 @@ class Daemon:
             and (tick.get("queued_task_id") or tick.get("queued_research_id"))
         ):
             return
-        if not self._scheduler_worker_lock.acquire(blocking=False):
-            logger.info("Scheduler worker already active; skipping overlapping tick")
+
+        # Check for stuck busy states before attempting new work.
+        if self._fsm is not None:
+            self._fsm.check_work_timeout()
+
+        if self._fsm is not None and self._fsm.is_busy:
+            logger.info("FSM busy (%s); skipping scheduler tick", self._fsm.state)
             return
 
         try:
@@ -254,8 +257,6 @@ class Daemon:
             process_pending_autonomy_work()
         except Exception:
             logger.exception("Scheduler worker failed")
-        finally:
-            self._scheduler_worker_lock.release()
 
     def _on_doctor_call(self, _topic: str, payload: bytes) -> None:
         try:
@@ -264,8 +265,8 @@ class Daemon:
             logger.exception("Invalid doctor call payload")
             return
 
-        if not self._scheduler_worker_lock.acquire(blocking=False):
-            logger.info("Scheduler worker already active; skipping overlapping doctor call")
+        if self._fsm is not None and not self._fsm.try_begin_work("begin_diagnose"):
+            logger.info("FSM busy (%s); skipping overlapping doctor call", self._fsm.state)
             return
 
         try:
@@ -275,7 +276,8 @@ class Daemon:
         except Exception:
             logger.exception("Doctor call worker failed")
         finally:
-            self._scheduler_worker_lock.release()
+            if self._fsm is not None:
+                self._fsm.finish_work()
 
     def _on_task_work_request(self, _topic: str, payload: bytes) -> None:
         try:
@@ -285,8 +287,8 @@ class Daemon:
             return
 
         logger.info("Received task work request: %s", request.get("task_id", "??"))
-        if not self._scheduler_worker_lock.acquire(blocking=False):
-            logger.info("Scheduler worker already active; skipping overlapping task work request")
+        if self._fsm is not None and not self._fsm.try_begin_work("begin_task"):
+            logger.info("FSM busy (%s); skipping overlapping task work request", self._fsm.state)
             return
 
         try:
@@ -296,7 +298,8 @@ class Daemon:
         except Exception:
             logger.exception("Task work worker failed")
         finally:
-            self._scheduler_worker_lock.release()
+            if self._fsm is not None:
+                self._fsm.finish_work()
 
     def _on_research_work_request(self, _topic: str, payload: bytes) -> None:
         try:
@@ -306,8 +309,11 @@ class Daemon:
             return
 
         logger.info("Received research work request: %s", request.get("node_id", "??"))
-        if not self._scheduler_worker_lock.acquire(blocking=False):
-            logger.info("Scheduler worker already active; skipping overlapping research work request")
+        if self._fsm is not None and not self._fsm.try_begin_work("begin_research"):
+            logger.info(
+                "FSM busy (%s); skipping overlapping research work request",
+                self._fsm.state,
+            )
             return
 
         try:
@@ -317,4 +323,5 @@ class Daemon:
         except Exception:
             logger.exception("Research work worker failed")
         finally:
-            self._scheduler_worker_lock.release()
+            if self._fsm is not None:
+                self._fsm.finish_work()

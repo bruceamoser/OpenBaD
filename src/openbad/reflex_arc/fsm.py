@@ -27,12 +27,39 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-STATES = ["IDLE", "ACTIVE", "THROTTLED", "SLEEP", "EMERGENCY"]
+STATES = [
+    "IDLE",
+    "ACTIVE",
+    "RESEARCHING",
+    "EXECUTING_TASK",
+    "DIAGNOSING",
+    "THROTTLED",
+    "SLEEP",
+    "EMERGENCY",
+]
+
+# States where the agent is actively doing work and should not accept
+# new overlapping work requests.
+BUSY_STATES: frozenset[str] = frozenset({
+    "RESEARCHING",
+    "EXECUTING_TASK",
+    "DIAGNOSING",
+})
 
 TRANSITIONS = [
     # Normal flow
     {"trigger": "activate", "source": "IDLE", "dest": "ACTIVE"},
     {"trigger": "deactivate", "source": "ACTIVE", "dest": "IDLE"},
+    # Work states — entered when the agent begins a blocking work unit
+    {"trigger": "begin_research", "source": "IDLE", "dest": "RESEARCHING"},
+    {"trigger": "begin_research", "source": "ACTIVE", "dest": "RESEARCHING"},
+    {"trigger": "begin_task", "source": "IDLE", "dest": "EXECUTING_TASK"},
+    {"trigger": "begin_task", "source": "ACTIVE", "dest": "EXECUTING_TASK"},
+    {"trigger": "begin_diagnose", "source": "IDLE", "dest": "DIAGNOSING"},
+    {"trigger": "begin_diagnose", "source": "ACTIVE", "dest": "DIAGNOSING"},
+    {"trigger": "complete_work", "source": "RESEARCHING", "dest": "IDLE"},
+    {"trigger": "complete_work", "source": "EXECUTING_TASK", "dest": "IDLE"},
+    {"trigger": "complete_work", "source": "DIAGNOSING", "dest": "IDLE"},
     # Throttle
     {"trigger": "throttle", "source": "ACTIVE", "dest": "THROTTLED"},
     {"trigger": "throttle", "source": "IDLE", "dest": "THROTTLED"},
@@ -41,7 +68,7 @@ TRANSITIONS = [
     {"trigger": "sleep", "source": "ACTIVE", "dest": "SLEEP"},
     {"trigger": "sleep", "source": "IDLE", "dest": "SLEEP"},
     {"trigger": "wake", "source": "SLEEP", "dest": "IDLE"},
-    # Emergency
+    # Emergency — overrides any state including busy states
     {"trigger": "emergency", "source": "*", "dest": "EMERGENCY"},
     {"trigger": "recover_emergency", "source": "EMERGENCY", "dest": "IDLE"},
 ]
@@ -82,6 +109,7 @@ class AgentFSM:
         self._lock = threading.Lock()
         self._client = client
         self.state: str = "IDLE"  # set by transitions library internally
+        self._work_deadline: float = 0.0  # monotonic deadline for busy states
 
         self._machine = Machine(
             model=self,
@@ -91,6 +119,56 @@ class AgentFSM:
             send_event=True,
             after_state_change="on_state_change",
         )
+
+    # ------------------------------------------------------------------
+    # Busy-state helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def is_busy(self) -> bool:
+        """Return *True* if the agent is in a work state."""
+        return self.state in BUSY_STATES
+
+    def try_begin_work(self, trigger: str, *, timeout_seconds: float = 300.0) -> bool:
+        """Attempt to enter a busy state.
+
+        If the FSM is already busy or the transition is invalid, return
+        *False*.  On success, a monotonic deadline is recorded so that
+        :meth:`check_work_timeout` can recover stuck work states.
+        """
+        with self._lock:
+            if self.state in BUSY_STATES:
+                return False
+            try:
+                self._machine.events[trigger].trigger(self)
+            except Exception:
+                return False
+            self._work_deadline = time.monotonic() + max(30.0, timeout_seconds)
+            return True
+
+    def finish_work(self) -> bool:
+        """Leave the current busy state, returning to IDLE.
+
+        Safe to call even when not in a busy state (returns *False*).
+        """
+        self._work_deadline = 0.0
+        return self.fire("complete_work")
+
+    def check_work_timeout(self) -> bool:
+        """If the agent has been busy past its deadline, force recovery.
+
+        Returns *True* if a timeout recovery occurred.
+        """
+        if not self.is_busy:
+            return False
+        if self._work_deadline and time.monotonic() > self._work_deadline:
+            logger.warning(
+                "FSM: work state %s exceeded deadline — forcing finish_work",
+                self.state,
+            )
+            self._work_deadline = 0.0
+            return self.fire("complete_work")
+        return False
 
     # ------------------------------------------------------------------
     # State-change callback

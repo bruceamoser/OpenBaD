@@ -10,7 +10,7 @@ import pytest
 from openbad.nervous_system.schemas.common_pb2 import Header
 from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
 from openbad.nervous_system.schemas.immune_pb2 import ImmuneAlert
-from openbad.reflex_arc.fsm import STATES, TOPIC_TRIGGER_MAP, AgentFSM
+from openbad.reflex_arc.fsm import BUSY_STATES, STATES, TOPIC_TRIGGER_MAP, AgentFSM
 
 
 @pytest.fixture
@@ -33,7 +33,14 @@ def fsm_with_client(client_mock):
 
 class TestStates:
     def test_all_states_defined(self):
-        assert STATES == ["IDLE", "ACTIVE", "THROTTLED", "SLEEP", "EMERGENCY"]
+        assert STATES == [
+            "IDLE", "ACTIVE",
+            "RESEARCHING", "EXECUTING_TASK", "DIAGNOSING",
+            "THROTTLED", "SLEEP", "EMERGENCY",
+        ]
+
+    def test_busy_states(self):
+        assert {"RESEARCHING", "EXECUTING_TASK", "DIAGNOSING"} == BUSY_STATES
 
     def test_initial_state_idle(self, fsm: AgentFSM):
         assert fsm.state == "IDLE"
@@ -282,3 +289,93 @@ class TestConcurrency:
 
         assert not errors
         assert fsm.state == "EMERGENCY"
+
+
+# ── Busy-state transitions ────────────────────────────────────────
+
+
+class TestBusyTransitions:
+    @pytest.mark.parametrize("trigger,expected", [
+        ("begin_research", "RESEARCHING"),
+        ("begin_task", "EXECUTING_TASK"),
+        ("begin_diagnose", "DIAGNOSING"),
+    ])
+    def test_idle_to_busy(self, fsm: AgentFSM, trigger, expected):
+        assert fsm.fire(trigger)
+        assert fsm.state == expected
+
+    @pytest.mark.parametrize("trigger,expected", [
+        ("begin_research", "RESEARCHING"),
+        ("begin_task", "EXECUTING_TASK"),
+        ("begin_diagnose", "DIAGNOSING"),
+    ])
+    def test_active_to_busy(self, fsm: AgentFSM, trigger, expected):
+        fsm.fire("activate")
+        assert fsm.fire(trigger)
+        assert fsm.state == expected
+
+    @pytest.mark.parametrize("trigger", [
+        "begin_research", "begin_task", "begin_diagnose",
+    ])
+    def test_busy_blocks_other_busy(self, fsm: AgentFSM, trigger):
+        fsm.fire("begin_research")
+        assert not fsm.fire(trigger)
+        assert fsm.state == "RESEARCHING"
+
+    @pytest.mark.parametrize("busy_trigger", [
+        "begin_research", "begin_task", "begin_diagnose",
+    ])
+    def test_complete_work_returns_to_idle(self, fsm: AgentFSM, busy_trigger):
+        fsm.fire(busy_trigger)
+        assert fsm.fire("complete_work")
+        assert fsm.state == "IDLE"
+
+    def test_emergency_overrides_busy(self, fsm: AgentFSM):
+        fsm.fire("begin_research")
+        assert fsm.fire("emergency")
+        assert fsm.state == "EMERGENCY"
+
+    def test_complete_work_from_idle_fails(self, fsm: AgentFSM):
+        assert not fsm.fire("complete_work")
+        assert fsm.state == "IDLE"
+
+
+# ── try_begin_work / finish_work helpers ──────────────────────────
+
+
+class TestWorkHelpers:
+    def test_try_begin_work_success(self, fsm: AgentFSM):
+        assert fsm.try_begin_work("begin_research")
+        assert fsm.state == "RESEARCHING"
+        assert fsm.is_busy
+
+    def test_try_begin_work_rejects_when_busy(self, fsm: AgentFSM):
+        fsm.try_begin_work("begin_research")
+        assert not fsm.try_begin_work("begin_task")
+        assert fsm.state == "RESEARCHING"
+
+    def test_finish_work_returns_to_idle(self, fsm: AgentFSM):
+        fsm.try_begin_work("begin_task")
+        assert fsm.finish_work()
+        assert fsm.state == "IDLE"
+        assert not fsm.is_busy
+
+    def test_finish_work_safe_when_not_busy(self, fsm: AgentFSM):
+        assert not fsm.finish_work()
+        assert fsm.state == "IDLE"
+
+    def test_check_work_timeout_no_op_when_idle(self, fsm: AgentFSM):
+        assert not fsm.check_work_timeout()
+
+    def test_check_work_timeout_recovers_stuck_state(self, fsm: AgentFSM):
+        fsm.try_begin_work("begin_research", timeout_seconds=0.0)
+        # Deadline is now in the past (monotonic + 30s minimum).
+        # Force deadline to be expired.
+        fsm._work_deadline = 0.0001
+        assert fsm.check_work_timeout()
+        assert fsm.state == "IDLE"
+
+    def test_check_work_timeout_no_recovery_before_deadline(self, fsm: AgentFSM):
+        fsm.try_begin_work("begin_research", timeout_seconds=9999)
+        assert not fsm.check_work_timeout()
+        assert fsm.state == "RESEARCHING"

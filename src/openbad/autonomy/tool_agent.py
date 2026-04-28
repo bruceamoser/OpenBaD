@@ -16,6 +16,7 @@ Public API
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from openbad.frameworks.langchain_tools import async_get_openbad_tools
 log = logging.getLogger(__name__)
 
 _MAX_TOOL_ITERATIONS = 16
+_AGENT_TIMEOUT_SECONDS = 240  # 4 minutes — prevents stuck LLM calls from blocking the daemon
 
 _TOOLING_BASE_PROMPT = (
     "You have access to OpenBaD's embedded skills. These are built-in tools provided"
@@ -201,9 +203,24 @@ async def run_tool_agent(
     )
 
     try:
-        result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=user_prompt)]},
-            config={"recursion_limit": _MAX_TOOL_ITERATIONS * 2},
+        result = await asyncio.wait_for(
+            agent.ainvoke(
+                {"messages": [HumanMessage(content=user_prompt)]},
+                config={"recursion_limit": _MAX_TOOL_ITERATIONS * 2},
+            ),
+            timeout=_AGENT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        log.warning(
+            "LangGraph agent timed out after %ds request=%s",
+            _AGENT_TIMEOUT_SECONDS,
+            request_id,
+        )
+        return ToolAgentResult(
+            content="",
+            provider=provider_name or "unknown",
+            model=model_id,
+            used_agentic=True,
         )
     except Exception:
         log.exception("LangGraph agent failed request=%s", request_id)

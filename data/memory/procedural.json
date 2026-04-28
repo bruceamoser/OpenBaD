@@ -1,0 +1,39 @@
+{
+  "entries": {
+    "greet": {
+      "entry_id": "c5de7cdfd36b49bb",
+      "key": "greet",
+      "value": {
+        "name": "greet",
+        "description": "Say hello",
+        "capabilities": [
+          "chat"
+        ],
+        "code": "",
+        "confidence": 0.5,
+        "success_count": 0,
+        "failure_count": 0
+      },
+      "tier": "procedural",
+      "created_at": 1777333776.425011,
+      "accessed_at": 0.0,
+      "access_count": 0,
+      "ttl_seconds": null,
+      "context": "",
+      "metadata": {}
+    }
+  },
+  "skills": {
+    "greet": {
+      "name": "greet",
+      "description": "Say hello",
+      "capabilities": [
+        "chat"
+      ],
+      "code": "",
+      "confidence": 0.5,
+      "success_count": 0,
+      "failure_count": 0
+    }
+  }
+}

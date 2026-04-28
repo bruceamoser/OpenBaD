@@ -49,7 +49,10 @@ from openbad.reflex_arc.fsm import AgentFSM
 log = logging.getLogger(__name__)
 
 # FSM states where only internal crew is allowed.
-_RESTRICTED_STATES: frozenset[str] = frozenset({"THROTTLED", "EMERGENCY"})
+_RESTRICTED_STATES: frozenset[str] = frozenset({
+    "THROTTLED", "EMERGENCY",
+    "RESEARCHING", "EXECUTING_TASK", "DIAGNOSING",
+})
 
 # ── Topic → Crew mapping ─────────────────────────────────────────────── #
 
