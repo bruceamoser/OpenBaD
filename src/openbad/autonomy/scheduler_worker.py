@@ -888,6 +888,92 @@ def _process_autonomy_work(
             node = research_svc.peek()
         if node is None:
             return
+
+        # ── Planning phase: decompose top-level nodes ──
+        from openbad.tasks.research_planner import (  # noqa: PLC0415
+            all_children_complete,
+            build_plan_prompt,
+            build_synthesis_description,
+            enqueue_plan,
+            parse_plan,
+            should_plan,
+        )
+
+        if should_plan(node):
+            log.info("Research node %s: planning phase — decomposing into sub-tasks", node.node_id)
+            _post_session(
+                research_session_id,
+                f"📋 **Planning research:** {node.title}\nDecomposing into focused sub-questions…",
+            )
+            plan_system, plan_user = build_plan_prompt(node)
+            plan_llm = _run_llm(
+                system_prompt=plan_system,
+                user_prompt=plan_user,
+                system_name="research",
+                session_id=research_session_id,
+                request_id=f"plan-{node.node_id}",
+                tools_role=None,
+            )
+            if plan_llm is None:
+                log.warning("Research planner: provider unavailable for node %s", node.node_id)
+                _post_session(research_session_id, f"Research planner unavailable for '{node.title}'. Will retry.")
+                return
+
+            plan_text, plan_provider, plan_model, _ = plan_llm
+            subtasks = parse_plan(plan_text)
+
+            if not subtasks:
+                # Fallback: plan failed — execute directly as before.
+                log.warning("Research planner: plan parsing failed for node %s — falling back to direct execution", node.node_id)
+                _execute_research_node(node)
+                return
+
+            children = enqueue_plan(research_svc, node, subtasks)
+            research_svc.complete(node.node_id)
+
+            plan_summary = "\n".join(f"  {i+1}. {c.title}" for i, c in enumerate(children))
+            _post_session(
+                research_session_id,
+                f"✅ **Research plan created for:** {node.title}\n\n"
+                f"Decomposed into {len(children)} sub-questions:\n{plan_summary}\n\n"
+                f"*Planner: {plan_provider} / {plan_model}*",
+            )
+            executed_research_id = node.node_id
+            return
+
+        # ── Execution phase: focused child node ──
+        _execute_research_node(node)
+
+        # ── Synthesis check: if all siblings done, enqueue synthesis ──
+        if node.parent_node_id and not node.title.startswith("[synthesis]"):
+            if all_children_complete(research_svc, node.parent_node_id):
+                parent = research_svc.get(node.parent_node_id)
+                if parent is not None:
+                    siblings = research_svc.list_children(node.parent_node_id)
+                    # Check if a synthesis node already exists.
+                    has_synthesis = any(s.title.startswith("[synthesis]") for s in siblings)
+                    if not has_synthesis:
+                        data_children = [s for s in siblings if not s.title.startswith("[synthesis]")]
+                        child_summaries: dict[str, str] = {}
+                        for sib in data_children:
+                            child_summaries[sib.node_id] = sib.description
+                        synth_desc = build_synthesis_description(parent, data_children, child_summaries)
+                        research_svc.enqueue(
+                            title=f"[synthesis] {parent.title}",
+                            description=synth_desc,
+                            priority=parent.priority - 1,
+                            source_task_id=parent.source_task_id,
+                            parent_node_id=parent.node_id,
+                        )
+                        log.info("Research: all children complete for %s — synthesis node enqueued", parent.node_id)
+                        _post_session(
+                            research_session_id,
+                            f"🔬 All sub-research for **{parent.title}** is complete. Synthesis enqueued.",
+                        )
+
+    def _execute_research_node(node) -> None:
+        """Execute a single focused research node (child or fallback)."""
+        nonlocal executed_research_id
         research_prompt = (
             f"**Research Project:** {node.title}\n\n{node.description}"
             if node.description
@@ -898,7 +984,10 @@ def _process_autonomy_work(
         except Exception:
             log.exception("Failed to post research prompt to session")
 
-        is_complex_research = _classify_research_complexity(node.title or "", node.description or "")
+        is_synthesis = node.title.startswith("[synthesis]")
+        is_complex_research = (
+            not is_synthesis and _classify_research_complexity(node.title or "", node.description or "")
+        )
         crew_result = None
         llm = None
 
@@ -913,8 +1002,26 @@ def _process_autonomy_work(
         else:
             if is_complex_research:
                 log.warning("Crew dispatch failed for research %s — falling back to ReAct agent", node.node_id)
-            llm = _run_llm(
-                system_prompt=(
+
+            if is_synthesis:
+                system_prompt = (
+                    "You are the OpenBaD research synthesiser. You are given "
+                    "multiple sub-research findings on aspects of a larger topic.\n\n"
+                    "## What you MUST do\n"
+                    "1. Read ALL the sub-research findings provided below.\n"
+                    "2. Combine them into a single, cohesive, well-structured research report.\n"
+                    "3. Identify connections, patterns, and contradictions across findings.\n"
+                    "4. Produce a comprehensive summary with clear sections.\n\n"
+                    "## Rules\n"
+                    "- Do NOT repeat findings verbatim — synthesise and reorganize.\n"
+                    "- If findings are contradictory, note the disagreement.\n"
+                    "- Include practical recommendations where applicable.\n"
+                    "- Do NOT create new research nodes.\n"
+                    "- There is no human in this session. Do not ask questions."
+                )
+                tools_role = None  # No tools needed for synthesis.
+            else:
+                system_prompt = (
                     "You are the OpenBaD research worker. Your job is to INVESTIGATE and"
                     " PRODUCE FINDINGS — not to delegate, plan, or create more research nodes.\n\n"
                     "## What you MUST do\n"
@@ -931,15 +1038,19 @@ def _process_autonomy_work(
                     "- NEVER create a research node that restates or paraphrases the current topic.\n"
                     "- There is no human in this session. Do not ask questions or offer choices.\n"
                     "- Return a concise report with concrete findings, evidence, and citations."
-                ),
+                )
+                tools_role = "research"
+
+            llm = _run_llm(
+                system_prompt=system_prompt,
                 user_prompt=(
                     f"Research title: {node.title}\nDescription: {node.description}"
                 ),
                 system_name="research",
                 session_id=research_session_id,
                 request_id=node.node_id,
-                tool_call_validator=_build_research_tool_validator(node),
-                tools_role="research",
+                tool_call_validator=_build_research_tool_validator(node) if tools_role else None,
+                tools_role=tools_role,
             )
             if llm is None:
                 log.warning("Research node %s: provider unavailable; leaving pending for retry", node.node_id)
@@ -972,6 +1083,13 @@ def _process_autonomy_work(
             )
             return
 
+        # Store the summary in the node description so the synthesis
+        # node can access completed child findings later.
+        if node.is_child and summary.strip():
+            try:
+                research_svc.update(node.node_id, description=summary)
+            except (KeyError, ValueError):
+                pass
         research_svc.complete(node.node_id)
         meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}
         tools_suffix = f"\n\n*Tools used: {', '.join(tools_used)}*" if tools_used else ""

@@ -78,6 +78,7 @@ class ResearchService:
         priority: int = 0,
         description: str = "",
         source_task_id: str | None = None,
+        parent_node_id: str | None = None,
         node_id: str | None = None,
     ) -> ResearchNode:
         """Add a research node to the queue."""
@@ -86,6 +87,7 @@ class ResearchService:
             priority=priority,
             description=description,
             source_task_id=source_task_id,
+            parent_node_id=parent_node_id,
             node_id=node_id,
         )
 
@@ -108,6 +110,14 @@ class ResearchService:
     def list_completed(self, *, limit: int = 50) -> list[ResearchNode]:
         """Return completed nodes, most recent first."""
         return self._queue.list_completed(limit=limit)
+
+    def list_children(self, parent_node_id: str) -> list[ResearchNode]:
+        """Return all children of a parent node (any status)."""
+        return self._queue.list_children(parent_node_id)
+
+    def list_pending_children(self, parent_node_id: str) -> list[ResearchNode]:
+        """Return pending children of a parent node."""
+        return self._queue.list_pending_children(parent_node_id)
 
     def update(
         self,

@@ -13,6 +13,7 @@ Priority is a signed integer with the following convention:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import sqlite3
 import uuid
@@ -32,16 +33,33 @@ CREATE TABLE IF NOT EXISTS research_queue (
     description TEXT NOT NULL DEFAULT '',
     priority    INTEGER NOT NULL DEFAULT 0,
     source_task_id TEXT,
+    parent_node_id TEXT,
     enqueued_at TEXT NOT NULL,
     dequeued_at TEXT
 )
 """
 
+_MIGRATE_PARENT = """
+ALTER TABLE research_queue ADD COLUMN parent_node_id TEXT
+"""
+
 _INSERT = """
 INSERT INTO research_queue
-    (node_id, title, description, priority, source_task_id, enqueued_at)
+    (node_id, title, description, priority, source_task_id, parent_node_id, enqueued_at)
 VALUES
-    (:node_id, :title, :description, :priority, :source_task_id, :enqueued_at)
+    (:node_id, :title, :description, :priority, :source_task_id, :parent_node_id, :enqueued_at)
+"""
+
+_SELECT_CHILDREN = """
+SELECT * FROM research_queue
+WHERE parent_node_id = ?
+ORDER BY priority ASC, enqueued_at ASC
+"""
+
+_SELECT_PENDING_CHILDREN = """
+SELECT * FROM research_queue
+WHERE parent_node_id = ? AND dequeued_at IS NULL
+ORDER BY priority ASC, enqueued_at ASC
 """
 
 # Order: priority ASC (lower = urgent), then enqueued_at ASC (FIFO within same priority)
@@ -87,6 +105,9 @@ WHERE node_id = ?
 def initialize_research_db(conn: sqlite3.Connection) -> None:
     """Create the ``research_queue`` table if it does not exist."""
     conn.execute(_CREATE_TABLE)
+    # Migrate: add parent_node_id column if missing (pre-existing DBs).
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute(_MIGRATE_PARENT)
     conn.commit()
 
 
@@ -110,6 +131,7 @@ class ResearchNode:
     enqueued_at: datetime
     description: str = ""
     source_task_id: str | None = None
+    parent_node_id: str | None = None
     dequeued_at: datetime | None = None
 
     @property
@@ -118,6 +140,10 @@ class ResearchNode:
             return ResearchNodeStatus.PENDING
         return ResearchNodeStatus.DEQUEUED
 
+    @property
+    def is_child(self) -> bool:
+        return self.parent_node_id is not None
+
     def to_dict(self) -> dict:
         return {
             "node_id": self.node_id,
@@ -125,6 +151,7 @@ class ResearchNode:
             "description": self.description,
             "priority": self.priority,
             "source_task_id": self.source_task_id,
+            "parent_node_id": self.parent_node_id,
             "enqueued_at": self.enqueued_at.isoformat(),
             "dequeued_at": self.dequeued_at.isoformat() if self.dequeued_at else None,
             "status": self.status.value,
@@ -132,12 +159,18 @@ class ResearchNode:
 
     @classmethod
     def _from_row(cls, row: sqlite3.Row) -> ResearchNode:
+        # parent_node_id may not exist in older databases.
+        try:
+            parent = row["parent_node_id"]
+        except (IndexError, KeyError):
+            parent = None
         return cls(
             node_id=row["node_id"],
             title=row["title"],
             description=row["description"] or "",
             priority=row["priority"],
             source_task_id=row["source_task_id"],
+            parent_node_id=parent,
             enqueued_at=datetime.fromisoformat(row["enqueued_at"]),
             dequeued_at=(
                 datetime.fromisoformat(row["dequeued_at"]) if row["dequeued_at"] else None
@@ -173,6 +206,7 @@ class ResearchQueue:
         priority: int = 0,
         description: str = "",
         source_task_id: str | None = None,
+        parent_node_id: str | None = None,
         node_id: str | None = None,
     ) -> ResearchNode:
         """Add a research node to the queue.
@@ -187,6 +221,8 @@ class ResearchQueue:
             Optional extended description of the research task.
         source_task_id:
             Optional ID of the task that triggered this research item.
+        parent_node_id:
+            Optional ID of the parent research node (for planned sub-tasks).
         node_id:
             Optional explicit node ID; a UUID4 is generated if omitted.
         """
@@ -200,6 +236,7 @@ class ResearchQueue:
                 "description": description,
                 "priority": priority,
                 "source_task_id": source_task_id,
+                "parent_node_id": parent_node_id,
                 "enqueued_at": now.isoformat(),
             },
         )
@@ -210,6 +247,7 @@ class ResearchQueue:
             description=description,
             priority=priority,
             source_task_id=source_task_id,
+            parent_node_id=parent_node_id,
             enqueued_at=now,
         )
 
@@ -316,6 +354,16 @@ class ResearchQueue:
     def list_pending(self) -> list[ResearchNode]:
         """Return all pending nodes in priority order."""
         rows = self._conn.execute(_SELECT_ALL_PENDING).fetchall()
+        return [ResearchNode._from_row(r) for r in rows]
+
+    def list_children(self, parent_node_id: str) -> list[ResearchNode]:
+        """Return all children of a parent node (any status)."""
+        rows = self._conn.execute(_SELECT_CHILDREN, (parent_node_id,)).fetchall()
+        return [ResearchNode._from_row(r) for r in rows]
+
+    def list_pending_children(self, parent_node_id: str) -> list[ResearchNode]:
+        """Return pending children of a parent node."""
+        rows = self._conn.execute(_SELECT_PENDING_CHILDREN, (parent_node_id,)).fetchall()
         return [ResearchNode._from_row(r) for r in rows]
 
     def get(self, node_id: str) -> ResearchNode | None:
