@@ -742,6 +742,44 @@ async def mcp_bridge(
     return json.dumps(result, indent=2, default=str) if not isinstance(result, str) else result
 
 
+# ── Peripheral Transducers (Corsair egress) ──────────────────────────── #
+
+
+@skill_server.tool()
+async def transmit_message(
+    platform: str,
+    operation: str,
+    target: str = "",
+    content: str = "",
+) -> str:
+    """Send a message to an external platform via the Corsair MCP sidecar.
+
+    This is the universal egress skill — use it for Discord, Slack, Gmail,
+    GitHub, Telegram, or any other Corsair-supported integration.
+
+    Args:
+        platform: Corsair plugin name (e.g. "discord", "slack", "gmail").
+        operation: API operation to perform (e.g. "send_message", "create_issue").
+        target: Destination identifier (channel ID, email address, repo, etc.).
+        content: Message body or payload content.
+    """
+    params: dict[str, Any] = {}
+    if target:
+        params["target"] = target
+    if content:
+        params["content"] = content
+
+    return await mcp_bridge(
+        server="corsair",
+        tool_name="corsair_run",
+        arguments={
+            "plugin": platform,
+            "operation": operation,
+            "params": params,
+        },
+    )
+
+
 # ── Self-introspection ───────────────────────────────────────────────── #
 
 

@@ -2138,6 +2138,7 @@ def _build_runtime_tool_registry() -> ToolRegistry:
 
     # Level 1 diagnostics tools
     registry.register("mqtt-records-tool", role=ToolRole.COMMUNICATION)
+    registry.register("transmit-message", role=ToolRole.COMMUNICATION)
     registry.register("system-logs-tool", role=ToolRole.CODE)
     registry.register("endocrine-status-tool", role=ToolRole.MEMORY)
     registry.register("tasks-diagnostics-tool", role=ToolRole.CODE)
@@ -3346,6 +3347,25 @@ _CAPABILITIES_CATALOG = [
             {"name": "ask_user", "signature": "ask_user(question: str, timeout_s: float = 30) -> str | None", "description": "Mode A (active): publishes to agent/chat/response and awaits reply. Mode B (inactive): sets node to BLOCKED_ON_USER, yields lease."},
         ],
         "gates": ["presence-aware: reads system/wui/presence", "re-engagement: pending questions surface on reconnect"],
+    },
+    {
+        "id": "transmit_message",
+        "label": "External Messaging (Corsair)",
+        "icon": "📤",
+        "level": 1,
+        "module": "openbad.skills.server",
+        "description": "Universal egress to external platforms via the Corsair MCP sidecar. Supports Discord, Slack, Gmail, GitHub, Telegram, and 40+ integrations.",
+        "tools": [
+            {
+                "name": "transmit_message",
+                "signature": "transmit_message(platform: str, operation: str, target: str = '', content: str = '') -> str",
+                "description": "Route an outbound message or action to any Corsair-supported platform.",
+            },
+        ],
+        "gates": [
+            "requires Corsair sidecar running (openbad-corsair.service)",
+            "plugin must be enabled in peripherals.yaml with valid credentials",
+        ],
     },
     {
         "id": "diagnostics_mqtt",
