@@ -7,18 +7,22 @@ STM to LTM, and exposes a unified query API across all memory tiers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from openbad.memory.base import MemoryEntry, MemoryTier
+from openbad.memory.base import MemoryEntry, MemoryStore, MemoryTier
+from openbad.memory.cognitive_store import CognitiveMemoryStore
 from openbad.memory.config import MemoryConfig
 from openbad.memory.episodic import EpisodicMemory
 from openbad.memory.procedural import ProceduralMemory, Skill
 from openbad.memory.semantic import SemanticMemory, hash_embedding
 from openbad.memory.stm import ShortTermMemory
+from openbad.state.db import initialize_state_db
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +90,36 @@ class MemoryController:
             default_ttl=cfg.stm_ttl_seconds,
             publish_fn=publish_fn,
         )
-        self.episodic = EpisodicMemory(
-            storage_path=Path(storage_dir) / "episodic.json",
-        )
-        self.semantic = SemanticMemory(
-            embed_fn=embed_fn,
-            storage_path=Path(storage_dir) / "semantic.json",
-        )
-        self.procedural = ProceduralMemory(
-            storage_path=Path(storage_dir) / "procedural.json",
-        )
+
+        if cfg.ltm_backend == "sqlite":
+            db_path = Path(storage_dir) / ".." / "state.db"
+            conn = initialize_state_db(db_path)
+            self.episodic: MemoryStore = CognitiveMemoryStore(
+                conn, MemoryTier.EPISODIC,
+            )
+            self.semantic: MemoryStore = CognitiveMemoryStore(
+                conn, MemoryTier.SEMANTIC,
+            )
+            self.procedural: MemoryStore = CognitiveMemoryStore(
+                conn, MemoryTier.PROCEDURAL,
+            )
+            self._cognitive = True
+            self._db_conn: sqlite3.Connection | None = conn
+            _migrate_json_to_sqlite(storage_dir, conn)
+        else:
+            self.episodic = EpisodicMemory(
+                storage_path=Path(storage_dir) / "episodic.json",
+            )
+            self.semantic = SemanticMemory(
+                embed_fn=embed_fn,
+                storage_path=Path(storage_dir) / "semantic.json",
+            )
+            self.procedural = ProceduralMemory(
+                storage_path=Path(storage_dir) / "procedural.json",
+            )
+            self._cognitive = False
+            self._db_conn = None
+
         self._publish_fn = publish_fn
 
     # ------------------------------------------------------------------ #
@@ -190,10 +214,44 @@ class MemoryController:
     def recall(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Recall memories ranked by relevance, with library ref annotations.
 
-        Searches semantic (scored) and episodic (recency) stores, then
-        annotates results whose ``metadata["library_refs"]`` contain book
-        IDs so the LLM knows exhaustive documentation is available.
+        When the cognitive backend is active, uses the ``activate()``
+        pipeline (BM25 + ACT-R + Hebbian).  Otherwise falls back to the
+        legacy cosine-similarity search.
         """
+        if self._cognitive:
+            return self._recall_cognitive(query, top_k)
+        return self._recall_legacy(query, top_k)
+
+    def _recall_cognitive(
+        self, query: str, top_k: int,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+
+        for store_name in ("semantic", "episodic"):
+            store = getattr(self, store_name)
+            if not isinstance(store, CognitiveMemoryStore):
+                continue
+            try:
+                for ar in store.activate(query, limit=top_k):
+                    item: dict[str, Any] = {
+                        "key": ar.entry.key,
+                        "value": str(ar.entry.value),
+                        "tier": ar.entry.tier.value,
+                        "score": ar.score,
+                        "why": ar.why,
+                        "metadata": ar.entry.metadata,
+                    }
+                    _annotate_library_refs(item, ar.entry)
+                    results.append(item)
+            except Exception:
+                logger.exception("Cognitive recall failed for %s", store_name)
+
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:top_k]
+
+    def _recall_legacy(
+        self, query: str, top_k: int,
+    ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
 
         # Semantic search — scored
@@ -266,3 +324,73 @@ def _annotate_library_refs(item: dict[str, Any], entry: MemoryEntry) -> None:
             f" Exhaustive documentation available in Library Book ID: {book_id}]"
         )
     item["library_annotations"] = annotations
+
+
+# ---------------------------------------------------------------------------
+# JSON → SQLite migration
+# ---------------------------------------------------------------------------
+
+_TIER_MAP = {
+    "episodic": MemoryTier.EPISODIC,
+    "semantic": MemoryTier.SEMANTIC,
+    "procedural": MemoryTier.PROCEDURAL,
+}
+
+
+def _migrate_json_to_sqlite(
+    storage_dir: Path,
+    conn: sqlite3.Connection,
+) -> None:
+    """One-time migration of JSON memory files into the engrams table.
+
+    Runs automatically on first startup when JSON files exist and the
+    engrams table is empty for that tier.  After successful migration
+    the JSON files are renamed to ``*.json.migrated``.
+    """
+    for name, tier in _TIER_MAP.items():
+        json_path = Path(storage_dir) / f"{name}.json"
+        if not json_path.exists():
+            continue
+
+        # Only migrate if the tier has no existing data
+        count = conn.execute(
+            "SELECT COUNT(*) FROM engrams WHERE tier = ?", (tier.value,),
+        ).fetchone()[0]
+        if count > 0:
+            continue
+
+        try:
+            raw = json.loads(json_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Could not read %s for migration", json_path)
+            continue
+
+        entries: list[dict[str, Any]] = []
+        if isinstance(raw, dict):
+            # Typical format: { "entries": [...] } or bare { key: entry }
+            if "entries" in raw and isinstance(raw["entries"], list):
+                entries = raw["entries"]
+            else:
+                entries = list(raw.values())
+        elif isinstance(raw, list):
+            entries = raw
+
+        migrated = 0
+        store = CognitiveMemoryStore(conn, tier)
+        for data in entries:
+            if not isinstance(data, dict):
+                continue
+            try:
+                entry = MemoryEntry.from_dict(data)
+            except (KeyError, TypeError):
+                logger.debug("Skipping malformed entry during migration")
+                continue
+            store.write(entry)
+            migrated += 1
+
+        if migrated:
+            migrated_path = json_path.with_suffix(".json.migrated")
+            json_path.rename(migrated_path)
+            logger.info(
+                "Migrated %d %s entries from JSON to SQLite", migrated, name,
+            )
