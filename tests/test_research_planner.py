@@ -244,3 +244,15 @@ class TestBuildSynthesisDescription:
         assert "Finding about sub 2" in desc
         assert "Sub 1" in desc
         assert "Sub 2" in desc
+
+    def test_long_summaries_are_truncated(self):
+        parent = _make_node(title="Big Topic")
+        child1 = _make_node(title="Sub 1")
+        child1.node_id = "c1"
+        long_text = "word " * 300  # ~1500 chars
+        summaries = {"c1": long_text}
+        desc = build_synthesis_description(parent, [child1], summaries)
+        # Each child summary should be truncated with ellipsis.
+        assert "\u2026" in desc
+        # Total should be well under the raw length.
+        assert len(desc) < len(long_text)

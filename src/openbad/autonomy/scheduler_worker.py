@@ -49,6 +49,10 @@ _COMPLEXITY_KEYWORDS = re.compile(
 _COMPLEXITY_DESC_THRESHOLD = 500  # characters
 _COMPLEXITY_SUBTASK_THRESHOLD = 2
 
+# Track per-node retry attempts so stuck nodes don't block the queue forever.
+_research_retry_counts: dict[str, int] = {}
+_MAX_RESEARCH_RETRIES = 3
+
 
 def _classify_task_complexity(task: TaskModel) -> bool:
     """Return True if a task should be dispatched to a CrewAI crew."""
@@ -222,6 +226,36 @@ def _save_research_to_library(node: object, summary: str) -> None:
         )
     except Exception:
         log.exception("Failed to save research findings to library")
+
+
+def _save_children_to_library(synthesis_node: object) -> None:
+    """Fallback: save individual child findings when synthesis fails."""
+    try:
+        from openbad.skills.library_tool import draft_book
+        from openbad.tasks.research_service import ResearchService
+
+        section_id = _ensure_research_section()
+        parent_id = getattr(synthesis_node, "parent_node_id", None)
+        if not parent_id:
+            return
+        svc = ResearchService.get()
+        children = svc.list_children(parent_id)
+        saved = 0
+        for child in children:
+            if child.title.startswith("[synthesis]"):
+                continue
+            desc = (child.description or "").strip()
+            if not desc:
+                continue
+            draft_book(section_id, child.title, desc)
+            saved += 1
+        if saved:
+            log.info(
+                "Saved %d child research findings to library (synthesis fallback)",
+                saved,
+            )
+    except Exception:
+        log.exception("Failed to save child findings to library")
 
 
 def _parse_event_timestamp(raw: object) -> float | None:
@@ -1150,19 +1184,59 @@ def _process_autonomy_work(
             summary = _strip_autonomy_interaction(summary)
 
         # Guard: if the LLM returned empty content and used no tools,
-        # the research didn't actually happen — leave pending for retry.
+        # the research didn't actually happen — leave pending for retry
+        # up to _MAX_RESEARCH_RETRIES, then complete as failed.
         if not summary.strip() and not tools_used:
-            log.warning("Research node %s: LLM returned empty result with no tool use; leaving pending", node.node_id)
-            _post_session(research_session_id, f"Research node {node.node_id}: LLM returned empty result. Will retry.")
+            retries = _research_retry_counts.get(node.node_id, 0) + 1
+            _research_retry_counts[node.node_id] = retries
+            if retries < _MAX_RESEARCH_RETRIES:
+                log.warning(
+                    "Research node %s: empty result (attempt %d/%d); will retry",
+                    node.node_id, retries, _MAX_RESEARCH_RETRIES,
+                )
+                _post_session(
+                    research_session_id,
+                    f"Research node {node.node_id}: LLM returned empty result "
+                    f"(attempt {retries}/{_MAX_RESEARCH_RETRIES}). Will retry.",
+                )
+                _apply_reward(
+                    outcome=TraceOutcome.FAILURE,
+                    node_id=node.node_id,
+                    task_id=node.source_task_id or f"research:{node.node_id}",
+                    source="research",
+                    reason=f"Reward evaluation for empty research node {node.node_id}",
+                    context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "empty_result"},
+                )
+                return
+
+            # Max retries exhausted — complete as failed so queue isn't blocked.
+            log.warning(
+                "Research node %s: max retries exhausted; completing as failed",
+                node.node_id,
+            )
+            _research_retry_counts.pop(node.node_id, None)
+            research_svc.complete(node.node_id)
+            _post_session(
+                research_session_id,
+                f"❌ Research node **{node.title}** failed after "
+                f"{_MAX_RESEARCH_RETRIES} attempts (empty result).",
+            )
+            # For failed synthesis, save child findings to library as fallback.
+            if is_synthesis and node.parent_node_id:
+                _save_children_to_library(node)
             _apply_reward(
                 outcome=TraceOutcome.FAILURE,
                 node_id=node.node_id,
                 task_id=node.source_task_id or f"research:{node.node_id}",
                 source="research",
-                reason=f"Reward evaluation for empty research node {node.node_id}",
-                context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "empty_result"},
+                reason=f"Research node {node.node_id} failed after max retries",
+                context={"system": "research", "source_task_id": node.source_task_id or "", "failure": "max_retries"},
             )
+            executed_research_id = node.node_id
             return
+
+        # Clear retry counter on success.
+        _research_retry_counts.pop(node.node_id, None)
 
         # Store the summary in the node description so the synthesis
         # node can access completed child findings later.
@@ -1173,8 +1247,9 @@ def _process_autonomy_work(
                 pass
         research_svc.complete(node.node_id)
 
-        # Persist synthesis results (or standalone results) to the Library.
-        if summary.strip() and (is_synthesis or not node.is_child):
+        # Persist results to the Library — save child findings individually
+        # so knowledge isn't lost even if synthesis later fails.
+        if summary.strip():
             _save_research_to_library(node, summary)
 
         meta = {"provider": provider_name, "model": model_id, "tools_used": list(tools_used)}

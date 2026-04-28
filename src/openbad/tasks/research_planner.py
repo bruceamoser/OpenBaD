@@ -130,12 +130,21 @@ def enqueue_plan(
     return children
 
 
+# Keep each child summary under this limit so the combined synthesis
+# prompt fits within small-model context windows.
+_CHILD_SUMMARY_MAX_CHARS = 600
+
+
 def build_synthesis_description(
     parent: ResearchNode,
     children: list[ResearchNode],
     child_summaries: dict[str, str],
 ) -> str:
-    """Build the description for the synthesis node."""
+    """Build the description for the synthesis node.
+
+    Each child summary is truncated to *_CHILD_SUMMARY_MAX_CHARS* so the
+    total prompt stays within reach of small language models.
+    """
     lines = [
         f"Synthesise the findings from the following sub-research into a "
         f"cohesive report on: {parent.title}\n",
@@ -144,6 +153,8 @@ def build_synthesis_description(
     ]
     for i, child in enumerate(children):
         summary = child_summaries.get(child.node_id, "(no summary available)")
+        if len(summary) > _CHILD_SUMMARY_MAX_CHARS:
+            summary = summary[:_CHILD_SUMMARY_MAX_CHARS].rsplit(" ", 1)[0] + " …"
         lines.append(f"### {i + 1}. {child.title}\n{summary}\n")
     return "\n".join(lines)
 
