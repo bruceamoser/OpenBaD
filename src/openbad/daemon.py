@@ -358,7 +358,7 @@ class Daemon:
         try:
             from openbad.identity.persistence import IdentityPersistence
             from openbad.identity.personality_modulator import PersonalityModulator
-            from openbad.memory.base import EpisodicMemory
+            from openbad.memory.episodic import EpisodicMemory
             from openbad.wui.server import _resolve_identity_config_path
 
             config_path = _resolve_identity_config_path()
