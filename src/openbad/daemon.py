@@ -23,6 +23,9 @@ from openbad.nervous_system.schemas.cognitive_pb2 import ModelHealthStatus
 from openbad.nervous_system.schemas.common_pb2 import Header
 from openbad.nervous_system.schemas.endocrine_pb2 import EndocrineEvent
 from openbad.nervous_system.schemas.telemetry_pb2 import TokenTelemetry
+from openbad.peripherals.chat_router import PeripheralChatRouter
+from openbad.peripherals.config import load_peripherals_config
+from openbad.peripherals.telegram_bridge import TelegramBridge
 from openbad.plugins.observations.external_signals import ExternalSignalPlugin
 from openbad.reflex_arc.fsm import AgentFSM
 
@@ -66,6 +69,8 @@ class Daemon:
         self._stop_event: asyncio.Event | None = None
         self._crew_bridge: CrewMQTTBridge | None = None
         self._external_signal_plugin: ExternalSignalPlugin | None = None
+        self._telegram_bridge: TelegramBridge | None = None
+        self._chat_router: PeripheralChatRouter | None = None
 
     # -- public --------------------------------------------------------- #
 
@@ -123,6 +128,9 @@ class Daemon:
         )
         self._crew_bridge.subscribe()
 
+        # 4b. Peripheral transducers (Telegram, etc.)
+        await self._start_peripherals()
+
         # 5. Interoception publishers for vitals panels and dashboards
         telemetry_interval_s = _load_hardware_telemetry_interval()
         self._telemetry = TelemetryMonitor(self._client, interval=telemetry_interval_s)
@@ -166,6 +174,9 @@ class Daemon:
         if self._telemetry is not None:
             self._telemetry.stop()
             self._telemetry = None
+
+        # Peripheral transducers
+        await self._stop_peripherals()
 
         self._crew_bridge = None
         self._endocrine = None
@@ -334,6 +345,55 @@ class Daemon:
         finally:
             if self._fsm is not None:
                 self._fsm.finish_work()
+
+    # -- peripheral transducers ----------------------------------------- #
+
+    async def _start_peripherals(self) -> None:
+        """Start enabled peripheral bridges (Telegram, etc.)."""
+        if self._client is None:
+            return
+
+        cfg = load_peripherals_config()
+        enabled_plugins = {p.name for p in cfg.plugins if p.enabled}
+
+        if "telegram" in enabled_plugins:
+            bridge = TelegramBridge.from_credentials(self._client)
+            if bridge is not None:
+                await bridge.start()
+                self._telegram_bridge = bridge
+                logger.info("Telegram bridge activated")
+            else:
+                logger.warning("Telegram enabled but credentials missing")
+
+        if enabled_plugins:
+            self._chat_router = PeripheralChatRouter(
+                self._client, self._resolve_chat_model,
+            )
+            self._chat_router.start()
+
+    async def _stop_peripherals(self) -> None:
+        """Stop peripheral bridges."""
+        if self._chat_router is not None:
+            self._chat_router.stop()
+            self._chat_router = None
+
+        if self._telegram_bridge is not None:
+            await self._telegram_bridge.stop()
+            self._telegram_bridge = None
+
+    def _resolve_chat_model(self) -> tuple[object | None, str | None, str]:
+        """Return ``(chat_model, model_id, provider_name)`` for the default provider."""
+        try:
+            from openbad.wui.server import _read_providers_config, _resolve_chat_adapter
+
+            _path, config = _read_providers_config()
+            chat_model, model_id, provider_name, *_ = _resolve_chat_adapter(
+                config, "chat",
+            )
+            return chat_model, model_id, provider_name
+        except Exception:
+            logger.exception("Failed to resolve chat model for peripheral router")
+            return None, None, ""
 
     def _on_external_inbound(self, topic: str, payload: bytes) -> None:
         """Handle an inbound external message from the Corsair webhook bridge.
