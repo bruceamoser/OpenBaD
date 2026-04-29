@@ -231,12 +231,13 @@ class TestPeripheralChatRouter:
         router = PeripheralChatRouter(mqtt, _resolver())
 
         mock_loop = MagicMock()
-        with patch("asyncio.get_event_loop", return_value=mock_loop):
-            router._on_inbound(
-                "topic",
-                json.dumps(
-                    {"platform": "t", "event": "message",
-                     "data": {"content": "hi", "sender": "1"}},
-                ).encode(),
-            )
-            mock_loop.create_task.assert_called_once()
+        mock_loop.is_closed.return_value = False
+        router._loop = mock_loop
+        router._on_inbound(
+            "topic",
+            json.dumps(
+                {"platform": "t", "event": "message",
+                 "data": {"content": "hi", "sender": "1"}},
+            ).encode(),
+        )
+        mock_loop.call_soon_threadsafe.assert_called_once()
