@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import stat
-from pathlib import Path
 
 from aiohttp import web
 
@@ -14,11 +13,11 @@ from openbad.peripherals.config import (
     CorsairConfig,
     PluginConfig,
     load_peripherals_config,
+    resolve_config_write_path,
+    resolve_credentials_dir,
 )
 
 logger = logging.getLogger(__name__)
-
-_CREDS_DIR = Path("data/config/peripherals")
 
 # Available Corsair plugin catalog — integrations users can add.
 # Each entry describes the plugin, required credential fields, and a hint.
@@ -157,8 +156,8 @@ async def _put_transducer(request: web.Request) -> web.Response:
 
     # Save credentials securely if provided
     if credentials and isinstance(credentials, dict):
-        _CREDS_DIR.mkdir(parents=True, exist_ok=True)
-        creds_path = _CREDS_DIR / f"{plugin_name}.json"
+        creds_dir = resolve_credentials_dir()
+        creds_path = creds_dir / f"{plugin_name}.json"
         creds_path.write_text(json.dumps(credentials, indent=2))
         # Set file permissions to 0600 (owner read/write only)
         os.chmod(creds_path, stat.S_IRUSR | stat.S_IWUSR)
@@ -206,8 +205,8 @@ async def _post_transducer(request: web.Request) -> web.Response:
 
     # Save credentials if provided
     if credentials and isinstance(credentials, dict):
-        _CREDS_DIR.mkdir(parents=True, exist_ok=True)
-        creds_path = _CREDS_DIR / f"{name}.json"
+        creds_dir = resolve_credentials_dir()
+        creds_path = creds_dir / f"{name}.json"
         creds_path.write_text(json.dumps(credentials, indent=2))
         os.chmod(creds_path, stat.S_IRUSR | stat.S_IWUSR)
 
@@ -280,7 +279,8 @@ async def _verify_credentials(plugin_name: str) -> web.Response:
     """Verify credentials by calling the platform's API directly."""
     import aiohttp as _aiohttp  # noqa: PLC0415
 
-    creds_path = _CREDS_DIR / f"{plugin_name}.json"
+    creds_dir = resolve_credentials_dir()
+    creds_path = creds_dir / f"{plugin_name}.json"
     if not creds_path.exists():
         return web.json_response(
             {"ok": False, "error": "No credentials file found"}, status=400,
@@ -371,19 +371,17 @@ async def _verify_credentials(plugin_name: str) -> web.Response:
 
 
 def _update_plugin_enabled(plugin_name: str, enabled: bool) -> None:
-    """Toggle the enabled flag for a plugin in peripherals.yaml."""
+    """Toggle the enabled flag for a plugin in peripherals.yaml.
+
+    Writes to the first writable config path (``/etc/openbad`` in
+    production, ``config/`` in dev) so the daemon picks up changes
+    without manual file copying.
+    """
     import yaml  # noqa: PLC0415
 
-    # Read from /etc first (production overlay), but always write to
-    # the local config dir (writable by the service user).
-    write_path = Path("config/peripherals.yaml")
-    read_path = write_path
+    write_path = resolve_config_write_path()
 
-    etc_path = Path("/etc/openbad/peripherals.yaml")
-    if etc_path.exists():
-        read_path = etc_path
-
-    raw = (yaml.safe_load(read_path.read_text()) or {}) if read_path.exists() else {}
+    raw = (yaml.safe_load(write_path.read_text()) or {}) if write_path.exists() else {}
 
     corsair = raw.setdefault("corsair", {})
     plugins = corsair.setdefault("plugins", [])
@@ -391,9 +389,16 @@ def _update_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     for p in plugins:
         if isinstance(p, dict) and p.get("name") == plugin_name:
             p["enabled"] = enabled
+            # Ensure credentials_file is set
+            if not p.get("credentials_file"):
+                p["credentials_file"] = f"{plugin_name}.json"
             break
     else:
-        plugins.append({"name": plugin_name, "enabled": enabled})
+        plugins.append({
+            "name": plugin_name,
+            "enabled": enabled,
+            "credentials_file": f"{plugin_name}.json",
+        })
 
     write_path.parent.mkdir(parents=True, exist_ok=True)
     write_path.write_text(yaml.dump(raw, default_flow_style=False))

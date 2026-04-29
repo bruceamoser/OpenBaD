@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,8 @@ from openbad.peripherals.config import (
     PluginConfig,
     enabled_plugin_names,
     load_peripherals_config,
+    resolve_config_write_path,
+    resolve_credentials_dir,
     resolve_credentials_path,
 )
 
@@ -205,3 +208,65 @@ class TestEnabledPluginNames:
 
     def test_empty_for_default_config(self) -> None:
         assert enabled_plugin_names(CorsairConfig()) == []
+
+
+# ── resolve_credentials_dir tests ─────────────────────────────────── #
+
+
+class TestResolveCredentialsDir:
+
+    def test_returns_existing_dir(self, tmp_path: Path) -> None:
+        with patch(
+            "openbad.peripherals.config._CREDENTIALS_DIR_CANDIDATES",
+            [tmp_path / "prod", tmp_path / "dev"],
+        ):
+            prod = tmp_path / "prod"
+            prod.mkdir()
+            result = resolve_credentials_dir()
+            assert result == prod
+
+    def test_creates_dir_if_parent_exists(self, tmp_path: Path) -> None:
+        with patch(
+            "openbad.peripherals.config._CREDENTIALS_DIR_CANDIDATES",
+            [tmp_path / "prod" / "creds", tmp_path / "dev"],
+        ):
+            (tmp_path / "prod").mkdir()
+            result = resolve_credentials_dir()
+            assert result == tmp_path / "prod" / "creds"
+            assert result.is_dir()
+
+    def test_falls_back_to_last_candidate(self, tmp_path: Path) -> None:
+        with patch(
+            "openbad.peripherals.config._CREDENTIALS_DIR_CANDIDATES",
+            [tmp_path / "nonexistent" / "prod", tmp_path / "dev"],
+        ):
+            result = resolve_credentials_dir()
+            assert result == tmp_path / "dev"
+            assert result.is_dir()
+
+
+# ── resolve_config_write_path tests ───────────────────────────────── #
+
+
+class TestResolveConfigWritePath:
+
+    def test_returns_existing_writable_file(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "peripherals.yaml"
+        cfg.write_text("corsair: {}")
+        with patch(
+            "openbad.peripherals.config._DEFAULT_SEARCH_PATHS",
+            [cfg, tmp_path / "fallback.yaml"],
+        ):
+            result = resolve_config_write_path()
+            assert result == cfg
+
+    def test_falls_back_when_not_writable(self, tmp_path: Path) -> None:
+        read_only = tmp_path / "ro" / "peripherals.yaml"
+        fallback = tmp_path / "fb" / "peripherals.yaml"
+        (tmp_path / "fb").mkdir()
+        with patch(
+            "openbad.peripherals.config._DEFAULT_SEARCH_PATHS",
+            [read_only, fallback],
+        ):
+            result = resolve_config_write_path()
+            assert result == fallback

@@ -455,6 +455,13 @@ create_dirs() {
     mkdir -p "$DATA_DIR" "$LOG_DIR"
     chown "$OPENBAD_USER:$OPENBAD_GROUP" "$DATA_DIR" "$LOG_DIR"
     chmod 750 "$DATA_DIR" "$LOG_DIR"
+
+    # Peripheral transducer credentials directory
+    local creds_dir="$DATA_DIR/data/config/peripherals"
+    mkdir -p "$creds_dir"
+    chown "$OPENBAD_USER:$OPENBAD_GROUP" "$creds_dir"
+    chmod 700 "$creds_dir"
+    info "  Created $creds_dir"
 }
 
 # ------------------------------------------------------------------

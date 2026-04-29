@@ -19,11 +19,11 @@ import aiohttp
 
 from openbad.nervous_system import topics
 from openbad.nervous_system.client import NervousSystemClient
+from openbad.peripherals.config import resolve_credentials_dir
 
 logger = logging.getLogger(__name__)
 
 _TELEGRAM_API = "https://api.telegram.org/bot{token}"
-_CREDS_DIR = Path("data/config/peripherals")
 _POLL_TIMEOUT = 30  # Telegram long-poll timeout (seconds)
 _MAX_BACKOFF = 60  # Max retry backoff on API errors
 
@@ -223,7 +223,7 @@ class TelegramBridge:
         credentials_dir: Path | None = None,
     ) -> TelegramBridge | None:
         """Create a bridge from stored credentials, or None if unavailable."""
-        creds_dir = credentials_dir or _CREDS_DIR
+        creds_dir = credentials_dir or resolve_credentials_dir()
         creds_path = creds_dir / "telegram.json"
         if not creds_path.exists():
             logger.warning("No Telegram credentials at %s", creds_path)

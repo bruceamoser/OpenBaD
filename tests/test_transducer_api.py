@@ -94,7 +94,8 @@ class TestPutTransducer:
     @pytest.mark.asyncio
     async def test_saves_credentials(self, aiohttp_client, tmp_path) -> None:
         with patch(
-            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+            "openbad.wui.transducer_api.resolve_credentials_dir",
+            return_value=tmp_path,
         ), patch(
             "openbad.wui.transducer_api._update_plugin_enabled",
         ):
@@ -246,7 +247,8 @@ class TestPostTransducer:
     @pytest.mark.asyncio
     async def test_creates_plugin(self, aiohttp_client, tmp_path) -> None:
         with patch(
-            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+            "openbad.wui.transducer_api.resolve_credentials_dir",
+            return_value=tmp_path,
         ), patch(
             "openbad.wui.transducer_api._update_plugin_enabled",
         ):
@@ -335,7 +337,8 @@ class TestCredentialVerification:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+            "openbad.wui.transducer_api.resolve_credentials_dir",
+            return_value=tmp_path,
         ), patch(
             "aiohttp.ClientSession", return_value=mock_session,
         ):
@@ -361,7 +364,8 @@ class TestCredentialVerification:
     async def test_missing_credentials(self, aiohttp_client, tmp_path) -> None:
         """Test returns error when no credentials file exists."""
         with patch(
-            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+            "openbad.wui.transducer_api.resolve_credentials_dir",
+            return_value=tmp_path,
         ):
             mock_server = MagicMock()
             mock_server.list_tools = MagicMock(return_value=[])
