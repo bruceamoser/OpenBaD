@@ -1020,10 +1020,12 @@ def assemble_context(
     message_tokens = estimate_tokens(message)
 
     # Reserve tokens: system + current message + tool definitions + response headroom.
-    # Tool definitions (~1200 tokens for chat role) are injected by
-    # LangGraph's bind_tools and don't appear in our messages array,
-    # so we must account for them here.
-    _TOOL_DEFINITION_RESERVE = 1500
+    # Tool definitions are injected by LangGraph's bind_tools and don't
+    # appear in our messages array, so we must account for them here.
+    # With hierarchical tool routing the chat role binds ~10 tools
+    # (8 direct + 2 meta-tools); roles without hierarchical routing may
+    # bind more.  We use a conservative estimate that covers both cases.
+    _TOOL_DEFINITION_RESERVE = 3000
     available = max(
         0,
         budget.context_tokens

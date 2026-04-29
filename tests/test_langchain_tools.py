@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openbad.frameworks.langchain_tools import (
+    _DIRECT_TOOLS,
     _ROLE_TOOLS,
     _build_args_schema,
+    _build_meta_tools,
     _json_type_to_python,
     _make_tool_func,
     _mcp_tool_to_langchain,
@@ -220,6 +222,146 @@ class TestRoleFiltering:
         assert "get_entity_info" in chat_tools
         assert "update_user_entity" in chat_tools
         assert "update_assistant_entity" in chat_tools
+
+
+# ── Hierarchical tool routing tests ──────────────────────────────────── #
+
+
+class TestDirectToolsConfig:
+    def test_chat_has_direct_tools(self) -> None:
+        assert "chat" in _DIRECT_TOOLS
+
+    def test_direct_tools_subset_of_role_tools(self) -> None:
+        for role, direct in _DIRECT_TOOLS.items():
+            assert direct.issubset(_ROLE_TOOLS[role]), (
+                f"_DIRECT_TOOLS[{role!r}] has tools not in _ROLE_TOOLS: "
+                f"{direct - _ROLE_TOOLS[role]}"
+            )
+
+    def test_chat_direct_tools_are_small(self) -> None:
+        assert len(_DIRECT_TOOLS["chat"]) <= 10
+
+
+class TestBuildMetaTools:
+    def test_returns_list_and_use_tool(self) -> None:
+        fake = _mcp_tool_to_langchain(
+            _fake_mcp_tool("search_library", "Search library"),
+        )
+        meta = _build_meta_tools("chat", [fake])
+        names = {t.name for t in meta}
+        assert names == {"list_tools", "use_tool"}
+
+    @pytest.mark.asyncio
+    async def test_list_tools_shows_catalogue(self) -> None:
+        fakes = [
+            _mcp_tool_to_langchain(_fake_mcp_tool("search_library", "Search the library")),
+            _mcp_tool_to_langchain(_fake_mcp_tool("draft_book", "Draft a book")),
+        ]
+        meta = _build_meta_tools("chat", fakes)
+        list_tool = next(t for t in meta if t.name == "list_tools")
+        result = await list_tool.coroutine(query="")
+        assert "search_library" in result
+        assert "draft_book" in result
+        assert "Available tools (2)" in result
+
+    @pytest.mark.asyncio
+    async def test_list_tools_filters_by_query(self) -> None:
+        fakes = [
+            _mcp_tool_to_langchain(_fake_mcp_tool("search_library", "Search the library")),
+            _mcp_tool_to_langchain(_fake_mcp_tool("draft_book", "Draft a book")),
+        ]
+        meta = _build_meta_tools("chat", fakes)
+        list_tool = next(t for t in meta if t.name == "list_tools")
+        result = await list_tool.coroutine(query="library")
+        assert "search_library" in result
+        assert "draft_book" not in result
+
+    @pytest.mark.asyncio
+    async def test_use_tool_dispatches(self) -> None:
+        fake = _mcp_tool_to_langchain(
+            _fake_mcp_tool("search_library", "Search the library"),
+        )
+        meta = _build_meta_tools("chat", [fake])
+        use = next(t for t in meta if t.name == "use_tool")
+
+        with patch(
+            "openbad.frameworks.langchain_tools.call_skill",
+            new_callable=AsyncMock,
+            return_value="found 3 books",
+        ):
+            result = await use.coroutine(
+                tool_name="search_library",
+                arguments='{"query": "python"}',
+            )
+        assert "found 3 books" in result
+
+    @pytest.mark.asyncio
+    async def test_use_tool_rejects_unknown(self) -> None:
+        fake = _mcp_tool_to_langchain(
+            _fake_mcp_tool("search_library", "Search the library"),
+        )
+        meta = _build_meta_tools("chat", [fake])
+        use = next(t for t in meta if t.name == "use_tool")
+        result = await use.coroutine(tool_name="nonexistent", arguments="{}")
+        assert "Unknown tool" in result
+
+    @pytest.mark.asyncio
+    async def test_use_tool_rejects_bad_json(self) -> None:
+        fake = _mcp_tool_to_langchain(
+            _fake_mcp_tool("search_library", "Search"),
+        )
+        meta = _build_meta_tools("chat", [fake])
+        use = next(t for t in meta if t.name == "use_tool")
+        result = await use.coroutine(tool_name="search_library", arguments="{bad")
+        assert "Invalid JSON" in result
+
+
+class TestHierarchicalRouting:
+    @pytest.mark.asyncio
+    async def test_chat_gets_meta_tools(self) -> None:
+        # Build fake MCP tools for all chat role tools
+        chat_names = _ROLE_TOOLS["chat"]
+        fake_tools = [_fake_mcp_tool(n, f"Tool {n}") for n in chat_names]
+
+        with patch("openbad.frameworks.langchain_tools.skill_server") as mock_server:
+            mock_server.list_tools = AsyncMock(return_value=fake_tools)
+            from openbad.frameworks import langchain_tools
+
+            langchain_tools._tools_cache = None
+            langchain_tools._tools_cache = await langchain_tools._async_build_tools()
+
+            tools = await async_get_tools_for_role("chat")
+            names = {t.name for t in tools}
+
+        # Should have direct tools + list_tools + use_tool
+        direct = _DIRECT_TOOLS["chat"]
+        for name in direct:
+            assert name in names, f"Direct tool {name!r} missing"
+        assert "list_tools" in names
+        assert "use_tool" in names
+        # Total should be direct + 2 meta-tools
+        assert len(tools) == len(direct) + 2
+
+    @pytest.mark.asyncio
+    async def test_task_gets_all_tools_directly(self) -> None:
+        # Task role has no _DIRECT_TOOLS entry → all tools bound directly
+        task_names = _ROLE_TOOLS["task"]
+        fake_tools = [_fake_mcp_tool(n, f"Tool {n}") for n in task_names]
+
+        with patch("openbad.frameworks.langchain_tools.skill_server") as mock_server:
+            mock_server.list_tools = AsyncMock(return_value=fake_tools)
+            from openbad.frameworks import langchain_tools
+
+            langchain_tools._tools_cache = None
+            langchain_tools._tools_cache = await langchain_tools._async_build_tools()
+
+            tools = await async_get_tools_for_role("task")
+            names = {t.name for t in tools}
+
+        # No meta-tools for task role
+        assert "list_tools" not in names
+        assert "use_tool" not in names
+        assert len(tools) == len(task_names)
 
 
 # ── CrewAI tool adapter tests ────────────────────────────────────────── #
