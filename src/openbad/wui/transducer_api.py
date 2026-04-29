@@ -254,13 +254,15 @@ async def _post_transducer_test(request: web.Request) -> web.Response:
             # Fall back to credential verification
             return await _verify_credentials(plugin_name)
 
-        # Call the transmit_message skill
-        result = await tools["transmit_message"].run(
-            platform=plugin_name,
-            operation="sendMessage",
-            target=target,
-            content=content,
-        )
+        # Call the transmit_message skill via call_skill
+        from openbad.skills.server import call_skill  # noqa: PLC0415
+
+        result = await call_skill("transmit_message", {
+            "platform": plugin_name,
+            "operation": "sendMessage",
+            "target": target,
+            "content": content,
+        })
         return web.json_response({"ok": True, "result": str(result)})
     except web.HTTPException:
         raise
