@@ -72,7 +72,11 @@ from openbad.proprioception.registry import ToolRegistry, ToolRole
 from openbad.sensory.config import load_sensory_config
 from openbad.usage_recorder import UsageTrackingProviderAdapter  # still used by _build_wizard_adapter
 from openbad.wui.bridge import MqttWebSocketBridge
-from openbad.wui.chat_pipeline import get_conversation_history, stream_chat
+from openbad.wui.chat_pipeline import (
+    get_conversation_history,
+    list_peripheral_sessions,
+    stream_chat,
+)
 from openbad.wui.usage_tracker import UsageTracker, resolve_usage_db_path
 
 # SvelteKit build output: wui-svelte/build/ is copied here by ``make wui``.
@@ -2842,7 +2846,9 @@ def _sanitize_session_policy(payload: dict[str, object]) -> dict[str, object]:
 
 async def _get_sessions(_request: web.Request) -> web.Response:
     policy = load_session_policy(SESSION_POLICY_PATH)
-    return web.json_response({"sessions": list_sessions(policy)})
+    sessions = list_sessions(policy)
+    sessions.extend(list_peripheral_sessions())
+    return web.json_response({"sessions": sessions})
 
 
 async def _get_immune_policy(_request: web.Request) -> web.Response:

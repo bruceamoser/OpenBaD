@@ -27,6 +27,7 @@ class PeripheralChatRouter:
         self,
         mqtt_client: NervousSystemClient,
         model_resolver: Callable[[], tuple[Any, str, str]],
+        identity_resolver: Callable[[], tuple[Any, Any, Any, Any, Any]] | None = None,
     ) -> None:
         """Initialise the router.
 
@@ -38,9 +39,14 @@ class PeripheralChatRouter:
             A callable returning ``(chat_model, model_id, provider_name)``
             for the current default provider.  This is called per-message
             so the router always uses the latest configuration.
+        identity_resolver:
+            Optional callable returning a 5-tuple of
+            ``(user_profile, assistant_profile, modulation,
+            identity_persistence, personality_modulator)``.
         """
         self._mqtt = mqtt_client
         self._resolve_model = model_resolver
+        self._resolve_identity = identity_resolver
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -114,6 +120,24 @@ class PeripheralChatRouter:
             logger.warning("No chat model configured — skipping peripheral message")
             return
 
+        # Resolve identity context if available
+        user_profile = None
+        assistant_profile = None
+        modulation = None
+        identity_persistence = None
+        personality_modulator = None
+        if self._resolve_identity is not None:
+            try:
+                (
+                    user_profile,
+                    assistant_profile,
+                    modulation,
+                    identity_persistence,
+                    personality_modulator,
+                ) = self._resolve_identity()
+            except Exception:
+                logger.exception("Failed to resolve identity context")
+
         # Collect the streamed response
         reply_parts: list[str] = []
         try:
@@ -123,6 +147,11 @@ class PeripheralChatRouter:
                 content,
                 session_id,
                 provider_name=provider_name,
+                user_profile=user_profile,
+                assistant_profile=assistant_profile,
+                modulation=modulation,
+                identity_persistence=identity_persistence,
+                personality_modulator=personality_modulator,
                 nervous_system_client=self._mqtt,
             ):
                 if chunk.error:

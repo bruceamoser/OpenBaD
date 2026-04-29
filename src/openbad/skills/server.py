@@ -797,6 +797,167 @@ async def list_embedded_skills() -> str:
     return "\n".join(lines)
 
 
+# ── Entity / Identity Tools ─────────────────────────────────────────── #
+
+_identity_persistence: Any = None
+_personality_modulator: Any = None
+
+
+def _get_identity_persistence() -> Any:
+    """Return the global IdentityPersistence, lazily initialising if needed."""
+    global _identity_persistence, _personality_modulator
+    if _identity_persistence is not None:
+        return _identity_persistence
+    try:
+        from pathlib import Path
+
+        from openbad.identity.persistence import IdentityPersistence
+        from openbad.identity.personality import PersonalityModulator
+        from openbad.memory.base import EpisodicMemory
+        from openbad.wui.server import _resolve_identity_config_path
+
+        config_path = _resolve_identity_config_path()
+        if not config_path.exists():
+            return None
+
+        episodic_path = Path("/var/lib/openbad/memory/identity.json")
+        _identity_persistence = IdentityPersistence(
+            config_path,
+            EpisodicMemory(storage_path=episodic_path),
+        )
+        _personality_modulator = PersonalityModulator(
+            _identity_persistence.assistant,
+        )
+        return _identity_persistence
+    except Exception:
+        log.exception("Failed to initialise identity persistence")
+        return None
+
+
+@skill_server.tool()
+async def get_entity_info() -> str:
+    """Retrieve current user and assistant entity profiles.
+
+    Returns the full identity information for both the user you are
+    talking to and yourself (the assistant).  Use this to check what
+    you know about the user or about your own identity before updating.
+    """
+    try:
+        persistence = _get_identity_persistence()
+        if persistence is None:
+            return "Identity system not available."
+
+        user = persistence.user
+        assistant = persistence.assistant
+        lines = ["## User Profile"]
+        for field_name in (
+            "name", "preferred_name", "communication_style",
+            "expertise_domains", "interaction_history_summary",
+            "worldview", "interests", "pet_peeves",
+            "preferred_feedback_style", "active_projects",
+            "timezone", "work_hours",
+        ):
+            val = getattr(user, field_name, None)
+            if val is not None and val != "" and val != []:
+                lines.append(f"- **{field_name}**: {val}")
+
+        lines.append("\n## Assistant Profile")
+        for field_name in (
+            "name", "persona_summary", "learning_focus", "worldview",
+            "boundaries", "opinions", "vocabulary", "influences",
+            "anti_patterns", "current_focus",
+        ):
+            val = getattr(assistant, field_name, None)
+            if val is not None and val != "" and val != [] and val != {}:
+                lines.append(f"- **{field_name}**: {val}")
+
+        o = assistant.openness
+        c = assistant.conscientiousness
+        e = assistant.extraversion
+        a = assistant.agreeableness
+        s = assistant.stability
+        lines.append(
+            f"- **OCEAN**: O={o} C={c} E={e} A={a} S={s}",
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error retrieving entity info: {exc}"
+
+
+@skill_server.tool()
+async def update_user_entity(changes: str) -> str:
+    """Update the user's entity profile with new information.
+
+    Use this when you learn new facts about the user — their name,
+    interests, expertise, communication preferences, active projects,
+    timezone, etc.
+
+    Args:
+        changes: A JSON object with fields to update.  Valid fields:
+            name, preferred_name, communication_style, expertise_domains,
+            interaction_history_summary, worldview, interests, pet_peeves,
+            preferred_feedback_style, active_projects, timezone, work_hours.
+            For list fields, provide the complete new list.
+    """
+    try:
+        persistence = _get_identity_persistence()
+        if persistence is None:
+            return "Identity system not available."
+
+        payload = json.loads(changes)
+        if not isinstance(payload, dict):
+            return "Changes must be a JSON object."
+
+        persistence.update_user(**payload)
+
+        updated_fields = ", ".join(payload.keys())
+        return f"User profile updated: {updated_fields}"
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON: {exc}"
+    except (AttributeError, ValueError, TypeError) as exc:
+        return f"Update failed: {exc}"
+    except Exception as exc:
+        return f"Error updating user entity: {exc}"
+
+
+@skill_server.tool()
+async def update_assistant_entity(changes: str) -> str:
+    """Update your own (the assistant's) entity profile.
+
+    Use this when you want to change your persona, learning focus,
+    boundaries, opinions, vocabulary, or OCEAN personality traits.
+
+    Args:
+        changes: A JSON object with fields to update.  Valid fields:
+            name, persona_summary, learning_focus, worldview, boundaries,
+            opinions, vocabulary, influences, anti_patterns, current_focus,
+            openness, conscientiousness, extraversion, agreeableness,
+            stability.  For list fields, provide the complete new list.
+    """
+    try:
+        persistence = _get_identity_persistence()
+        if persistence is None:
+            return "Identity system not available."
+
+        payload = json.loads(changes)
+        if not isinstance(payload, dict):
+            return "Changes must be a JSON object."
+
+        persistence.update_assistant(**payload)
+
+        if _personality_modulator is not None:
+            _personality_modulator.update(persistence.assistant)
+
+        updated_fields = ", ".join(payload.keys())
+        return f"Assistant profile updated: {updated_fields}"
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON: {exc}"
+    except (AttributeError, ValueError, TypeError) as exc:
+        return f"Update failed: {exc}"
+    except Exception as exc:
+        return f"Error updating assistant entity: {exc}"
+
+
 # ── Memory Tools ─────────────────────────────────────────────────────── #
 
 

@@ -71,6 +71,8 @@ class Daemon:
         self._external_signal_plugin: ExternalSignalPlugin | None = None
         self._telegram_bridge: TelegramBridge | None = None
         self._chat_router: PeripheralChatRouter | None = None
+        self._identity_persistence: object | None = None
+        self._personality_modulator: object | None = None
 
     # -- public --------------------------------------------------------- #
 
@@ -128,7 +130,10 @@ class Daemon:
         )
         self._crew_bridge.subscribe()
 
-        # 4b. Peripheral transducers (Telegram, etc.)
+        # 4b. Identity context for peripheral chat
+        self._initialize_identity()
+
+        # 4c. Peripheral transducers (Telegram, etc.)
         await self._start_peripherals()
 
         # 5. Interoception publishers for vitals panels and dashboards
@@ -346,6 +351,38 @@ class Daemon:
             if self._fsm is not None:
                 self._fsm.finish_work()
 
+    # -- identity context ----------------------------------------------- #
+
+    def _initialize_identity(self) -> None:
+        """Load identity persistence for peripheral chat context."""
+        try:
+            from openbad.identity.persistence import IdentityPersistence
+            from openbad.identity.personality import PersonalityModulator
+            from openbad.memory.base import EpisodicMemory
+            from openbad.wui.server import _resolve_identity_config_path
+
+            config_path = _resolve_identity_config_path()
+            if not config_path.exists():
+                logger.warning(
+                    "Identity config not found at %s; "
+                    "peripheral chat will lack entity context",
+                    config_path,
+                )
+                return
+
+            episodic_path = Path("/var/lib/openbad/memory/identity.json")
+            persistence = IdentityPersistence(
+                config_path,
+                EpisodicMemory(storage_path=episodic_path),
+            )
+            self._identity_persistence = persistence
+            self._personality_modulator = PersonalityModulator(
+                persistence.assistant,
+            )
+            logger.info("Identity context loaded for peripheral chat")
+        except Exception:
+            logger.exception("Failed to load identity context")
+
     # -- peripheral transducers ----------------------------------------- #
 
     async def _start_peripherals(self) -> None:
@@ -367,7 +404,9 @@ class Daemon:
 
         if enabled_plugins:
             self._chat_router = PeripheralChatRouter(
-                self._client, self._resolve_chat_model,
+                self._client,
+                self._resolve_chat_model,
+                identity_resolver=self._resolve_identity,
             )
             self._chat_router.start()
 
@@ -394,6 +433,28 @@ class Daemon:
         except Exception:
             logger.exception("Failed to resolve chat model for peripheral router")
             return None, None, ""
+
+    def _resolve_identity(
+        self,
+    ) -> tuple[
+        object | None,
+        object | None,
+        object | None,
+        object | None,
+        object | None,
+    ]:
+        """Return identity context for peripheral chat."""
+        if self._identity_persistence is not None:
+            p = self._identity_persistence
+            m = self._personality_modulator
+            return (
+                p.user,
+                p.assistant,
+                getattr(m, "factors", None),
+                p,
+                m,
+            )
+        return None, None, None, None, None
 
     def _on_external_inbound(self, topic: str, payload: bytes) -> None:
         """Handle an inbound external message from the Corsair webhook bridge.
