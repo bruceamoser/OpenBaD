@@ -185,18 +185,21 @@ class TestTelegramBridge:
         payload = json.dumps({"chat_id": 42, "text": "reply"}).encode()
 
         mock_loop = MagicMock()
-        with patch("asyncio.get_event_loop", return_value=mock_loop):
-            bridge._on_outbound("motor/external/telegram/outbound", payload)
-            mock_loop.create_task.assert_called_once()
+        mock_loop.is_closed.return_value = False
+        bridge._loop = mock_loop
+        bridge._on_outbound("motor/external/telegram/outbound", payload)
+        mock_loop.call_soon_threadsafe.assert_called_once()
 
     def test_on_outbound_missing_fields(self) -> None:
         mqtt = _make_mqtt()
         bridge = TelegramBridge("tok", mqtt)  # noqa: S106
 
         payload = json.dumps({"chat_id": 42}).encode()
-        with patch("asyncio.get_event_loop") as mock_loop:
-            bridge._on_outbound("topic", payload)
-            mock_loop.return_value.create_task.assert_not_called()
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = False
+        bridge._loop = mock_loop
+        bridge._on_outbound("topic", payload)
+        mock_loop.call_soon_threadsafe.assert_not_called()
 
     def test_from_credentials(self, tmp_path) -> None:
         creds = tmp_path / "telegram.json"

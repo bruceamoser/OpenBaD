@@ -46,6 +46,7 @@ class TelegramBridge:
         self._session: aiohttp.ClientSession | None = None
         self._task: asyncio.Task[None] | None = None
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ── Lifecycle ─────────────────────────────────────────── #
 
@@ -54,6 +55,7 @@ class TelegramBridge:
         if self._running:
             return
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=_POLL_TIMEOUT + 10),
         )
@@ -188,8 +190,12 @@ class TelegramBridge:
             return
 
         # Schedule the async send on the event loop
-        loop = asyncio.get_event_loop()
-        loop.create_task(self.send_message(int(chat_id), text))
+        if self._loop is None or self._loop.is_closed():
+            logger.error("No event loop — cannot send outbound message")
+            return
+        self._loop.call_soon_threadsafe(
+            self._loop.create_task, self.send_message(int(chat_id), text),
+        )
 
     async def send_message(self, chat_id: int, text: str) -> bool:
         """Send a message via Telegram Bot API."""
