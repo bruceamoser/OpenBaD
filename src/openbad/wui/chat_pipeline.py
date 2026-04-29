@@ -1335,10 +1335,12 @@ async def _agentic_stream(
     messages: list[dict[str, Any]],
     request_id: str,
 ) -> AsyncIterator[StreamChunk]:
-    """Run LangGraph ReAct agent with streaming to the chat UI.
+    """Run LangGraph supervisor agent with streaming to the chat UI.
 
-    Uses ``create_react_agent`` backed by a LangChain ``BaseChatModel``
-    (typically ``ChatOpenAI``).
+    Uses a multi-agent supervisor graph: the supervisor evaluates user
+    intent and routes to specialized sub-agents, each with isolated tool
+    context.  Falls back to a single ``create_react_agent`` if the
+    supervisor infrastructure is unavailable.
 
     Yields ``StreamChunk`` objects.  The caller handles the final
     ``done=True`` chunk and memory consolidation.
@@ -1347,9 +1349,8 @@ async def _agentic_stream(
 
     from langchain_core.messages import AIMessage, HumanMessage
     from langchain_core.tools import StructuredTool
-    from langgraph.prebuilt import create_react_agent
 
-    from openbad.frameworks.langchain_tools import async_get_tools_for_role
+    from openbad.frameworks.langchain_tools import async_get_openbad_tools
 
     # ── Shared output queue ──
     #  Both the agent event stream and tool-wrapper side-effects
@@ -1358,11 +1359,18 @@ async def _agentic_stream(
     _sentinel = object()
     output_q: _asyncio.Queue[Any] = _asyncio.Queue()
 
-    # ── Wrap tools with timeout + access-request handling ──
-    # Use role-filtered tools to reduce context size and prevent
-    # the model from hallucinating calls to tools it shouldn't use.
-    base_tools = await async_get_tools_for_role("chat")
+    # ── Load all role tools (unfiltered) for sub-agent distribution ──
+    from openbad.frameworks.agents.sub_agents import (
+        CHAT_DIRECT_TOOLS,
+        CHAT_SUB_AGENTS,
+    )
+    from openbad.frameworks.langchain_tools import _ROLE_TOOLS
 
+    chat_allowed = _ROLE_TOOLS.get("chat", set())
+    all_tools = await async_get_openbad_tools()
+    role_tools = [t for t in all_tools if t.name in chat_allowed]
+
+    # ── Wrap tools with timeout + access-request handling ──
     def _wrap_tool(tool: Any) -> StructuredTool:
         original = tool.coroutine
         tool_name = tool.name
@@ -1433,7 +1441,7 @@ async def _agentic_stream(
             args_schema=tool.args_schema,
         )
 
-    wrapped_tools = [_wrap_tool(t) for t in base_tools]
+    wrapped_tools = [_wrap_tool(t) for t in role_tools]
 
     # ── Convert messages to LangChain format ──
     system_prompt = ""
@@ -1448,16 +1456,30 @@ async def _agentic_stream(
         elif role == "assistant":
             lc_messages.append(AIMessage(content=content))
 
-    agent = create_react_agent(
-        model=chat_model,
-        tools=wrapped_tools,
-        prompt=system_prompt or None,
+    # ── Build supervisor graph ──
+    from openbad.frameworks.supervisor import build_supervisor_graph
+
+    direct_tools = [t for t in wrapped_tools if t.name in CHAT_DIRECT_TOOLS]
+
+    agent = build_supervisor_graph(
+        chat_model,
+        CHAT_SUB_AGENTS,
+        wrapped_tools,
+        system_prompt=system_prompt,
+        request_id=request_id,
+        direct_tools=direct_tools,
     )
 
+    # Count supervisor-level tools for logging (routing + respond + direct)
+    supervisor_tool_count = len(CHAT_SUB_AGENTS) + 1 + len(direct_tools)
+
     log.info(
-        "LangGraph agent created request=%s tools=%d system_prompt_len=%d "
+        "Supervisor agent created request=%s sub_agents=%d "
+        "supervisor_tools=%d total_tools=%d system_prompt_len=%d "
         "messages=%d",
         request_id,
+        len(CHAT_SUB_AGENTS),
+        supervisor_tool_count,
         len(wrapped_tools),
         len(system_prompt),
         len(lc_messages),
