@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import stat
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
 
 from openbad.peripherals.config import CorsairConfig, PluginConfig
-from openbad.wui.transducer_api import setup_transducer_routes
+from openbad.wui.transducer_api import _PLUGIN_CATALOG, setup_transducer_routes
 
 
 def _sample_config() -> CorsairConfig:
@@ -183,3 +183,198 @@ class TestPostTransducerTest:
             assert resp.status == 200
             data = await resp.json()
             assert data["ok"] is True
+
+
+# ── GET /api/transducers/catalog ────────────────────────────────── #
+
+
+class TestGetCatalog:
+    @pytest.fixture(autouse=True)
+    def _patch_config(self):
+        with patch(
+            "openbad.wui.transducer_api.load_peripherals_config",
+            return_value=_sample_config(),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_returns_catalog(self, aiohttp_client) -> None:
+        client = await aiohttp_client(_make_app())
+        resp = await client.get("/api/transducers/catalog")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "catalog" in data
+        assert len(data["catalog"]) == len(_PLUGIN_CATALOG)
+
+    @pytest.mark.asyncio
+    async def test_installed_flag(self, aiohttp_client) -> None:
+        client = await aiohttp_client(_make_app())
+        resp = await client.get("/api/transducers/catalog")
+        data = await resp.json()
+        entries = {e["name"]: e for e in data["catalog"]}
+        # discord is in _sample_config, should be marked installed
+        assert entries["discord"]["installed"] is True
+        # telegram is not in _sample_config
+        assert entries["telegram"]["installed"] is False
+
+    @pytest.mark.asyncio
+    async def test_catalog_shape(self, aiohttp_client) -> None:
+        client = await aiohttp_client(_make_app())
+        resp = await client.get("/api/transducers/catalog")
+        data = await resp.json()
+        entry = data["catalog"][0]
+        assert "name" in entry
+        assert "label" in entry
+        assert "icon" in entry
+        assert "description" in entry
+        assert "credential_fields" in entry
+        assert "installed" in entry
+
+
+# ── POST /api/transducers ──────────────────────────────────────── #
+
+
+class TestPostTransducer:
+    @pytest.fixture(autouse=True)
+    def _patch_config(self):
+        with patch(
+            "openbad.wui.transducer_api.load_peripherals_config",
+            return_value=_sample_config(),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_creates_plugin(self, aiohttp_client, tmp_path) -> None:
+        with patch(
+            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+        ), patch(
+            "openbad.wui.transducer_api._update_plugin_enabled",
+        ):
+            client = await aiohttp_client(_make_app())
+            resp = await client.post(
+                "/api/transducers",
+                json={
+                    "name": "telegram",
+                    "credentials": {"bot_token": "tk-123"},  # noqa: S106
+                    "enabled": False,
+                },
+            )
+            assert resp.status == 201
+            creds_file = tmp_path / "telegram.json"
+            assert creds_file.exists()
+            creds = json.loads(creds_file.read_text())
+            assert creds["bot_token"] == "tk-123"  # noqa: S105
+            mode = creds_file.stat().st_mode
+            assert mode & stat.S_IRUSR
+            assert not mode & stat.S_IRGRP
+            assert not mode & stat.S_IROTH
+
+    @pytest.mark.asyncio
+    async def test_rejects_duplicate(self, aiohttp_client) -> None:
+        client = await aiohttp_client(_make_app())
+        resp = await client.post(
+            "/api/transducers",
+            json={"name": "discord"},
+        )
+        assert resp.status == 409
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_name(self, aiohttp_client) -> None:
+        client = await aiohttp_client(_make_app())
+        resp = await client.post(
+            "/api/transducers",
+            json={"name": "nonexistent_plugin"},
+        )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_rejects_missing_name(self, aiohttp_client) -> None:
+        client = await aiohttp_client(_make_app())
+        resp = await client.post(
+            "/api/transducers",
+            json={},
+        )
+        assert resp.status == 400
+
+
+# ── Credential verification fallback ────────────────────────────── #
+
+
+class TestCredentialVerification:
+    """Test the _verify_credentials fallback used when transmit_message is unavailable."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_config(self):
+        with patch(
+            "openbad.wui.transducer_api.load_peripherals_config",
+            return_value=_sample_config(),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_telegram_verify_success(
+        self, aiohttp_client, tmp_path,
+    ) -> None:
+        """Test Telegram getMe returns bot username."""
+        creds = tmp_path / "telegram.json"
+        creds.write_text('{"bot_token": "fake"}')
+
+        mock_resp = MagicMock()
+        mock_resp.json = AsyncMock(return_value={
+            "ok": True,
+            "result": {"username": "openbad_bot"},
+        })
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_ctx)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+        ), patch(
+            "aiohttp.ClientSession", return_value=mock_session,
+        ):
+            # No transmit_message skill → falls through to _verify_credentials
+            mock_server = MagicMock()
+            mock_server.list_tools = MagicMock(return_value=[])
+
+            with patch(
+                "openbad.skills.server.skill_server",
+                mock_server,
+            ):
+                client = await aiohttp_client(_make_app())
+                resp = await client.post(
+                    "/api/transducers/telegram/test",
+                    json={"content": "test"},
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["ok"] is True
+                assert "openbad_bot" in data["result"]
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials(self, aiohttp_client, tmp_path) -> None:
+        """Test returns error when no credentials file exists."""
+        with patch(
+            "openbad.wui.transducer_api._CREDS_DIR", tmp_path,
+        ):
+            mock_server = MagicMock()
+            mock_server.list_tools = MagicMock(return_value=[])
+
+            with patch(
+                "openbad.skills.server.skill_server",
+                mock_server,
+            ):
+                client = await aiohttp_client(_make_app())
+                resp = await client.post(
+                    "/api/transducers/telegram/test",
+                    json={"content": "test"},
+                )
+                assert resp.status == 400
+                data = await resp.json()
+                assert data["ok"] is False
