@@ -4,6 +4,14 @@ Reads tool definitions from the FastMCP ``skill_server`` and produces
 LangChain-compatible tools that preserve immune gating, access control,
 and result truncation.
 
+Hierarchical tool routing
+~~~~~~~~~~~~~~~~~~~~~~~~~
+When a role defines ``_DIRECT_TOOLS`` (a small set always bound to the
+model) vs the full ``_ROLE_TOOLS`` allow-list, the extra tools are made
+available through two meta-tools: ``list_tools`` and ``use_tool``.  This
+keeps the tool-schema token footprint small enough for context-limited
+models while preserving access to the full capability set.
+
 Public API
 ----------
 ``get_openbad_tools()``
@@ -15,6 +23,7 @@ Public API
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -135,6 +144,26 @@ _ROLE_TOOLS: dict[str, set[str]] = {
     },
 }
 
+# ── Direct (always-bound) tools per role ──────────────────────────────── #
+#
+# Roles listed here expose only these tools directly to the model.
+# All remaining tools in ``_ROLE_TOOLS[role]`` are accessible via the
+# auto-generated ``list_tools`` and ``use_tool`` meta-tools.
+# Roles NOT listed here bind all their tools directly (no meta-tools).
+
+_DIRECT_TOOLS: dict[str, set[str]] = {
+    "chat": {
+        "ask_user",
+        "web_search",
+        "web_fetch",
+        "read_memory",
+        "write_memory",
+        "query_semantic",
+        "get_entity_info",
+        "read_events",
+    },
+}
+
 
 # ── Internal helpers ──────────────────────────────────────────────────── #
 
@@ -210,6 +239,108 @@ def _mcp_tool_to_langchain(mcp_tool: Any) -> StructuredTool:
     )
 
 
+# ── Meta-tool builders (hierarchical tool routing) ────────────────────── #
+
+
+def _build_meta_tools(
+    role: str,
+    discoverable: list[BaseTool],
+) -> list[BaseTool]:
+    """Build ``list_tools`` and ``use_tool`` meta-tools.
+
+    *discoverable* is the list of tools accessible only through these
+    meta-tools (i.e. those in ``_ROLE_TOOLS[role]`` but not in
+    ``_DIRECT_TOOLS[role]``).
+    """
+    from pydantic import BaseModel, Field
+
+    # Build a lookup for fast dispatch
+    _by_name: dict[str, BaseTool] = {t.name: t for t in discoverable}
+
+    # Pre-build the catalogue string once
+    _catalogue = "\n".join(
+        f"- {t.name}: {(t.description or '')[:120]}"
+        for t in discoverable
+    )
+
+    class ListToolsInput(BaseModel):
+        query: str = Field(
+            default="",
+            description="Optional keyword to filter tools by name or description.",
+        )
+
+    async def _list_tools(query: str = "") -> str:
+        if not query:
+            return (
+                f"Available tools ({len(_by_name)}):\n{_catalogue}\n\n"
+                "Call use_tool with the tool name and a JSON arguments object."
+            )
+        q = query.lower()
+        matches = [
+            f"- {t.name}: {(t.description or '')[:120]}"
+            for t in discoverable
+            if q in t.name.lower() or q in (t.description or "").lower()
+        ]
+        if not matches:
+            return f"No tools matching '{query}'. Call list_tools without a query to see all."
+        return "\n".join(matches)
+
+    class UseToolInput(BaseModel):
+        tool_name: str = Field(description="Name of the tool to invoke.")
+        arguments: str = Field(
+            default="{}",
+            description="JSON object of arguments to pass to the tool.",
+        )
+
+    async def _use_tool(tool_name: str, arguments: str = "{}") -> str:
+        tool = _by_name.get(tool_name)
+        if tool is None:
+            available = ", ".join(sorted(_by_name))
+            return (
+                f"Unknown tool '{tool_name}'. "
+                f"Available: {available}"
+            )
+        try:
+            kwargs = json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError as exc:
+            return f"Invalid JSON arguments: {exc}"
+
+        if not isinstance(kwargs, dict):
+            return "Arguments must be a JSON object (dict), not a list or scalar."
+
+        try:
+            if tool.coroutine:
+                result = await tool.coroutine(**kwargs)
+            else:
+                result = tool.invoke(kwargs)
+            return str(result)
+        except Exception as exc:
+            log.exception("use_tool dispatch failed: %s(%s)", tool_name, arguments)
+            return f"Tool {tool_name} failed: {type(exc).__name__}: {exc}"
+
+    list_tool = StructuredTool(
+        name="list_tools",
+        description=(
+            f"List {len(_by_name)} additional tools available for this session. "
+            "Pass an optional query to filter by keyword. Use use_tool to call them."
+        ),
+        coroutine=_list_tools,
+        args_schema=ListToolsInput,
+    )
+
+    use_tool = StructuredTool(
+        name="use_tool",
+        description=(
+            "Invoke an additional tool by name. Call list_tools first to see "
+            "available tools and their descriptions. Pass arguments as a JSON string."
+        ),
+        coroutine=_use_tool,
+        args_schema=UseToolInput,
+    )
+
+    return [list_tool, use_tool]
+
+
 # ── Public API ────────────────────────────────────────────────────────── #
 
 # Module-level cache so tools are built only once.
@@ -274,13 +405,41 @@ def get_tools_for_role(role: str) -> list[BaseTool]:
 
 
 async def async_get_tools_for_role(role: str) -> list[BaseTool]:
-    """Async variant of :func:`get_tools_for_role`."""
-    allowed = _ROLE_TOOLS.get(role.lower(), set())
+    """Async variant of :func:`get_tools_for_role`.
+
+    When the role has a ``_DIRECT_TOOLS`` entry, only those tools are
+    bound directly.  The remaining allowed tools are made discoverable
+    via ``list_tools`` / ``use_tool`` meta-tools to reduce schema tokens.
+    """
+    role_lower = role.lower()
+    allowed = _ROLE_TOOLS.get(role_lower, set())
     if not allowed:
         log.warning("No tool allowlist defined for role %r", role)
         return []
+
     all_tools = await async_get_openbad_tools()
-    return [t for t in all_tools if t.name in allowed]
+    role_tools = [t for t in all_tools if t.name in allowed]
+
+    direct_names = _DIRECT_TOOLS.get(role_lower)
+    if direct_names is None:
+        # No hierarchical routing — bind all tools directly.
+        return role_tools
+
+    direct = [t for t in role_tools if t.name in direct_names]
+    discoverable = [t for t in role_tools if t.name not in direct_names]
+
+    if discoverable:
+        meta = _build_meta_tools(role_lower, discoverable)
+        direct.extend(meta)
+        log.info(
+            "Hierarchical tools for role=%s: %d direct + %d discoverable "
+            "(via list_tools/use_tool)",
+            role_lower,
+            len(direct) - len(meta),
+            len(discoverable),
+        )
+
+    return direct
 
 
 def clear_tools_cache() -> None:
