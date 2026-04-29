@@ -7,6 +7,7 @@ assembled reply to ``motor/external/{platform}/outbound``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -41,6 +42,7 @@ class PeripheralChatRouter:
         self._mqtt = mqtt_client
         self._resolve_model = model_resolver
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ── Lifecycle ─────────────────────────────────────────── #
 
@@ -49,6 +51,10 @@ class PeripheralChatRouter:
         if self._running:
             return
         self._running = True
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = asyncio.get_event_loop()
         self._mqtt.subscribe(
             topics.EXTERNAL_INBOUND_ALL,
             bytes,
@@ -66,14 +72,12 @@ class PeripheralChatRouter:
 
     def _on_inbound(self, topic: str, payload: bytes) -> None:
         """Dispatch inbound MQTT messages to the async handler."""
-        import asyncio
-
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
+        if self._loop is None or self._loop.is_closed():
             logger.error("No event loop — cannot handle inbound message")
             return
-        loop.create_task(self._handle_inbound(topic, payload))
+        self._loop.call_soon_threadsafe(
+            self._loop.create_task, self._handle_inbound(topic, payload),
+        )
 
     async def _handle_inbound(self, topic: str, payload: bytes) -> None:
         """Parse the inbound message, run through chat, and reply."""
