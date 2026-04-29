@@ -13,8 +13,11 @@ _DEFAULT_SEARCH_PATHS: list[Path] = [
     Path("config/peripherals.yaml"),
 ]
 
-# Where per-plugin credential files live.
-_DEFAULT_CREDENTIALS_DIR = Path("data/config/peripherals")
+# Credentials dir search order (production → repo fallback).
+_CREDENTIALS_DIR_CANDIDATES: list[Path] = [
+    Path("/var/lib/openbad/data/config/peripherals"),
+    Path("data/config/peripherals"),
+]
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,54 @@ class CorsairConfig:
     entry_point: str = ""
     webhook_secret: str = ""
     plugins: list[PluginConfig] = field(default_factory=list)
+
+
+def resolve_credentials_dir() -> Path:
+    """Return the credentials directory, preferring the production path.
+
+    Creates the directory if it doesn't exist at the selected location.
+    Falls back to ``data/config/peripherals`` (relative to CWD) for dev.
+    """
+    for candidate in _CREDENTIALS_DIR_CANDIDATES:
+        if candidate.is_dir():
+            return candidate
+        # If the parent exists and is writable, use this candidate
+        if candidate.parent.exists():
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except OSError:
+                continue
+    # Final fallback: relative path
+    fallback = _CREDENTIALS_DIR_CANDIDATES[-1]
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+def resolve_config_write_path() -> Path:
+    """Return the path to write ``peripherals.yaml``.
+
+    Prefers ``/etc/openbad/peripherals.yaml`` when writable, otherwise
+    falls back to the repo-local ``config/peripherals.yaml``.
+    """
+    for candidate in _DEFAULT_SEARCH_PATHS:
+        if candidate.exists():
+            try:
+                # Check if writable
+                candidate.open("a").close()
+                return candidate
+            except OSError:
+                continue
+        elif candidate.parent.is_dir():
+            try:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except OSError:
+                continue
+    # Fallback
+    fallback = _DEFAULT_SEARCH_PATHS[-1]
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def _resolve_config_path(
@@ -105,7 +156,7 @@ def resolve_credentials_path(
     if not plugin.credentials_file:
         return None
 
-    base = credentials_dir or _DEFAULT_CREDENTIALS_DIR
+    base = credentials_dir or resolve_credentials_dir()
     candidate = base / plugin.credentials_file
 
     if not candidate.is_file():
