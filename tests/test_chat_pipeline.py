@@ -455,10 +455,14 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
     )
 
     # create_react_agent mock: captures wrapped tools and calls them
+    wrapped_tools_ref: list = []
+
     def _fake_create_agent(*, model, tools, prompt):
+        wrapped_tools_ref.extend(tools)
+
         async def _fake_astream_events(inp, *, version, config):
             # Simulate the agent calling the read_file tool
-            for t in tools:
+            for t in wrapped_tools_ref:
                 if t.name == "read_file":
                     yield {
                         "event": "on_tool_start",
@@ -488,6 +492,17 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
         chat_pipeline, "_wait_for_access_decision", _instant_timeout,
     )
 
+    # Mock build_supervisor_graph to return a fake agent-like object
+    # that uses the wrapped tools passed to it.
+    def _fake_build_supervisor(
+        chat_model, sub_agents, all_tools, **kwargs,
+    ):
+        return _fake_create_agent(
+            model=chat_model,
+            tools=all_tools,
+            prompt=kwargs.get("system_prompt", ""),
+        )
+
     with (
         patch(
             "openbad.frameworks.langchain_tools.async_get_openbad_tools",
@@ -495,8 +510,8 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
             return_value=[fake_tool],
         ),
         patch(
-            "langgraph.prebuilt.create_react_agent",
-            side_effect=_fake_create_agent,
+            "openbad.frameworks.supervisor.build_supervisor_graph",
+            side_effect=_fake_build_supervisor,
         ),
     ):
         chunks = [
