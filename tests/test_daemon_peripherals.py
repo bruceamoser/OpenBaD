@@ -131,3 +131,31 @@ class TestDaemonPeripherals:
             result = daemon._resolve_chat_model()
 
         assert result == (None, None, "")
+
+    def test_resolve_identity_success(self, daemon: Daemon) -> None:
+        mock_user = MagicMock()
+        mock_asst = MagicMock()
+        mock_factors = MagicMock()
+        mock_persist = MagicMock()
+        mock_persist.user = mock_user
+        mock_persist.assistant = mock_asst
+        mock_modulator = MagicMock()
+        mock_modulator.factors = mock_factors
+
+        daemon._identity_persistence = mock_persist
+        daemon._personality_modulator = mock_modulator
+
+        result = daemon._resolve_identity()
+
+        assert result[0] is mock_user
+        assert result[1] is mock_asst
+        assert result[2] is mock_factors
+        assert result[3] is mock_persist
+        assert result[4] is mock_modulator
+
+    def test_resolve_identity_no_persistence(
+        self, daemon: Daemon,
+    ) -> None:
+        result = daemon._resolve_identity()
+
+        assert result == (None, None, None, None, None)

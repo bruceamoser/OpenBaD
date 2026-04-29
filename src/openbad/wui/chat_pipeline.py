@@ -590,6 +590,38 @@ def get_conversation_history(
     return _get_conversation_history(session_id)[-limit:]
 
 
+def list_peripheral_sessions() -> list[dict[str, str]]:
+    """Return session metadata for all peripheral chat sessions.
+
+    Queries SQLite for distinct ``peripheral:*`` session IDs and builds
+    dropdown-friendly dicts with ``key``, ``session_id``, and ``label``.
+    """
+    try:
+        conn = _get_state_conn()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT session_id
+            FROM session_messages
+            WHERE session_id LIKE 'peripheral:%'
+            ORDER BY session_id
+            """,
+        ).fetchall()
+        result: list[dict[str, str]] = []
+        for row in rows:
+            sid = str(row["session_id"])
+            parts = sid.split(":", 2)
+            platform = parts[1] if len(parts) > 1 else "unknown"
+            sender = parts[2] if len(parts) > 2 else ""
+            label = f"{platform.title()}"
+            if sender:
+                label += f" ({sender})"
+            result.append({"key": sid, "session_id": sid, "label": label})
+        return result
+    except Exception:
+        log.exception("Failed to list peripheral sessions")
+        return []
+
+
 def append_assistant_message(
     session_id: str,
     content: str,

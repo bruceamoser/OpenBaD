@@ -241,3 +241,44 @@ class TestPeripheralChatRouter:
             ).encode(),
         )
         mock_loop.call_soon_threadsafe.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_inbound_passes_identity_context(self) -> None:
+        mqtt = _make_mqtt()
+        model = MagicMock()
+        user_p = MagicMock()
+        asst_p = MagicMock()
+        mod = MagicMock()
+        persist = MagicMock()
+        pmod = MagicMock()
+        identity_fn = lambda: (user_p, asst_p, mod, persist, pmod)
+
+        captured_kwargs: dict = {}
+
+        async def spy_stream(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            yield StreamChunk(token="ok", done=True)
+
+        router = PeripheralChatRouter(
+            mqtt, _resolver(model), identity_resolver=identity_fn,
+        )
+
+        payload = json.dumps({
+            "platform": "telegram",
+            "event": "message",
+            "data": {"sender": "1", "content": "hi", "sender_name": "X"},
+        }).encode()
+
+        with patch(
+            "openbad.peripherals.chat_router.stream_chat",
+            side_effect=spy_stream,
+        ):
+            await router._handle_inbound(
+                "sensory/external/telegram/inbound", payload,
+            )
+
+        assert captured_kwargs["user_profile"] is user_p
+        assert captured_kwargs["assistant_profile"] is asst_p
+        assert captured_kwargs["modulation"] is mod
+        assert captured_kwargs["identity_persistence"] is persist
+        assert captured_kwargs["personality_modulator"] is pmod
