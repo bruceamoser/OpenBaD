@@ -105,7 +105,7 @@ class LiteLLMAdapter(ProviderAdapter):
         default_model: str = "",
         api_key: str = "",
         api_base: str = "",
-        timeout_s: float = 30,
+        timeout_s: float = 90,
         max_retries: int = 2,
         extra_kwargs: dict[str, Any] | None = None,
     ) -> None:
