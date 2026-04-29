@@ -201,6 +201,26 @@ class TestRoleFiltering:
         assert "exec_command" not in sleep_tools
         assert "create_task" not in sleep_tools
 
+    def test_chat_role_has_memory_tools(self) -> None:
+        chat_tools = _ROLE_TOOLS["chat"]
+        assert "read_memory" in chat_tools
+        assert "write_memory" in chat_tools
+        assert "prune_memory" in chat_tools
+        assert "query_semantic" in chat_tools
+
+    def test_chat_role_has_library_tools(self) -> None:
+        chat_tools = _ROLE_TOOLS["chat"]
+        assert "search_library" in chat_tools
+        assert "read_book" in chat_tools
+        assert "draft_book" in chat_tools
+        assert "link_books" in chat_tools
+
+    def test_chat_role_has_entity_tools(self) -> None:
+        chat_tools = _ROLE_TOOLS["chat"]
+        assert "get_entity_info" in chat_tools
+        assert "update_user_entity" in chat_tools
+        assert "update_assistant_entity" in chat_tools
+
 
 # ── CrewAI tool adapter tests ────────────────────────────────────────── #
 
