@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import create_react_agent
@@ -252,7 +252,12 @@ def build_supervisor_graph(
             results.append(ToolMessage(content=str(out), tool_call_id=tc["id"]))
         return {"messages": results}
 
-    # ── Sub-agent nodes ──
+    # ── Sub-agent node builders ──
+    # Each sub-agent runs as an independent react agent invocation with
+    # a CLEAN message history (just a HumanMessage with the delegation
+    # request).  This avoids the llama.cpp "assistant prefill +
+    # enable_thinking" conflict that occurs when the sub-agent sees the
+    # supervisor's AIMessage in the shared state.
     sub_agent_graphs: dict[str, Any] = {}
     for agent_def in sub_agents:
         agent_tools = [
@@ -266,39 +271,78 @@ def build_supervisor_graph(
             )
             continue
 
-        sub_graph = create_react_agent(
+        sub_react = create_react_agent(
             model=chat_model,
             tools=agent_tools,
             prompt=agent_def.system_prompt or None,
         )
-        sub_agent_graphs[agent_def.name] = sub_graph
 
-    # ── Routing-tool response injector ──
-    # When the supervisor calls delegate_to_X, the AI message has a
-    # tool_call but no ToolMessage response.  Sub-agents (which share
-    # MessagesState) would see a dangling tool call.  This node injects
-    # a ToolMessage for each routing tool call with the delegation
-    # request text, so the sub-agent sees a clean conversation.
-    def _make_inject_node(agent_name: str) -> Any:
-        async def _inject(state: MessagesState) -> dict[str, Any]:
-            last = state["messages"][-1]
-            results: list[ToolMessage] = []
-            request_text = ""
-            for tc in getattr(last, "tool_calls", []):
-                if tc["name"] == f"delegate_to_{agent_name}":
-                    request_text = tc.get("args", {}).get("request", "")
-                    results.append(ToolMessage(
-                        content=f"Delegated to {agent_name}: {request_text}",
-                        tool_call_id=tc["id"],
+        def _make_sub_node(
+            react_agent: Any, agent_name: str,
+        ) -> Any:
+            async def _sub_node(state: MessagesState) -> dict[str, Any]:
+                """Extract delegation request, run sub-agent with clean
+                messages, return result as AIMessage to parent state."""
+                # Find the delegation request from the supervisor's
+                # last tool call.
+                request_text = ""
+                tool_call_ids: list[str] = []
+                for msg in reversed(state["messages"]):
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            if tc["name"] == f"delegate_to_{agent_name}":
+                                request_text = tc.get(
+                                    "args", {},
+                                ).get("request", "")
+                            tool_call_ids.append(tc["id"])
+                        break
+
+                if not request_text:
+                    # Fallback: use the original user message
+                    for msg in state["messages"]:
+                        if isinstance(msg, HumanMessage):
+                            request_text = msg.content
+                            break
+
+                log.info(
+                    "Sub-agent %s executing (request=%s): %s",
+                    agent_name,
+                    request_id,
+                    request_text[:100],
+                )
+
+                # Run the react agent with a clean conversation
+                result = await react_agent.ainvoke(
+                    {"messages": [HumanMessage(content=request_text)]},
+                )
+
+                # Extract the final AI response
+                result_msgs = result.get("messages", [])
+                final_text = ""
+                for m in reversed(result_msgs):
+                    if isinstance(m, AIMessage) and m.content:
+                        final_text = m.content
+                        break
+
+                if not final_text:
+                    final_text = f"Sub-agent {agent_name} completed."
+
+                # Return ToolMessages for the routing tool calls, plus
+                # the sub-agent's response as an AIMessage.
+                response_msgs: list[Any] = []
+                for tc_id in tool_call_ids:
+                    response_msgs.append(ToolMessage(
+                        content=f"[{agent_name}] {final_text}",
+                        tool_call_id=tc_id,
                     ))
-                else:
-                    # Respond to any other tool calls too
-                    results.append(ToolMessage(
-                        content="(handled by supervisor)",
-                        tool_call_id=tc["id"],
-                    ))
-            return {"messages": results}
-        return _inject
+
+                return {"messages": response_msgs}
+
+            return _sub_node
+
+        sub_agent_graphs[agent_def.name] = _make_sub_node(
+            sub_react, agent_def.name,
+        )
 
     # ── State graph ──
     graph = StateGraph(MessagesState)
@@ -312,12 +356,9 @@ def build_supervisor_graph(
         # After executing direct tools, go back to supervisor
         graph.add_edge("exec_direct_tools", "supervisor")
 
-    # Add sub-agent nodes with routing-response injectors
-    for name, sub_graph in sub_agent_graphs.items():
-        inject_name = f"_inject_{name}"
-        graph.add_node(inject_name, _make_inject_node(name))
-        graph.add_node(name, sub_graph)
-        graph.add_edge(inject_name, name)
+    # Add sub-agent nodes (each is a wrapper function, not a subgraph)
+    for name, node_fn in sub_agent_graphs.items():
+        graph.add_node(name, node_fn)
 
     # Supervisor is the entry point
     graph.add_edge(START, "supervisor")
@@ -352,19 +393,18 @@ def build_supervisor_graph(
             if tool_name == respond_tool_name:
                 return END
 
-            # delegate_to_X → route to inject node → sub-agent X
+            # delegate_to_X → route to sub-agent X
             for agent_def in sub_agents:
                 if (
                     tool_name == f"delegate_to_{agent_def.name}"
                     and agent_def.name in sub_agent_graphs
                 ):
-                    inject_name = f"_inject_{agent_def.name}"
                     log.info(
                         "Supervisor routing to %s (request=%s)",
                         agent_def.name,
                         request_id,
                     )
-                    return inject_name
+                    return agent_def.name
 
             # Direct tool (e.g. ask_user) → execute it
             if tool_name in direct_tool_lookup:
@@ -374,9 +414,7 @@ def build_supervisor_graph(
         return END
 
     # Build the list of possible destinations
-    destinations: list[str] = [END]
-    for name in sub_agent_graphs:
-        destinations.append(f"_inject_{name}")
+    destinations: list[str] = [END] + list(sub_agent_graphs.keys())
     if direct_tool_lookup:
         destinations.append("exec_direct_tools")
 
