@@ -185,11 +185,42 @@ def build_supervisor_graph(
 
     respond_tool_name = respond_tool.name
 
+    # ── Build supervisor system prompt ──
+    # Prepend delegation instructions so the LLM knows it must route
+    # tool-requiring tasks to sub-agents instead of answering directly.
+    agent_roster = "\n".join(
+        f"- delegate_to_{a.name}: {a.description}" for a in sub_agents
+    )
+    direct_names = ", ".join(t.name for t in (direct_tools or []))
+    supervisor_preamble = (
+        "You are a SUPERVISOR agent. You do NOT have direct access to "
+        "tools like memory, files, web search, or entity updates. "
+        "Instead, you DELEGATE tasks to specialized sub-agents by "
+        "calling the appropriate delegate_to_* tool.\n\n"
+        "IMPORTANT RULES:\n"
+        "1. When the user's request requires any tool action (searching "
+        "memory, updating entities, reading files, web search, etc.), "
+        "you MUST call the appropriate delegate_to_* tool. NEVER say "
+        "\"I cannot\" do something that a sub-agent can handle.\n"
+        "2. Use respond_to_user ONLY for greetings, simple factual "
+        "answers from conversation context, or clarifying questions.\n"
+        "3. You may delegate to multiple sub-agents in sequence.\n\n"
+        "Available sub-agents:\n"
+        f"{agent_roster}\n"
+    )
+    if direct_names:
+        supervisor_preamble += (
+            f"\nDirect tools (use these yourself): {direct_names}\n"
+        )
+    supervisor_preamble += "\n---\n\n"
+
+    full_prompt = supervisor_preamble + (system_prompt or "")
+
     # ── Supervisor node ──
     supervisor_agent = create_react_agent(
         model=chat_model,
         tools=supervisor_tools,
-        prompt=system_prompt or None,
+        prompt=full_prompt,
     )
 
     # ── Sub-agent nodes ──
