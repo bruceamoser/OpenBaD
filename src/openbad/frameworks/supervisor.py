@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import create_react_agent
@@ -217,11 +217,40 @@ def build_supervisor_graph(
     full_prompt = supervisor_preamble + (system_prompt or "")
 
     # ── Supervisor node ──
-    supervisor_agent = create_react_agent(
-        model=chat_model,
-        tools=supervisor_tools,
-        prompt=full_prompt,
-    )
+    # Use a simple model call (not create_react_agent) so the tool calls
+    # are visible to the conditional edge BEFORE execution.  The react
+    # agent pattern would execute the routing tools internally and then
+    # loop, hiding the tool call from the conditional edge.
+    supervisor_model = chat_model.bind_tools(supervisor_tools)
+    _system_msg = SystemMessage(content=full_prompt)
+
+    async def _supervisor_node(state: MessagesState) -> dict[str, Any]:
+        """Single LLM call with tools bound. Returns AI message."""
+        msgs = [_system_msg, *state["messages"]]
+        response = await supervisor_model.ainvoke(msgs)
+        return {"messages": [response]}
+
+    # ── Direct-tool execution node ──
+    # When the supervisor calls a direct tool (e.g. ask_user), this node
+    # executes it and feeds the result back.
+    direct_tool_lookup: dict[str, BaseTool] = {
+        t.name: t for t in (direct_tools or [])
+    }
+
+    async def _exec_direct_tools(state: MessagesState) -> dict[str, Any]:
+        """Execute any direct-tool calls from the supervisor's last msg."""
+        last = state["messages"][-1]
+        results: list[ToolMessage] = []
+        for tc in getattr(last, "tool_calls", []):
+            tool = direct_tool_lookup.get(tc["name"])
+            if tool and tool.coroutine:
+                out = await tool.coroutine(**tc["args"])
+            elif tool:
+                out = tool.invoke(tc["args"])
+            else:
+                out = f"Unknown direct tool: {tc['name']}"
+            results.append(ToolMessage(content=str(out), tool_call_id=tc["id"]))
+        return {"messages": results}
 
     # ── Sub-agent nodes ──
     sub_agent_graphs: dict[str, Any] = {}
@@ -244,15 +273,51 @@ def build_supervisor_graph(
         )
         sub_agent_graphs[agent_def.name] = sub_graph
 
+    # ── Routing-tool response injector ──
+    # When the supervisor calls delegate_to_X, the AI message has a
+    # tool_call but no ToolMessage response.  Sub-agents (which share
+    # MessagesState) would see a dangling tool call.  This node injects
+    # a ToolMessage for each routing tool call with the delegation
+    # request text, so the sub-agent sees a clean conversation.
+    def _make_inject_node(agent_name: str) -> Any:
+        async def _inject(state: MessagesState) -> dict[str, Any]:
+            last = state["messages"][-1]
+            results: list[ToolMessage] = []
+            request_text = ""
+            for tc in getattr(last, "tool_calls", []):
+                if tc["name"] == f"delegate_to_{agent_name}":
+                    request_text = tc.get("args", {}).get("request", "")
+                    results.append(ToolMessage(
+                        content=f"Delegated to {agent_name}: {request_text}",
+                        tool_call_id=tc["id"],
+                    ))
+                else:
+                    # Respond to any other tool calls too
+                    results.append(ToolMessage(
+                        content="(handled by supervisor)",
+                        tool_call_id=tc["id"],
+                    ))
+            return {"messages": results}
+        return _inject
+
     # ── State graph ──
     graph = StateGraph(MessagesState)
 
-    # Add supervisor node
-    graph.add_node("supervisor", supervisor_agent)
+    # Add supervisor node (simple model call)
+    graph.add_node("supervisor", _supervisor_node)
 
-    # Add sub-agent nodes
+    # Add direct-tool execution node
+    if direct_tool_lookup:
+        graph.add_node("exec_direct_tools", _exec_direct_tools)
+        # After executing direct tools, go back to supervisor
+        graph.add_edge("exec_direct_tools", "supervisor")
+
+    # Add sub-agent nodes with routing-response injectors
     for name, sub_graph in sub_agent_graphs.items():
+        inject_name = f"_inject_{name}"
+        graph.add_node(inject_name, _make_inject_node(name))
         graph.add_node(name, sub_graph)
+        graph.add_edge(inject_name, name)
 
     # Supervisor is the entry point
     graph.add_edge(START, "supervisor")
@@ -263,46 +328,57 @@ def build_supervisor_graph(
 
     # ── Conditional routing from supervisor ──
     def _route_supervisor(state: MessagesState) -> str:
-        """Determine next node based on supervisor's last tool call."""
+        """Determine next node based on supervisor's last tool call.
+
+        The supervisor node is a single model call (not a react agent),
+        so the last message is always an AIMessage whose ``tool_calls``
+        list tells us where to route.
+        """
         messages = state["messages"]
-
-        # Walk backwards to find the last AI message with tool calls
-        for msg in reversed(messages):
-            if not isinstance(msg, AIMessage):
-                continue
-
-            # If the AI message has no tool calls, it's a direct response
-            if not msg.tool_calls:
-                return END
-
-            # Check which tool was called
-            for tc in msg.tool_calls:
-                tool_name = tc.get("name", "")
-
-                # respond_to_user → END
-                if tool_name == respond_tool_name:
-                    return END
-
-                # delegate_to_X → route to sub-agent X
-                for agent_def in sub_agents:
-                    if (
-                        tool_name == f"delegate_to_{agent_def.name}"
-                        and agent_def.name in sub_agent_graphs
-                    ):
-                            log.info(
-                                "Supervisor routing to %s (request=%s)",
-                                agent_def.name,
-                                request_id,
-                            )
-                            return agent_def.name
-
-            # If tool call didn't match any routing, end
+        if not messages:
             return END
 
+        last = messages[-1]
+
+        # If not an AI message or no tool calls → direct answer → END
+        if not isinstance(last, AIMessage) or not last.tool_calls:
+            return END
+
+        # Check the first tool call to determine routing
+        for tc in last.tool_calls:
+            tool_name = tc.get("name", "")
+
+            # respond_to_user → END
+            if tool_name == respond_tool_name:
+                return END
+
+            # delegate_to_X → route to inject node → sub-agent X
+            for agent_def in sub_agents:
+                if (
+                    tool_name == f"delegate_to_{agent_def.name}"
+                    and agent_def.name in sub_agent_graphs
+                ):
+                    inject_name = f"_inject_{agent_def.name}"
+                    log.info(
+                        "Supervisor routing to %s (request=%s)",
+                        agent_def.name,
+                        request_id,
+                    )
+                    return inject_name
+
+            # Direct tool (e.g. ask_user) → execute it
+            if tool_name in direct_tool_lookup:
+                return "exec_direct_tools"
+
+        # Unknown tool call → END
         return END
 
     # Build the list of possible destinations
-    destinations: list[str] = [END] + list(sub_agent_graphs.keys())
+    destinations: list[str] = [END]
+    for name in sub_agent_graphs:
+        destinations.append(f"_inject_{name}")
+    if direct_tool_lookup:
+        destinations.append("exec_direct_tools")
 
     graph.add_conditional_edges(
         "supervisor",
