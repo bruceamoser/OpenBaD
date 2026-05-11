@@ -14,6 +14,7 @@ import logging
 import sqlite3
 import threading
 import uuid
+from datetime import UTC
 from pathlib import Path
 
 from openbad.tasks.lease import Lease, LeaseStore
@@ -87,13 +88,30 @@ class TaskService:
         description: str = "",
         owner: str = "system",
         parent_task_id: str | None = None,
+        due_at: float | None = None,
+        recurrence_rule: str | None = None,
     ) -> TaskModel:
-        """Create a new task in PENDING status and return it."""
+        """Create a new task in PENDING status and return it.
+
+        If *recurrence_rule* is set and *due_at* is not provided, the
+        first due time is computed from the rule.
+        """
+        if recurrence_rule:
+            from openbad.tasks.recurrence import validate_recurrence_rule
+
+            validate_recurrence_rule(recurrence_rule)
+            if due_at is None:
+                from openbad.tasks.recurrence import compute_next_due
+
+                due_at = compute_next_due(recurrence_rule)
+
         task = TaskModel.new(
             title,
             description=description,
             owner=owner,
             parent_task_id=parent_task_id,
+            due_at=due_at,
+            recurrence_rule=recurrence_rule,
         )
         return self._store.create_task(task)
 
@@ -136,8 +154,53 @@ class TaskService:
         return self.transition_task(task_id, TaskStatus.CANCELLED)
 
     def complete_task(self, task_id: str) -> TaskModel:
-        """Convenience wrapper to mark a task done."""
-        return self.transition_task(task_id, TaskStatus.DONE)
+        """Convenience wrapper to mark a task done.
+
+        If the completed task has a ``recurrence_rule``, a new pending
+        task is automatically spawned for the next occurrence.
+        """
+        task = self.transition_task(task_id, TaskStatus.DONE)
+        if task.recurrence_rule:
+            self.spawn_next_recurrence(task)
+        return task
+
+    def spawn_next_recurrence(self, completed_task: TaskModel) -> TaskModel:
+        """Create the next occurrence of a recurring task.
+
+        The new task inherits title, description, priority, owner, and
+        the recurrence_rule.  Its ``due_at`` is set to the next
+        occurrence after the just-completed task's ``due_at`` (or now).
+        """
+        from datetime import datetime
+
+        from openbad.tasks.recurrence import compute_next_due
+
+        # Compute next due relative to the previous due_at
+        # (not now) to avoid drift.
+        if completed_task.due_at:
+            after = datetime.fromtimestamp(
+                completed_task.due_at, tz=UTC,
+            )
+        else:
+            after = None
+
+        next_due = compute_next_due(completed_task.recurrence_rule, after)
+
+        new_task = self.create_task(
+            completed_task.title,
+            description=completed_task.description,
+            owner=completed_task.owner,
+            parent_task_id=completed_task.task_id,
+            due_at=next_due,
+            recurrence_rule=completed_task.recurrence_rule,
+        )
+        log.info(
+            "Spawned next recurrence task=%s from=%s due_at=%.0f",
+            new_task.task_id,
+            completed_task.task_id,
+            next_due,
+        )
+        return new_task
 
     def update_task(
         self,

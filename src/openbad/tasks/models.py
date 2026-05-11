@@ -194,6 +194,7 @@ class TaskModel:
         owner: str = "system",
         due_at: float | None = None,
         parent_task_id: str | None = None,
+        recurrence_rule: str | None = None,
     ) -> TaskModel:
         """Create a new task with a generated UUID."""
         now = time.time()
@@ -210,6 +211,7 @@ class TaskModel:
             root_task_id=task_id,
             due_at=due_at,
             parent_task_id=parent_task_id,
+            recurrence_rule=recurrence_rule,
             created_at=now,
             updated_at=now,
         )
