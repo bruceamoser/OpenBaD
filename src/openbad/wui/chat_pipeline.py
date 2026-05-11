@@ -1552,6 +1552,9 @@ async def _agentic_stream(
                         content_buffer.append(text)
 
             elif kind == "on_chat_model_end":
+                end_node = event.get("metadata", {}).get(
+                    "langgraph_node", "supervisor",
+                )
                 output = event.get("data", {}).get("output")
                 if output:
                     usage = getattr(output, "usage_metadata", None)
@@ -1570,14 +1573,26 @@ async def _agentic_stream(
                                     reasoning=reasoning_text.strip(),
                                     tokens_used=total_tokens,
                                 )
-                    else:
-                        # Final answer — flush content as tokens.
+                    elif end_node == "supervisor":
+                        # Final answer from the supervisor — flush
+                        # content as visible tokens.
                         if content_buffer:
                             from openbad.autonomy.tool_agent import strip_think_tags
                             full_text = strip_think_tags("".join(content_buffer))
                             if full_text:
                                 yield StreamChunk(
                                     token=full_text,
+                                    tokens_used=total_tokens,
+                                )
+                    else:
+                        # Sub-agent final answer — treat as reasoning
+                        # so only the supervisor's paraphrase is shown.
+                        if content_buffer:
+                            from openbad.autonomy.tool_agent import strip_think_tags
+                            reasoning_text = strip_think_tags("".join(content_buffer))
+                            if reasoning_text.strip():
+                                yield StreamChunk(
+                                    reasoning=reasoning_text.strip(),
                                     tokens_used=total_tokens,
                                 )
                 content_buffer.clear()

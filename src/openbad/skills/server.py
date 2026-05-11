@@ -482,6 +482,8 @@ async def create_task(
     title: str,
     description: str = "",
     owner: str = "user",
+    due_at: float | None = None,
+    recurrence_rule: str | None = None,
 ) -> str:
     """Create a new task in the task manager.
 
@@ -489,11 +491,23 @@ async def create_task(
         title: The task title.
         description: Optional task description.
         owner: Task owner ('user' or 'agent', default 'user').
+        due_at: Optional Unix timestamp when the task is due.
+        recurrence_rule: Optional recurrence rule. Supported formats:
+            daily|HH:MM|TZ, weekly|DOW|HH:MM|TZ, interval|Ns.
+            Example: 'daily|18:00|US/Eastern' for every day at 6pm ET.
+            If set and due_at is omitted, the first due time is auto-computed.
     """
     from openbad.skills.tasks_diagnostics_tool import TasksDiagnosticsToolAdapter
 
     adapter = TasksDiagnosticsToolAdapter()
-    result = await asyncio.to_thread(adapter.create_task, title=title, description=description, owner=owner)
+    result = await asyncio.to_thread(
+        adapter.create_task,
+        title=title,
+        description=description,
+        owner=owner,
+        due_at=due_at,
+        recurrence_rule=recurrence_rule,
+    )
     return json.dumps(result, indent=2, default=str)
 
 
