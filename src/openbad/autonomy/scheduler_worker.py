@@ -272,6 +272,181 @@ def _parse_event_timestamp(raw: object) -> float | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Idle dispatch: Maintenance Crew
+# ---------------------------------------------------------------------------
+
+_IDLE_COOLDOWN_SECONDS = 300  # Don't run maintenance more than once per 5 min
+_last_idle_dispatch_ts: float = 0.0
+
+
+def _get_exploration_topic(conn: Any) -> str:
+    """Derive an exploration topic from recent conversation or use a default."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT content FROM session_messages
+            WHERE role = 'user'
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+        ).fetchall()
+        if rows:
+            snippets = [str(row[0])[:200] for row in rows]
+            return (
+                "Based on the user's recent activity, explore related knowledge "
+                "and connections:\n\n" + "\n".join(f"- {s}" for s in snippets)
+            )
+    except Exception:
+        pass
+    return (
+        "Explore the local system environment, recent events, and look for "
+        "interesting patterns or knowledge gaps that could be useful."
+    )
+
+
+def _idle_dispatch_maintenance(
+    *,
+    endocrine_runtime: Any,
+    conn: Any,
+    research_session_id: str,
+    post_session: Any,
+    adjust: Any,
+) -> None:
+    """Dispatch Maintenance Crew during idle periods.
+
+    Called when the heartbeat tick finds no pending tasks or research.
+    Respects FSM gating, endocrine thresholds, and a cooldown timer.
+    """
+    global _last_idle_dispatch_ts  # noqa: PLW0603
+
+    import time as _time
+
+    now = _time.time()
+
+    # Cooldown: avoid running maintenance too frequently
+    if (now - _last_idle_dispatch_ts) < _IDLE_COOLDOWN_SECONDS:
+        return
+
+    # FSM gating
+    fsm_state = "IDLE"
+    try:
+        fsm_state = endocrine_runtime.fsm_state or "IDLE"
+    except Exception:
+        pass
+
+    if fsm_state.upper() != "IDLE":
+        log.debug("Idle dispatch skipped: FSM state is %s", fsm_state)
+        return
+
+    # Endocrine gating
+    cortisol = endocrine_runtime.levels.get("cortisol", 0.0)
+    dopamine = endocrine_runtime.levels.get("dopamine", 0.0)
+
+    from openbad.frameworks.crews.maintenance import CORTISOL_DISABLE
+
+    if cortisol > CORTISOL_DISABLE:
+        log.debug("Idle dispatch skipped: cortisol %.2f > disable threshold", cortisol)
+        return
+
+    # Get exploration topic
+    topic = _get_exploration_topic(conn)
+
+    # Build crew LLM factory
+    try:
+        _cfg_path, cfg = _read_providers_config()
+        resolved = _resolve_chat_adapter(cfg, "research")
+        _adapter, _model, _pname, _fb, _cm, crew_llm = resolved
+        if crew_llm is None:
+            log.warning("Idle dispatch skipped: no crew LLM available")
+            return
+    except Exception:
+        log.exception("Idle dispatch skipped: failed to resolve crew LLM")
+        return
+
+    def llm_factory(priority: str) -> Any:
+        return crew_llm
+
+    def tools_factory(tool_role: str) -> list[Any]:
+        from openbad.frameworks.langchain_tools import async_get_crew_tools
+
+        try:
+            return asyncio.run(async_get_crew_tools(tool_role))
+        except Exception:
+            log.exception("Failed to get crew tools for role=%s", tool_role)
+            return []
+
+    # Build and run the Maintenance Crew
+    from openbad.frameworks.crews.maintenance import create_maintenance_crew
+
+    crew = create_maintenance_crew(
+        topic,
+        cortisol=cortisol,
+        dopamine=dopamine,
+        fsm_state=fsm_state,
+        llm_factory=llm_factory,
+        tools_factory=tools_factory,
+    )
+    if crew is None:
+        return
+
+    _last_idle_dispatch_ts = now
+    log.info(
+        "Idle dispatch: running Maintenance Crew (cortisol=%.2f dopamine=%.2f)",
+        cortisol, dopamine,
+    )
+
+    try:
+        result = crew.kickoff()
+        raw = str(result.raw if hasattr(result, "raw") else result)
+        summary = _strip_autonomy_interaction(raw)
+
+        if summary:
+            post_session(
+                research_session_id,
+                f"Idle exploration completed:\n\n{summary}",
+                extra_metadata={"source": "maintenance-crew", "idle_dispatch": True},
+            )
+            # Persist findings to library
+            try:
+                _persist_research_to_library(summary, "idle-exploration")
+            except Exception:
+                log.exception("Failed to persist idle exploration to library")
+
+            # Reward for successful exploration
+            adjust(
+                "maintenance-crew",
+                "Successful idle exploration",
+                {"dopamine": 0.03, "endorphin": 0.02},
+            )
+        else:
+            log.info("Idle dispatch: Maintenance Crew returned empty result")
+    except Exception:
+        log.exception("Idle dispatch: Maintenance Crew failed")
+        adjust(
+            "maintenance-crew",
+            "Idle exploration failed",
+            {"cortisol": 0.02},
+        )
+
+
+def _persist_research_to_library(summary: str, source: str) -> None:
+    """Persist maintenance crew findings to the Library."""
+    from openbad.library.store import LibraryStore
+    from openbad.state.db import initialize_state_db
+
+    conn = initialize_state_db()
+    store = LibraryStore(conn)
+
+    section_id = _ensure_research_section()
+    store.create_book(
+        section_id=section_id,
+        title=f"Exploration: {source}",
+        content=summary,
+        summary=summary[:200],
+    )
+
+
 def process_pending_autonomy_work(db_path: str | Path | None = None) -> dict[str, str | None]:
     return _process_autonomy_work(
         db_path=db_path,
@@ -1521,6 +1696,25 @@ def _process_autonomy_work(
     doctor_policy = session_allows(policy, "doctor", "allow_endocrine_doctor", True)
     if doctor_request is not None and doctor_policy:
         _process_doctor(doctor_request)
+
+    # ── Idle dispatch: Maintenance Crew ──
+    # When this is a general heartbeat tick (run_tasks=True) and nothing
+    # was executed, dispatch the Maintenance Crew for proactive exploration.
+    if (
+        run_tasks
+        and executed_task_id is None
+        and executed_research_id is None
+        and task_request is None
+        and research_request is None
+        and doctor_request is None
+    ):
+        _idle_dispatch_maintenance(
+            endocrine_runtime=endocrine_runtime,
+            conn=conn,
+            research_session_id=research_session_id,
+            post_session=_post_session,
+            adjust=_adjust,
+        )
 
     return {
         "executed_task_id": executed_task_id,
