@@ -1229,12 +1229,17 @@ async def stream_chat(
             # Onboarding mode: simple non-agentic completion
             from langchain_core.messages import HumanMessage as _HM
 
+            from openbad.autonomy.tool_agent import strip_think_tags
+
             prompt = _flatten_messages(messages)
             result = await chat_model.agenerate(
                 [[_HM(content=prompt)]],
             )
             for gen in result.generations[0]:
-                content = gen.message.content if hasattr(gen, "message") else gen.text
+                raw = gen.message.content if hasattr(gen, "message") else gen.text
+                content = strip_think_tags(raw)
+                if not content:
+                    continue
                 tokens_used += 1
                 full_response.append(content)
                 yield StreamChunk(token=content, tokens_used=tokens_used)
