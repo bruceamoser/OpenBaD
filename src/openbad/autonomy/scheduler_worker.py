@@ -43,10 +43,11 @@ _AUTONOMY_INTERACTIVE_PATTERNS = (
 
 
 _COMPLEXITY_KEYWORDS = re.compile(
-    r"\b(multi[- ]?step|pipeline|integrate|refactor|migrate|redesign|architect)\b",
+    r"\b(multi[- ]?step|pipeline|integrate|refactor|migrate|redesign|architect"
+    r"|research|analyze|investigate|compare|plan|review|summarize|explain)\b",
     re.IGNORECASE,
 )
-_COMPLEXITY_DESC_THRESHOLD = 500  # characters
+_COMPLEXITY_DESC_THRESHOLD = 100  # characters
 _COMPLEXITY_SUBTASK_THRESHOLD = 2
 
 # Track per-node retry attempts so stuck nodes don't block the queue forever.
@@ -54,20 +55,28 @@ _research_retry_counts: dict[str, int] = {}
 _MAX_RESEARCH_RETRIES = 3
 
 
-def _classify_task_complexity(task: TaskModel) -> bool:
+def _classify_task_complexity(task: TaskModel, *, force_crew: bool = False) -> bool:
     """Return True if a task should be dispatched to a CrewAI crew."""
+    if force_crew:
+        return True
+
     desc = task.description or ""
+    title = task.title or ""
 
     # Explicit flag
     if "[crew]" in desc.lower():
         return True
 
     # Keyword heuristic
-    if _COMPLEXITY_KEYWORDS.search(desc):
+    if _COMPLEXITY_KEYWORDS.search(desc) or _COMPLEXITY_KEYWORDS.search(title):
         return True
 
-    # Length heuristic
+    # Length heuristic — anything beyond a one-liner qualifies
     if len(desc) > _COMPLEXITY_DESC_THRESHOLD:
+        return True
+
+    # Multi-word title (3+ words) suggests non-trivial task
+    if len(title.split()) >= 3:
         return True
 
     # Subtask count (markdown checklist items)
@@ -1099,7 +1108,8 @@ def _process_autonomy_work(
 
         task_store.update_task_status(task_to_run.task_id, TaskStatus.RUNNING)
 
-        is_complex = _classify_task_complexity(task_to_run)
+        force_crew_flag = session_allows(policy, "tasks", "force_crew", False)
+        is_complex = _classify_task_complexity(task_to_run, force_crew=force_crew_flag)
         crew_result = None
         llm = None
 
