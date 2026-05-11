@@ -138,7 +138,10 @@ def _build_research_tool_validator(node) -> Callable[[str, dict[str, Any]], str 
 
 
 def _strip_autonomy_interaction(text: str) -> str:
-    paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", (text or "").strip()) if chunk.strip()]
+    from openbad.autonomy.tool_agent import strip_think_tags
+
+    cleaned = strip_think_tags(text or "")
+    paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", cleaned.strip()) if chunk.strip()]
     kept: list[str] = []
     for paragraph in paragraphs:
         if any(pattern.search(paragraph) for pattern in _AUTONOMY_INTERACTIVE_PATTERNS):

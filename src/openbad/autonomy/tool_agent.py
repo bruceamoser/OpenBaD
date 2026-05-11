@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -52,6 +53,21 @@ _TOOLING_BASE_PROMPT = (
     " If a tool fails, acknowledge that explicitly and continue with the best supported"
     " answer you can provide."
 )
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from model output.
+
+    Qwen3 and similar reasoning models wrap chain-of-thought inside
+    ``<think>`` tags.  This function strips those blocks and returns
+    only the visible response content.
+    """
+    if not text:
+        return text
+    cleaned = _THINK_TAG_RE.sub("", text).strip()
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -247,8 +263,22 @@ async def run_tool_agent(
                 total_tokens += usage.get("total_tokens", 0)
     for msg in reversed(all_messages):
         if isinstance(msg, AIMessage) and not msg.tool_calls:
-            final_content = msg.content or ""
-            break
+            raw_content = msg.content or ""
+            final_content = strip_think_tags(raw_content)
+            # If content was entirely inside <think> tags, check for
+            # reasoning_content in additional_kwargs (llama.cpp compat)
+            if not final_content:
+                extra = getattr(msg, "additional_kwargs", {}) or {}
+                reasoning = extra.get("reasoning_content", "")
+                if reasoning:
+                    log.warning(
+                        "Response content empty after think-tag strip; "
+                        "using reasoning_content as fallback request=%s",
+                        request_id,
+                    )
+                    final_content = strip_think_tags(str(reasoning))
+            if final_content:
+                break
 
     # Append creation verification footer
     creation_tools = {"create_task", "create_research_node"}
