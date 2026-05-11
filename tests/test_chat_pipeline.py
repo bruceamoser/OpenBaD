@@ -534,3 +534,90 @@ async def test_agentic_stream_surfaces_access_request_notice(monkeypatch):
     assert "req-123" in reasoning
     assert "Path Access Requests" in reasoning
 
+
+# ------------------------------------------------------------------ #
+#  Think-tag stripping in streaming paths
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_agentic_stream_strips_think_tags_from_final(tmp_path):
+    """Final answer content has <think> tags stripped before yielding."""
+    from openbad.wui.chat_pipeline import _agentic_stream
+
+    # Simulate LangGraph astream_events yielding content with think tags
+    events = [
+        {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="<think>reason")}},
+        {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="ing</think>")}},
+        {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="The answer.")}},
+        {"event": "on_chat_model_end", "data": {"output": SimpleNamespace(
+            usage_metadata={"total_tokens": 5},
+            tool_calls=[],
+        )}},
+    ]
+
+    async def _fake_astream_events(input, **kwargs):
+        for ev in events:
+            yield ev
+
+    mock_agent = MagicMock()
+    mock_agent.astream_events = _fake_astream_events
+
+    with (
+        patch("openbad.frameworks.langchain_tools.async_get_openbad_tools", new_callable=AsyncMock, return_value=[]),
+        patch("openbad.frameworks.supervisor.build_supervisor_graph", return_value=mock_agent),
+    ):
+        chunks = [
+            chunk async for chunk in _agentic_stream(
+                MagicMock(), "test-model",
+                [{"role": "user", "content": "hi"}], "req-think",
+            )
+        ]
+
+    tokens = "".join(c.token for c in chunks if c.token)
+    assert tokens == "The answer."
+    assert "<think>" not in tokens
+
+
+@pytest.mark.asyncio
+async def test_agentic_stream_strips_think_tags_from_reasoning(tmp_path):
+    """Intermediate reasoning (before tool calls) has think tags stripped."""
+    from openbad.wui.chat_pipeline import _agentic_stream
+
+    events = [
+        {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="<think>hidden</think>visible thought")}},
+        {"event": "on_chat_model_end", "data": {"output": SimpleNamespace(
+            usage_metadata={"total_tokens": 3},
+            tool_calls=[{"name": "find_files", "args": {}, "id": "tc1"}],
+        )}},
+        {"event": "on_tool_start", "name": "find_files", "data": {}},
+        {"event": "on_tool_end", "name": "find_files", "data": {"output": "[]"}},
+        {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="Done.")}},
+        {"event": "on_chat_model_end", "data": {"output": SimpleNamespace(
+            usage_metadata={"total_tokens": 5},
+            tool_calls=[],
+        )}},
+    ]
+
+    async def _fake_astream_events(input, **kwargs):
+        for ev in events:
+            yield ev
+
+    mock_agent = MagicMock()
+    mock_agent.astream_events = _fake_astream_events
+
+    with (
+        patch("openbad.frameworks.langchain_tools.async_get_openbad_tools", new_callable=AsyncMock, return_value=[]),
+        patch("openbad.frameworks.supervisor.build_supervisor_graph", return_value=mock_agent),
+    ):
+        chunks = [
+            chunk async for chunk in _agentic_stream(
+                MagicMock(), "test-model",
+                [{"role": "user", "content": "find files"}], "req-reason",
+            )
+        ]
+
+    reasoning = "".join(c.reasoning for c in chunks if c.reasoning)
+    assert "<think>" not in reasoning
+    assert "visible thought" in reasoning
+
