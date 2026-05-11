@@ -64,26 +64,14 @@ _SEMANTIC_TOP_K = 3  # top-k results from semantic search
 # ── SQLite state DB singleton for session messages ─────────────────── #
 _state_conn: Any = None
 
-_PREFERRED_STATE_DB = Path("/var/lib/openbad/data/state.db")
-
 
 def _get_state_conn() -> Any:
     """Return a shared SQLite connection to the state database."""
     global _state_conn
     if _state_conn is None:
-        from os import environ
-
         from openbad.state.db import DEFAULT_STATE_DB_PATH, initialize_state_db
 
-        configured = environ.get("OPENBAD_STATE_DB", "").strip()
-        if configured:
-            db_path = Path(configured)
-        elif _PREFERRED_STATE_DB.exists():
-            db_path = _PREFERRED_STATE_DB
-        else:
-            db_path = DEFAULT_STATE_DB_PATH
-
-        _state_conn = initialize_state_db(db_path)
+        _state_conn = initialize_state_db(DEFAULT_STATE_DB_PATH)
     return _state_conn
 _EVIDENCE_HONESTY_BLOCK = (
     "Ground all claims in evidence available in this session."
@@ -152,8 +140,10 @@ def _clamp(value: float, low: float, high: float) -> float:
 def _build_tooling_prompt(modulation: Any | None) -> str:
     lines = [
         "You have access to OpenBaD's embedded skills. These are built-in tools provided directly to you — they are NOT on an external server. When the answer depends on filesystem state, terminal output, logs, tasks, research nodes, or external content, call your tools instead of narrating what you would do.",
+        "Tasks and research nodes are different queues. Items created with create_task appear on /tasks; items created with create_research_node appear on /research. Never describe a research node as a task.",
         "The mcp_bridge tool is ONLY for connecting to external third-party MCP servers. Do not use mcp_bridge to access your own embedded skills — just call them directly by name.",
         "If asked about your tools or capabilities, call list_embedded_skills to see everything available to you.",
+        "When tools are available, never simulate tool use by writing literal markup like <tool_call> or by claiming you queued, created, or checked something unless a real tool call succeeded.",
         "Do not ask the user for permission before reversible reads, searches, diagnostics, or other already-allowed inspection steps.",
         "Use ask_user(question) only when blocked on missing business context, explicit approval, or destructive or irreversible actions.",
         "If the user mentions a filename or spec and the exact path is not verified, use find_files before read_file. Search the current workspace first, and never invent directories, absolute paths, or a guessed cwd.",
@@ -1568,7 +1558,8 @@ async def _agentic_stream(
                         # as reasoning so the user sees the agent's
                         # chain of thought before tool calls.
                         if content_buffer:
-                            reasoning_text = "".join(content_buffer)
+                            from openbad.autonomy.tool_agent import strip_think_tags
+                            reasoning_text = strip_think_tags("".join(content_buffer))
                             if reasoning_text.strip():
                                 yield StreamChunk(
                                     reasoning=reasoning_text.strip(),
@@ -1577,9 +1568,11 @@ async def _agentic_stream(
                     else:
                         # Final answer — flush content as tokens.
                         if content_buffer:
-                            for seg in content_buffer:
+                            from openbad.autonomy.tool_agent import strip_think_tags
+                            full_text = strip_think_tags("".join(content_buffer))
+                            if full_text:
                                 yield StreamChunk(
-                                    token=seg,
+                                    token=full_text,
                                     tokens_used=total_tokens,
                                 )
                 content_buffer.clear()
