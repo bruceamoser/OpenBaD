@@ -468,6 +468,17 @@ class Daemon:
         if self._external_signal_plugin is not None:
             await self._scanner.register_plugin(self._external_signal_plugin)
 
+        # Register the system log watcher plugin
+        try:
+            from openbad.plugins.observations.syslog import SyslogObservationPlugin
+
+            syslog_plugin = SyslogObservationPlugin(
+                service_filters=["openbad.service", "openbad-wui.service"],
+            )
+            await self._scanner.register_plugin(syslog_plugin)
+        except Exception:
+            logger.warning("Syslog plugin registration failed", exc_info=True)
+
         logger.info("BackgroundScanner activated with endocrine modulation")
 
     def _resolve_chat_model(self) -> tuple[object | None, str | None, str]:

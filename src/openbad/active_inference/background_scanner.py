@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from openbad.active_inference.exploration_actions import ExplorationActionGenerator
+from openbad.active_inference.immune_interceptor import ImmuneInterceptor
 
 if TYPE_CHECKING:
     from openbad.active_inference.engine import ExplorationEngine
@@ -37,10 +38,12 @@ class BackgroundScanner:
         exploration_engine: ExplorationEngine,
         action_generator: ExplorationActionGenerator,
         endocrine: EndocrineController | None = None,
+        immune_interceptor: ImmuneInterceptor | None = None,
     ) -> None:
         self._engine = exploration_engine
         self._action_generator = action_generator
         self._endocrine = endocrine
+        self._immune = immune_interceptor or ImmuneInterceptor(endocrine=endocrine)
         self._tasks: dict[str, asyncio.Task] = {}
         self._running = False
         self._current_state = "IDLE"
@@ -79,7 +82,22 @@ class BackgroundScanner:
             if self._should_scan():
                 try:
                     event = await self._engine.poll_plugin(plugin)
-                    if event.explored:
+
+                    # Immune interception: screen before cognitive processing
+                    result = self._immune.intercept(
+                        source_id=event.source_id,
+                        surprise=event.surprise,
+                        errors=event.errors,
+                    )
+
+                    if result.quarantined:
+                        logger.warning(
+                            "Observation quarantined: %s — %s",
+                            event.source_id,
+                            result.reason,
+                        )
+                    elif event.explored:
+                        # Only process high-surprise if immune clears it
                         await self._action_generator.process_high_surprise(
                             source_id=event.source_id,
                             surprise=event.surprise,
@@ -91,7 +109,9 @@ class BackgroundScanner:
                         plugin.source_id,
                     )
 
-            adjusted_interval = self._compute_interval(interval)
+            # Adjust interval with immune memory (vigilance/habituation)
+            immune_factor = self._immune.get_poll_factor(plugin.source_id)
+            adjusted_interval = self._compute_interval(interval) * immune_factor
             await asyncio.sleep(adjusted_interval)
 
     def _should_scan(self) -> bool:
