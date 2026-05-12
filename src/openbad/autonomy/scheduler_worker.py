@@ -285,8 +285,11 @@ def _parse_event_timestamp(raw: object) -> float | None:
 # Idle dispatch: Maintenance Crew
 # ---------------------------------------------------------------------------
 
-_IDLE_COOLDOWN_SECONDS = 300  # Don't run maintenance more than once per 5 min
-_last_idle_dispatch_ts: float = 0.0
+_IDLE_COOLDOWN_SECONDS = 3600  # Don't run maintenance more than once per hour
+_last_idle_dispatch_ts: float = time.time()  # Start with cooldown active
+
+_DOCTOR_COOLDOWN_SECONDS = 600  # Don't run doctor more than once per 10 min per source
+_last_doctor_dispatch: dict[str, float] = {}  # source → timestamp
 
 
 def _get_exploration_topic(conn: Any) -> str:
@@ -683,16 +686,29 @@ def _process_autonomy_work(
             # _process_doctor on every task/research tick that had log
             # errors, creating a feedback loop (doctor errors → more
             # errors → more doctor calls).
+            #
+            # Publish to the MQTT doctor topic rather than calling
+            # _process_doctor inline — this ensures the daemon's FSM
+            # gates the call (DIAGNOSING state blocks duplicates) and
+            # properly resets state when the doctor finishes.
             if endocrine_runtime.has_any_activation():
                 doctor_policy = session_allows(policy, "doctor", "allow_endocrine_doctor", True)
                 if doctor_policy:
-                    _process_doctor(
-                        {
-                            "source": "log-health",
-                            "reason": reason,
-                            "context": summary,
-                        }
-                    )
+                    try:
+                        from openbad.nervous_system.client import NervousSystemClient
+                        from openbad.nervous_system import topics
+
+                        client = NervousSystemClient.get_instance()
+                        client.publish_bytes(
+                            topics.DOCTOR_CALL,
+                            json.dumps({
+                                "source": "log-health",
+                                "reason": reason,
+                                "context": summary,
+                            }).encode("utf-8"),
+                        )
+                    except Exception:
+                        log.debug("Failed to publish doctor call via MQTT")
             return
 
         reason = "Observed runtime warning accumulation in persistent event log"
@@ -1458,7 +1474,6 @@ def _process_autonomy_work(
     def _process_doctor(request: dict[str, object] | None) -> None:
         nonlocal executed_doctor
         doctor_now = time.time()
-        levels = endocrine_runtime.levels
         request_payload = request if isinstance(request, dict) else {}
         request_source = str(
             request_payload.get("source", "unknown")
@@ -1466,6 +1481,18 @@ def _process_autonomy_work(
         request_reason = str(
             request_payload.get("reason", "doctor call requested")
         ).strip() or "doctor call requested"
+
+        # ── Cooldown: deduplicate repeated calls for the same source ──
+        last_ts = _last_doctor_dispatch.get(request_source, 0.0)
+        if (doctor_now - last_ts) < _DOCTOR_COOLDOWN_SECONDS:
+            log.debug(
+                "Doctor call suppressed (cooldown): source=%s reason=%s",
+                request_source, request_reason,
+            )
+            return
+        _last_doctor_dispatch[request_source] = doctor_now
+
+        levels = endocrine_runtime.levels
 
         # ── Primary path: Internal Crew (Immune → Doctor) ──
         crew_result = _run_doctor_crew(request_source, request_reason)
@@ -1705,23 +1732,8 @@ def _process_autonomy_work(
         _process_doctor(doctor_request)
 
     # ── Idle dispatch: Maintenance Crew ──
-    # When this is a general heartbeat tick (run_tasks=True) and nothing
-    # was executed, dispatch the Maintenance Crew for proactive exploration.
-    if (
-        run_tasks
-        and executed_task_id is None
-        and executed_research_id is None
-        and task_request is None
-        and research_request is None
-        and doctor_request is None
-    ):
-        _idle_dispatch_maintenance(
-            endocrine_runtime=endocrine_runtime,
-            conn=conn,
-            research_session_id=research_session_id,
-            post_session=_post_session,
-            adjust=_adjust,
-        )
+    # Disabled for automatic dispatch. User triggers manually via
+    # the Health dashboard button → POST /api/maintenance/run.
 
     return {
         "executed_task_id": executed_task_id,

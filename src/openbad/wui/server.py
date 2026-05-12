@@ -485,14 +485,6 @@ def _configured_models_for_provider(
             configured.append(model_id)
             seen.add(model_id)
 
-    for step in config.default_fallback_chain:
-        if step.provider != provider_name:
-            continue
-        model_id = step.model.strip()
-        if model_id and model_id not in seen:
-            configured.append(model_id)
-            seen.add(model_id)
-
     for provider in config.providers:
         if provider.name != provider_name:
             continue
@@ -960,6 +952,8 @@ def _extract_provider_config(
 def _build_langchain_model(
     provider: ProviderConfig,
     model: str,
+    *,
+    enable_thinking: bool = True,
 ) -> object:
     """Build a LangChain ``ChatOpenAI`` for a provider config.
 
@@ -977,6 +971,10 @@ def _build_langchain_model(
         "timeout": cfg["timeout_s"],
         "max_retries": 2,
     }
+    if not enable_thinking:
+        kwargs["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
     if cfg["is_copilot"]:
         kwargs["default_headers"] = {
             "Editor-Version": "OpenBaD/1.0",
@@ -1011,10 +1009,8 @@ def _build_crew_llm(
         prefill.  We strip them so the model can still think freely.
         """
 
-        def _prepare_completion_params(self, messages, tools=None, skip_file_processing=False):  # type: ignore[override]
-            params = super()._prepare_completion_params(
-                messages, tools, skip_file_processing=skip_file_processing,
-            )
+        def _prepare_completion_params(self, messages, tools=None, **kwargs):  # type: ignore[override]
+            params = super()._prepare_completion_params(messages, tools, **kwargs)
             msgs = params.get("messages")
             if msgs and isinstance(msgs, list):
                 # Strip ALL trailing assistant messages (prefill)
@@ -1036,6 +1032,7 @@ def _build_crew_llm(
         api_key=str(cfg["api_key"]) or None,
         base_url=str(cfg["base_url"]) or None,
         timeout=float(str(cfg["timeout_s"])),
+        max_tokens=4096,
     )
 
 
@@ -1308,10 +1305,6 @@ def _serialize_systems_config(config: CognitiveConfig) -> dict[str, object]:
             "provider": assignment.provider,
             "model": assignment.model,
         }
-    fallback_chain = [
-        {"provider": step.provider, "model": step.model}
-        for step in config.default_fallback_chain
-    ]
     provider_names: list[str] = []
     for provider in config.providers:
         if not provider.enabled or provider.name in provider_names:
@@ -1319,7 +1312,6 @@ def _serialize_systems_config(config: CognitiveConfig) -> dict[str, object]:
         provider_names.append(provider.name)
     return {
         "systems": systems,
-        "fallback_chain": fallback_chain,
         "providers": [
             {"name": provider_name}
             for provider_name in provider_names
@@ -1527,55 +1519,75 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
         bridge = request.app.get("bridge")
         nervous_system_client = getattr(bridge, "_mqtt", None) if bridge else None
 
-        async for chunk in stream_chat(
-            chat_model,
-            model,
-            message,
-            session_id,
-            system=system,
-            provider_name=provider_name or "",
-            user_profile=getattr(persistence, "user", None),
-            assistant_profile=getattr(persistence, "assistant", None),
-            modulation=getattr(modulator, "factors", None),
-            identity_persistence=persistence,
-            personality_modulator=modulator,
-            usage_tracker=request.app.get("usage_tracker"),
-            nervous_system_client=nervous_system_client,
-        ):
-            if chunk.error:
+        # Keepalive: send SSE comments every 10s to prevent browser timeout
+        keepalive_active = True
+
+        async def _keepalive() -> None:
+            while keepalive_active:
+                await asyncio.sleep(10)
+                if keepalive_active:
+                    try:
+                        await resp.write(b": keepalive\n\n")
+                    except Exception:
+                        break
+
+        keepalive_task = asyncio.ensure_future(_keepalive())
+
+        try:
+            async for chunk in stream_chat(
+                chat_model,
+                model,
+                message,
+                session_id,
+                system=system,
+                provider_name=provider_name or "",
+                user_profile=getattr(persistence, "user", None),
+                assistant_profile=getattr(persistence, "assistant", None),
+                modulation=getattr(modulator, "factors", None),
+                identity_persistence=persistence,
+                personality_modulator=modulator,
+                usage_tracker=request.app.get("usage_tracker"),
+                nervous_system_client=nervous_system_client,
+            ):
+                if chunk.error:
+                    data = json.dumps(
+                        {
+                            "session_id": session_id,
+                            "token": f"\n\n[Error: {chunk.error}]",
+                            "tokens_used": chunk.tokens_used,
+                        }
+                    )
+                    await resp.write(f"data: {data}\n\n".encode())
+                    break
+                if chunk.done:
+                    done_data = json.dumps(
+                        {
+                            "session_id": session_id,
+                            "tokens_used": chunk.tokens_used,
+                            "provider": chunk.provider,
+                            "model": chunk.model,
+                            "done": True,
+                        }
+                    )
+                    await resp.write(f"data: {done_data}\n\n".encode())
+                    break
                 data = json.dumps(
                     {
                         "session_id": session_id,
-                        "token": f"\n\n[Error: {chunk.error}]",
+                        "token": chunk.token,
+                        "reasoning": chunk.reasoning,
                         "tokens_used": chunk.tokens_used,
+                        **({"access_request": chunk.access_request} if chunk.access_request else {}),
                     }
                 )
                 await resp.write(f"data: {data}\n\n".encode())
-                break
-            if chunk.done:
-                done_data = json.dumps(
-                    {
-                        "session_id": session_id,
-                        "tokens_used": chunk.tokens_used,
-                        "provider": chunk.provider,
-                        "model": chunk.model,
-                        "done": True,
-                    }
-                )
-                await resp.write(f"data: {done_data}\n\n".encode())
-                break
-            data = json.dumps(
-                {
-                    "session_id": session_id,
-                    "token": chunk.token,
-                    "reasoning": chunk.reasoning,
-                    "tokens_used": chunk.tokens_used,
-                    **({"access_request": chunk.access_request} if chunk.access_request else {}),
-                }
-            )
-            await resp.write(f"data: {data}\n\n".encode())
-            await resp.drain()
-        await resp.write(b"data: [DONE]\n\n")
+                await resp.drain()
+            await resp.write(b"data: [DONE]\n\n")
+        finally:
+            keepalive_active = False
+            keepalive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await keepalive_task
     except Exception:
         log.exception(
             "Chat stream error for system=%s provider=%s model=%s",
@@ -1757,10 +1769,6 @@ async def _put_systems(request: web.Request) -> web.Response:
     if not isinstance(systems_raw, dict):
         raise web.HTTPBadRequest(text="systems must be an object")
 
-    chain_raw = payload.get("fallback_chain")
-    if not isinstance(chain_raw, list):
-        raise web.HTTPBadRequest(text="fallback_chain must be a list")
-
     # Validate system names
     systems: dict[str, dict[str, str]] = {}
     for name, assignment in systems_raw.items():
@@ -1775,15 +1783,6 @@ async def _put_systems(request: web.Request) -> web.Response:
             "model": str(assignment.get("model", "")).strip(),
         }
 
-    chain = []
-    for step in chain_raw:
-        if not isinstance(step, dict):
-            raise web.HTTPBadRequest(text="fallback chain entries must be objects")
-        chain.append({
-            "provider": str(step.get("provider", "")).strip(),
-            "model": str(step.get("model", "")).strip(),
-        })
-
     path = _resolve_cognitive_config_path()
     existing = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
 
@@ -1792,7 +1791,8 @@ async def _put_systems(request: web.Request) -> web.Response:
         cognitive = {}
 
     cognitive["systems"] = systems
-    cognitive["default_fallback_chain"] = chain
+    # No fallback chain — if the model fails, it fails.
+    cognitive.pop("default_fallback_chain", None)
     existing["cognitive"] = cognitive
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3029,6 +3029,162 @@ async def _post_endocrine_reset_levels(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Maintenance Crew (manual trigger)
+# ---------------------------------------------------------------------------
+
+# Module-level state for tracking maintenance crew runs
+_maintenance_state: dict[str, object] = {
+    "running": False,
+    "last_run": None,
+    "last_result": None,
+    "last_topic": None,
+    "error": None,
+}
+
+
+async def _get_maintenance_status(_request: web.Request) -> web.Response:
+    """GET /api/maintenance/status — current maintenance crew state + explanation."""
+    runtime = EndocrineRuntime(config=load_endocrine_config())
+    cortisol = runtime.levels.get("cortisol", 0.0)
+    dopamine = runtime.levels.get("dopamine", 0.0)
+
+    # Determine what the crew would do
+    from openbad.frameworks.crews.maintenance import (  # noqa: PLC0415
+        CORTISOL_DISABLE,
+        CORTISOL_SUPPRESS,
+    )
+
+    if cortisol > CORTISOL_DISABLE:
+        scope = "disabled (cortisol too high)"
+    elif cortisol > CORTISOL_SUPPRESS:
+        scope = "reduced (elevated cortisol)"
+    else:
+        scope = "full exploration"
+
+    # Get the topic it would explore
+    from openbad.state.db import initialize_state_db  # noqa: PLC0415
+
+    conn = initialize_state_db()
+    from openbad.autonomy.scheduler_worker import _get_exploration_topic  # noqa: PLC0415
+
+    topic = _get_exploration_topic(conn)
+
+    return web.json_response({
+        "running": _maintenance_state["running"],
+        "last_run": _maintenance_state["last_run"],
+        "last_result": _maintenance_state["last_result"],
+        "last_topic": _maintenance_state["last_topic"],
+        "error": _maintenance_state["error"],
+        "explanation": {
+            "purpose": (
+                "The Maintenance Crew is a 3-agent pipeline: "
+                "Explorer (forages for novel info), Research (verifies findings), "
+                "Sleep (consolidates into long-term memory)."
+            ),
+            "current_topic": topic,
+            "exploration_scope": scope,
+            "cortisol": round(cortisol, 3),
+            "dopamine": round(dopamine, 3),
+        },
+    })
+
+
+async def _post_maintenance_run(request: web.Request) -> web.Response:
+    """POST /api/maintenance/run — manually trigger the maintenance crew."""
+    if _maintenance_state["running"]:
+        return web.json_response(
+            {"ok": False, "error": "Maintenance crew is already running"},
+            status=409,
+        )
+
+    import asyncio  # noqa: PLC0415
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(_run_maintenance_crew_background(request.app))
+    return web.json_response({"ok": True, "state": "started"})
+
+
+async def _run_maintenance_crew_background(app: web.Application) -> None:
+    """Run maintenance crew in background, update _maintenance_state."""
+    import asyncio  # noqa: PLC0415
+
+    _maintenance_state["running"] = True
+    _maintenance_state["error"] = None
+
+    try:
+        runtime = EndocrineRuntime(config=load_endocrine_config())
+        cortisol = runtime.levels.get("cortisol", 0.0)
+        dopamine = runtime.levels.get("dopamine", 0.0)
+
+        from openbad.state.db import initialize_state_db  # noqa: PLC0415
+
+        conn = initialize_state_db()
+        from openbad.autonomy.scheduler_worker import _get_exploration_topic  # noqa: PLC0415
+
+        topic = _get_exploration_topic(conn)
+        _maintenance_state["last_topic"] = topic
+
+        # Resolve crew LLM
+        from openbad.autonomy.scheduler_worker import (  # noqa: PLC0415
+            _read_providers_config,
+            _resolve_chat_adapter,
+        )
+
+        _cfg_path, cfg = _read_providers_config()
+        resolved = _resolve_chat_adapter(cfg, "research")
+        _adapter, _model, _pname, _fb, _cm, crew_llm = resolved
+        if crew_llm is None:
+            _maintenance_state["running"] = False
+            _maintenance_state["error"] = "No crew LLM available"
+            return
+
+        def llm_factory(priority: str) -> object:
+            return crew_llm
+
+        def tools_factory(tool_role: str) -> list[object]:
+            from openbad.frameworks.langchain_tools import (  # noqa: PLC0415
+                async_get_crew_tools,
+            )
+
+            try:
+                return asyncio.run(async_get_crew_tools(tool_role))
+            except Exception:
+                return []
+
+        from openbad.frameworks.crews.maintenance import (  # noqa: PLC0415
+            create_maintenance_crew,
+        )
+
+        crew = create_maintenance_crew(
+            topic,
+            cortisol=cortisol,
+            dopamine=dopamine,
+            fsm_state="IDLE",
+            llm_factory=llm_factory,
+            tools_factory=tools_factory,
+        )
+        if crew is None:
+            _maintenance_state["running"] = False
+            _maintenance_state["error"] = "Crew creation blocked by FSM state"
+            return
+
+        # Run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, crew.kickoff)
+        raw = str(result.raw if hasattr(result, "raw") else result)
+
+        _maintenance_state["last_result"] = raw[:2000]
+        _maintenance_state["last_run"] = datetime.now(UTC).isoformat()
+        _maintenance_state["error"] = None
+
+    except Exception as exc:
+        log.exception("Manual maintenance crew run failed")
+        _maintenance_state["error"] = str(exc)[:500]
+    finally:
+        _maintenance_state["running"] = False
+
+
+# ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
 
@@ -3614,6 +3770,10 @@ def create_app(
         candidate = BUILD_DIR / rel
         if candidate.is_file():
             return web.FileResponse(candidate)
+        # SvelteKit adapter-static outputs e.g. health.html for /health
+        html_candidate = BUILD_DIR / f"{rel}.html"
+        if html_candidate.is_file():
+            return web.FileResponse(html_candidate)
         return web.FileResponse(BUILD_DIR / "index.html")
 
     app.router.add_get("/", _spa_index)
@@ -3678,6 +3838,8 @@ def create_app(
     app.router.add_get("/api/endocrine/config", _get_endocrine_config)
     app.router.add_put("/api/endocrine/config", _put_endocrine_config)
     app.router.add_post("/api/endocrine/reset", _post_endocrine_reset_levels)
+    app.router.add_get("/api/maintenance/status", _get_maintenance_status)
+    app.router.add_post("/api/maintenance/run", _post_maintenance_run)
     app.router.add_get("/api/tasks", _get_tasks)
     app.router.add_get("/api/tasks/completed", _get_tasks_completed)
     app.router.add_post("/api/tasks", _post_tasks)
@@ -3735,6 +3897,30 @@ def create_app(
         semantic=_get_semantic(),
         procedural=ProceduralMemory(storage_path=_PROC_DIR / "skills.json"),
     )
+
+    # Routines API (scheduled automation)
+    from openbad.wui.routine_api import setup_routine_routes  # noqa: PLC0415
+
+    setup_routine_routes(app)
+
+    # System services management API
+    from openbad.wui.services_api import setup_services_routes  # noqa: PLC0415
+
+    setup_services_routes(app)
+
+    # Start routine daemon
+    from openbad.routines.daemon import start_routine_daemon  # noqa: PLC0415
+
+    async def _start_routine_daemon(app: web.Application) -> None:
+        app["_routine_daemon"] = start_routine_daemon()
+
+    async def _stop_routine_daemon(app: web.Application) -> None:
+        task = app.get("_routine_daemon")
+        if task:
+            task.cancel()
+
+    app.on_startup.append(_start_routine_daemon)
+    app.on_cleanup.append(_stop_routine_daemon)
 
     # SvelteKit static assets + SPA fallback for client-side routing
     _app_dir = BUILD_DIR / "_app"

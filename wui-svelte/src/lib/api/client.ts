@@ -35,3 +35,13 @@ export async function del<T>(path: string): Promise<T> {
   if (!resp.ok) throw new Error(`DELETE ${path} failed: ${resp.statusText}`);
   return resp.json() as Promise<T>;
 }
+
+export async function patch<T>(path: string, body: unknown): Promise<T> {
+  const resp = await fetch(`${BASE}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`PATCH ${path} failed: ${resp.statusText}`);
+  return resp.json() as Promise<T>;
+}

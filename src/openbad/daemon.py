@@ -76,6 +76,7 @@ class Daemon:
         self._chat_router: PeripheralChatRouter | None = None
         self._identity_persistence: object | None = None
         self._personality_modulator: object | None = None
+        self._last_doctor_ts: float = 0.0
 
     # -- public --------------------------------------------------------- #
 
@@ -303,6 +304,15 @@ class Daemon:
         except Exception:
             logger.exception("Invalid doctor call payload")
             return
+
+        # Cooldown: suppress repeated MQTT doctor calls within 10 minutes.
+        import time as _time
+
+        now = _time.time()
+        if (now - self._last_doctor_ts) < 600:
+            logger.debug("Doctor call suppressed (MQTT cooldown)")
+            return
+        self._last_doctor_ts = now
 
         if self._fsm is not None and not self._fsm.try_begin_work("begin_diagnose"):
             logger.info("FSM busy (%s); skipping overlapping doctor call", self._fsm.state)

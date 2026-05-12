@@ -106,9 +106,10 @@ def initialize_research_db(conn: sqlite3.Connection) -> None:
     """Create the ``research_queue`` table if it does not exist."""
     conn.execute(_CREATE_TABLE)
     # Migrate: add parent_node_id column if missing (pre-existing DBs).
-    with contextlib.suppress(sqlite3.OperationalError):
+    with contextlib.suppress(sqlite3.OperationalError, SystemError):
         conn.execute(_MIGRATE_PARENT)
-    conn.commit()
+    if conn.in_transaction:
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------

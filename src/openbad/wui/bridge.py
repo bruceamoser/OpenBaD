@@ -121,7 +121,7 @@ class MqttWebSocketBridge:
     def create_app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/events", self._sse_handler)
-        app.router.add_get("/health", self._health)
+        app.router.add_get("/api/health", self._health)
         app.router.add_get("/ws", self._ws_handler)
         app.on_startup.append(self._on_startup)
         app.on_shutdown.append(self._on_shutdown)

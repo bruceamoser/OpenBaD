@@ -52,7 +52,8 @@ _SELECT_BY_NODE = "SELECT * FROM reward_records WHERE node_id = ? ORDER BY creat
 def initialize_reward_db(conn: sqlite3.Connection) -> None:
     """Create the ``reward_records`` table if it does not exist."""
     conn.execute(_CREATE_TABLE)
-    conn.commit()
+    if conn.in_transaction:
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
