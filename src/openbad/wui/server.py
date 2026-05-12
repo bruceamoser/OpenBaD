@@ -3749,6 +3749,7 @@ async def run_server(
     port: int = 9200,
     mqtt_host: str = "localhost",
     mqtt_port: int = 1883,
+    mcp_port: int = 9201,
 ) -> None:
     app = create_app(mqtt_host=mqtt_host, mqtt_port=mqtt_port, enable_mqtt=True)
     _initialize_identity_state(app)
