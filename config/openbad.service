@@ -10,6 +10,7 @@ Wants=openbad-searxng.service
 Type=simple
 User=openbad
 Group=openbad
+SupplementaryGroups=systemd-journal
 ExecStart=/usr/local/bin/openbad run --host localhost --port 1883
 ExecStop=/bin/kill -TERM $MAINPID
 Restart=on-failure

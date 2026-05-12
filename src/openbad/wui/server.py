@@ -995,8 +995,26 @@ def _build_crew_llm(
     ``ChatOpenAI`` returned by :func:`_build_langchain_model`.  CrewAI
     uses its own LLM wrapper around LiteLLM, so we build a parallel
     object from the same extracted config.
+
+    We subclass ``LLM`` to strip trailing assistant prefill messages
+    that CrewAI injects to guide response format.  llama.cpp rejects
+    the combination of thinking + assistant prefill, so removing the
+    prefill lets the model think freely.
     """
     from crewai import LLM
+
+    class _ThinkingLLM(LLM):
+        """LLM subclass that strips assistant prefill for thinking models."""
+
+        def _prepare_completion_params(self, messages, tools=None, skip_file_processing=False):  # type: ignore[override]
+            params = super()._prepare_completion_params(
+                messages, tools, skip_file_processing=skip_file_processing,
+            )
+            msgs = params.get("messages")
+            if msgs and isinstance(msgs, list) and len(msgs) > 1:
+                if msgs[-1].get("role") == "assistant":
+                    params["messages"] = msgs[:-1]
+            return params
 
     cfg = _extract_provider_config(provider, model)
 
@@ -1006,12 +1024,11 @@ def _build_crew_llm(
     if cfg["base_url"] and "/" not in str(crew_model):
         crew_model = f"openai/{crew_model}"
 
-    return LLM(
+    return _ThinkingLLM(
         model=str(crew_model),
         api_key=str(cfg["api_key"]) or None,
         base_url=str(cfg["base_url"]) or None,
         timeout=float(str(cfg["timeout_s"])),
-        thinking=False,
     )
 
 

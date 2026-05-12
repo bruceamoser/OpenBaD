@@ -46,6 +46,7 @@ class SyslogObservationPlugin(ObservationPlugin):
             "alert": 1,
             "emerg": 0,
         }
+        self._permission_warned = False
 
     @property
     def source_id(self) -> str:
@@ -110,7 +111,12 @@ class SyslogObservationPlugin(ObservationPlugin):
             )
 
             if result.returncode != 0:
-                logger.error(f"journalctl failed: {result.stderr}")
+                if "insufficient permissions" in (result.stderr or ""):
+                    if not self._permission_warned:
+                        logger.warning("journalctl: insufficient permissions — add openbad user to systemd-journal group")
+                        self._permission_warned = True
+                else:
+                    logger.error(f"journalctl failed: {result.stderr}")
                 return 0, 0, 0, []
 
             import json
