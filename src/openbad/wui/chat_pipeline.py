@@ -1047,6 +1047,62 @@ _MAX_TOOL_ITERATIONS = 16
 _TOOL_CALL_TIMEOUT_S = 30.0
 
 
+def _format_tool_result(raw: str, *, max_len: int = 400) -> str:
+    """Format a tool result for display in the reasoning trace.
+
+    Tries to parse JSON and produce a compact human-readable summary
+    (key counts, short previews).  Falls back to plain truncation.
+    """
+    text = raw.strip()
+    if not text:
+        return ""
+
+    # Try JSON parsing for structured results
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Not JSON — just truncate
+        if len(text) > max_len:
+            return text[:max_len] + "…"
+        return text
+
+    # List of events/items — summarize instead of dumping everything
+    if isinstance(data, list):
+        count = len(data)
+        if count == 0:
+            return "(empty list)"
+        # Show count + first item preview
+        first = json.dumps(data[0], indent=None, default=str)
+        if len(first) > 200:
+            first = first[:200] + "…"
+        if count == 1:
+            return first
+        return f"({count} items) first: {first}"
+
+    # Dict — show keys and short values
+    if isinstance(data, dict):
+        compact = json.dumps(data, indent=None, default=str)
+        if len(compact) <= max_len:
+            return compact
+        # Too long — show keys and truncated values
+        parts: list[str] = []
+        for k, v in list(data.items())[:8]:
+            vs = json.dumps(v, indent=None, default=str)
+            if len(vs) > 60:
+                vs = vs[:60] + "…"
+            parts.append(f"{k}: {vs}")
+        summary = ", ".join(parts)
+        if len(data) > 8:
+            summary += f" (+{len(data) - 8} more keys)"
+        return summary
+
+    # Primitive
+    result = str(data)
+    if len(result) > max_len:
+        return result[:max_len] + "…"
+    return result
+
+
 # ── Streaming pipeline ────────────────────────────────────────────── #
 
 
@@ -1578,7 +1634,7 @@ async def _agentic_stream(
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "unknown")
                 yield StreamChunk(
-                    reasoning=f"Calling tool: {tool_name}",
+                    reasoning=f"\n🔧 **{tool_name}** …",
                     tokens_used=total_tokens,
                 )
 
@@ -1586,15 +1642,11 @@ async def _agentic_stream(
                 tool_name = event.get("name", "unknown")
                 raw = event.get("data", {}).get("output", "")
                 result_text = str(raw) if raw else ""
-                # Truncate long results to keep the stream readable.
-                preview = (
-                    result_text[:300] + "…"
-                    if len(result_text) > 300
-                    else result_text
-                )
+                # Try to pretty-print JSON results compactly.
+                preview = _format_tool_result(result_text, max_len=400)
                 if preview.strip():
                     yield StreamChunk(
-                        reasoning=f"Tool {tool_name} returned: {preview}",
+                        reasoning=f" → {preview}\n",
                         tokens_used=total_tokens,
                     )
     finally:

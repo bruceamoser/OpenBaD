@@ -1,0 +1,1 @@
+async function e(r){const t=await r("/api/setup-status");if(t.first_run)return t.redirect_to||"/providers?wizard=1";const n=await r("/api/onboarding/status");return n.onboarding_complete?null:n.redirect_to||null}export{e as r};

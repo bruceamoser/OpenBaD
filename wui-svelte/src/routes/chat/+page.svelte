@@ -542,10 +542,17 @@
             </div>
           {/if}
           {#if msg.reasoning}
-            <details class="reasoning">
-              <summary>Reasoning trace</summary>
-              <pre>{msg.reasoning}</pre>
-            </details>
+            {#if streaming && i === messages.length - 1}
+              <div class="reasoning reasoning-live">
+                <div class="reasoning-header">⚙️ Working…</div>
+                <pre>{msg.reasoning}</pre>
+              </div>
+            {:else}
+              <details class="reasoning">
+                <summary>Reasoning trace</summary>
+                <pre>{msg.reasoning}</pre>
+              </details>
+            {/if}
           {/if}
           <div class="bubble-actions">
             <button
@@ -829,6 +836,24 @@
     opacity: 0.7;
     margin: 0.25rem 0 0 0;
     font-family: 'JetBrains Mono', monospace;
+  }
+  .reasoning-live {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .reasoning-live .reasoning-header {
+    font-size: 0.75rem;
+    color: var(--accent, #6cb4ee);
+    margin-bottom: 0.25rem;
+    font-weight: 500;
+  }
+  .reasoning-live pre {
+    opacity: 0.85;
+    font-size: 0.78rem;
   }
   .bubble-actions {
     display: flex;
