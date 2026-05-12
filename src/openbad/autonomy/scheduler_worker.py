@@ -616,16 +616,13 @@ def _process_autonomy_work(
 
     def _summarize_log_health(*, lookback_seconds: int = 900) -> dict[str, object] | None:
         cutoff = time.time() - max(60, int(lookback_seconds))
-        warning_events = recent_events(limit=80, level="WARNING")
-        error_events = recent_events(limit=80, level="ERROR")
-        critical_events = recent_events(limit=40, level="CRITICAL")
+        warning_events = recent_events(limit=80, level="WARNING", since=cutoff)
+        error_events = recent_events(limit=80, level="ERROR", since=cutoff)
+        critical_events = recent_events(limit=40, level="CRITICAL", since=cutoff)
 
         def _filter(events: list[dict[str, object]]) -> list[dict[str, object]]:
             filtered: list[dict[str, object]] = []
             for event in events:
-                event_ts = _parse_event_timestamp(event.get("ts"))
-                if event_ts is None or event_ts < cutoff:
-                    continue
                 source_name = str(event.get("source", "")).strip().lower()
                 if not source_name.startswith("openbad"):
                     continue

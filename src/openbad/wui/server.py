@@ -3362,9 +3362,14 @@ async def _get_system_events(request: web.Request) -> web.Response:
     level = request.query.get("level") or None
     source = request.query.get("source") or None
     search = request.query.get("search") or None
+    since: float | None = None
+    with contextlib.suppress(ValueError, TypeError):
+        raw_since = request.query.get("since")
+        if raw_since is not None:
+            since = float(raw_since)
 
     events = recent_events(limit=limit, level=level, source=source,
-                           search=search, page=page)
+                           search=search, page=page, since=since)
     total = event_count(level=level, source=source, search=search)
     total_pages = max(1, (total + limit - 1) // limit) if total else 1
 

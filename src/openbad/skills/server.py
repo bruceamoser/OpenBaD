@@ -364,17 +364,23 @@ async def get_mqtt_records(limit: int = 100) -> str:
 
 
 @skill_server.tool()
-async def get_system_logs(limit: int = 200, system: str = "") -> str:
+async def get_system_logs(limit: int = 200, system: str = "", hours_back: float = 1.0) -> str:
     """Retrieve recent persistent system log events.  Optionally filter by source subsystem.
+
+    Only returns events from the recent past (default: last 1 hour).
 
     Args:
         limit: Maximum number of log lines (default 200).
         system: Optional source module filter (e.g. 'wui', 'endocrine').
+        hours_back: How many hours of history to include (default 1.0).
     """
+    import time as _time
+
     from openbad.skills.event_log_tool import EventLogToolAdapter
 
+    since = _time.time() - max(0.01, float(hours_back)) * 3600
     adapter = EventLogToolAdapter()
-    events = await asyncio.to_thread(adapter.read_events, limit=limit, source=system)
+    events = await asyncio.to_thread(adapter.read_events, limit=limit, source=system, since=since)
     return json.dumps(events, indent=2, default=str)
 
 
@@ -384,20 +390,29 @@ async def read_events(
     level: str = "",
     source: str = "",
     search: str = "",
+    hours_back: float = 1.0,
 ) -> str:
     """Read entries from the persistent event log.  Supports filtering by level, source, and text search.
+
+    Only returns events from the recent past (default: last 1 hour).
+    Increase hours_back to look further into the past if needed.
 
     Args:
         limit: Maximum number of events (default 100).
         level: Filter by level (e.g. 'INFO', 'WARNING', 'ERROR').
         source: Filter by event source.
         search: Text search within event messages.
+        hours_back: How many hours of history to include (default 1.0).
     """
+    import time as _time
+
     from openbad.skills.event_log_tool import EventLogToolAdapter
 
+    since = _time.time() - max(0.01, float(hours_back)) * 3600
     adapter = EventLogToolAdapter()
     events = await asyncio.to_thread(
-        adapter.read_events, limit=limit, level=level, source=source, search=search,
+        adapter.read_events, limit=limit, level=level, source=source,
+        search=search, since=since,
     )
     return json.dumps(events, indent=2, default=str)
 

@@ -45,6 +45,7 @@ class EventLogToolAdapter:
         level: str = "",
         source: str = "",
         search: str = "",
+        since: float | None = None,
     ) -> list[dict[str, Any]]:
         """Return recent persistent log events, newest first.
 
@@ -58,8 +59,16 @@ class EventLogToolAdapter:
             Filter by logger/module name substring.
         search : str
             Free-text substring search on the log message.
+        since : float | None
+            Unix epoch timestamp.  Only events at or after this time are
+            returned.  Defaults to 1 hour ago when called without a value.
         """
+        import time as _time
+
+        if since is None:
+            since = _time.time() - 3600  # default: last 1 hour
         params: dict[str, Any] = {"limit": max(1, min(int(limit), 500))}
+        params["since"] = str(since)
         if level.strip():
             params["level"] = level.strip().upper()
         if source.strip():

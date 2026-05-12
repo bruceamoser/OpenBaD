@@ -266,17 +266,24 @@ def recent_events(
     search: str | None = None,
     log_dir: str | Path | None = None,
     page: int = 1,
+    since: float | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent events, newest-first.
 
     Uses SQLite ``system_events`` table when available (fast indexed queries).
     Falls back to tail-reading the JSONL file if the DB is not initialised.
+
+    Parameters
+    ----------
+    since:
+        Unix epoch timestamp.  Only events at or after this time are returned.
     """
     conn = _get_event_db()
     if conn is not None:
         try:
             return _recent_events_db(conn, limit=limit, level=level,
-                                     source=source, search=search, page=page)
+                                     source=source, search=search, page=page,
+                                     since=since)
         except Exception:  # noqa: BLE001
             pass  # fall through to file-based
     return _recent_events_file(limit=limit, level=level, source=source,
@@ -320,11 +327,15 @@ def _recent_events_db(
     source: str | None = None,
     search: str | None = None,
     page: int = 1,
+    since: float | None = None,
 ) -> list[dict[str, Any]]:
     """Query system_events with indexed WHERE + LIMIT/OFFSET."""
     clauses: list[str] = []
     params: list[object] = []
 
+    if since is not None:
+        clauses.append("ts >= ?")
+        params.append(since)
     if level:
         clauses.append("level = ?")
         params.append(level.upper())
