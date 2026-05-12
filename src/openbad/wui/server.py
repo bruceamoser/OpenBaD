@@ -3149,6 +3149,48 @@ async def _post_task_cancel(request: web.Request) -> web.Response:
         raise web.HTTPInternalServerError(text=str(exc)) from exc
 
 
+async def _post_tasks_bulk_cancel(request: web.Request) -> web.Response:
+    """Cancel multiple tasks matching a filter.
+
+    Request body: ``{"title": "...", "owner": "...", "status": "..."}``
+    All filter fields are optional.  At least one must be provided.
+    """
+    try:
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
+
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+
+        title_filter = payload.get("title")
+        owner_filter = payload.get("owner")
+        status_filter = payload.get("status")
+        if not any([title_filter, owner_filter, status_filter]):
+            raise web.HTTPBadRequest(text="at least one filter (title, owner, status) required")
+
+        svc = TaskService.get_instance()
+        all_tasks = svc.list_tasks(limit=10000)
+        cancelled = 0
+        errors = 0
+        for task in all_tasks:
+            if title_filter and task.title != title_filter:
+                continue
+            if owner_filter and task.owner != owner_filter:
+                continue
+            if status_filter and str(task.status) != status_filter:
+                continue
+            try:
+                svc.cancel_task(task.task_id)
+                cancelled += 1
+            except (ValueError, KeyError):
+                errors += 1
+        return web.json_response({"cancelled": cancelled, "errors": errors})
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Research
 # ---------------------------------------------------------------------------
@@ -3640,6 +3682,7 @@ def create_app(
     app.router.add_patch("/api/tasks/{task_id}", _patch_task)
     app.router.add_post("/api/tasks/{task_id}/complete", _post_task_complete)
     app.router.add_post("/api/tasks/{task_id}/cancel", _post_task_cancel)
+    app.router.add_post("/api/tasks/bulk-cancel", _post_tasks_bulk_cancel)
     app.router.add_get("/api/research", _get_research)
     app.router.add_post("/api/research", _post_research)
     app.router.add_patch("/api/research/{research_id}", _patch_research)
