@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -735,8 +736,25 @@ async def mcp_bridge(
     """
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
+    # Resolve the server command — for "corsair" use the entry_point from config
+    command = server
+    args: list[str] = []
+    if server == "corsair":
+        try:
+            import yaml
+
+            cfg_path = Path(__file__).resolve().parents[3] / "config" / "peripherals.yaml"
+            if cfg_path.exists():
+                cfg = yaml.safe_load(cfg_path.read_text()) or {}
+                entry = cfg.get("corsair", {}).get("entry_point", "")
+                if entry:
+                    command = "node"
+                    args = [entry]
+        except Exception:
+            pass  # Fall through to original behaviour
+
     client = MultiServerMCPClient(
-        {server: {"command": server, "args": [], "transport": "stdio"}}
+        {server: {"command": command, "args": args, "transport": "stdio"}}
     )
     try:
         tools = await client.get_tools()
@@ -774,6 +792,57 @@ async def mcp_bridge(
 # ── Peripheral Transducers (Corsair egress) ──────────────────────────── #
 
 
+async def _transmit_direct(
+    platform: str,
+    operation: str,
+    target: str,
+    content: str,
+) -> str | None:
+    """Try to send via native platform bridge (no Corsair needed).
+
+    Returns a JSON string on success, or ``None`` to signal that the
+    caller should fall back to the Corsair MCP path.
+    """
+    import aiohttp as _aiohttp
+
+    from openbad.peripherals.config import resolve_credentials_dir
+
+    if platform != "telegram" or operation not in ("send_message", "sendMessage"):
+        return None
+
+    creds_dir = resolve_credentials_dir()
+    creds_path = creds_dir / "telegram.json"
+    if not creds_path.exists():
+        return json.dumps({"error": "No Telegram credentials configured."})
+
+    try:
+        creds = json.loads(creds_path.read_text())
+    except Exception as exc:
+        return json.dumps({"error": f"Failed to read Telegram credentials: {exc}"})
+
+    token = creds.get("bot_token", "")
+    if not token:
+        return json.dumps({"error": "Telegram bot_token not set in credentials."})
+
+    chat_id = target
+    if not chat_id:
+        return json.dumps({"error": "No target chat_id provided."})
+
+    base_url = f"https://api.telegram.org/bot{token}"
+    async with _aiohttp.ClientSession(
+        timeout=_aiohttp.ClientTimeout(total=15),
+    ) as session:
+        async with session.post(
+            f"{base_url}/sendMessage",
+            json={"chat_id": chat_id, "text": content},
+        ) as resp:
+            data = await resp.json()
+            if data.get("ok"):
+                return json.dumps({"ok": True, "result": "Message sent."})
+            desc = data.get("description", "Unknown error")
+            return json.dumps({"error": f"Telegram API: {desc}"})
+
+
 @skill_server.tool()
 async def transmit_message(
     platform: str,
@@ -781,17 +850,24 @@ async def transmit_message(
     target: str = "",
     content: str = "",
 ) -> str:
-    """Send a message to an external platform via the Corsair MCP sidecar.
+    """Send a message to an external platform (Telegram, Discord, Slack, etc.).
 
-    This is the universal egress skill — use it for Discord, Slack, Gmail,
-    GitHub, Telegram, or any other Corsair-supported integration.
+    Tries native platform bridges first for lower latency and fewer
+    dependencies.  Falls back to the Corsair MCP sidecar for platforms
+    that don't have a built-in bridge.
 
     Args:
-        platform: Corsair plugin name (e.g. "discord", "slack", "gmail").
+        platform: Platform name (e.g. "telegram", "discord", "slack", "gmail").
         operation: API operation to perform (e.g. "send_message", "create_issue").
-        target: Destination identifier (channel ID, email address, repo, etc.).
+        target: Destination identifier (chat ID, channel ID, email, etc.).
         content: Message body or payload content.
     """
+    # Try direct bridge first (avoids Corsair dependency)
+    direct = await _transmit_direct(platform, operation, target, content)
+    if direct is not None:
+        return direct
+
+    # Fall back to Corsair MCP sidecar
     params: dict[str, Any] = {}
     if target:
         params["target"] = target
