@@ -60,11 +60,17 @@ class UserProfile:
     active_projects: list[str] = field(default_factory=list)
     timezone: str = ""
     work_hours: tuple[int, int] = (9, 17)
+    personality_text: str = ""
+
+    _PERSONALITY_TEXT_LIMIT: int = field(default=2000, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.name:
             msg = "UserProfile.name is required"
             raise ValueError(msg)
+        self.personality_text = str(self.personality_text or "")[
+            : self._PERSONALITY_TEXT_LIMIT
+        ]
         if isinstance(self.communication_style, str):
             self.communication_style = CommunicationStyle(
                 self.communication_style.lower(),
@@ -118,4 +124,5 @@ def load_user_profile(path: str | Path) -> UserProfile:
         active_projects=user_data.get("active_projects", []),
         timezone=user_data.get("timezone", ""),
         work_hours=user_data.get("work_hours", [9, 17]),
+        personality_text=user_data.get("personality_text", ""),
     )

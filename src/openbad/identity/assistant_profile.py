@@ -164,9 +164,15 @@ class AssistantProfile:
     extraversion: float = 0.5
     agreeableness: float = 0.4
     stability: float = 0.6
+    personality_text: str = ""
+
+    _PERSONALITY_TEXT_LIMIT: int = field(default=2000, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.persona_summary = str(self.persona_summary)
+        self.personality_text = str(self.personality_text or "")[
+            : self._PERSONALITY_TEXT_LIMIT
+        ]
         self.learning_focus = _list_of_str(self.learning_focus)
         self.worldview = _list_of_str(self.worldview)
         self.boundaries = _list_of_str(self.boundaries)
@@ -219,4 +225,5 @@ def load_assistant_profile(path: str | Path) -> AssistantProfile:
         extraversion=ocean.get("extraversion", 0.5),
         agreeableness=ocean.get("agreeableness", 0.4),
         stability=ocean.get("stability", 0.6),
+        personality_text=data.get("personality_text", ""),
     )

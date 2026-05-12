@@ -46,7 +46,6 @@ from openbad.cognitive.providers.github_copilot import (
     CopilotAuthError,
     GitHubCopilotProvider,
 )
-from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter, litellm_model_name
 from openbad.cognitive.providers.ollama import OllamaProvider
 from openbad.cognitive.providers.openai_compat import (
     custom_provider,
@@ -848,7 +847,7 @@ def _build_wizard_adapter(provider: ProviderConfig):
 def _build_litellm_adapter(
     provider: ProviderConfig,
     model: str = "",
-) -> LiteLLMAdapter:
+) -> object:
     """Build a LiteLLMAdapter for a given provider config.
 
     The *model* is converted to a LiteLLM-qualified name (e.g. ``ollama/llama3.2``).
@@ -856,6 +855,8 @@ def _build_litellm_adapter(
     :func:`_build_chat_adapter` instead.
     """
     import os
+
+    from openbad.cognitive.providers.litellm_adapter import LiteLLMAdapter, litellm_model_name
 
     timeout_s = max(1.0, provider.timeout_ms / 1000)
     api_key = provider.api_key or ""
@@ -902,6 +903,8 @@ def _build_chat_adapter(
             system=system_name,
         )
         return adapter, model
+    from openbad.cognitive.providers.litellm_adapter import litellm_model_name
+
     litellm_model = litellm_model_name(provider.name, model)
     return (
         UsageTrackingProviderAdapter(
@@ -1378,6 +1381,7 @@ def _resolve_chat_adapter(
                     break
                 chat_model = _build_langchain_model(p, assignment.model)
                 crew_llm = _build_crew_llm(p, assignment.model)
+                from openbad.cognitive.providers.litellm_adapter import litellm_model_name
                 model_id = litellm_model_name(p.name, assignment.model)
                 return (
                     chat_model, model_id, p.name, False,
@@ -1404,6 +1408,7 @@ def _resolve_chat_adapter(
             continue
         chat_model = _build_langchain_model(p, fallback_model)
         crew_llm = _build_crew_llm(p, fallback_model)
+        from openbad.cognitive.providers.litellm_adapter import litellm_model_name
         model_id = litellm_model_name(p.name, fallback_model)
         used_fallback = bool(assigned_provider and p.name != assigned_provider)
         if used_fallback:
@@ -2383,12 +2388,15 @@ def _serialize_user(profile) -> dict:
     from dataclasses import asdict
     d = asdict(profile)
     d["communication_style"] = profile.communication_style.value
+    d.pop("_PERSONALITY_TEXT_LIMIT", None)
     return d
 
 
 def _serialize_assistant(profile) -> dict:
     from dataclasses import asdict
-    return asdict(profile)
+    d = asdict(profile)
+    d.pop("_PERSONALITY_TEXT_LIMIT", None)
+    return d
 
 
 async def _get_entity_user(request: web.Request) -> web.Response:
@@ -3257,18 +3265,34 @@ async def _get_mqtt_log(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+
+
 async def _get_system_events(request: web.Request) -> web.Response:
-    """GET /api/events — persistent event log (loguru JSON-lines file)."""
-    from openbad.state.event_log import recent_events  # noqa: PLC0415
+    """GET /api/events — system event log from SQLite (with file fallback)."""
+    from openbad.state.event_log import event_count, recent_events  # noqa: PLC0415
 
     limit = 100
     with contextlib.suppress(ValueError, TypeError):
-        limit = int(request.query.get("limit", "100"))
+        limit = min(500, int(request.query.get("limit", "100")))
+    page = 1
+    with contextlib.suppress(ValueError, TypeError):
+        page = max(1, int(request.query.get("page", "1")))
     level = request.query.get("level") or None
     source = request.query.get("source") or None
     search = request.query.get("search") or None
-    events = recent_events(limit=limit, level=level, source=source, search=search)
-    return web.json_response({"events": events})
+
+    events = recent_events(limit=limit, level=level, source=source,
+                           search=search, page=page)
+    total = event_count(level=level, source=source, search=search)
+    total_pages = max(1, (total + limit - 1) // limit) if total else 1
+
+    return web.json_response({
+        "events": events,
+        "page": page,
+        "per_page": limit,
+        "total": total,
+        "total_pages": total_pages,
+    })
 
 # ---------------------------------------------------------------------------
 # Built-in capabilities catalog

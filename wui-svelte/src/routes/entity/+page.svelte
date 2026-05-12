@@ -18,6 +18,7 @@
     communication_style: string;
     expertise_domains: string[];
     learned_summary?: string;
+    personality_text: string;
   }
 
   interface ModulationFactors {
@@ -31,6 +32,7 @@
   interface AssistantProfile {
     name: string;
     persona_summary: string;
+    personality_text: string;
     learning_focus: string;
     openness: number;
     conscientiousness: number;
@@ -52,11 +54,13 @@
     communication_style: 'casual',
     expertise_domains: [],
     learned_summary: '',
+    personality_text: '',
   });
 
   let assistant: AssistantProfile = $state({
     name: '',
     persona_summary: '',
+    personality_text: '',
     learning_focus: '',
     openness: 0.5,
     conscientiousness: 0.5,
@@ -133,6 +137,7 @@
         preferred_name: user.preferred_name,
         communication_style: user.communication_style,
         expertise_domains: user.expertise_domains,
+        personality_text: user.personality_text,
       });
       userDirty = false;
       statusMsg = 'User saved';
@@ -150,6 +155,7 @@
       await apiPut('/api/entity/assistant', {
         name: assistant.name,
         persona_summary: assistant.persona_summary,
+        personality_text: assistant.personality_text,
         learning_focus: assistant.learning_focus,
         openness: assistant.openness,
         conscientiousness: assistant.conscientiousness,
@@ -260,6 +266,10 @@
           <option value="terse">Terse</option>
         </select>
       </label>
+      <label>Personality
+        <textarea bind:value={user.personality_text} oninput={() => userDirty = true} rows="6" maxlength="2000" placeholder="Describe yourself — background, expertise, preferences, communication style, projects, interests…"></textarea>
+        <span class="char-count">{user.personality_text.length} / 2000</span>
+      </label>
       <div class="domains-section">
         <h4>Expertise Domains</h4>
         <div class="domain-chips">
@@ -304,6 +314,10 @@
       </label>
       <label>Persona Summary
         <textarea bind:value={assistant.persona_summary} oninput={() => assistantDirty = true} rows="3" placeholder="Describe the assistant's personality…"></textarea>
+      </label>
+      <label>Personality Text
+        <textarea bind:value={assistant.personality_text} oninput={() => assistantDirty = true} rows="6" maxlength="2000" placeholder="Detailed personality description in markdown — values, quirks, communication style, background…"></textarea>
+        <span class="char-count">{assistant.personality_text.length} / 2000</span>
       </label>
       <label>Learning Focus
         <input type="text" bind:value={assistant.learning_focus} oninput={() => assistantDirty = true} placeholder="e.g. systems programming" />
@@ -422,6 +436,7 @@
   .add-row { display: flex; gap: 0.4rem; }
   .add-row input { flex: 1; }
   .ro-summary { color: var(--text-dim); font-style: italic; white-space: pre-wrap; line-height: 1.6; }
+  .char-count { font-size: 0.75rem; color: var(--text-dim); text-align: right; }
 
   .ocean-grid { display: flex; flex-direction: column; gap: 1rem; }
   .ocean-row { display: flex; flex-direction: column; gap: 0.25rem; }

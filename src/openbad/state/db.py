@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,10 @@ import sqlite_vec
 
 DEFAULT_STATE_DB_PATH = Path("data/state.db")
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+
+# Connection cache: reuse a single connection per resolved db path.
+_conn_cache: dict[str, sqlite3.Connection] = {}
+_conn_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -60,11 +65,28 @@ def initialize_state_db(
     *,
     migrations_dir: Path | None = None,
 ) -> sqlite3.Connection:
-    """Create or open the state DB and apply pending migrations."""
+    """Create or open the state DB and apply pending migrations.
+
+    Connections are cached per resolved path so that repeated calls
+    (e.g. from high-frequency API polling) reuse the same connection
+    instead of leaking one per call.
+    """
     path = Path(db_path)
+    cache_key = str(path.resolve())
+
+    with _conn_lock:
+        cached = _conn_cache.get(cache_key)
+        if cached is not None:
+            try:
+                cached.execute("SELECT 1")
+                return cached
+            except sqlite3.ProgrammingError:
+                # Connection was closed externally; fall through to recreate.
+                _conn_cache.pop(cache_key, None)
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -88,6 +110,9 @@ def initialize_state_db(
         conn.close()
         raise
 
+    with _conn_lock:
+        _conn_cache[cache_key] = conn
+
     return conn
 
 
@@ -107,4 +132,16 @@ class StateDatabase:
         return self._conn
 
     def close(self) -> None:
+        cache_key = str(self._db_path.resolve())
+        with _conn_lock:
+            _conn_cache.pop(cache_key, None)
         self._conn.close()
+
+
+def close_cached_connection(db_path: str | Path = DEFAULT_STATE_DB_PATH) -> None:
+    """Close and evict a cached connection for *db_path*."""
+    cache_key = str(Path(db_path).resolve())
+    with _conn_lock:
+        conn = _conn_cache.pop(cache_key, None)
+    if conn is not None:
+        conn.close()

@@ -838,9 +838,10 @@ def _get_identity_persistence() -> Any:
 async def get_entity_info() -> str:
     """Retrieve current user and assistant entity profiles.
 
-    Returns the full identity information for both the user you are
-    talking to and yourself (the assistant).  Use this to check what
-    you know about the user or about your own identity before updating.
+    Returns the personality text (markdown), OCEAN trait values, and
+    key metadata for both the user and the assistant.  Always call this
+    before updating an entity so you can merge new information with
+    what already exists.
     """
     try:
         persistence = _get_identity_persistence()
@@ -849,27 +850,31 @@ async def get_entity_info() -> str:
 
         user = persistence.user
         assistant = persistence.assistant
+
         lines = ["## User Profile"]
+        lines.append(f"- **name**: {user.name}")
+        if user.preferred_name:
+            lines.append(f"- **preferred_name**: {user.preferred_name}")
+        if user.personality_text:
+            lines.append(f"\n### User Personality\n{user.personality_text}")
+        else:
+            lines.append("\n*(No user personality text set yet.)*")
         for field_name in (
-            "name", "preferred_name", "communication_style",
-            "expertise_domains", "interaction_history_summary",
-            "worldview", "interests", "pet_peeves",
-            "preferred_feedback_style", "active_projects",
-            "timezone", "work_hours",
+            "communication_style", "expertise_domains",
+            "interests", "active_projects", "timezone",
         ):
             val = getattr(user, field_name, None)
             if val is not None and val != "" and val != []:
                 lines.append(f"- **{field_name}**: {val}")
 
         lines.append("\n## Assistant Profile")
-        for field_name in (
-            "name", "persona_summary", "learning_focus", "worldview",
-            "boundaries", "opinions", "vocabulary", "influences",
-            "anti_patterns", "current_focus",
-        ):
-            val = getattr(assistant, field_name, None)
-            if val is not None and val != "" and val != [] and val != {}:
-                lines.append(f"- **{field_name}**: {val}")
+        lines.append(f"- **name**: {assistant.name}")
+        if assistant.personality_text:
+            lines.append(
+                f"\n### Assistant Personality\n{assistant.personality_text}",
+            )
+        else:
+            lines.append("\n*(No assistant personality text set yet.)*")
 
         o = assistant.openness
         c = assistant.conscientiousness
@@ -877,7 +882,12 @@ async def get_entity_info() -> str:
         a = assistant.agreeableness
         s = assistant.stability
         lines.append(
-            f"- **OCEAN**: O={o} C={c} E={e} A={a} S={s}",
+            f"\n### OCEAN Traits\n"
+            f"- Openness: {o:.2f}\n"
+            f"- Conscientiousness: {c:.2f}\n"
+            f"- Extraversion: {e:.2f}\n"
+            f"- Agreeableness: {a:.2f}\n"
+            f"- Stability: {s:.2f}",
         )
         return "\n".join(lines)
     except Exception as exc:
@@ -886,37 +896,52 @@ async def get_entity_info() -> str:
 
 @skill_server.tool()
 async def update_user_entity(changes: str) -> str:
-    """Update the user's entity profile with new information.
+    """Update the user's entity profile.
 
-    Use this when you learn new facts about the user — their name,
-    interests, expertise, communication preferences, active projects,
-    timezone, etc.
+    IMPORTANT: Always call get_entity_info first to read current values,
+    then merge your changes with existing data before calling this tool.
+
+    The most important field is ``personality_text`` — a markdown text
+    block (max 2000 chars) describing who the user is: their background,
+    expertise, preferences, communication style, projects, and anything
+    else relevant.  When updating personality_text, read the existing
+    text first and incorporate new information rather than replacing it.
 
     Args:
-        changes: A JSON object with fields to update.  Valid fields:
-            name, preferred_name, communication_style, expertise_domains,
-            interaction_history_summary, worldview, interests, pet_peeves,
-            preferred_feedback_style, active_projects, timezone, work_hours.
-            For list fields, provide the complete new list.
+        changes: A JSON object with fields to update.  Key fields:
+            - personality_text: Markdown description of the user (max 2000 chars)
+            - name, preferred_name, communication_style
+            - expertise_domains, interests, active_projects (lists)
+            - timezone, work_hours
     """
     try:
         persistence = _get_identity_persistence()
         if persistence is None:
             return "Identity system not available."
 
+        if not changes or not changes.strip():
+            return ("No changes provided. Pass a JSON object like: "
+                    '{"personality_text": "...", "name": "..."}')
+
         payload = json.loads(changes)
         if not isinstance(payload, dict):
             return "Changes must be a JSON object."
 
+        log.info("update_user_entity called with keys: %s", list(payload.keys()))
         persistence.update_user(**payload)
 
         updated_fields = ", ".join(payload.keys())
+        log.info("User profile updated: %s", updated_fields)
         return f"User profile updated: {updated_fields}"
     except json.JSONDecodeError as exc:
-        return f"Invalid JSON: {exc}"
+        log.warning("update_user_entity bad JSON: %s", exc)
+        return (f"Invalid JSON: {exc}. Pass a JSON object like: "
+                '{"personality_text": "...", "name": "..."}')
     except (AttributeError, ValueError, TypeError) as exc:
+        log.warning("update_user_entity failed: %s", exc)
         return f"Update failed: {exc}"
     except Exception as exc:
+        log.exception("update_user_entity error")
         return f"Error updating user entity: {exc}"
 
 
@@ -924,25 +949,38 @@ async def update_user_entity(changes: str) -> str:
 async def update_assistant_entity(changes: str) -> str:
     """Update your own (the assistant's) entity profile.
 
-    Use this when you want to change your persona, learning focus,
-    boundaries, opinions, vocabulary, or OCEAN personality traits.
+    IMPORTANT: Always call get_entity_info first to read current values,
+    then merge your changes with existing data before calling this tool.
+
+    The most important fields are:
+    - ``personality_text``: A markdown text block (max 2000 chars)
+      describing your personality, background, communication style,
+      values, and quirks.  When updating, read the existing text and
+      incorporate changes rather than replacing it entirely.
+    - OCEAN traits: ``openness``, ``conscientiousness``, ``extraversion``,
+      ``agreeableness``, ``stability`` — each a float 0.0 to 1.0.
 
     Args:
-        changes: A JSON object with fields to update.  Valid fields:
-            name, persona_summary, learning_focus, worldview, boundaries,
-            opinions, vocabulary, influences, anti_patterns, current_focus,
-            openness, conscientiousness, extraversion, agreeableness,
-            stability.  For list fields, provide the complete new list.
+        changes: A JSON object with fields to update.  Key fields:
+            - personality_text: Markdown description (max 2000 chars)
+            - openness, conscientiousness, extraversion, agreeableness,
+              stability: OCEAN trait floats (0.0–1.0)
+            - name, persona_summary, learning_focus, boundaries, etc.
     """
     try:
         persistence = _get_identity_persistence()
         if persistence is None:
             return "Identity system not available."
 
+        if not changes or not changes.strip():
+            return ("No changes provided. Pass a JSON object like: "
+                    '{"personality_text": "...", "openness": 0.8}')
+
         payload = json.loads(changes)
         if not isinstance(payload, dict):
             return "Changes must be a JSON object."
 
+        log.info("update_assistant_entity called with keys: %s", list(payload.keys()))
         persistence.update_assistant(**payload)
 
         if _personality_modulator is not None:
@@ -951,23 +989,39 @@ async def update_assistant_entity(changes: str) -> str:
         updated_fields = ", ".join(payload.keys())
         return f"Assistant profile updated: {updated_fields}"
     except json.JSONDecodeError as exc:
-        return f"Invalid JSON: {exc}"
+        log.warning("update_assistant_entity bad JSON: %s", exc)
+        return (f"Invalid JSON: {exc}. Pass a JSON object like: "
+                '{"personality_text": "...", "openness": 0.8}')
     except (AttributeError, ValueError, TypeError) as exc:
+        log.warning("update_assistant_entity failed: %s", exc)
         return f"Update failed: {exc}"
     except Exception as exc:
+        log.exception("update_assistant_entity error")
         return f"Error updating assistant entity: {exc}"
 
 
-# ── Memory Tools ─────────────────────────────────────────────────────── #
-
-
 def _get_memory_adapter() -> Any:
-    """Lazily obtain the singleton MemoryToolAdapter."""
+    """Lazily obtain the singleton MemoryToolAdapter.
+
+    Reuses the chat-pipeline's memory singletons so that tool-driven
+    writes are visible in the Memory Inspector and vice-versa.
+    """
     from openbad.memory.controller import MemoryController
     from openbad.skills.memory_tool import MemoryToolAdapter
 
     if not hasattr(_get_memory_adapter, "_instance"):
+        from openbad.wui.chat_pipeline import (
+            _get_episodic,
+            _get_semantic,
+            _get_stm,
+        )
+
         ctrl = MemoryController()
+        # Replace the controller's default stores with the shared
+        # chat-pipeline singletons so both paths hit the same data.
+        ctrl.stm = _get_stm()
+        ctrl.episodic = _get_episodic()
+        ctrl.semantic = _get_semantic()
         _get_memory_adapter._instance = MemoryToolAdapter(ctrl)  # type: ignore[attr-defined]
     return _get_memory_adapter._instance  # type: ignore[attr-defined]
 

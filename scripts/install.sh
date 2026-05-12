@@ -572,6 +572,52 @@ SETTINGS
 }
 
 # ------------------------------------------------------------------
+# Grant openbad user read access to the project source tree
+# ------------------------------------------------------------------
+_grant_project_acl() {
+    local root="$1"
+    if [[ -z "$root" ]] || [[ ! -d "$root" ]]; then
+        return
+    fi
+
+    if command -v setfacl &>/dev/null; then
+        info "Granting $OPENBAD_USER recursive read ACL on $root ..."
+        setfacl -R -m "u:${OPENBAD_USER}:rX" "$root" 2>/dev/null || true
+        setfacl -R -d -m "u:${OPENBAD_USER}:rX" "$root" 2>/dev/null || true
+
+        # Walk parent directories to ensure traverse access
+        local parent
+        parent="$(dirname "$root")"
+        while [[ "$parent" != "/" ]]; do
+            setfacl -m "u:${OPENBAD_USER}:x" "$parent" 2>/dev/null || true
+            parent="$(dirname "$parent")"
+        done
+    fi
+}
+
+# ------------------------------------------------------------------
+# Inject OPENBAD_PROJECT_ROOT into installed service units
+# ------------------------------------------------------------------
+_inject_project_root() {
+    local resolved_root
+    resolved_root="$(cd "$PROJECT_ROOT" && pwd -P)"
+
+    for unit in openbad.service openbad-wui.service; do
+        local unit_path="$SYSTEMD_DIR/$unit"
+        [[ -f "$unit_path" ]] || continue
+
+        # Remove any previous OPENBAD_PROJECT_ROOT line
+        sed -i '/^Environment=OPENBAD_PROJECT_ROOT=/d' "$unit_path"
+
+        # Insert after OPENBAD_CONFIG_DIR line
+        sed -i "/^Environment=OPENBAD_CONFIG_DIR=/a Environment=OPENBAD_PROJECT_ROOT=${resolved_root}" "$unit_path"
+    done
+
+    info "  Set OPENBAD_PROJECT_ROOT=$resolved_root in service units"
+    _grant_project_acl "$resolved_root"
+}
+
+# ------------------------------------------------------------------
 # Install systemd units
 # ------------------------------------------------------------------
 install_units() {
@@ -597,6 +643,9 @@ install_units() {
     else
         warn "  openbad-wui.service not found in $CONFIG_SRC"
     fi
+
+    # Inject OPENBAD_PROJECT_ROOT so the agent can read its own workspace.
+    _inject_project_root
 
     if [ -f "$CONFIG_SRC/openbad-heartbeat.service" ]; then
         cp "$CONFIG_SRC/openbad-heartbeat.service" "$SYSTEMD_DIR/openbad-heartbeat.service"

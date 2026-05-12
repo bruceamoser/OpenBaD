@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import {
     cpuTelemetry,
@@ -33,15 +32,13 @@
     prevFsm = currentFsm;
   });
 
-  let historyInterval: ReturnType<typeof setInterval> | undefined;
-
-  onMount(() => {
-    historyInterval = setInterval(() => {
-      cpuHistory = [...cpuHistory, cpu].slice(-SPARKLINE_MAX);
-      memHistory = [...memHistory, mem].slice(-SPARKLINE_MAX);
-    }, 1000);
+  $effect(() => {
+    // Append whenever WebSocket pushes new cpu/mem values
+    const c = cpu;
+    const m = mem;
+    cpuHistory = [...cpuHistory, c].slice(-SPARKLINE_MAX);
+    memHistory = [...memHistory, m].slice(-SPARKLINE_MAX);
   });
-  onDestroy(() => { if (historyInterval) clearInterval(historyInterval); });
 
   function fsmColor(state: string): string {
     switch (state) {

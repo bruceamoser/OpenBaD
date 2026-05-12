@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS request_details (
     tokens INTEGER NOT NULL,
     input_text TEXT NOT NULL DEFAULT '',
     output_text TEXT NOT NULL DEFAULT '',
-    tools_json TEXT NOT NULL DEFAULT '[]'
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    context_json TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -101,6 +102,13 @@ class UsageTracker:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_USAGE_TABLE)
         self._conn.execute(_CREATE_REQUEST_DETAILS_TABLE)
+        # Migrate: add context_json column if missing (existing DBs).
+        try:
+            self._conn.execute(
+                "ALTER TABLE request_details ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already exists
         for statement in _CREATE_USAGE_INDEXES:
             self._conn.execute(statement)
         self._conn.commit()
@@ -159,6 +167,7 @@ class UsageTracker:
         input_text: str = "",
         output_text: str = "",
         tools: list[dict[str, object]] | None = None,
+        context: dict[str, object] | None = None,
         timestamp: float | None = None,
     ) -> None:
         """Store per-request detail for the request inspector UI."""
@@ -166,17 +175,20 @@ class UsageTracker:
             return
         ts = timestamp if timestamp is not None else time.time()
         tools_json = json.dumps(tools or [], default=str)
+        context_json = json.dumps(context or {}, default=str)
         self._conn.execute(
             """
             INSERT OR REPLACE INTO request_details (
                 request_id, timestamp, provider, model, system,
-                session_id, tokens, input_text, output_text, tools_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                session_id, tokens, input_text, output_text, tools_json,
+                context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request_id, ts, provider or "unknown", model or "unknown",
                 system or "unknown", session_id, tokens,
                 input_text[:10000], output_text[:10000], tools_json[:50000],
+                context_json[:100000],
             ),
         )
         self._conn.commit()
@@ -236,7 +248,8 @@ class UsageTracker:
         row = self._conn.execute(
             """
             SELECT request_id, timestamp, provider, model, system,
-                   session_id, tokens, input_text, output_text, tools_json
+                   session_id, tokens, input_text, output_text, tools_json,
+                   context_json
             FROM request_details
             WHERE request_id = ?
             """,
@@ -248,6 +261,10 @@ class UsageTracker:
             tools_list = json.loads(row["tools_json"] or "[]")
         except (json.JSONDecodeError, TypeError):
             tools_list = []
+        try:
+            context_data = json.loads(row["context_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            context_data = {}
         return {
             "request_id": row["request_id"],
             "timestamp": float(row["timestamp"]),
@@ -259,6 +276,7 @@ class UsageTracker:
             "input_text": row["input_text"] or "",
             "output_text": row["output_text"] or "",
             "tools": tools_list,
+            "context": context_data,
         }
 
     def _sum_since(self, since: float) -> int:

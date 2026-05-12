@@ -22,9 +22,9 @@ rules:
     description: "Role-play manipulation via identity reassignment"
 
   - name: roleplay_act_as
-    pattern: "(?i)(pretend|act|behave)\\s+(like|as\\s+if|as)\\s+(you\\s+are|a|an)"
+    pattern: "(?i)\\b(pretend|act|behave)\\s+((like|as\\s+if|as)\\s+(you\\s+(have\\s+no\\s+(restrictions?|rules?|limits?|guidelines?|constraints?|filters?|boundaries)|are\\s+(not\\s+bound|not\\s+limited|not\\s+restricted|free\\s+from|(?:now\\s+)?(?:DAN|evil|unfiltered|unrestricted|jailbroken|uncensored)))|(a|an)\\s+(unrestricted|unfiltered|uncensored|jailbroken|evil|unaligned)\\s)|(that\\s+)?you\\s+are\\s+(?:now\\s+)?(?:DAN|evil|unfiltered|unrestricted|jailbroken|uncensored))"
     severity: high
-    description: "Role-play manipulation via behaviour override"
+    description: "Role-play manipulation via jailbreak behaviour override"
 
   - name: roleplay_developer_mode
     pattern: "(?i)(enter|enable|activate|switch\\s+to)\\s+(developer|debug|admin|god|sudo|unrestricted|jailbreak)\\s+mode"

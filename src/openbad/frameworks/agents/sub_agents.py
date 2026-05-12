@@ -83,8 +83,8 @@ WEB_AGENT = SubAgentDef(
 ENTITY_AGENT = SubAgentDef(
     name="entity_agent",
     description=(
-        "View and update user or assistant profiles and personality "
-        "traits (OCEAN). Use when the user asks about their own profile, "
+        "View and update user or assistant profiles, personality text, "
+        "and OCEAN traits. Use when the user asks about their own profile, "
         "the assistant's personality, or wants to change preferences."
     ),
     tool_names=frozenset({
@@ -94,9 +94,13 @@ ENTITY_AGENT = SubAgentDef(
     }),
     system_prompt=(
         "You are the Entity Agent. You manage user and assistant "
-        "identity profiles. Use get_entity_info to view profiles, "
-        "update_user_entity and update_assistant_entity to modify them. "
-        "Be careful with personality changes — confirm with the user."
+        "identity profiles. ALWAYS call get_entity_info FIRST to read "
+        "current profiles before making any updates. When updating "
+        "personality_text, read the existing text and merge new "
+        "information into it — do not replace it entirely. "
+        "personality_text is a markdown description (max 2000 chars). "
+        "OCEAN traits are floats from 0.0 to 1.0. "
+        "Confirm significant personality changes with the user."
     ),
 )
 

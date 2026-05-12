@@ -171,6 +171,11 @@ class ContextWindowManager:
             self._request_usage[request_id] = (
                 self._request_usage.get(request_id, 0) + tokens_used
             )
+            # Evict oldest entries when the cache grows too large.
+            if len(self._request_usage) > 500:
+                keys = list(self._request_usage)
+                for k in keys[:250]:
+                    del self._request_usage[k]
 
     def get_provider_usage(self, provider: str) -> UsageRecord:
         """Return cumulative usage for a provider."""

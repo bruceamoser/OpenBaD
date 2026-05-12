@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { get as apiGet, post as apiPost, put as apiPut } from '$lib/api/client';
   import { endocrineLevels } from '$lib/stores/websocket';
 
@@ -92,7 +92,6 @@
   let error = $state('');
   let saveMsg = $state('');
   let activeTab: 'overview' | 'config' | 'activity' = $state('overview');
-  let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   /* ── Live levels from WebSocket ────────────────────────── */
 
@@ -217,9 +216,7 @@
   onMount(() => {
     loadStatus();
     loadConfig();
-    pollTimer = setInterval(loadStatus, 15000);
   });
-  onDestroy(() => { if (pollTimer) clearInterval(pollTimer); });
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -229,6 +226,7 @@
 <div class="page-header">
   <h2>Endocrine System</h2>
   <span class="page-sub">Hormone levels, tuning, reward signals, subsystem gates, and activity log</span>
+  <button class="btn-sm ghost" onclick={() => { loadStatus(); loadConfig(); }} disabled={loading} style="margin-left:auto">↻ Refresh</button>
 </div>
 
 {#if error}

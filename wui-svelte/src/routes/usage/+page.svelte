@@ -86,6 +86,11 @@
     input_text: string;
     output_text: string;
     tools: ToolCall[];
+    context?: {
+      system_prompt?: string;
+      supporting_context?: string;
+      conversation_history?: { role: string; content: string }[];
+    };
     type_label?: string;
     label?: string;
   }
@@ -97,6 +102,7 @@
   let requestsPage: RequestsPage | null = $state(null);
   let selectedDetail: RequestDetail | null = $state(null);
   let expandedTools: Set<number> = $state(new Set());
+  let expandedContext: Set<string> = $state(new Set());
   let loading = $state(true);
   let requestsLoading = $state(false);
   let detailLoading = $state(false);
@@ -163,6 +169,7 @@
   async function loadDetail(requestId: string): Promise<void> {
     detailLoading = true;
     expandedTools = new Set();
+    expandedContext = new Set();
     try {
       selectedDetail = await apiGet<RequestDetail>(`/api/usage/requests/${requestId}`);
     } catch (e) {
@@ -181,6 +188,12 @@
     const next = new Set(expandedTools);
     if (next.has(idx)) next.delete(idx); else next.add(idx);
     expandedTools = next;
+  }
+
+  function toggleContext(key: string): void {
+    const next = new Set(expandedContext);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    expandedContext = next;
   }
 
   onMount(() => {
@@ -244,6 +257,57 @@
         <h4>Input</h4>
         <pre class="detail-content">{selectedDetail.input_text || '(no input recorded)'}</pre>
       </section>
+
+      {#if selectedDetail.context && (selectedDetail.context.system_prompt || selectedDetail.context.supporting_context || (selectedDetail.context.conversation_history && selectedDetail.context.conversation_history.length > 0))}
+        <section class="detail-section">
+          <h4>Context Sent to LLM</h4>
+          <div class="context-sections">
+            {#if selectedDetail.context.system_prompt}
+              <div class="context-item">
+                <button class="context-header" onclick={() => toggleContext('system')}>
+                  <span class="context-name">System Prompt</span>
+                  <span class="context-size">{selectedDetail.context.system_prompt.length.toLocaleString()} chars</span>
+                  <span class="tool-toggle">{expandedContext.has('system') ? '▾' : '▸'}</span>
+                </button>
+                {#if expandedContext.has('system')}
+                  <pre class="detail-content context-pre">{selectedDetail.context.system_prompt}</pre>
+                {/if}
+              </div>
+            {/if}
+            {#if selectedDetail.context.supporting_context}
+              <div class="context-item">
+                <button class="context-header" onclick={() => toggleContext('supporting')}>
+                  <span class="context-name">Memory / Episodic Context</span>
+                  <span class="context-size">{selectedDetail.context.supporting_context.length.toLocaleString()} chars</span>
+                  <span class="tool-toggle">{expandedContext.has('supporting') ? '▾' : '▸'}</span>
+                </button>
+                {#if expandedContext.has('supporting')}
+                  <pre class="detail-content context-pre">{selectedDetail.context.supporting_context}</pre>
+                {/if}
+              </div>
+            {/if}
+            {#if selectedDetail.context.conversation_history && selectedDetail.context.conversation_history.length > 0}
+              <div class="context-item">
+                <button class="context-header" onclick={() => toggleContext('history')}>
+                  <span class="context-name">Conversation History</span>
+                  <span class="context-size">{selectedDetail.context.conversation_history.length} turns</span>
+                  <span class="tool-toggle">{expandedContext.has('history') ? '▾' : '▸'}</span>
+                </button>
+                {#if expandedContext.has('history')}
+                  <div class="history-turns">
+                    {#each selectedDetail.context.conversation_history as turn}
+                      <div class="history-turn">
+                        <span class="turn-role" class:role-user={turn.role === 'user'} class:role-assistant={turn.role === 'assistant'} class:role-system={turn.role === 'system'}>{turn.role}</span>
+                        <pre class="turn-content">{turn.content}</pre>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </section>
+      {/if}
 
       {#if selectedDetail.tools.length > 0}
         <section class="detail-section">
@@ -568,6 +632,49 @@
     padding: 0.5rem 0.7rem; background: var(--bg); border-radius: var(--radius-sm);
     font-size: 0.78rem; color: var(--text-sub); white-space: pre-wrap; word-break: break-word;
     max-height: 250px; overflow: auto; font-family: var(--font-mono, monospace);
+    line-height: 1.45;
+  }
+
+  /* ── Context sections ── */
+  .context-sections { display: flex; flex-direction: column; gap: 0.5rem; }
+  .context-item {
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .context-header {
+    display: flex; justify-content: space-between; align-items: center;
+    width: 100%; padding: 0.55rem 0.85rem; background: var(--bg-surface1);
+    border: none; cursor: pointer; text-align: left;
+    color: var(--text); font-size: 0.85rem;
+  }
+  .context-header:hover { background: var(--bg-surface2); }
+  .context-name { font-weight: 600; flex: 1; }
+  .context-size {
+    font-size: 0.75rem; color: var(--text-dim); margin-right: 0.5rem;
+    font-family: var(--font-mono, monospace);
+  }
+  .context-pre {
+    max-height: 400px; overflow: auto;
+    margin: 0; border-radius: 0;
+  }
+  .history-turns { padding: 0.5rem 0.85rem; }
+  .history-turn {
+    margin-bottom: 0.75rem; padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .history-turn:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  .turn-role {
+    display: inline-block; font-size: 0.7rem; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 0.15rem 0.45rem;
+    border-radius: var(--radius-sm); margin-bottom: 0.3rem; font-weight: 600;
+  }
+  .role-user { background: var(--blue); color: var(--bg); }
+  .role-assistant { background: var(--green); color: var(--bg); }
+  .role-system { background: var(--text-dim); color: var(--bg); }
+  .turn-content {
+    padding: 0.4rem 0.7rem; background: var(--bg); border-radius: var(--radius-sm);
+    font-size: 0.78rem; color: var(--text-sub); white-space: pre-wrap; word-break: break-word;
+    max-height: 200px; overflow: auto; font-family: var(--font-mono, monospace);
     line-height: 1.45;
   }
 

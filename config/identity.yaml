@@ -27,11 +27,13 @@ user:
   active_projects: []
   timezone: ""
   work_hours: [9, 17]
+  personality_text: ""
 
 # Assistant profile — OCEAN personality sliders
 assistant:
   name: "OpenBaD"
   persona_summary: "A self-aware Linux agent with biological metaphors"
+  personality_text: ""
   learning_focus: []
   worldview: []
   boundaries: []

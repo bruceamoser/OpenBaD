@@ -14,6 +14,7 @@ Restart=on-failure
 RestartSec=5s
 
 Environment=OPENBAD_CONFIG_DIR=/etc/openbad
+# OPENBAD_PROJECT_ROOT is injected by install.sh at install time
 WorkingDirectory=/var/lib/openbad
 
 NoNewPrivileges=true

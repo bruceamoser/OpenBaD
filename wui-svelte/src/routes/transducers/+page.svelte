@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { get as apiGet, put as apiPut, post as apiPost } from '$lib/api/client';
 
   // ── Types ──────────────────────────────────────────────── //
@@ -53,8 +53,6 @@
   let wizardTestResult = $state('');
   let wizardTestLoading = $state(false);
   let wizardEnableOnFinish = $state(true);
-
-  let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   // ── Data loading ───────────────────────────────────────── //
   async function loadPlugins(): Promise<void> {
@@ -280,10 +278,7 @@
 
   onMount(() => {
     loadPlugins();
-    pollTimer = setInterval(loadPlugins, 15_000);
   });
-
-  onDestroy(() => { if (pollTimer) clearInterval(pollTimer); });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -294,7 +289,10 @@
       <h2>Transducers</h2>
       <span class="page-sub">Peripheral integrations — Corsair plugins</span>
     </div>
-    <button class="btn btn-primary add-btn" onclick={openWizard}>+ Add Plugin</button>
+    <div style="display:flex;gap:0.5rem">
+      <button class="btn-sm ghost" onclick={loadPlugins} disabled={loading}>↻ Refresh</button>
+      <button class="btn btn-primary add-btn" onclick={openWizard}>+ Add Plugin</button>
+    </div>
   </div>
 </div>
 

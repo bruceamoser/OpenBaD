@@ -786,38 +786,33 @@ def _build_identity_prompt(
     assistant_profile: Any | None,
     modulation: Any | None,
 ) -> str:
-    """Render the full assistant and user identity into the system prompt.
+    """Render compact entity packets for the system prompt.
 
-    Identity leads the prompt so the LLM internalises it before anything else.
-    Every field from AssistantProfile that has a value is rendered.
+    Each entity is a short personality_text (markdown, max 2000 chars)
+    plus OCEAN trait labels.  This keeps the identity block small enough
+    for context-limited models.
     """
     parts: list[str] = []
 
-    # ── Assistant identity ──────────────────────────────────────────────────
+    # ── Assistant identity ──
     if assistant_profile is not None:
         assistant_name = getattr(assistant_profile, "name", "") or "OpenBaD"
+        personality_text = getattr(assistant_profile, "personality_text", "")
         persona_summary = getattr(assistant_profile, "persona_summary", "")
-        learning_focus = getattr(assistant_profile, "learning_focus", []) or []
-        worldview = getattr(assistant_profile, "worldview", []) or []
-        boundaries = getattr(assistant_profile, "boundaries", []) or []
-        anti_patterns = getattr(assistant_profile, "anti_patterns", []) or []
-        current_focus = getattr(assistant_profile, "current_focus", []) or []
-        influences = getattr(assistant_profile, "influences", []) or []
-        opinions = getattr(assistant_profile, "opinions", {}) or {}
-        vocabulary = getattr(assistant_profile, "vocabulary", {}) or {}
-        continuity_log = getattr(assistant_profile, "continuity_log", []) or []
-        rhetorical_style = getattr(assistant_profile, "rhetorical_style", None)
 
-        # Opening persona embodiment — imperative, not descriptive
         opening = (
             f"You are {assistant_name}. Fully embody this persona in every response."
             " Speak and think as this person naturally would."
             " Never describe yourself as 'configured as' or narrate your own settings;"
             " simply be this person."
         )
-        if persona_summary:
-            opening += f"\n\n{persona_summary}"
         parts.append(opening)
+
+        # Personality text is the primary identity block
+        if personality_text:
+            parts.append(personality_text)
+        elif persona_summary:
+            parts.append(persona_summary)
 
         # OCEAN personality → behavioural instructions
         ocean_traits = {
@@ -845,7 +840,8 @@ def _build_identity_prompt(
         if ocean_lines:
             parts.append("Personality (OCEAN):\n" + "\n".join(ocean_lines))
 
-        # Rhetorical style
+        # Rhetorical style (compact)
+        rhetorical_style = getattr(assistant_profile, "rhetorical_style", None)
         if rhetorical_style is not None:
             style_lines = []
             for attr, label in (
@@ -860,91 +856,42 @@ def _build_identity_prompt(
             if style_lines:
                 parts.append("Rhetorical style:\n" + "\n".join(style_lines))
 
-        # Focus and direction
-        if learning_focus:
-            parts.append(
-                "Learning focus: " + ", ".join(str(i) for i in learning_focus) + "."
-            )
-        if current_focus:
-            parts.append(
-                "Current focus: " + ", ".join(str(i) for i in current_focus) + "."
-            )
-
-        # Worldview, influences, and boundaries
-        if worldview:
-            parts.append("Worldview:\n" + "\n".join(f"- {i}" for i in worldview))
-        if influences:
-            parts.append(
-                "Intellectual influences: " + ", ".join(str(i) for i in influences) + "."
-            )
-        if boundaries:
-            parts.append("Boundaries:\n" + "\n".join(f"- {i}" for i in boundaries))
-        if anti_patterns:
-            parts.append(
-                "Avoid these patterns:\n" + "\n".join(f"- {i}" for i in anti_patterns)
-            )
-
-        # Opinions
-        if opinions:
-            opinion_lines = []
-            for topic, stances in opinions.items():
-                if stances:
-                    opinion_lines.append(
-                        f"- {topic}: " + "; ".join(str(s) for s in stances)
-                    )
-            if opinion_lines:
-                parts.append("Opinions and stances:\n" + "\n".join(opinion_lines))
-
-        # Vocabulary overrides
-        if vocabulary:
-            vocab_lines = [
-                f"- prefer '{preferred}' over '{avoid}'"
-                for avoid, preferred in vocabulary.items()
-            ]
-            if vocab_lines:
-                parts.append("Vocabulary preferences:\n" + "\n".join(vocab_lines))
-
-        # Continuity log — last 3 entries for cross-session context
-        recent_log = [e for e in continuity_log if getattr(e, "summary", "")][-3:]
-        if recent_log:
-            log_lines = [f"- {getattr(e, 'summary', '')}" for e in recent_log]
-            parts.append("Continuity (recent identity events):\n" + "\n".join(log_lines))
-
-    # ── User context ────────────────────────────────────────────────────────
+    # ── User context ──
     if user_profile is not None:
         user_name = (
             getattr(user_profile, "preferred_name", "")
             or getattr(user_profile, "name", "")
         )
-        communication_style = getattr(user_profile, "communication_style", "")
-        expertise_domains = getattr(user_profile, "expertise_domains", []) or []
-        interaction_history_summary = getattr(user_profile, "interaction_history_summary", "")
-        active_projects = getattr(user_profile, "active_projects", []) or []
-        interests = getattr(user_profile, "interests", []) or []
-        preferred_feedback_style = getattr(user_profile, "preferred_feedback_style", "")
+        personality_text = getattr(user_profile, "personality_text", "")
 
         user_lines = []
         if user_name:
             user_lines.append(f"The user's name is {user_name}.")
-        if communication_style:
-            style_value = getattr(communication_style, "value", communication_style)
-            user_lines.append(f"Preferred communication style: {style_value}.")
-        if expertise_domains:
-            user_lines.append(
-                "User expertise: " + ", ".join(str(i) for i in expertise_domains) + "."
-            )
-        if active_projects:
-            user_lines.append(
-                "Active projects: " + ", ".join(str(i) for i in active_projects) + "."
-            )
-        if interests:
-            user_lines.append(
-                "Interests: " + ", ".join(str(i) for i in interests) + "."
-            )
-        if preferred_feedback_style:
-            user_lines.append(f"Preferred feedback style: {preferred_feedback_style}.")
-        if interaction_history_summary:
-            user_lines.append(f"User history: {interaction_history_summary}")
+
+        if personality_text:
+            user_lines.append(personality_text)
+        else:
+            # Fallback: render key fields if no personality text yet
+            communication_style = getattr(user_profile, "communication_style", "")
+            expertise_domains = getattr(user_profile, "expertise_domains", []) or []
+            interests = getattr(user_profile, "interests", []) or []
+            active_projects = getattr(user_profile, "active_projects", []) or []
+            if communication_style:
+                style_value = getattr(communication_style, "value", communication_style)
+                user_lines.append(f"Preferred communication style: {style_value}.")
+            if expertise_domains:
+                user_lines.append(
+                    "User expertise: " + ", ".join(str(i) for i in expertise_domains) + "."
+                )
+            if interests:
+                user_lines.append(
+                    "Interests: " + ", ".join(str(i) for i in interests) + "."
+                )
+            if active_projects:
+                user_lines.append(
+                    "Active projects: " + ", ".join(str(i) for i in active_projects) + "."
+                )
+
         if user_lines:
             parts.append("About the user:\n" + "\n".join(user_lines))
 
@@ -1295,6 +1242,14 @@ async def stream_chat(
     response_text = "".join(full_response)
 
     if usage_tracker is not None:
+        context_payload: dict[str, object] = {
+            "system_prompt": context.system_prompt[:10000],
+            "supporting_context": context.supporting_context[:5000],
+            "conversation_history": [
+                {"role": t.role, "content": t.content[:2000]}
+                for t in context.conversation_history
+            ],
+        }
         usage_tracker.record_detail(
             request_id=request_id,
             provider=provider_name or "unknown",
@@ -1304,6 +1259,7 @@ async def stream_chat(
             tokens=tokens_used,
             input_text=message[:5000],
             output_text=response_text[:5000],
+            context=context_payload,
         )
     _write_turn(
         session_id,

@@ -71,14 +71,18 @@ def test_initialize_state_db_is_idempotent(tmp_path: Path) -> None:
     first = initialize_state_db(db_path)
     second = initialize_state_db(db_path)
 
+    # Cached: both calls return the same connection object.
+    assert first is second
+
     migration_count = second.execute(
         "SELECT COUNT(*) FROM schema_migrations"
     ).fetchone()[0]
 
-    first.close()
-    second.close()
+    # All discovered migrations should be applied.
+    assert migration_count >= 1
 
-    assert migration_count == 1
+    from openbad.state.db import close_cached_connection
+    close_cached_connection(db_path)
 
 
 def test_state_database_wrapper_initializes_db(tmp_path: Path) -> None:

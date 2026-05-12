@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { fsmState } from '$lib/stores/websocket';
   import { get as apiGet } from '$lib/api/client';
@@ -14,30 +14,48 @@
     line: number;
   }
 
+  interface EventsResponse {
+    events: SystemEvent[];
+    page: number;
+    per_page: number;
+    total: number;
+    total_pages: number;
+  }
+
   let events: SystemEvent[] = $state([]);
   let loading = $state(true);
-  let autoRefresh = $state(true);
   let searchText = $state('');
   let levelFilter = $state('');
   let sourceFilter = $state('');
-  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let currentPage = $state(1);
+  let totalPages = $state(1);
+  let totalEvents = $state(0);
+  const perPage = 100;
 
   // Collect unique sources for filter dropdown
   let sources = $derived([...new Set(events.map(e => shortSource(e.source)))].sort());
 
-  async function loadEvents(): Promise<void> {
+  async function loadEvents(page: number = currentPage): Promise<void> {
     try {
-      let url = '/api/events?limit=500';
+      let url = `/api/events?limit=${perPage}&page=${page}`;
       if (levelFilter) url += `&level=${levelFilter}`;
       if (sourceFilter) url += `&source=openbad.${sourceFilter}`;
       if (searchText) url += `&search=${encodeURIComponent(searchText)}`;
-      const res = await apiGet<{ events: SystemEvent[] }>(url);
+      const res = await apiGet<EventsResponse>(url);
       events = res.events ?? [];
+      currentPage = res.page ?? page;
+      totalPages = res.total_pages ?? 1;
+      totalEvents = res.total ?? events.length;
     } catch {
       // ignore
     } finally {
       loading = false;
     }
+  }
+
+  function applyFilters(): void {
+    currentPage = 1;
+    loadEvents(1);
   }
 
   function levelClass(level: string): string {
@@ -62,16 +80,7 @@
     return source.replace(/^openbad\./, '');
   }
 
-  $effect(() => {
-    if (autoRefresh) {
-      refreshTimer = setInterval(loadEvents, 5000);
-    } else {
-      if (refreshTimer !== undefined) clearInterval(refreshTimer);
-    }
-  });
-
   onMount(() => { loadEvents(); });
-  onDestroy(() => { if (refreshTimer !== undefined) clearInterval(refreshTimer); });
 
   let fsmCurrent = $derived($fsmState?.current_state ?? 'IDLE');
 </script>
@@ -95,32 +104,29 @@
 <!-- Unified Event Log -->
 <Card label="System Event Log">
   <div class="log-toolbar">
-    <select bind:value={levelFilter} onchange={loadEvents}>
+    <select bind:value={levelFilter} onchange={applyFilters}>
       <option value="">All levels</option>
       <option value="ERROR">Errors</option>
       <option value="WARNING">Warnings</option>
       <option value="INFO">Info</option>
       <option value="DEBUG">Debug</option>
     </select>
-    <select bind:value={sourceFilter} onchange={loadEvents}>
+    <select bind:value={sourceFilter} onchange={applyFilters}>
       <option value="">All sources</option>
       {#each sources as src}
         <option value={src}>{src}</option>
       {/each}
     </select>
     <input type="text" placeholder="Search…" bind:value={searchText}
-      onkeydown={(e) => { if (e.key === 'Enter') loadEvents(); }} />
+      onkeydown={(e) => { if (e.key === 'Enter') applyFilters(); }} />
     <div class="toolbar-spacer"></div>
-    <label class="auto-toggle">
-      <input type="checkbox" bind:checked={autoRefresh} /> Auto
-    </label>
-    <button class="secondary" onclick={loadEvents} disabled={loading}>
+    <button class="secondary" onclick={() => loadEvents()} disabled={loading}>
       {loading ? 'Loading…' : '↻ Refresh'}
     </button>
   </div>
 
   <div class="log-info">
-    Persisted to disk · 7-day retention · {events.length} entries shown
+    SQLite-backed · {totalEvents.toLocaleString()} total events · Page {currentPage} of {totalPages} · {events.length} shown
   </div>
 
   {#if loading && events.length === 0}
@@ -142,6 +148,14 @@
         </div>
       {/each}
     </div>
+
+    {#if totalPages > 1}
+      <div class="pagination">
+        <button class="btn-sm ghost" disabled={currentPage <= 1 || loading} onclick={() => loadEvents(currentPage - 1)}>← Prev</button>
+        <span class="page-info">Page {currentPage} of {totalPages}</span>
+        <button class="btn-sm ghost" disabled={currentPage >= totalPages || loading} onclick={() => loadEvents(currentPage + 1)}>Next →</button>
+      </div>
+    {/if}
   {/if}
 </Card>
 
@@ -245,4 +259,19 @@
     border-radius: var(--radius-sm);
     white-space: pre-wrap;
   }
+
+  /* Pagination */
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    font-size: 0.82rem;
+  }
+  .page-info { color: var(--text-dim); }
+  .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  .ghost { background: transparent; border: 1px solid var(--border); color: var(--text); cursor: pointer; border-radius: var(--radius-sm); }
+  .ghost:hover:not(:disabled) { background: var(--bg-surface1); }
+  .ghost:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

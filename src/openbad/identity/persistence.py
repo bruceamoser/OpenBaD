@@ -40,6 +40,7 @@ def _user_to_dict(profile: UserProfile) -> dict[str, Any]:
     d = asdict(profile)
     d["communication_style"] = profile.communication_style.value
     d["work_hours"] = list(profile.work_hours)
+    d.pop("_PERSONALITY_TEXT_LIMIT", None)
     return d
 
 
@@ -66,15 +67,22 @@ def _dict_to_user(data: dict[str, Any]) -> UserProfile:
         active_projects=data.get("active_projects", []),
         timezone=data.get("timezone", ""),
         work_hours=data.get("work_hours", [9, 17]),
+        personality_text=data.get("personality_text", ""),
     )
 
 
 def _assistant_to_dict(profile: AssistantProfile) -> dict[str, Any]:
-    return asdict(profile)
+    d = asdict(profile)
+    d.pop("_PERSONALITY_TEXT_LIMIT", None)
+    return d
 
 
 def _dict_to_assistant(data: dict[str, Any]) -> AssistantProfile:
-    return AssistantProfile(**data)
+    filtered = {
+        k: v for k, v in data.items()
+        if not k.startswith("_") and k != "PERSONALITY_TEXT_LIMIT"
+    }
+    return AssistantProfile(**filtered)
 
 
 class IdentityPersistence:
@@ -124,6 +132,8 @@ class IdentityPersistence:
     def update_user(self, **changes: Any) -> UserProfile:
         """Apply runtime changes to the user profile and persist to LTM."""
         for key, value in changes.items():
+            if key.startswith("_"):
+                continue
             if not hasattr(self._user, key):
                 msg = f"UserProfile has no field {key!r}"
                 raise AttributeError(msg)
@@ -135,6 +145,8 @@ class IdentityPersistence:
     def update_assistant(self, **changes: Any) -> AssistantProfile:
         """Apply runtime changes to the assistant profile and persist to LTM."""
         for key, value in changes.items():
+            if key.startswith("_"):
+                continue
             if not hasattr(self._assistant, key):
                 msg = f"AssistantProfile has no field {key!r}"
                 raise AttributeError(msg)

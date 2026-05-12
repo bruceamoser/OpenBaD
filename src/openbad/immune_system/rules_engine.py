@@ -97,11 +97,23 @@ _BUILTIN_RULES: list[dict[str, str]] = [
     {
         "name": "roleplay_act_as",
         "pattern": (
-            r"(?i)(pretend|act|behave)\s+"
-            r"(like|as\s+if|as\s+)?\s*(you\s+are|a|an)"
+            r"(?i)\b(pretend|act|behave)\s+"
+            r"("
+            # "as/like/as if" + dangerous follow-up
+            r"(like|as\s+if|as)\s+"
+            r"("
+            r"you\s+(have\s+no\s+(restrictions?|rules?|limits?|guidelines?|constraints?|filters?|boundaries)"
+            r"|are\s+(not\s+bound|not\s+limited|not\s+restricted|free\s+from"
+            r"|(?:now\s+)?(?:DAN|evil|unfiltered|unrestricted|jailbroken|uncensored)))"
+            r"|(a|an)\s+(unrestricted|unfiltered|uncensored|jailbroken|evil|unaligned)\s"
+            r")"
+            r"|"
+            # direct "you are [now] DAN/unfiltered/etc"
+            r"(that\s+)?you\s+are\s+(?:now\s+)?(?:DAN|evil|unfiltered|unrestricted|jailbroken|uncensored)"
+            r")"
         ),
         "severity": "high",
-        "description": "Role-play manipulation via behaviour override",
+        "description": "Role-play manipulation via jailbreak behaviour override",
     },
     {
         "name": "roleplay_developer_mode",

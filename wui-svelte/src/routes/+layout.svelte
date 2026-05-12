@@ -56,7 +56,6 @@
   let accessModalOpen = $state(false);
   let accessDecisionBusy = $state(false);
   let accessStatusMsg = $state('');
-  let accessPollHandle: ReturnType<typeof setInterval> | null = null;
 
   function statusColor(s: string): string {
     if (s === 'connected') return 'var(--green)';
@@ -173,16 +172,9 @@
     checkOnboarding();
     loadVersion();
     loadPendingAccessRequests();
-    accessPollHandle = setInterval(() => {
-      void loadPendingAccessRequests();
-    }, 3000);
   });
 
   onDestroy(() => {
-    if (accessPollHandle) {
-      clearInterval(accessPollHandle);
-      accessPollHandle = null;
-    }
     disconnect();
   });
 </script>
