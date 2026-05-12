@@ -78,10 +78,20 @@
     }
   }
 
-  function openConfig(p: Plugin): void {
+  async function openConfig(p: Plugin): Promise<void> {
     configPlugin = p;
     configCredentials = '';
     configMsg = '';
+    try {
+      const res = await apiGet<{ credentials: Record<string, string> | null }>(
+        `/api/transducers/${p.name}/credentials`,
+      );
+      if (res.credentials) {
+        configCredentials = JSON.stringify(res.credentials, null, 2);
+      }
+    } catch {
+      // Ignore — user can enter fresh credentials
+    }
   }
 
   function closeConfig(): void {

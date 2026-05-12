@@ -7,6 +7,7 @@ import json
 import logging
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -286,12 +287,15 @@ class Daemon:
             logger.info("FSM busy (%s); skipping scheduler tick", self._fsm.state)
             return
 
-        try:
-            from openbad.autonomy.scheduler_worker import process_pending_autonomy_work
+        def _run_scheduler() -> None:
+            try:
+                from openbad.autonomy.scheduler_worker import process_pending_autonomy_work
 
-            process_pending_autonomy_work()
-        except Exception:
-            logger.exception("Scheduler worker failed")
+                process_pending_autonomy_work()
+            except Exception:
+                logger.exception("Scheduler worker failed")
+
+        threading.Thread(target=_run_scheduler, daemon=True).start()
 
     def _on_doctor_call(self, _topic: str, payload: bytes) -> None:
         try:
@@ -304,15 +308,18 @@ class Daemon:
             logger.info("FSM busy (%s); skipping overlapping doctor call", self._fsm.state)
             return
 
-        try:
-            from openbad.autonomy.scheduler_worker import process_doctor_call
+        def _run_doctor() -> None:
+            try:
+                from openbad.autonomy.scheduler_worker import process_doctor_call
 
-            process_doctor_call(request if isinstance(request, dict) else None)
-        except Exception:
-            logger.exception("Doctor call worker failed")
-        finally:
-            if self._fsm is not None:
-                self._fsm.finish_work()
+                process_doctor_call(request if isinstance(request, dict) else None)
+            except Exception:
+                logger.exception("Doctor call worker failed")
+            finally:
+                if self._fsm is not None:
+                    self._fsm.finish_work()
+
+        threading.Thread(target=_run_doctor, daemon=True).start()
 
     def _on_task_work_request(self, _topic: str, payload: bytes) -> None:
         try:
@@ -326,15 +333,18 @@ class Daemon:
             logger.info("FSM busy (%s); skipping overlapping task work request", self._fsm.state)
             return
 
-        try:
-            from openbad.autonomy.scheduler_worker import process_task_call
+        def _run_task() -> None:
+            try:
+                from openbad.autonomy.scheduler_worker import process_task_call
 
-            process_task_call(request if isinstance(request, dict) else None)
-        except Exception:
-            logger.exception("Task work worker failed")
-        finally:
-            if self._fsm is not None:
-                self._fsm.finish_work()
+                process_task_call(request if isinstance(request, dict) else None)
+            except Exception:
+                logger.exception("Task work worker failed")
+            finally:
+                if self._fsm is not None:
+                    self._fsm.finish_work()
+
+        threading.Thread(target=_run_task, daemon=True).start()
 
     def _on_research_work_request(self, _topic: str, payload: bytes) -> None:
         try:
@@ -351,15 +361,18 @@ class Daemon:
             )
             return
 
-        try:
-            from openbad.autonomy.scheduler_worker import process_research_call
+        def _run_research() -> None:
+            try:
+                from openbad.autonomy.scheduler_worker import process_research_call
 
-            process_research_call(request if isinstance(request, dict) else None)
-        except Exception:
-            logger.exception("Research work worker failed")
-        finally:
-            if self._fsm is not None:
-                self._fsm.finish_work()
+                process_research_call(request if isinstance(request, dict) else None)
+            except Exception:
+                logger.exception("Research work worker failed")
+            finally:
+                if self._fsm is not None:
+                    self._fsm.finish_work()
+
+        threading.Thread(target=_run_research, daemon=True).start()
 
     # -- identity context ----------------------------------------------- #
 

@@ -216,7 +216,10 @@ class CrewMQTTBridge:
                 log.info("Crew %s gated; skipping dispatch", crew_type)
                 return
 
-            result = crew.kickoff()
+            # Run synchronous kickoff in a thread so we don't block the
+            # event loop (which starves the Telegram poll task, etc.).
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, crew.kickoff)
 
             # Publish result back.
             response_topic = _RESPONSE_TOPICS.get(crew_type)

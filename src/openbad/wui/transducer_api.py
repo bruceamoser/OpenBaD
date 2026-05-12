@@ -223,6 +223,20 @@ async def _post_transducer(request: web.Request) -> web.Response:
     return web.json_response({"name": name, "enabled": enabled}, status=201)
 
 
+async def _get_transducer_credentials(request: web.Request) -> web.Response:
+    """GET /api/transducers/{plugin}/credentials — return stored credentials."""
+    plugin_name = request.match_info["plugin"]
+    creds_dir = resolve_credentials_dir()
+    creds_path = creds_dir / f"{plugin_name}.json"
+    if not creds_path.exists():
+        return web.json_response({"credentials": None})
+    try:
+        creds = json.loads(creds_path.read_text())
+    except Exception:
+        return web.json_response({"credentials": None})
+    return web.json_response({"credentials": creds})
+
+
 async def _get_transducer_health(request: web.Request) -> web.Response:
     """GET /api/transducers/{plugin}/health — return health status."""
     plugin_name = request.match_info["plugin"]
@@ -415,5 +429,6 @@ def setup_transducer_routes(app: web.Application) -> None:
     app.router.add_get("/api/transducers", _get_transducers)
     app.router.add_post("/api/transducers", _post_transducer)
     app.router.add_put("/api/transducers/{plugin}", _put_transducer)
+    app.router.add_get("/api/transducers/{plugin}/credentials", _get_transducer_credentials)
     app.router.add_get("/api/transducers/{plugin}/health", _get_transducer_health)
     app.router.add_post("/api/transducers/{plugin}/test", _post_transducer_test)
