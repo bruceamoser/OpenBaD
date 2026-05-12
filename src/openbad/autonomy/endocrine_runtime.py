@@ -39,7 +39,7 @@ class EndocrineRuntime:
     ) -> None:
         self._config = config
         self._max_adjustment_history = max_adjustment_history
-        self._conn = initialize_state_db(db_path or _resolve_state_db_path())
+        self._conn = initialize_state_db(db_path or DEFAULT_STATE_DB_PATH)
         self._ensure_rows()
 
     @property
@@ -488,20 +488,6 @@ def load_endocrine_config() -> EndocrineConfig:
             return EndocrineConfig.from_yaml(path)
 
     return EndocrineConfig()
-
-
-def _resolve_state_db_path() -> Path:
-    from os import environ
-
-    configured = environ.get("OPENBAD_STATE_DB", "").strip()
-    if configured:
-        return Path(configured)
-
-    preferred = Path("/var/lib/openbad/data/state.db")
-    if preferred.exists():
-        return preferred
-
-    return DEFAULT_STATE_DB_PATH
 
 
 def _clamp(value: float) -> float:

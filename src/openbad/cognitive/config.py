@@ -47,7 +47,7 @@ class ProviderConfig:
     model: str = ""
     api_key: str = ""
     api_key_env: str = ""
-    timeout_ms: int = 30_000
+    timeout_ms: int = 14_400_000
     enabled: bool = True
 
 
@@ -66,7 +66,7 @@ class ReasoningDefaults:
 
     default_max_tokens: int = 2_048
     default_temperature: float = 0.7
-    critical_timeout_ms: int = 30_000
+    critical_timeout_ms: int = 14_400_000
     high_timeout_ms: int = 15_000
     medium_timeout_ms: int = 10_000
     low_timeout_ms: int = 5_000

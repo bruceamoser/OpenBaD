@@ -12,3 +12,5 @@ memory:
     idle_timeout_minutes: 20
     allow_daytime_naps: false
     enabled: true
+onboarding:
+  sleep_configured: true

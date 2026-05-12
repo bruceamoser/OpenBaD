@@ -1,42 +1,16 @@
-# Default model routing configuration for OpenBaD
-
 cortisol_threshold: 0.8
-budget_limit: 0  # 0 = unlimited
+budget_limit: 0
 health_ttl_s: 60
-
 chains:
   critical:
-    - provider: anthropic
-      model: claude-sonnet-4-20250514
-    - provider: openai
-      model: gpt-4o
-    - provider: ollama
-      model: llama3.2
-
+  - provider: custom
+    model: Qwen3.6-35B-A3B-APEX-I-Balanced.gguf
   high:
-    - provider: openai
-      model: gpt-4o-mini
-    - provider: ollama
-      model: llama3.2
-
+  - provider: custom
+    model: Qwen3.6-35B-A3B-APEX-I-Balanced.gguf
   medium:
-    - provider: ollama
-      model: llama3.2
-    - provider: openai
-      model: gpt-4o-mini
-
+  - provider: custom
+    model: Qwen3.6-35B-A3B-APEX-I-Balanced.gguf
   low:
-    - provider: ollama
-      model: llama3.2
-
-# Agent-to-priority mappings for CrewAI agent model routing.
-# Each agent is assigned a routing priority that determines which
-# fallback chain is used for its LLM calls.
-agent_priorities:
-  chat: medium
-  task: medium
-  research: low
-  doctor: critical
-  sleep: low
-  immune: high
-  explorer: low
+  - provider: custom
+    model: Qwen3.6-35B-A3B-APEX-I-Balanced.gguf

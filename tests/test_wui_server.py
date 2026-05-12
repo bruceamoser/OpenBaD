@@ -707,9 +707,10 @@ async def test_resolve_chat_adapter_requires_explicit_system_model(aiohttp_clien
 
 
 @pytest.mark.asyncio
-async def test_resolve_chat_adapter_falls_back_to_first_valid_provider_when_assignment_invalid(
+async def test_resolve_chat_adapter_returns_none_when_assigned_provider_invalid(
     aiohttp_client, tmp_path, monkeypatch
 ):
+    """When the assigned provider doesn't match any enabled provider, return None."""
     import openbad.wui.server as srv
 
     config_dir = tmp_path / "openbad"
@@ -737,15 +738,15 @@ async def test_resolve_chat_adapter_falls_back_to_first_valid_provider_when_assi
 
     adapter, model, provider_name, is_fallback, _chat_model, _crew_llm = srv._resolve_chat_adapter(config, "chat")
 
-    assert adapter is not None
-    assert model == "openai/gpt-4o-mini"
-    assert provider_name == "openai"
+    assert adapter is None
+    assert model is None
 
 
 @pytest.mark.asyncio
-async def test_resolve_chat_adapter_fallback_uses_model_from_other_system_assignment(
+async def test_resolve_chat_adapter_no_fallback_when_assigned_provider_unavailable(
     aiohttp_client, tmp_path, monkeypatch
 ):
+    """When the assigned provider is unavailable, return None — no fallback."""
     import openbad.wui.server as srv
 
     config_dir = tmp_path / "openbad"
@@ -774,17 +775,16 @@ async def test_resolve_chat_adapter_fallback_uses_model_from_other_system_assign
         systems={
             CognitiveSystem.CHAT: SystemAssignment(provider="github-copilot", model="gpt-5.1"),
             CognitiveSystem.REASONING: SystemAssignment(),
-            CognitiveSystem.REACTIONS: SystemAssignment(provider="custom", model="Bonsai-8B.gguf"),
+            CognitiveSystem.REACTIONS: SystemAssignment(provider="custom", model="Ternary-Bonsai-8B-Q2_0.gguf"),
             CognitiveSystem.SLEEP: SystemAssignment(),
-            CognitiveSystem.DOCTOR: SystemAssignment(provider="custom", model="Bonsai-8B.gguf"),
+            CognitiveSystem.DOCTOR: SystemAssignment(provider="custom", model="Ternary-Bonsai-8B-Q2_0.gguf"),
         },
     )
 
     adapter, model, provider_name, is_fallback, _chat_model, _crew_llm = srv._resolve_chat_adapter(config, "chat")
 
-    assert adapter is not None
-    assert model == "openai/Bonsai-8B.gguf"
-    assert provider_name == "custom"
+    assert adapter is None
+    assert model is None
 
 
 @pytest.mark.asyncio

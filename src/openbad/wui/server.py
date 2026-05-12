@@ -1397,7 +1397,7 @@ def _resolve_chat_adapter(
     assignment = config.systems.get(system)
     assigned_provider = assignment.provider if assignment else ""
 
-    # Try the explicitly-assigned provider first.
+    # Use the explicitly-assigned provider only — no fallback.
     if assignment and assigned_provider:
         for p in config.providers:
             if p.name == assigned_provider and p.enabled and _provider_is_valid(p):
@@ -1412,38 +1412,10 @@ def _resolve_chat_adapter(
                     chat_model, crew_llm,
                 )
 
-    # Fallback: if chat assignment is stale or unverified, use first valid provider.
-    for p in config.providers:
-        if not p.enabled or not _provider_is_valid(p):
-            continue
-
-        configured_models = [
-            a.model.strip()
-            for a in config.systems.values()
-            if a.provider == p.name and a.model.strip()
-        ]
-        fallback_model = (
-            configured_models[0]
-            if configured_models
-            else (_provider_model(p) or _provider_verification_model(p.name))
-        )
-
-        if not fallback_model:
-            continue
-        chat_model = _build_langchain_model(p, fallback_model)
-        crew_llm = _build_crew_llm(p, fallback_model)
-        from openbad.cognitive.providers.litellm_adapter import litellm_model_name
-        model_id = litellm_model_name(p.name, fallback_model)
-        used_fallback = bool(assigned_provider and p.name != assigned_provider)
-        if used_fallback:
-            log.warning(
-                "Provider fallback: system=%s assigned=%s using=%s model=%s",
-                system_name, assigned_provider, p.name, fallback_model,
-            )
-        return (
-            chat_model, model_id, p.name, used_fallback,
-            chat_model, crew_llm,
-        )
+    log.warning(
+        "No provider/model assigned for system '%s'",
+        system_name,
+    )
     return None, None, "", True, None, None
 
 

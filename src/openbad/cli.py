@@ -554,7 +554,8 @@ def heartbeat(mqtt_host: str, mqtt_port: int, db_path: str | None) -> None:
 @click.option("--port", default=9200, type=int, help="Web UI bind port.")
 @click.option("--mqtt-host", default="localhost", help="MQTT broker host.")
 @click.option("--mqtt-port", default=1883, type=int, help="MQTT broker port.")
-def wui(host: str, port: int, mqtt_host: str, mqtt_port: int) -> None:
+@click.option("--mcp-port", default=9201, type=int, help="MCP SSE server port.")
+def wui(host: str, port: int, mqtt_host: str, mqtt_port: int, mcp_port: int) -> None:
     """Launch the web UI server with MQTT->WebSocket bridge."""
     from openbad.wui.server import run_server
 
@@ -564,6 +565,7 @@ def wui(host: str, port: int, mqtt_host: str, mqtt_port: int) -> None:
             port=port,
             mqtt_host=mqtt_host,
             mqtt_port=mqtt_port,
+            mcp_port=mcp_port,
         )
     )
 

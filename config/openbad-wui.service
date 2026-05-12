@@ -9,7 +9,7 @@ Requires=openbad.service
 Type=simple
 User=openbad
 Group=openbad
-ExecStart=/usr/local/bin/openbad wui --host 127.0.0.1 --port 9200 --mqtt-host localhost --mqtt-port 1883
+ExecStart=/usr/local/bin/openbad wui --host 127.0.0.1 --port 9200 --mqtt-host localhost --mqtt-port 1883 --mcp-port 9201
 Restart=on-failure
 RestartSec=5s
 

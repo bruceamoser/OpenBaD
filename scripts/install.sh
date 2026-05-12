@@ -334,12 +334,9 @@ install_package() {
         python3 -m venv "$VENV_DIR"
     fi
 
-    "$VENV_DIR/bin/python" -m pip install --upgrade pip
-    # Ensure critical compiled deps satisfy current constraints before
-    # the full install, so pip doesn't backtrack the entire dep tree.
-    "$VENV_DIR/bin/python" -m pip install 'protobuf>=6.0'
-    "$VENV_DIR/bin/python" -m pip install --force-reinstall --no-deps "$PROJECT_ROOT"
-    "$VENV_DIR/bin/python" -m pip install "$PROJECT_ROOT"
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip uv
+    # Use uv for dependency resolution (pip hits resolution-too-deep with crewai).
+    "$VENV_DIR/bin/uv" pip install --python "$VENV_DIR/bin/python" --reinstall-package openbad "$PROJECT_ROOT"
 
     # Keep CLI path stable for systemd and operators.
     ln -sf "$VENV_DIR/bin/openbad" "$OPENBAD_BIN"

@@ -242,10 +242,6 @@ class ModelRouter:
             raise RuntimeError(msg)
 
         candidates = [assigned_step]
-        for step in self._default_fallback_chain:
-            if step == assigned_step:
-                continue
-            candidates.append(step)
 
         for idx, step in enumerate(candidates):
             key = f"{step.provider}/{step.model_id}"

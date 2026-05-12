@@ -392,7 +392,7 @@ function providerSummaryCard(provider, index) {
         <div><span>Model</span><strong>${escapeHtml(provider.model || '--')}</strong></div>
         <div><span>Endpoint</span><strong>${escapeHtml(endpoint)}</strong></div>
         <div><span>Auth env</span><strong>${escapeHtml(envText)}</strong></div>
-        <div><span>Timeout</span><strong>${provider.timeout_ms || 30000} ms</strong></div>
+        <div><span>Timeout</span><strong>${provider.timeout_ms || 14400000} ms</strong></div>
       </div>
     </article>
   `;
@@ -436,7 +436,7 @@ function openWizard(editIndex = null) {
     els.wiring.wizardType.value = 'github-copilot';
     els.wiring.baseUrl.value = 'http://127.0.0.1:11434';
     els.wiring.apiKeyEnv.value = '';
-    els.wiring.timeoutMs.value = '30000';
+    els.wiring.timeoutMs.value = '14400000';
     els.wiring.wizardStatus.textContent = 'Choose a provider type to begin the setup walkthrough.';
   } else {
     const provider = providerDrafts[editIndex];
@@ -444,7 +444,7 @@ function openWizard(editIndex = null) {
     els.wiring.wizardType.value = providerTypeFromDraft(provider);
     els.wiring.baseUrl.value = provider.base_url || 'http://127.0.0.1:11434';
     els.wiring.apiKeyEnv.value = provider.api_key_env || '';
-    els.wiring.timeoutMs.value = String(provider.timeout_ms || 30000);
+    els.wiring.timeoutMs.value = String(provider.timeout_ms || 14400000);
     els.wiring.wizardStatus.textContent = 'Verify the provider again before saving updated settings.';
   }
 
@@ -519,7 +519,7 @@ async function persistWiringConfig(statusMessage) {
 function verificationPayload() {
   const payload = {
     provider_type: els.wiring.wizardType.value,
-    timeout_ms: Number(els.wiring.timeoutMs.value || 30000),
+    timeout_ms: Number(els.wiring.timeoutMs.value || 14400000),
   };
 
   if (payload.provider_type === 'local-openai') {
@@ -590,7 +590,7 @@ async function startCopilotAuthorization() {
     const response = await fetch('/api/wiring/providers/copilot/device-code', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ timeout_ms: Number(els.wiring.timeoutMs.value || 30000) }),
+      body: JSON.stringify({ timeout_ms: Number(els.wiring.timeoutMs.value || 14400000) }),
     });
     if (!response.ok) {
       throw new Error(`sign-in start failed (${response.status})`);

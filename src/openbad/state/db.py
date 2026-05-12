@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -9,7 +10,25 @@ from pathlib import Path
 
 import sqlite_vec
 
-DEFAULT_STATE_DB_PATH = Path("data/state.db")
+
+def _resolve_default_state_db() -> Path:
+    """Resolve the canonical state DB path.
+
+    Priority:
+      1. OPENBAD_STATE_DB env var (explicit override)
+      2. /var/lib/openbad/data/state.db (production install)
+      3. data/state.db (relative fallback for dev without production dir)
+    """
+    configured = os.environ.get("OPENBAD_STATE_DB", "").strip()
+    if configured:
+        return Path(configured)
+    preferred = Path("/var/lib/openbad/data/state.db")
+    if preferred.exists() or preferred.parent.exists():
+        return preferred
+    return Path("data/state.db")
+
+
+DEFAULT_STATE_DB_PATH = _resolve_default_state_db()
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 # Connection cache: reuse a single connection per resolved db path.
