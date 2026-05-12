@@ -1103,6 +1103,104 @@ def _format_tool_result(raw: str, *, max_len: int = 400) -> str:
     return result
 
 
+# ── Fast-path triage ──────────────────────────────────────────────── #
+
+# Keywords that suggest the user wants a tool action (memory, files, web, etc.)
+_TOOL_KEYWORDS: re.Pattern[str] = re.compile(
+    r"\b(?:"
+    r"search|find|look\s?up|fetch|browse|open|read|write|save|store"
+    r"|remember|recall|forget|delete|remove|prune"
+    r"|create|add|update|edit|modify|change"
+    r"|task|research|file|folder|directory|path"
+    r"|web|http|url|link|site|page|download"
+    r"|send|message|email|telegram|discord|slack"
+    r"|status|health|hormone|endocrine|event|log"
+    r"|profile|personality|trait|ocean"
+    r"|library|book|knowledge"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_tools(message: str) -> bool:
+    """Quick heuristic: does the message likely need tool access?
+
+    Returns False for greetings, simple questions, conversational
+    messages — allowing a direct LLM call without supervisor overhead.
+    """
+    stripped = message.strip()
+    # Very short messages are almost always conversational
+    if len(stripped) < 120 and not _TOOL_KEYWORDS.search(stripped):
+        return False
+    # Longer messages: check for tool keywords
+    return bool(_TOOL_KEYWORDS.search(stripped))
+
+
+async def _direct_stream(
+    chat_model: Any,
+    messages: list[dict[str, Any]],
+    request_id: str,
+) -> AsyncIterator[StreamChunk]:
+    """Stream a direct LLM completion with no tools or supervisor.
+
+    Used for simple conversational messages where agent overhead
+    would be wasteful.  Disables model thinking/reasoning to avoid
+    generating hundreds of hidden tokens for simple greetings.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from openbad.autonomy.tool_agent import strip_think_tags
+
+    lc_messages: list[Any] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = str(msg.get("content", ""))
+        if role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        elif role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            lc_messages.append(AIMessage(content=content))
+
+    # Disable thinking for fast conversational responses.
+    # Build a no-think copy using extra_body so the LLM skips <think> blocks.
+    try:
+        from langchain_openai import ChatOpenAI
+
+        api_key = chat_model.openai_api_key
+        if hasattr(api_key, "get_secret_value"):
+            api_key = api_key.get_secret_value()
+        no_think_model = ChatOpenAI(
+            model=chat_model.model_name,
+            api_key=api_key,
+            base_url=str(chat_model.openai_api_base),
+            timeout=chat_model.request_timeout or 300,
+            max_retries=chat_model.max_retries or 2,
+            streaming=True,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+    except Exception:
+        log.debug("Failed to build no-think model, using original", exc_info=True)
+        no_think_model = chat_model
+
+    log.info("Direct stream (no supervisor, no-think) request=%s messages=%d", request_id, len(lc_messages))
+
+    tokens = 0
+    try:
+        async for chunk in no_think_model.astream(lc_messages):
+            text = getattr(chunk, "content", "") or ""
+            if not text:
+                continue
+            tokens += 1
+            yield StreamChunk(token=text, tokens_used=tokens)
+    except Exception as exc:
+        log.exception("Direct stream error request=%s", request_id)
+        yield StreamChunk(error=str(exc), done=True)
+        return
+
+    yield StreamChunk(done=True, tokens_used=tokens)
+
+
 # ── Streaming pipeline ────────────────────────────────────────────── #
 
 
@@ -1212,12 +1310,26 @@ async def stream_chat(
     tokens_used = 0
     t0 = time.monotonic()
 
-    use_agentic = not onboarding_mode
+    use_agentic = not onboarding_mode and _needs_tools(message)
 
     try:
         if use_agentic:
             async for chunk in _agentic_stream(
                 chat_model, model_id, messages, request_id,
+            ):
+                if chunk.error:
+                    yield chunk
+                    return
+                tokens_used = max(tokens_used, chunk.tokens_used)
+                if chunk.token:
+                    full_response.append(chunk.token)
+                yield chunk
+                if chunk.done:
+                    break
+        elif not onboarding_mode:
+            # Fast path: direct LLM stream without supervisor/tools
+            async for chunk in _direct_stream(
+                chat_model, messages, request_id,
             ):
                 if chunk.error:
                     yield chunk

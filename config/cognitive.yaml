@@ -43,11 +43,3 @@ cognitive:
     immune:
       provider: custom
       model: Qwen3.6-35B-A3B-APEX-I-Balanced.gguf
-  default_fallback_chain:
-  - provider: ollama
-    model: bonsai-8b
-  - provider: ollama
-    model: llama3.2
-  fallback_cortisol:
-    release_per_step: 0.1
-    escalation_after: 5
