@@ -1004,16 +1004,23 @@ def _build_crew_llm(
     from crewai import LLM
 
     class _ThinkingLLM(LLM):
-        """LLM subclass that strips assistant prefill for thinking models."""
+        """LLM subclass that strips assistant prefill for thinking models.
+
+        llama.cpp rejects the combination of thinking mode + trailing
+        assistant messages.  CrewAI injects these as response-steering
+        prefill.  We strip them so the model can still think freely.
+        """
 
         def _prepare_completion_params(self, messages, tools=None, skip_file_processing=False):  # type: ignore[override]
             params = super()._prepare_completion_params(
                 messages, tools, skip_file_processing=skip_file_processing,
             )
             msgs = params.get("messages")
-            if msgs and isinstance(msgs, list) and len(msgs) > 1:
-                if msgs[-1].get("role") == "assistant":
-                    params["messages"] = msgs[:-1]
+            if msgs and isinstance(msgs, list):
+                # Strip ALL trailing assistant messages (prefill)
+                while msgs and msgs[-1].get("role") == "assistant":
+                    msgs = msgs[:-1]
+                params["messages"] = msgs
             return params
 
     cfg = _extract_provider_config(provider, model)
