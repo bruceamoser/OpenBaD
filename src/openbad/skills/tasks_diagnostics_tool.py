@@ -54,12 +54,18 @@ class TasksDiagnosticsToolAdapter:
         *,
         description: str = "",
         owner: str = "user",
+        due_at: float | None = None,
+        recurrence_rule: str | None = None,
     ) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "title": title,
             "description": description,
             "owner": owner,
         }
+        if due_at is not None:
+            payload["due_at"] = due_at
+        if recurrence_rule is not None:
+            payload["recurrence_rule"] = recurrence_rule
         url = f"{self._config.base_url.rstrip('/')}/api/tasks"
         try:
             data = json.loads(

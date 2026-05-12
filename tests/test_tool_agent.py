@@ -10,6 +10,7 @@ from openbad.autonomy.tool_agent import (
     _extract_creation_info,
     build_tooling_system_prompt,
     run_tool_agent,
+    strip_think_tags,
 )
 
 # ------------------------------------------------------------------ #
@@ -186,3 +187,121 @@ async def test_run_tool_agent_handles_exception() -> None:
     assert result.content == ""
     assert result.used_agentic is True
     assert result.provider == "custom"
+
+
+# ------------------------------------------------------------------ #
+#  strip_think_tags tests
+# ------------------------------------------------------------------ #
+
+
+def test_strip_think_tags_removes_single_block() -> None:
+    text = "<think>internal reasoning here</think>The actual answer."
+    assert strip_think_tags(text) == "The actual answer."
+
+
+def test_strip_think_tags_removes_multiline_block() -> None:
+    text = (
+        "<think>\nStep 1: consider options\n"
+        "Step 2: pick best\n</think>\n\nHere is the result."
+    )
+    assert strip_think_tags(text) == "Here is the result."
+
+
+def test_strip_think_tags_removes_multiple_blocks() -> None:
+    text = "<think>first</think>Hello <think>second</think>world"
+    assert strip_think_tags(text) == "Hello world"
+
+
+def test_strip_think_tags_no_tags_passthrough() -> None:
+    text = "No reasoning tags here."
+    assert strip_think_tags(text) == "No reasoning tags here."
+
+
+def test_strip_think_tags_empty_string() -> None:
+    assert strip_think_tags("") == ""
+
+
+def test_strip_think_tags_only_think_block() -> None:
+    text = "<think>all reasoning, no visible output</think>"
+    assert strip_think_tags(text) == ""
+
+
+def test_strip_think_tags_preserves_other_tags() -> None:
+    text = "<think>hidden</think><b>visible</b> content"
+    assert strip_think_tags(text) == "<b>visible</b> content"
+
+
+# ------------------------------------------------------------------ #
+#  Integration: tool agent strips think tags from final content
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_run_tool_agent_strips_think_tags() -> None:
+    mock_chat_model = MagicMock()
+    messages = [
+        HumanMessage(content="test"),
+        AIMessage(content="<think>reasoning about the answer</think>The final answer."),
+    ]
+    fake_result = {"messages": messages}
+
+    with (
+        patch(
+            "openbad.autonomy.tool_agent.async_get_openbad_tools",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("openbad.autonomy.tool_agent.create_react_agent") as mock_create,
+    ):
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = fake_result
+        mock_create.return_value = mock_agent
+
+        result = await run_tool_agent(
+            mock_chat_model,
+            "openai/test-model",
+            provider_name="custom",
+            system_prompt="Do the work.",
+            user_prompt="Answer me.",
+            request_id="req-think",
+        )
+
+    assert result.content == "The final answer."
+    assert "<think>" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_tool_agent_uses_reasoning_content_fallback() -> None:
+    """When content is only inside think tags, fall back to reasoning_content."""
+    mock_chat_model = MagicMock()
+    messages = [
+        HumanMessage(content="test"),
+        AIMessage(
+            content="<think>all hidden</think>",
+            additional_kwargs={"reasoning_content": "The reasoning fallback answer."},
+        ),
+    ]
+    fake_result = {"messages": messages}
+
+    with (
+        patch(
+            "openbad.autonomy.tool_agent.async_get_openbad_tools",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("openbad.autonomy.tool_agent.create_react_agent") as mock_create,
+    ):
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = fake_result
+        mock_create.return_value = mock_agent
+
+        result = await run_tool_agent(
+            mock_chat_model,
+            "openai/test-model",
+            provider_name="custom",
+            system_prompt="Do the work.",
+            user_prompt="Answer me.",
+            request_id="req-reasoning",
+        )
+
+    assert result.content == "The reasoning fallback answer."

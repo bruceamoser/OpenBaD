@@ -353,6 +353,34 @@ class TestClassifyTaskComplexity:
         )
         assert _classify_task_complexity(task) is False
 
+    def test_multi_word_title_is_complex(self) -> None:
+        task = _make_task("Set up the deployment pipeline", "Do it.")
+        assert _classify_task_complexity(task) is True
+
+    def test_two_word_title_with_short_desc_is_simple(self) -> None:
+        task = _make_task("Check time", "What time is it?")
+        assert _classify_task_complexity(task) is False
+
+    def test_description_over_100_chars_is_complex(self) -> None:
+        task = _make_task("Task", "A" * 101)
+        assert _classify_task_complexity(task) is True
+
+    def test_description_under_100_chars_is_simple(self) -> None:
+        task = _make_task("Hi", "Short desc")
+        assert _classify_task_complexity(task) is False
+
+    def test_force_crew_flag(self) -> None:
+        task = _make_task("Hi", "Short")
+        assert _classify_task_complexity(task, force_crew=True) is True
+
+    def test_new_keywords_research(self) -> None:
+        task = _make_task("Analyze logs", "Research the recent error patterns")
+        assert _classify_task_complexity(task) is True
+
+    def test_keyword_in_title(self) -> None:
+        task = _make_task("Investigate memory leak", "")
+        assert _classify_task_complexity(task) is True
+
 
 class TestClassifyResearchComplexity:
     def test_simple_research(self) -> None:

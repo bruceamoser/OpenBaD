@@ -12,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from openbad.active_inference.background_scanner import BackgroundScanner
 from openbad.endocrine.controller import EndocrineController
 from openbad.frameworks.crew_mqtt_bridge import CrewMQTTBridge
 from openbad.interoception.disk_network import DiskNetworkMonitor
@@ -69,6 +70,7 @@ class Daemon:
         self._stop_event: asyncio.Event | None = None
         self._crew_bridge: CrewMQTTBridge | None = None
         self._external_signal_plugin: ExternalSignalPlugin | None = None
+        self._scanner: BackgroundScanner | None = None
         self._telegram_bridge: TelegramBridge | None = None
         self._chat_router: PeripheralChatRouter | None = None
         self._identity_persistence: object | None = None
@@ -123,6 +125,9 @@ class Daemon:
 
         # 3. Endocrine controller
         self._endocrine = EndocrineController()
+
+        # 3b. Background scanner (endocrine-driven exploration)
+        await self._start_background_scanner()
 
         # 4. CrewAI ↔ MQTT activation bridge
         self._crew_bridge = CrewMQTTBridge(
@@ -182,6 +187,11 @@ class Daemon:
 
         # Peripheral transducers
         await self._stop_peripherals()
+
+        # Background scanner
+        if self._scanner is not None:
+            await self._scanner.stop()
+            self._scanner = None
 
         self._crew_bridge = None
         self._endocrine = None
@@ -419,6 +429,57 @@ class Daemon:
         if self._telegram_bridge is not None:
             await self._telegram_bridge.stop()
             self._telegram_bridge = None
+
+    async def _start_background_scanner(self) -> None:
+        """Instantiate and start the endocrine-driven background scanner."""
+        from openbad.active_inference.budget import ExplorationBudget
+        from openbad.active_inference.config import ActiveInferenceConfig
+        from openbad.active_inference.engine import ExplorationEngine
+        from openbad.active_inference.exploration_actions import ExplorationActionGenerator
+        from openbad.active_inference.insight_queue import InsightQueue
+        from openbad.active_inference.world_model import WorldModel
+
+        config_path = Path("/etc/openbad/active_inference.yaml")
+        if config_path.exists():
+            config = ActiveInferenceConfig.from_yaml(config_path)
+        else:
+            config = ActiveInferenceConfig()
+
+        world_model = WorldModel(
+            history_size=config.world_model_history_size,
+            ema_alpha=config.ema_alpha,
+        )
+        budget = ExplorationBudget(
+            daily_limit=config.daily_token_budget,
+            cooldown_seconds=config.cooldown_seconds,
+        )
+        engine = ExplorationEngine(config=config, world_model=world_model, budget=budget)
+        insight_queue = InsightQueue()
+        action_generator = ExplorationActionGenerator(insight_queue=insight_queue)
+
+        self._scanner = BackgroundScanner(
+            exploration_engine=engine,
+            action_generator=action_generator,
+            endocrine=self._endocrine,
+        )
+        await self._scanner.start()
+
+        # Register the external signal plugin
+        if self._external_signal_plugin is not None:
+            await self._scanner.register_plugin(self._external_signal_plugin)
+
+        # Register the system log watcher plugin
+        try:
+            from openbad.plugins.observations.syslog import SyslogObservationPlugin
+
+            syslog_plugin = SyslogObservationPlugin(
+                service_filters=["openbad.service", "openbad-wui.service"],
+            )
+            await self._scanner.register_plugin(syslog_plugin)
+        except Exception:
+            logger.warning("Syslog plugin registration failed", exc_info=True)
+
+        logger.info("BackgroundScanner activated with endocrine modulation")
 
     def _resolve_chat_model(self) -> tuple[object | None, str | None, str]:
         """Return ``(chat_model, model_id, provider_name)`` for the default provider."""

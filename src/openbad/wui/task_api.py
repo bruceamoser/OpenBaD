@@ -78,6 +78,8 @@ async def _create_task(request: web.Request) -> web.Response:
         title,
         description=body.get("description", ""),
         owner=body.get("owner", "system"),
+        due_at=body.get("due_at"),
+        recurrence_rule=body.get("recurrence_rule"),
     )
     return web.json_response(_task_to_dict(task), status=201)
 
