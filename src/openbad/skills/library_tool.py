@@ -51,6 +51,34 @@ async def _embed_and_store_vectors(
         log.exception("Background embedding failed for book %s", book_id)
 
 
+def browse_library() -> str:
+    """Browse the Library hierarchy.
+
+    Returns the full tree of libraries, shelves, sections, and book
+    titles with their IDs.  Use this to discover section_id values
+    before calling draft_book.
+    """
+    store = _get_store()
+    tree = store.get_tree()
+    if not tree:
+        return "The library is empty. Use draft_book to create the first entry."
+
+    lines: list[str] = []
+    for lib in tree:
+        lines.append(f"Library: {lib['name']} (id={lib['library_id']})")
+        for shelf in lib.get("shelves", []):
+            lines.append(f"  Shelf: {shelf['name']} (id={shelf['shelf_id']})")
+            for sec in shelf.get("sections", []):
+                lines.append(
+                    f"    Section: {sec['name']} (section_id={sec['section_id']})"
+                )
+                for book in sec.get("books", []):
+                    lines.append(
+                        f"      Book: {book['title']} (book_id={book['book_id']})"
+                    )
+    return "\n".join(lines)
+
+
 def search_library(query: str, top_k: int = 5) -> str:
     """Search the Library by vector similarity.
 
@@ -108,16 +136,62 @@ def read_book(book_id: str) -> str:
     )
 
 
-def draft_book(section_id: str, title: str, content: str) -> str:
+def _ensure_default_section() -> str:
+    """Return a default section_id, creating the hierarchy if needed."""
+    store = _get_store()
+    conn = store._conn  # noqa: SLF001
+
+    row = conn.execute(
+        "SELECT library_id FROM libraries WHERE name = ?",
+        ("General",),
+    ).fetchone()
+    if row:
+        library_id = row["library_id"]
+    else:
+        library_id = store.create_library("General", "Default library")
+
+    row = conn.execute(
+        "SELECT shelf_id FROM shelves WHERE library_id = ? AND name = ?",
+        (library_id, "General"),
+    ).fetchone()
+    if row:
+        shelf_id = row["shelf_id"]
+    else:
+        shelf_id = store.create_shelf(library_id, "General", "Default shelf")
+
+    row = conn.execute(
+        "SELECT section_id FROM sections WHERE shelf_id = ? AND name = ?",
+        (shelf_id, "General"),
+    ).fetchone()
+    if row:
+        return row["section_id"]
+    return store.create_section(shelf_id, "General")
+
+
+def draft_book(section_id: str = "", title: str = "", content: str = "") -> str:
     """Create a new book in the Library.
+
+    If *section_id* is empty or omitted, a default "General" section
+    is used automatically.  Use browse_library() first to discover
+    existing sections.
 
     Auto-chunks the content synchronously and enqueues background
     embedding so the cognitive router is not blocked.
     Also creates a semantic memory "card catalog" entry with a
     ``library_refs`` pointer so recall can annotate results.
     """
+    if not title.strip():
+        return json.dumps({"error": "title is required"})
+    if not content.strip():
+        return json.dumps({"error": "content is required"})
+    if not section_id.strip():
+        section_id = _ensure_default_section()
+
     store = _get_store()
-    book_id = store.create_book(section_id, title, content, author="system")
+    try:
+        book_id = store.create_book(section_id, title, content, author="system")
+    except sqlite3.IntegrityError as exc:
+        return json.dumps({"error": f"Invalid section_id: {exc}"})
 
     # Create semantic card catalog entry
     _create_card_catalog_entry(store._conn, book_id, title, content)
@@ -129,7 +203,12 @@ def draft_book(section_id: str, title: str, content: str) -> str:
     except RuntimeError:
         log.debug("No running loop — skipping background embedding")
 
-    return json.dumps({"book_id": book_id, "title": title, "status": "created"})
+    return json.dumps({
+        "book_id": book_id,
+        "section_id": section_id,
+        "title": title,
+        "status": "created",
+    })
 
 
 _VALID_RELATIONS = {"supersedes", "relies_on", "contradicts", "references"}

@@ -1201,6 +1201,15 @@ def query_semantic(query: str, top_k: int = 5) -> str:
 
 
 @skill_server.tool()
+def browse_library() -> str:
+    """Browse the Library hierarchy — returns all libraries, shelves,
+    sections, and book titles with their IDs."""
+    from openbad.skills.library_tool import browse_library as _browse
+
+    return _browse()
+
+
+@skill_server.tool()
 def search_library(query: str, top_k: int = 5) -> str:
     """Search the Library for relevant content by semantic similarity.
 
@@ -1220,14 +1229,16 @@ def read_book(book_id: str) -> str:
 
 
 @skill_server.tool()
-def draft_book(section_id: str, title: str, content: str) -> str:
+def draft_book(title: str, content: str, section_id: str = "") -> str:
     """Create a new book in the Library.
 
+    If section_id is empty, a default section is used automatically.
+    Use browse_library() first to discover existing sections.
     Auto-chunks the content and enqueues background embedding.
     """
     from openbad.skills.library_tool import draft_book as _draft
 
-    return _draft(section_id, title, content)
+    return _draft(section_id=section_id, title=title, content=content)
 
 
 @skill_server.tool()

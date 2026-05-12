@@ -49,6 +49,7 @@ LIBRARY_AGENT = SubAgentDef(
         "or wants to save structured information."
     ),
     tool_names=frozenset({
+        "browse_library",
         "search_library",
         "read_book",
         "draft_book",
@@ -56,8 +57,10 @@ LIBRARY_AGENT = SubAgentDef(
     }),
     system_prompt=(
         "You are the Library Agent. You manage the knowledge base. "
+        "Use browse_library to see the hierarchy and discover section IDs. "
         "Use search_library to find relevant books, read_book to retrieve "
-        "content, draft_book to create new entries, and link_books to "
+        "content, draft_book to create new entries (section_id is optional — "
+        "omit it to use the default section), and link_books to "
         "create citation edges. Return concise results."
     ),
 )
