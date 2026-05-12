@@ -1,0 +1,10 @@
+# Allow openbad user to manage its own systemd services without password
+openbad ALL=(root) NOPASSWD: /usr/bin/systemctl start openbad*.service, \
+                              /usr/bin/systemctl stop openbad*.service, \
+                              /usr/bin/systemctl restart openbad*.service, \
+                              /usr/bin/systemctl start openbad*.timer, \
+                              /usr/bin/systemctl stop openbad*.timer, \
+                              /usr/bin/systemctl restart openbad*.timer, \
+                              /usr/bin/systemctl start openbad*.path, \
+                              /usr/bin/systemctl stop openbad*.path, \
+                              /usr/bin/systemctl restart openbad*.path
