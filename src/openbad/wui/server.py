@@ -1602,6 +1602,7 @@ async def _post_chat_stream(request: web.Request) -> web.StreamResponse:
                 }
             )
             await resp.write(f"data: {data}\n\n".encode())
+            await resp.drain()
         await resp.write(b"data: [DONE]\n\n")
     except Exception:
         log.exception(

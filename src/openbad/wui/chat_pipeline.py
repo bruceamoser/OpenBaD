@@ -1519,6 +1519,12 @@ async def _agentic_stream(
     agent_task = _asyncio.create_task(_run())
     total_tokens = 0
     content_buffer: list[str] = []
+    # Track whether we're inside a <think> block so we can route
+    # those tokens to reasoning instead of visible content.
+    _in_think = False
+    # Track whether we already streamed content live for the current
+    # model invocation so we don't re-emit at on_chat_model_end.
+    _streamed_live = False
 
     try:
         while True:
@@ -1532,11 +1538,14 @@ async def _agentic_stream(
 
             # ── Agent finished ──
             if tag == "done":
-                # Flush any remaining buffered content.
-                if content_buffer:
-                    for seg in content_buffer:
+                # Flush any remaining buffered content only if it
+                # wasn't already streamed live.
+                if content_buffer and not _streamed_live:
+                    from openbad.autonomy.tool_agent import strip_think_tags
+                    leftover = strip_think_tags("".join(content_buffer))
+                    if leftover:
                         yield StreamChunk(
-                            token=seg, tokens_used=total_tokens,
+                            token=leftover, tokens_used=total_tokens,
                         )
                     content_buffer.clear()
                 break
@@ -1560,8 +1569,60 @@ async def _agentic_stream(
                 chunk = event.get("data", {}).get("chunk")
                 if chunk:
                     text = getattr(chunk, "content", "") or ""
+                    node = event.get("metadata", {}).get(
+                        "langgraph_node", "",
+                    )
                     if text:
                         content_buffer.append(text)
+                        # ── Live-stream supervisor content ──
+                        # Filter out <think>…</think> blocks: route
+                        # them to reasoning so only the real answer
+                        # shows as visible tokens.
+                        if node == "supervisor":
+                            remaining = text
+                            while remaining:
+                                if _in_think:
+                                    end_idx = remaining.find("</think>")
+                                    if end_idx == -1:
+                                        # Still inside think block
+                                        yield StreamChunk(
+                                            reasoning=remaining,
+                                            tokens_used=total_tokens,
+                                        )
+                                        remaining = ""
+                                    else:
+                                        # Think block ends
+                                        think_part = remaining[:end_idx + 8]
+                                        if think_part:
+                                            yield StreamChunk(
+                                                reasoning=think_part,
+                                                tokens_used=total_tokens,
+                                            )
+                                        remaining = remaining[end_idx + 8:]
+                                        _in_think = False
+                                else:
+                                    start_idx = remaining.find("<think>")
+                                    if start_idx == -1:
+                                        # No think tag — stream as
+                                        # visible content
+                                        if remaining:
+                                            yield StreamChunk(
+                                                token=remaining,
+                                                tokens_used=total_tokens,
+                                            )
+                                            _streamed_live = True
+                                        remaining = ""
+                                    else:
+                                        # Text before <think> is visible
+                                        before = remaining[:start_idx]
+                                        if before:
+                                            yield StreamChunk(
+                                                token=before,
+                                                tokens_used=total_tokens,
+                                            )
+                                            _streamed_live = True
+                                        remaining = remaining[start_idx + 7:]
+                                        _in_think = True
                     # Stream reasoning_content live (llama.cpp / Qwen thinking)
                     extra = getattr(chunk, "additional_kwargs", None) or {}
                     reasoning_token = extra.get("reasoning_content", "") or ""
@@ -1582,38 +1643,56 @@ async def _agentic_stream(
                         total_tokens += usage.get("total_tokens", 0)
                     tool_calls = getattr(output, "tool_calls", [])
                     if tool_calls:
-                        # Intermediate turn — show buffered content
-                        # as reasoning so the user sees the agent's
-                        # chain of thought before tool calls.
-                        from openbad.autonomy.tool_agent import strip_think_tags
-                        reasoning_text = strip_think_tags("".join(content_buffer)) if content_buffer else ""
-                        if not reasoning_text and output:
-                            extra = getattr(output, "additional_kwargs", None) or {}
-                            rc = extra.get("reasoning_content", "")
-                            if rc:
-                                reasoning_text = strip_think_tags(str(rc))
-                        if reasoning_text and reasoning_text.strip():
-                            yield StreamChunk(
-                                reasoning=reasoning_text.strip(),
-                                tokens_used=total_tokens,
-                            )
+                        # Intermediate turn — supervisor is routing to
+                        # a sub-agent.  If we already streamed content
+                        # live, that's fine (user sees brief thinking).
+                        # Only emit buffered content as reasoning if
+                        # we DIDN'T stream it.
+                        if not _streamed_live:
+                            from openbad.autonomy.tool_agent import strip_think_tags
+                            reasoning_text = strip_think_tags("".join(content_buffer)) if content_buffer else ""
+                            if not reasoning_text and output:
+                                extra = getattr(output, "additional_kwargs", None) or {}
+                                rc = extra.get("reasoning_content", "")
+                                if rc:
+                                    reasoning_text = strip_think_tags(str(rc))
+                            if reasoning_text and reasoning_text.strip():
+                                yield StreamChunk(
+                                    reasoning=reasoning_text.strip(),
+                                    tokens_used=total_tokens,
+                                )
                     elif end_node == "supervisor":
-                        # Final answer from the supervisor — flush
-                        # content as visible tokens.
-                        from openbad.autonomy.tool_agent import strip_think_tags
-                        final_text = strip_think_tags("".join(content_buffer)) if content_buffer else ""
-                        # If content was empty, fall back to reasoning_content
-                        # (llama.cpp / Qwen puts answer only in reasoning_content).
-                        if not final_text and output:
-                            extra = getattr(output, "additional_kwargs", None) or {}
-                            rc = extra.get("reasoning_content", "")
-                            if rc:
-                                final_text = strip_think_tags(str(rc))
-                        if final_text:
-                            yield StreamChunk(
-                                token=final_text,
-                                tokens_used=total_tokens,
-                            )
+                        # Final answer from the supervisor.
+                        # If we already streamed live, only fall back
+                        # to reasoning_content when content was empty.
+                        if not _streamed_live:
+                            from openbad.autonomy.tool_agent import strip_think_tags
+                            final_text = strip_think_tags("".join(content_buffer)) if content_buffer else ""
+                            if not final_text and output:
+                                extra = getattr(output, "additional_kwargs", None) or {}
+                                rc = extra.get("reasoning_content", "")
+                                if rc:
+                                    final_text = strip_think_tags(str(rc))
+                            if final_text:
+                                yield StreamChunk(
+                                    token=final_text,
+                                    tokens_used=total_tokens,
+                                )
+                        else:
+                            # Content was streamed live.  Check if the
+                            # model put the answer ONLY in reasoning_content
+                            # (llama.cpp / Qwen edge case).
+                            if not content_buffer or not "".join(content_buffer).strip():
+                                extra = getattr(output, "additional_kwargs", None) or {}
+                                rc = extra.get("reasoning_content", "")
+                                if rc:
+                                    from openbad.autonomy.tool_agent import strip_think_tags
+                                    fallback = strip_think_tags(str(rc))
+                                    if fallback:
+                                        yield StreamChunk(
+                                            token=fallback,
+                                            tokens_used=total_tokens,
+                                        )
                     else:
                         # Sub-agent final answer — treat as reasoning
                         # so only the supervisor's paraphrase is shown.
@@ -1630,6 +1709,8 @@ async def _agentic_stream(
                                 tokens_used=total_tokens,
                             )
                 content_buffer.clear()
+                _in_think = False
+                _streamed_live = False
 
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "unknown")
