@@ -15,6 +15,8 @@
     owner?: string;
     created_at: number;
     updated_at: number;
+    due_at?: number | null;
+    recurrence_rule?: string | null;
   }
 
   interface SessionMessage {
@@ -30,6 +32,11 @@
   let createTitle = $state('');
   let createDescription = $state('');
   let createOwner = $state('user');
+  let createDueDate = $state('');
+  let createDueTime = $state('');
+  let createRecurrence = $state('none');
+  let createRecurrenceTime = $state('09:00');
+  let createRecurrenceDay = $state('MON');
   let createStatus = $state('');
   let creating = $state(false);
   let error = $state('');
@@ -108,14 +115,38 @@
     creating = true;
     createStatus = '';
     try {
-      await apiPost<Task>('/api/tasks', {
+      const payload: Record<string, unknown> = {
         title,
         description: createDescription,
         owner: createOwner.trim() || 'user',
-      });
+      };
+
+      // Build due_at from date + time inputs
+      if (createDueDate) {
+        const dtStr = createDueTime ? `${createDueDate}T${createDueTime}` : `${createDueDate}T00:00`;
+        const dt = new Date(dtStr);
+        if (!Number.isNaN(dt.getTime())) {
+          payload.due_at = Math.floor(dt.getTime() / 1000);
+        }
+      }
+
+      // Build recurrence_rule
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (createRecurrence === 'daily') {
+        payload.recurrence_rule = `daily|${createRecurrenceTime}|${tz}`;
+      } else if (createRecurrence === 'weekly') {
+        payload.recurrence_rule = `weekly|${createRecurrenceDay}|${createRecurrenceTime}|${tz}`;
+      }
+
+      await apiPost<Task>('/api/tasks', payload);
       createTitle = '';
       createDescription = '';
       createOwner = 'user';
+      createDueDate = '';
+      createDueTime = '';
+      createRecurrence = 'none';
+      createRecurrenceTime = '09:00';
+      createRecurrenceDay = 'MON';
       createStatus = 'Task created';
       await load();
     } catch (e) {
@@ -160,6 +191,42 @@
       Owner
       <input type="text" placeholder="user" bind:value={createOwner} />
     </label>
+    <label>
+      Due Date
+      <input type="date" bind:value={createDueDate} />
+    </label>
+    <label>
+      Due Time
+      <input type="time" bind:value={createDueTime} />
+    </label>
+    <label>
+      Recurrence
+      <select bind:value={createRecurrence}>
+        <option value="none">None</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+      </select>
+    </label>
+    {#if createRecurrence !== 'none'}
+      <label>
+        At Time
+        <input type="time" bind:value={createRecurrenceTime} />
+      </label>
+    {/if}
+    {#if createRecurrence === 'weekly'}
+      <label>
+        Day
+        <select bind:value={createRecurrenceDay}>
+          <option value="MON">Monday</option>
+          <option value="TUE">Tuesday</option>
+          <option value="WED">Wednesday</option>
+          <option value="THU">Thursday</option>
+          <option value="FRI">Friday</option>
+          <option value="SAT">Saturday</option>
+          <option value="SUN">Sunday</option>
+        </select>
+      </label>
+    {/if}
     <label class="full-row">
       Description
       <textarea rows="3" placeholder="Task details" bind:value={createDescription}></textarea>
@@ -189,7 +256,15 @@
           <span class="status-dot" style="color:{statusColor(t.status)}">●</span>
           <div class="task-meta">
             <span class="task-title">{t.title}</span>
-            <span class="task-sub">{t.kind} · {t.horizon} horizon · priority {t.priority}</span>
+            <span class="task-sub">
+              {t.kind} · {t.horizon} horizon · priority {t.priority}
+              {#if t.due_at}
+                · due {fmtTime(t.due_at)}
+              {/if}
+              {#if t.recurrence_rule}
+                · 🔁 {t.recurrence_rule}
+              {/if}
+            </span>
           </div>
           <span class="status-badge" style="color:{statusColor(t.status)}">{t.status}</span>
           <span class="expand-icon">{expandedId === t.task_id ? '▲' : '▼'}</span>
@@ -200,6 +275,12 @@
             <div class="detail-row"><strong>ID:</strong> <code>{t.task_id}</code></div>
             <div class="detail-row"><strong>Created:</strong> {fmtTime(t.created_at)}</div>
             <div class="detail-row"><strong>Updated:</strong> {fmtTime(t.updated_at)}</div>
+            {#if t.due_at}
+              <div class="detail-row"><strong>Due:</strong> {fmtTime(t.due_at)}</div>
+            {/if}
+            {#if t.recurrence_rule}
+              <div class="detail-row"><strong>Recurrence:</strong> {t.recurrence_rule}</div>
+            {/if}
           </div>
         {/if}
       {/each}
@@ -232,6 +313,12 @@
             <div class="detail-row"><strong>Status:</strong> {t.status}</div>
             <div class="detail-row"><strong>Created:</strong> {fmtTime(t.created_at)}</div>
             <div class="detail-row"><strong>Updated:</strong> {fmtTime(t.updated_at)}</div>
+            {#if t.due_at}
+              <div class="detail-row"><strong>Due:</strong> {fmtTime(t.due_at)}</div>
+            {/if}
+            {#if t.recurrence_rule}
+              <div class="detail-row"><strong>Recurrence:</strong> {t.recurrence_rule}</div>
+            {/if}
           </div>
         {/if}
       {/each}
@@ -295,7 +382,8 @@
     color: var(--text-sub);
   }
   .create-grid input,
-  .create-grid textarea {
+  .create-grid textarea,
+  .create-grid select {
     padding: 0.45rem 0.55rem;
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);

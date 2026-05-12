@@ -45,6 +45,7 @@ def _task_to_dict(task) -> dict:  # type: ignore[type-arg]
         "updated_at": task.updated_at,
         "parent_task_id": task.parent_task_id,
         "due_at": task.due_at,
+        "recurrence_rule": task.recurrence_rule,
     }
 
 
