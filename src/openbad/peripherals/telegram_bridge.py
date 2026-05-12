@@ -130,8 +130,7 @@ class TelegramBridge:
             data = await resp.json()
             if not data.get("ok"):
                 desc = data.get("description", "Unknown error")
-                logger.error("getUpdates failed: %s", desc)
-                return []
+                raise RuntimeError(f"getUpdates failed: {desc}")
             return data.get("result", [])
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
