@@ -3133,6 +3133,22 @@ async def _post_task_complete(request: web.Request) -> web.Response:
         raise web.HTTPInternalServerError(text=str(exc)) from exc
 
 
+async def _post_task_cancel(request: web.Request) -> web.Response:
+    try:
+        from openbad.tasks.service import TaskService  # noqa: PLC0415
+
+        task_id = request.match_info["task_id"]
+        svc = TaskService.get_instance()
+        task = svc.cancel_task(task_id)
+        return web.json_response(task.to_dict())
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc)) from exc
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise web.HTTPInternalServerError(text=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Research
 # ---------------------------------------------------------------------------
@@ -3623,6 +3639,7 @@ def create_app(
     app.router.add_post("/api/tasks", _post_tasks)
     app.router.add_patch("/api/tasks/{task_id}", _patch_task)
     app.router.add_post("/api/tasks/{task_id}/complete", _post_task_complete)
+    app.router.add_post("/api/tasks/{task_id}/cancel", _post_task_cancel)
     app.router.add_get("/api/research", _get_research)
     app.router.add_post("/api/research", _post_research)
     app.router.add_patch("/api/research/{research_id}", _patch_research)
