@@ -62,6 +62,7 @@ _ROLE_TOOLS: dict[str, set[str]] = {
         "get_entity_info",
         "update_user_entity",
         "update_assistant_entity",
+        "transmit_message",
     },
     "task": {
         "read_file",

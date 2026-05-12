@@ -145,6 +145,28 @@ FILE_AGENT = SubAgentDef(
     ),
 )
 
+TRANSDUCER_AGENT = SubAgentDef(
+    name="transducer_agent",
+    description=(
+        "Send messages to external platforms (Telegram, Discord, Slack, "
+        "Gmail, GitHub) via the transducer system. Use when the user "
+        "asks to send a message, notify someone, or communicate through "
+        "an external channel."
+    ),
+    tool_names=frozenset({
+        "transmit_message",
+    }),
+    system_prompt=(
+        "You are the Transducer Agent. You send messages to external "
+        "platforms via the transmit_message tool. The 'platform' "
+        "parameter should be the service name (e.g. 'telegram', "
+        "'discord', 'slack', 'gmail'). The 'operation' is typically "
+        "'send_message'. The 'target' is the recipient (chat ID, "
+        "channel, email). The 'content' is the message body. "
+        "Return the result to the supervisor."
+    ),
+)
+
 # Ordered list for the chat supervisor — order determines routing
 # preference when multiple agents match.
 CHAT_SUB_AGENTS: list[SubAgentDef] = [
@@ -154,6 +176,7 @@ CHAT_SUB_AGENTS: list[SubAgentDef] = [
     ENTITY_AGENT,
     SYSTEM_AGENT,
     FILE_AGENT,
+    TRANSDUCER_AGENT,
 ]
 
 # Tools that stay directly on the chat supervisor (not in any sub-agent).
