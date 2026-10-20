@@ -1,16 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use openbad_agent::{AgentConfig, AgentObserver, default_agent};
-use openbad_core::SessionId;
 use openbad_core::event::{NewEvent, SessionEventKind};
+use openbad_core::{SessionId, WorkspaceId};
 #[cfg(feature = "keyring")]
 use openbad_governance::secrets::KeychainSecretStore;
 #[cfg(not(feature = "keyring"))]
 use openbad_governance::secrets::MemorySecretStore;
 use openbad_governance::secrets::{Secret, SecretStore};
 use openbad_harness::ReasoningEffort;
+use openbad_index::{IndexReport, WorkspaceIndexer};
 use openbad_llm::chat::{ChatMessage, ChatRole, ToolCall};
 use openbad_llm::{DeepSeekClient, FLASH_MODEL, ReqwestTransport, UsageTotals};
 use openbad_store::Store;
@@ -18,6 +19,7 @@ use openbad_store::types::{
     AuditReport, DoctorReport, ModelRouteRecord, NewModelRoute, NewProvider, ProviderRecord,
     SessionMessage, SessionSummary,
 };
+use openbad_tools::WorkspaceSearch;
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -29,9 +31,62 @@ const API_KEY_REFERENCE: &str = "openbad/deepseek/api_key";
 const USER_ID_SETTING: &str = "install_user_id";
 
 pub struct AppState {
-    store: Mutex<Store>,
+    store: Arc<Mutex<Store>>,
     secrets: Box<dyn SecretStore>,
     cancel: Arc<AtomicBool>,
+}
+
+struct StoreSearch {
+    store: Arc<Mutex<Store>>,
+    workspace_id: WorkspaceId,
+}
+
+impl WorkspaceSearch for StoreSearch {
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<openbad_tools::WorkspaceSearchHit>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let hits = store
+            .search_workspace(self.workspace_id, query, limit as u32)
+            .map_err(|error| error.to_string())?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| openbad_tools::WorkspaceSearchHit {
+                path: hit.path,
+                snippet: hit.snippet,
+            })
+            .collect())
+    }
+
+    fn find_symbols(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<openbad_tools::WorkspaceSymbolHit>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let hits = store
+            .find_indexed_symbols(self.workspace_id, query, kind, limit as u32)
+            .map_err(|error| error.to_string())?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| openbad_tools::WorkspaceSymbolHit {
+                path: hit.path,
+                name: hit.name,
+                kind: hit.kind,
+                line: hit.line,
+                signature: hit.signature,
+            })
+            .collect())
+    }
 }
 
 #[derive(Serialize)]
@@ -197,6 +252,75 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
 }
 
 #[tauri::command]
+fn workspace_index_status(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<openbad_store::types::IndexSummary, String> {
+    let path = PathBuf::from(&workspace_path);
+    if !path.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let name = workspace_name(&path);
+    let workspace = store
+        .ensure_workspace(name, &workspace_path)
+        .map_err(|error| error.to_string())?;
+    let summary = store
+        .workspace_index_summary(workspace)
+        .map_err(|error| error.to_string())?;
+    if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+        eprintln!("[index] status {workspace_path}: {summary:?}");
+    }
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn refresh_workspace_index(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<IndexReport, String> {
+    let path = PathBuf::from(&workspace_path);
+    if !path.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let workspace = store
+            .ensure_workspace(workspace_name(&path), &path.to_string_lossy())
+            .map_err(|error| error.to_string())?;
+        let report = WorkspaceIndexer::new(&store, workspace, &path)
+            .refresh()
+            .map_err(|error| error.to_string())?;
+        if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+            eprintln!(
+                "[index] refresh {}: seen={} added={} updated={} removed={} elapsed={}ms",
+                path.display(),
+                report.seen,
+                report.added,
+                report.updated,
+                report.removed,
+                report.elapsed_ms
+            );
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|error| format!("index task failed: {error}"))?
+}
+
+fn workspace_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace")
+}
+
+#[tauri::command]
 fn health(state: State<'_, AppState>) -> Result<Health, String> {
     let store = state
         .store
@@ -308,7 +432,7 @@ async fn chat(
     let api_key = resolve_api_key(&state)?;
     state.cancel.store(false, Ordering::SeqCst);
 
-    let (session, workspace_id, history, turn) = {
+    let (session, workspace_id, history, turn, indexed) = {
         let store = state
             .store
             .lock()
@@ -367,7 +491,12 @@ async fn chat(
         history.push(ChatMessage::user(message.clone()));
 
         let user_id = ensure_user_id(&store)?;
-        (session, workspace_id, (history, user_id), turn)
+        let indexed = workspace_id
+            .parse()
+            .ok()
+            .and_then(|workspace: WorkspaceId| store.workspace_index_summary(workspace).ok())
+            .is_some_and(|summary| summary.files > 0);
+        (session, workspace_id, (history, user_id), turn, indexed)
     };
 
     let (history, user_id) = history;
@@ -388,7 +517,7 @@ async fn chat(
         };
         client = client.with_reasoning_effort(effort);
     }
-    let agent = default_agent(
+    let mut agent = default_agent(
         client,
         Arc::new(WorkspaceService::new(workspace_path)),
         AgentConfig {
@@ -398,6 +527,14 @@ async fn chat(
             ..AgentConfig::default()
         },
     );
+    if indexed {
+        if let Ok(workspace_id) = workspace_id.parse::<WorkspaceId>() {
+            agent = agent.with_search(Arc::new(StoreSearch {
+                store: Arc::clone(&state.store),
+                workspace_id,
+            }));
+        }
+    }
 
     let observer = ChannelObserver {
         channel: on_event,
@@ -683,13 +820,15 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState {
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
             secrets: secret_store(),
             cancel: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             health,
             foundation,
+            workspace_index_status,
+            refresh_workspace_index,
             workspace_default,
             save_api_key,
             clear_api_key,
@@ -713,7 +852,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0002_phase1_schema");
+        assert_eq!(payload.doctor.schema_version, "0003_workspace_index");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

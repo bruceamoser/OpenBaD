@@ -61,6 +61,22 @@ export type AgentEvent =
     }
   | { type: "usage"; usage: Usage };
 
+export type WorkspaceIndexSummary = {
+  files: number;
+  symbols: number;
+  bytes: number;
+  indexed_at: number | null;
+};
+
+export type IndexReport = {
+  seen: number;
+  added: number;
+  updated: number;
+  removed: number;
+  elapsed_ms: number;
+  summary: WorkspaceIndexSummary;
+};
+
 export type SessionSummary = {
   id: string;
   workspace_id: string | null;

@@ -122,12 +122,39 @@ pub enum ToolError {
     Failed(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSearchHit {
+    pub path: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSymbolHit {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub signature: String,
+}
+
+/// Optional indexed search supplied by the application. Tools fall back to a
+/// live filesystem scan when no index is attached.
+pub trait WorkspaceSearch: Send + Sync {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<WorkspaceSearchHit>, String>;
+    fn find_symbols(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceSymbolHit>, String>;
+}
+
 pub struct ToolContext {
     pub workspace: Arc<WorkspaceService>,
     pub allow_writes: bool,
     pub allow_commands: bool,
     pub max_output_bytes: usize,
+    pub search: Option<Arc<dyn WorkspaceSearch>>,
     read_paths: Mutex<HashSet<PathBuf>>,
 }
 
@@ -139,6 +166,7 @@ impl ToolContext {
             allow_writes: false,
             allow_commands: false,
             max_output_bytes: 256 * 1024,
+            search: None,
             read_paths: Mutex::new(HashSet::new()),
         }
     }
@@ -184,6 +212,7 @@ impl ToolRegistry {
         registry.register(ReadFileTool);
         registry.register(ListDirTool);
         registry.register(GrepTool);
+        registry.register(SearchCodeTool);
         registry.register(GlobTool);
         registry.register(FindSymbolsTool);
         registry.register(WriteFileTool);
@@ -508,6 +537,59 @@ impl Tool for GrepTool {
     }
 }
 
+struct SearchCodeTool;
+
+#[async_trait]
+impl Tool for SearchCodeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "search_code",
+            "Search indexed workspace code and text. Faster than grep on large repositories; falls back to a live scan when no index exists.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 200}
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let query = string_arg(&arguments, "query")?;
+        if query.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "query must not be empty".to_owned(),
+            ));
+        }
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(50)
+            .clamp(1, 200);
+        if let Some(search) = &context.search {
+            let hits = search
+                .search(&query, max_results)
+                .map_err(ToolError::Failed)?;
+            let content = hits
+                .iter()
+                .map(|hit| format!("{}: {}", hit.path, hit.snippet.replace('\n', " ")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+                .with_metadata(json!({"matches": hits.len(), "indexed": true})));
+        }
+        GrepTool
+            .execute(json!({"query": query, "max_results": max_results}), context)
+            .await
+    }
+}
+
 struct GlobTool;
 
 #[async_trait]
@@ -621,6 +703,21 @@ impl Tool for FindSymbolsTool {
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(100)
             .clamp(1, 500);
+        if let Some(search) = &context.search {
+            let hits = search
+                .find_symbols(&query, kind_filter.as_deref(), max_results)
+                .map_err(ToolError::Failed)?;
+            let content = hits
+                .iter()
+                .map(|hit| format!("{}:{}: {}", hit.path, hit.line, hit.signature))
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                );
+            return Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+                .with_metadata(json!({"matches": hits.len(), "indexed": true})));
+        }
         let definition = symbol_pattern();
 
         let mut matches = Vec::new();
@@ -1246,11 +1343,56 @@ mod tests {
         assert!(functions.content.contains("startServer"));
     }
 
+    struct FakeSearch;
+
+    impl WorkspaceSearch for FakeSearch {
+        fn search(&self, query: &str, _limit: usize) -> Result<Vec<WorkspaceSearchHit>, String> {
+            Ok(vec![WorkspaceSearchHit {
+                path: "src/indexed.rs".to_owned(),
+                snippet: format!("matched {query}"),
+            }])
+        }
+
+        fn find_symbols(
+            &self,
+            query: &str,
+            _kind: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<WorkspaceSymbolHit>, String> {
+            Ok(vec![WorkspaceSymbolHit {
+                path: "src/indexed.rs".to_owned(),
+                name: query.to_owned(),
+                kind: "fn".to_owned(),
+                line: 9,
+                signature: format!("fn {query}()"),
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_search_tools_prefer_the_workspace_index() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.search = Some(Arc::new(FakeSearch));
+
+        let search = SearchCodeTool
+            .execute(json!({"query": "needle"}), &context)
+            .await
+            .expect("search");
+        assert!(search.content.contains("src/indexed.rs: matched needle"));
+
+        let symbols = FindSymbolsTool
+            .execute(json!({"query": "lookup"}), &context)
+            .await
+            .expect("symbols");
+        assert!(symbols.content.contains("src/indexed.rs:9: fn lookup()"));
+    }
+
     #[tokio::test]
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
-        assert!(definitions.len() >= 11);
+        assert!(definitions.len() >= 12);
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
     }

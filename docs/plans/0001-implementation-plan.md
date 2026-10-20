@@ -33,7 +33,9 @@ later phase.
 > foundation is complete, and the Phase 3 coding MVP is working: built-in
 > workspace tools, the DeepSeek agent loop, SQLite message persistence, keychain
 > API-key storage, and a Tauri chat UI with streamed reasoning and cancellation.
-> Per-call approvals, the evidence gate, and the Phase 4–8 systems remain.
+> Phase 4 has started with the SQLite workspace index and indexed search tools.
+> Per-call approvals, the evidence gate, LSP/PTY/checkpoints, and the Phase 5–8
+> systems remain.
 
 | Milestone | Phases | Outcome | Target |
 | --- | --- | --- | --- |
@@ -113,6 +115,7 @@ secrets.
 - `openbad-store::Store` owns a dedicated writer thread and a separate reader
   connection. Every mutation goes through `WriteCommand`; event append and
   projection update share one transaction.
+- `0003_workspace_index.sql` adds workspace file hashes, symbols, and FTS5 search.
 - `0002_phase1_schema.sql` adds providers, model routes, session projections,
   approvals, audit, LLM calls, tool invocations, evidence, and request
   envelopes. `session_events` remains the source of truth.
@@ -292,6 +295,25 @@ commands with approvals.
 - PTY/job kill tests.
 - Diff/rewind integration tests.
 - FIM mock tests.
+
+### Phase 4 implementation notes
+
+- `openbad-index` walks the workspace with `ignore`, hashes file contents with
+  BLAKE3, and stores changed files, symbols, and full text in SQLite. Unchanged
+  files are skipped on refresh, and deleted files are removed from the index.
+- `0003_workspace_index` adds `workspace_files`, `workspace_symbols`, and an
+  FTS5 `workspace_fts` table. Indexed search returns snippets and symbol
+  locations; `search_code` and `find_symbols` use the index when the desktop
+  supplies it and fall back to live scans otherwise.
+- The desktop automatically indexes an empty workspace and exposes a Workspace
+  index panel with file/symbol counts and a refresh action. Indexing runs on a
+  blocking task so the chat UI stays responsive.
+- Default indexing limits are 512 KiB per file and 64 directory levels. The
+  extension allowlist covers common source, config, and documentation formats;
+  binary files are skipped.
+- Still open for Phase 4: filesystem watching/debounce, LSP diagnostics, PTY and
+  job supervision, checkpoint/rewind, diff review, FIM completion, and the
+  workspace doctor report.
 
 ## 9. Phase 5 — Memory and knowledge
 

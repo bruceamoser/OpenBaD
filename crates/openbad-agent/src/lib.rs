@@ -12,7 +12,7 @@ use openbad_llm::chat::{
 use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
-use openbad_tools::{ToolContext, ToolRegistry};
+use openbad_tools::{ToolContext, ToolRegistry, WorkspaceSearch};
 use openbad_workspace::WorkspaceService;
 use serde_json::Value;
 use uuid::Uuid;
@@ -84,6 +84,7 @@ pub struct Agent<T: HttpTransport> {
     client: DeepSeekClient<T>,
     tools: ToolRegistry,
     workspace: Arc<WorkspaceService>,
+    search: Option<Arc<dyn WorkspaceSearch>>,
     config: AgentConfig,
 }
 
@@ -99,8 +100,15 @@ impl<T: HttpTransport> Agent<T> {
             client,
             tools,
             workspace,
+            search: None,
             config,
         }
+    }
+
+    #[must_use]
+    pub fn with_search(mut self, search: Arc<dyn WorkspaceSearch>) -> Self {
+        self.search = Some(search);
+        self
     }
 
     pub async fn run(&self, history: Vec<ChatMessage>) -> Result<AgentRun, AgentError> {
@@ -133,6 +141,7 @@ impl<T: HttpTransport> Agent<T> {
             let mut context = ToolContext::new(self.workspace.clone());
             context.allow_writes = self.config.allow_writes;
             context.allow_commands = self.config.allow_commands;
+            context.search = self.search.clone();
             context
         });
 

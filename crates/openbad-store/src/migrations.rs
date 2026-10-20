@@ -12,6 +12,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_phase1_schema",
         include_str!("../migrations/0002_phase1_schema.sql"),
     ),
+    (
+        "0003_workspace_index",
+        include_str!("../migrations/0003_workspace_index.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

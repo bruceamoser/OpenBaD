@@ -15,8 +15,9 @@ use crate::migrations;
 use crate::now_millis;
 use crate::projections;
 use crate::types::{
-    AuditRecord, AuditReport, DoctorReport, ModelRouteRecord, NewModelRoute, NewProvider,
-    NewSession, NewWorkspace, ProviderRecord, SessionMessage, SessionSummary, SessionTurn,
+    AuditRecord, AuditReport, DoctorReport, IndexHit, IndexSummary, IndexedFile, ModelRouteRecord,
+    NewModelRoute, NewProvider, NewSession, NewWorkspace, ProviderRecord, SessionMessage,
+    SessionSummary, SessionTurn, SymbolHit,
 };
 
 enum WriteCommand {
@@ -64,6 +65,16 @@ enum WriteCommand {
         reply: SyncSender<Result<(), StoreError>>,
     },
     RebuildProjections {
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    UpdateWorkspaceIndex {
+        workspace_id: WorkspaceId,
+        files: Vec<IndexedFile>,
+        removed: Vec<String>,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    ClearWorkspaceIndex {
+        workspace_id: WorkspaceId,
         reply: SyncSender<Result<(), StoreError>>,
     },
     Shutdown,
@@ -500,6 +511,136 @@ impl Store {
         self.write(|reply| WriteCommand::RebuildProjections { reply })
     }
 
+    pub fn workspace_index_hashes(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement =
+            connection.prepare("SELECT path, hash FROM workspace_files WHERE workspace_id = ?1")?;
+        let rows = statement.query_map([workspace_id.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_workspace_index(
+        &self,
+        workspace_id: WorkspaceId,
+        files: Vec<IndexedFile>,
+        removed: Vec<String>,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::UpdateWorkspaceIndex {
+            workspace_id,
+            files,
+            removed,
+            reply,
+        })
+    }
+
+    pub fn clear_workspace_index(&self, workspace_id: WorkspaceId) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::ClearWorkspaceIndex {
+            workspace_id,
+            reply,
+        })
+    }
+
+    pub fn search_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<IndexHit>, StoreError> {
+        let terms = fts_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT path,
+                    snippet(workspace_fts, 2, '<<', '>>', '…', 16) AS snippet,
+                    rank
+             FROM workspace_fts
+             WHERE workspace_fts MATCH ?1 AND workspace_id = ?2
+             ORDER BY rank
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![terms, workspace_id.to_string(), i64::from(limit)],
+            |row| {
+                Ok(IndexHit {
+                    path: row.get(0)?,
+                    snippet: row.get(1)?,
+                    score: row.get::<_, f64>(2)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn find_indexed_symbols(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        kind: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SymbolHit>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT path, name, kind, line, signature
+             FROM workspace_symbols
+             WHERE workspace_id = ?1
+               AND lower(name) LIKE '%' || lower(?2) || '%'
+               AND (?3 IS NULL OR kind = ?3)
+             ORDER BY CASE WHEN lower(name) = lower(?2) THEN 0 ELSE 1 END,
+                      length(name), name
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![workspace_id.to_string(), query, kind, i64::from(limit)],
+            |row| {
+                Ok(SymbolHit {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get::<_, i64>(3)? as u32,
+                    signature: row.get(4)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn workspace_index_summary(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<IndexSummary, StoreError> {
+        let connection = self.reader()?;
+        let (files, bytes, indexed_at) = connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0), MAX(indexed_at)
+             FROM workspace_files WHERE workspace_id = ?1",
+            [workspace_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+        let symbols = connection.query_row(
+            "SELECT COUNT(*) FROM workspace_symbols WHERE workspace_id = ?1",
+            [workspace_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )? as u64;
+        Ok(IndexSummary {
+            files,
+            symbols,
+            bytes,
+            indexed_at,
+        })
+    }
+
     pub fn doctor(&self) -> Result<DoctorReport, StoreError> {
         let connection = self.reader()?;
         let schema_version = migrations::current_version(&connection)?;
@@ -542,6 +683,116 @@ impl Drop for Store {
             }
         }
     }
+}
+
+fn update_workspace_index(
+    connection: &mut Connection,
+    workspace_id: WorkspaceId,
+    files: &[IndexedFile],
+    removed: &[String],
+) -> Result<(), StoreError> {
+    let workspace = workspace_id.to_string();
+    let now = now_millis();
+    let transaction = connection.transaction()?;
+
+    {
+        let mut delete_symbols = transaction.prepare_cached(
+            "DELETE FROM workspace_symbols WHERE workspace_id = ?1 AND path = ?2",
+        )?;
+        let mut delete_fts = transaction
+            .prepare_cached("DELETE FROM workspace_fts WHERE workspace_id = ?1 AND path = ?2")?;
+        let mut delete_file = transaction
+            .prepare_cached("DELETE FROM workspace_files WHERE workspace_id = ?1 AND path = ?2")?;
+        for path in removed {
+            delete_symbols.execute(params![workspace, path])?;
+            delete_fts.execute(params![workspace, path])?;
+            delete_file.execute(params![workspace, path])?;
+        }
+    }
+
+    {
+        let mut upsert_file = transaction.prepare_cached(
+            "INSERT INTO workspace_files
+                (workspace_id, path, hash, size, modified_at, language, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(workspace_id, path) DO UPDATE SET
+                hash = excluded.hash,
+                size = excluded.size,
+                modified_at = excluded.modified_at,
+                language = excluded.language,
+                indexed_at = excluded.indexed_at",
+        )?;
+        let mut delete_symbols = transaction.prepare_cached(
+            "DELETE FROM workspace_symbols WHERE workspace_id = ?1 AND path = ?2",
+        )?;
+        let mut delete_fts = transaction
+            .prepare_cached("DELETE FROM workspace_fts WHERE workspace_id = ?1 AND path = ?2")?;
+        let mut insert_symbol = transaction.prepare_cached(
+            "INSERT OR REPLACE INTO workspace_symbols
+                (workspace_id, path, name, kind, line, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let mut insert_fts = transaction.prepare_cached(
+            "INSERT INTO workspace_fts (workspace_id, path, content) VALUES (?1, ?2, ?3)",
+        )?;
+
+        for file in files {
+            upsert_file.execute(params![
+                workspace,
+                file.path,
+                file.hash,
+                file.size as i64,
+                file.modified_at,
+                file.language,
+                now,
+            ])?;
+            delete_symbols.execute(params![workspace, file.path])?;
+            delete_fts.execute(params![workspace, file.path])?;
+            for symbol in &file.symbols {
+                insert_symbol.execute(params![
+                    workspace,
+                    file.path,
+                    symbol.name,
+                    symbol.kind,
+                    i64::from(symbol.line),
+                    symbol.signature,
+                ])?;
+            }
+            insert_fts.execute(params![workspace, file.path, file.content])?;
+        }
+    }
+
+    transaction.commit()?;
+    Ok(())
+}
+
+fn clear_workspace_index(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+) -> Result<(), StoreError> {
+    let workspace = workspace_id.to_string();
+    connection.execute(
+        "DELETE FROM workspace_symbols WHERE workspace_id = ?1",
+        [&workspace],
+    )?;
+    connection.execute(
+        "DELETE FROM workspace_fts WHERE workspace_id = ?1",
+        [&workspace],
+    )?;
+    connection.execute(
+        "DELETE FROM workspace_files WHERE workspace_id = ?1",
+        [&workspace],
+    )?;
+    Ok(())
+}
+
+fn fts_terms(query: &str) -> String {
+    let terms: Vec<String> = query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{}\"*", term.to_lowercase()))
+        .collect();
+    terms.join(" AND ")
 }
 
 fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
@@ -600,6 +851,25 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             }
             WriteCommand::RebuildProjections { reply } => {
                 let _ = reply.send(projections::rebuild(&mut connection));
+            }
+            WriteCommand::UpdateWorkspaceIndex {
+                workspace_id,
+                files,
+                removed,
+                reply,
+            } => {
+                let _ = reply.send(update_workspace_index(
+                    &mut connection,
+                    workspace_id,
+                    &files,
+                    &removed,
+                ));
+            }
+            WriteCommand::ClearWorkspaceIndex {
+                workspace_id,
+                reply,
+            } => {
+                let _ = reply.send(clear_workspace_index(&connection, workspace_id));
             }
             WriteCommand::Shutdown => break,
         }
@@ -820,7 +1090,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0002_phase1_schema"
+            "0003_workspace_index"
         );
     }
 
@@ -1084,6 +1354,72 @@ mod tests {
         Store::restore_from(&backup_path, &restored_path).expect("restore");
         let restored = Store::open(&restored_path).expect("open restored");
         assert_eq!(restored.doctor().expect("doctor").event_count, 1);
+    }
+
+    #[test]
+    fn workspace_index_searches_text_and_symbols() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("index", "/tmp/openbad-index")
+            .expect("workspace");
+        store
+            .update_workspace_index(
+                workspace,
+                vec![IndexedFile {
+                    path: "src/agent.rs".to_owned(),
+                    hash: "abc".to_owned(),
+                    size: 42,
+                    modified_at: 1,
+                    language: Some("rust".to_owned()),
+                    content: "pub struct AgentConfig { max_steps: u32 }\nfn run_agent() {}"
+                        .to_owned(),
+                    symbols: vec![
+                        crate::types::IndexedSymbol {
+                            name: "AgentConfig".to_owned(),
+                            kind: "struct".to_owned(),
+                            line: 1,
+                            signature: "pub struct AgentConfig".to_owned(),
+                        },
+                        crate::types::IndexedSymbol {
+                            name: "run_agent".to_owned(),
+                            kind: "fn".to_owned(),
+                            line: 2,
+                            signature: "fn run_agent()".to_owned(),
+                        },
+                    ],
+                }],
+                Vec::new(),
+            )
+            .expect("index");
+
+        let hits = store
+            .search_workspace(workspace, "max steps", 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "src/agent.rs");
+        println!("SNIPPET={:?}", hits[0].snippet);
+        assert!(hits[0].snippet.contains("max"));
+
+        let symbols = store
+            .find_indexed_symbols(workspace, "agent", Some("struct"), 10)
+            .expect("symbols");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "AgentConfig");
+        assert_eq!(symbols[0].line, 1);
+
+        let summary = store.workspace_index_summary(workspace).expect("summary");
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.symbols, 2);
+
+        store
+            .update_workspace_index(workspace, Vec::new(), vec!["src/agent.rs".to_owned()])
+            .expect("remove");
+        assert!(
+            store
+                .search_workspace(workspace, "agent", 10)
+                .expect("search after removal")
+                .is_empty()
+        );
     }
 
     #[test]

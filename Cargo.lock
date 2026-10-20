@@ -2661,6 +2661,7 @@ dependencies = [
  "openbad-core",
  "openbad-governance",
  "openbad-harness",
+ "openbad-index",
  "openbad-llm",
  "openbad-store",
  "openbad-tools",
@@ -2694,6 +2695,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "openbad-index"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ignore",
+ "openbad-core",
+ "openbad-store",
+ "regex",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
