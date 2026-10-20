@@ -13,7 +13,47 @@ import {
 } from "./backend";
 import type { ChatEntry, FoundationState, SessionSummary } from "./types";
 
+type Preferences = {
+  model: string;
+  thinking: boolean;
+  reasoningEffort: string;
+  maxSteps: number;
+};
+
+const defaultPreferences: Preferences = {
+  model: "deepseek-flash",
+  thinking: true,
+  reasoningEffort: "high",
+  maxSteps: 64,
+};
+
+function loadPreferences(): Preferences {
+  try {
+    const raw = localStorage.getItem("openbad.preferences");
+    if (raw !== null) {
+      const parsed = JSON.parse(raw) as Partial<Preferences>;
+      return {
+        model: typeof parsed.model === "string" ? parsed.model : defaultPreferences.model,
+        thinking:
+          typeof parsed.thinking === "boolean" ? parsed.thinking : defaultPreferences.thinking,
+        reasoningEffort:
+          typeof parsed.reasoningEffort === "string"
+            ? parsed.reasoningEffort
+            : defaultPreferences.reasoningEffort,
+        maxSteps:
+          typeof parsed.maxSteps === "number"
+            ? Math.max(1, Math.min(256, parsed.maxSteps))
+            : defaultPreferences.maxSteps,
+      };
+    }
+  } catch {
+    // Ignore unavailable or malformed local storage.
+  }
+  return defaultPreferences;
+}
+
 export default function App() {
+  const preferences = useRef(loadPreferences()).current;
   const [foundation, setFoundation] = useState<FoundationState>({ kind: "loading" });
   const [workspacePath, setWorkspacePath] = useState("");
   const [message, setMessage] = useState("");
@@ -22,10 +62,10 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [allowWrites, setAllowWrites] = useState(false);
   const [allowCommands, setAllowCommands] = useState(false);
-  const [maxSteps, setMaxSteps] = useState(64);
-  const [model, setModel] = useState("deepseek-flash");
-  const [thinking, setThinking] = useState(true);
-  const [reasoningEffort, setReasoningEffort] = useState("high");
+  const [maxSteps, setMaxSteps] = useState(preferences.maxSteps);
+  const [model, setModel] = useState(preferences.model);
+  const [thinking, setThinking] = useState(preferences.thinking);
+  const [reasoningEffort, setReasoningEffort] = useState(preferences.reasoningEffort);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -68,6 +108,17 @@ export default function App() {
       element.scrollTop = element.scrollHeight;
     }
   }, [entries, busy]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "openbad.preferences",
+        JSON.stringify({ model, thinking, reasoningEffort, maxSteps }),
+      );
+    } catch {
+      // Storage can be unavailable in hardened webviews; preferences are optional.
+    }
+  }, [maxSteps, model, reasoningEffort, thinking]);
 
   const handleChatScroll = useCallback(() => {
     const element = scrollRef.current;

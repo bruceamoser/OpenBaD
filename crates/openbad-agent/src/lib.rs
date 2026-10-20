@@ -278,6 +278,9 @@ impl<T: HttpTransport> Agent<T> {
         let mut finish_reason = None;
 
         while let Some(event) = stream.next().await {
+            if observer.is_cancelled() {
+                return Err(AgentError::Cancelled);
+            }
             match event? {
                 StreamEvent::Delta {
                     content: content_delta,
