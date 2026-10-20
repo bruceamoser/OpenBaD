@@ -2,6 +2,7 @@
 
 pub mod canon;
 pub mod context;
+pub mod learning;
 pub mod manifest;
 pub mod policy;
 pub mod questions;
@@ -16,6 +17,10 @@ pub use canon::{
 pub use context::{
     ContextError, ContextPolicy, ContextRule, DeadEnd, context_path, dead_end_summary,
     dead_ends_path, load_context_policy, load_dead_ends, save_context_policy, save_dead_ends,
+};
+pub use learning::{
+    Claim, LearningError, Unknown, claims_path, learning_summary, load_claims, load_unknowns,
+    save_claims, save_unknowns, unknowns_path, validate_confidence,
 };
 pub use manifest::{
     CommandDefinition, CommandSpec, Invariant, ManifestError, ProjectManifest, ScopeClass,

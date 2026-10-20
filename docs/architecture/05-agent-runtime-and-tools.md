@@ -338,6 +338,9 @@ Implemented:
 | `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
 | `delete_file` | write | Soft delete to `.openbad/trash`; hard delete requires `hard=true` |
+| `context_report` | read | Estimate loaded files/knowledge/memory tokens and rules |
+| `record_claim` / `list_claims` | write/read | Provenance-tagged claims with evidence |
+| `record_unknown` / `list_unknowns` | write/read | Known-unknown register |
 | `preview_write` | read | Unified diff for a proposed write without touching disk |
 | `snapshot_create` / `snapshot_list` / `snapshot_restore` | write/read | Bounded workspace snapshots with explicit restore confirmation |
 | `assert_project` | read | Count/schema/local-link structural assertions |
@@ -397,6 +400,11 @@ Manifest `gates:` group recipes into named pre-flight checks. `run_gate`
 executes them in order and writes a JSON evidence file under `.openbad/gates/`.
 When `prove_it: true`, the prompt requires every factual claim to cite an
 executed check or be labelled UNVERIFIED.
+
+`read_file` and `read_repo_file` accept `max_bytes` or `budget_tokens` and report
+the effective cap. `context_report` estimates loaded evidence tokens and lists
+rules. `record_claim` stores executed/read/inferred/assumed provenance, while
+`record_unknown` maintains the unresolved-question register.
 
 `write_file` and `edit_file` screen content for obvious secrets (private keys,
 cloud/API/GitHub/Slack tokens) before writing. `preview_write` lets the model

@@ -54,6 +54,9 @@ Project truth lives in `.openbad/canon.yaml`, `.openbad/glossary.yaml`, and
 `.openbad/adr/`; `yaml_query` gives bounded access to project YAML documents
 without loading whole files.
 
+Claims and known unknowns live in `.openbad/claims.json` and
+`.openbad/unknowns.json`; both are injected into the next prompt.
+
 Structured questions live in `.openbad/questions.json` and are answered in the
 Project → Questions panel. The assistant reads the answer on its next turn.
 

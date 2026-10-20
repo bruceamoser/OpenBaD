@@ -530,6 +530,11 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(ContextReportTool);
+        registry.register(RecordClaimTool);
+        registry.register(ListClaimsTool);
+        registry.register(RecordUnknownTool);
+        registry.register(ListUnknownsTool);
         registry.register(PreviewWriteTool);
         registry.register(SnapshotCreateTool);
         registry.register(SnapshotListTool);
@@ -1306,7 +1311,9 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {"type": "string", "description": "Workspace-relative path"},
                 "start_line": {"type": "integer", "minimum": 1},
-                "end_line": {"type": "integer", "minimum": 1}
+                "end_line": {"type": "integer", "minimum": 1},
+                "max_bytes": {"type": "integer", "minimum": 256},
+                "budget_tokens": {"type": "integer", "minimum": 64, "description": "Approximate token budget (4 bytes per token)"}
             },
             "required": ["path"],
             "additionalProperties": false
@@ -1347,16 +1354,21 @@ impl Tool for ReadFileTool {
             .collect::<Vec<_>>()
             .join("\n");
         let shown = selected.lines().count();
-        let truncated = selected.len() > context.max_output_bytes;
+        let max_bytes = optional_usize(&arguments, "max_bytes")
+            .or_else(|| optional_usize(&arguments, "budget_tokens").map(|tokens| tokens * 4))
+            .unwrap_or(context.max_output_bytes)
+            .clamp(256, context.max_output_bytes);
+        let truncated = selected.len() > max_bytes;
 
         Ok(
-            ToolResult::ok(truncate(&selected, context.max_output_bytes)).with_metadata(json!({
+            ToolResult::ok(truncate(&selected, max_bytes)).with_metadata(json!({
                 "path": path,
                 "lines": shown,
                 "total_lines": total_lines,
                 "start_line": start.min(total_lines.saturating_add(1)),
                 "end_line": end,
                 "truncated": truncated,
+                "max_bytes": max_bytes,
                 "has_more": end < total_lines,
                 "next_start_line": if end < total_lines { Some(end + 1) } else { None },
             })),
@@ -3820,7 +3832,9 @@ impl Tool for ReadRepoFileTool {
                 "repo": {"type": "string", "description": "Linked repository id or name"},
                 "path": {"type": "string", "description": "Repository-relative path"},
                 "start_line": {"type": "integer", "minimum": 1},
-                "end_line": {"type": "integer", "minimum": 1}
+                "end_line": {"type": "integer", "minimum": 1},
+                "max_bytes": {"type": "integer", "minimum": 256},
+                "budget_tokens": {"type": "integer", "minimum": 64}
             },
             "required": ["repo", "path"],
             "additionalProperties": false
@@ -3873,9 +3887,13 @@ impl Tool for ReadRepoFileTool {
             .collect::<Vec<_>>()
             .join("\n");
         let shown = selected.lines().count();
-        let truncated = selected.len() > context.max_output_bytes;
+        let max_bytes = optional_usize(&arguments, "max_bytes")
+            .or_else(|| optional_usize(&arguments, "budget_tokens").map(|tokens| tokens * 4))
+            .unwrap_or(context.max_output_bytes)
+            .clamp(256, context.max_output_bytes);
+        let truncated = selected.len() > max_bytes;
         Ok(
-            ToolResult::ok(truncate(&selected, context.max_output_bytes)).with_metadata(json!({
+            ToolResult::ok(truncate(&selected, max_bytes)).with_metadata(json!({
                 "repo": repo.name,
                 "path": path,
                 "lines": shown,
@@ -3883,6 +3901,7 @@ impl Tool for ReadRepoFileTool {
                 "start_line": start.min(total_lines.saturating_add(1)),
                 "end_line": end,
                 "truncated": truncated,
+                "max_bytes": max_bytes,
                 "has_more": end < total_lines,
                 "next_start_line": if end < total_lines { Some(end + 1) } else { None },
             })),
@@ -4495,6 +4514,316 @@ async fn run_tool_shell(context: &ToolContext, command: String) -> Result<ToolRe
     RunCommandTool
         .execute(json!({"command": command, "timeout_seconds": 300}), context)
         .await
+}
+
+struct ContextReportTool;
+
+#[async_trait]
+impl Tool for ContextReportTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "context_report",
+            "Estimate what this turn is holding by category: loaded files, project knowledge, memories, rules, and ruled-out findings.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let loaded = context.loaded_paths();
+        let loaded_bytes = loaded
+            .iter()
+            .map(|path| {
+                std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+            })
+            .sum::<u64>();
+        let (knowledge_count, knowledge_chars) = context
+            .project
+            .as_ref()
+            .map(|project| {
+                project
+                    .list_knowledge()
+                    .map(|entries| {
+                        (
+                            entries.len(),
+                            entries
+                                .iter()
+                                .map(|entry| entry.chunks * 1_400)
+                                .sum::<u64>(),
+                        )
+                    })
+                    .unwrap_or((0, 0))
+            })
+            .unwrap_or((0, 0));
+        let (memory_count, memory_chars) = context
+            .memory
+            .as_ref()
+            .map(|memory| {
+                memory
+                    .list(100)
+                    .map(|entries| {
+                        (
+                            entries.len(),
+                            entries
+                                .iter()
+                                .map(|entry| entry.content.chars().count() as u64)
+                                .sum::<u64>(),
+                        )
+                    })
+                    .unwrap_or((0, 0))
+            })
+            .unwrap_or((0, 0));
+        let policy = context_policy(context)?;
+        let dead_ends = openbad_workspace::load_dead_ends(context.workspace.root())
+            .map(|entries| entries.len())
+            .unwrap_or(0);
+        let claims = openbad_workspace::load_claims(context.workspace.root())
+            .map(|entries| entries.len())
+            .unwrap_or(0);
+        let unknowns = openbad_workspace::load_unknowns(context.workspace.root())
+            .map(|entries| entries.len())
+            .unwrap_or(0);
+        let estimated_tokens = (loaded_bytes + knowledge_chars + memory_chars) / 4;
+        let content = format!(
+            "loaded files: {} ({} bytes)\nproject knowledge: {} documents (~{} chars)\nmemories: {} (~{} chars)\npinned rules: {} · excluded rules: {}\nrules to avoid: {} dead ends\nclaims: {} · known unknowns: {}\nestimated evidence tokens: ~{}\noutput cap: {} bytes",
+            loaded.len(),
+            loaded_bytes,
+            knowledge_count,
+            knowledge_chars,
+            memory_count,
+            memory_chars,
+            policy.pinned.len(),
+            policy.excluded.len(),
+            dead_ends,
+            claims,
+            unknowns,
+            estimated_tokens,
+            context.max_output_bytes
+        );
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "loaded_files": loaded.len(),
+            "loaded_bytes": loaded_bytes,
+            "knowledge_documents": knowledge_count,
+            "memories": memory_count,
+            "pinned_rules": policy.pinned.len(),
+            "excluded_rules": policy.excluded.len(),
+            "dead_ends": dead_ends,
+            "claims": claims,
+            "unknowns": unknowns,
+            "estimated_tokens": estimated_tokens
+        })))
+    }
+}
+
+struct RecordClaimTool;
+
+#[async_trait]
+impl Tool for RecordClaimTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "record_claim",
+            "Record a structured claim with provenance (executed, read, inferred, assumed), evidence, and how to check it.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "claim": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["executed", "read", "inferred", "assumed"]},
+                "evidence": {"type": "array", "items": {"type": "string"}},
+                "how_to_check": {"type": "string"}
+            },
+            "required": ["claim", "confidence"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("record_claim".to_owned()));
+        }
+        let claim = string_arg(&arguments, "claim")?;
+        let confidence = string_arg(&arguments, "confidence")?;
+        if !openbad_workspace::validate_confidence(&confidence) {
+            return Err(ToolError::InvalidArgument(
+                "confidence must be executed, read, inferred, or assumed".to_owned(),
+            ));
+        }
+        let mut claims = openbad_workspace::load_claims(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let entry = openbad_workspace::Claim {
+            id: format!("claim-{}", now_millis()),
+            claim,
+            confidence,
+            evidence: arguments
+                .get("evidence")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            how_to_check: optional_string(&arguments, "how_to_check"),
+            created_at: now_millis(),
+        };
+        claims.push(entry.clone());
+        openbad_workspace::save_claims(context.workspace.root(), &claims)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "recorded claim {} ({})",
+            entry.id, entry.confidence
+        ))
+        .with_metadata(json!({"id": entry.id, "confidence": entry.confidence})))
+    }
+}
+
+struct ListClaimsTool;
+
+#[async_trait]
+impl Tool for ListClaimsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_claims",
+            "List recorded claims and provenance.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}}
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let query = optional_string(&arguments, "query").map(|query| query.to_ascii_lowercase());
+        let claims = openbad_workspace::load_claims(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let visible = claims
+            .iter()
+            .filter(|claim| {
+                query
+                    .as_ref()
+                    .is_none_or(|query| claim.claim.to_ascii_lowercase().contains(query))
+            })
+            .collect::<Vec<_>>();
+        if visible.is_empty() {
+            return Ok(ToolResult::ok("no claims"));
+        }
+        Ok(ToolResult::ok(
+            visible
+                .iter()
+                .map(|claim| {
+                    format!(
+                        "- [{}] {}: {}{}",
+                        claim.confidence,
+                        claim.id,
+                        claim.claim,
+                        claim
+                            .how_to_check
+                            .as_deref()
+                            .map(|check| format!(" (check: {check})"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
+    }
+}
+
+struct RecordUnknownTool;
+
+#[async_trait]
+impl Tool for RecordUnknownTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "record_unknown",
+            "Record a known unknown: a question or gap that is not yet resolved.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "context": {"type": "string"}
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("record_unknown".to_owned()));
+        }
+        let question = string_arg(&arguments, "question")?;
+        let mut unknowns = openbad_workspace::load_unknowns(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let unknown = openbad_workspace::Unknown {
+            id: format!("unknown-{}", now_millis()),
+            question,
+            context: optional_string(&arguments, "context"),
+            created_at: now_millis(),
+        };
+        unknowns.push(unknown.clone());
+        openbad_workspace::save_unknowns(context.workspace.root(), &unknowns)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!("recorded unknown {}", unknown.id))
+            .with_metadata(json!({"id": unknown.id})))
+    }
+}
+
+struct ListUnknownsTool;
+
+#[async_trait]
+impl Tool for ListUnknownsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_unknowns",
+            "List unresolved known unknowns.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let unknowns = openbad_workspace::load_unknowns(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        if unknowns.is_empty() {
+            return Ok(ToolResult::ok("no known unknowns"));
+        }
+        Ok(ToolResult::ok(
+            unknowns
+                .iter()
+                .map(|unknown| format!("- [{}] {}", unknown.id, unknown.question))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
+    }
 }
 
 struct PreviewWriteTool;
@@ -8016,6 +8345,59 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn context_report_budget_claims_and_unknowns_work() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("big.txt"), "line\n".repeat(2_000)).expect("big");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let read = ReadFileTool
+            .execute(json!({"path": "big.txt", "budget_tokens": 200}), &context)
+            .await
+            .expect("budgeted read");
+        assert_eq!(read.metadata["truncated"], true);
+        assert_eq!(read.metadata["max_bytes"], 800);
+
+        RecordClaimTool
+            .execute(
+                json!({
+                    "claim": "Tests pass",
+                    "confidence": "executed",
+                    "evidence": ["cargo test"],
+                    "how_to_check": "cargo test --workspace"
+                }),
+                &context,
+            )
+            .await
+            .expect("claim");
+        let claims = ListClaimsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("claims");
+        assert!(claims.content.contains("executed"));
+
+        RecordUnknownTool
+            .execute(
+                json!({"question": "Does the release gate include packaging?"}),
+                &context,
+            )
+            .await
+            .expect("unknown");
+        let unknowns = ListUnknownsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("unknowns");
+        assert!(unknowns.content.contains("release gate"));
+
+        let report = ContextReportTool
+            .execute(json!({}), &context)
+            .await
+            .expect("report");
+        assert!(report.content.contains("loaded files: 1"));
+        assert!(report.content.contains("claims: 1"));
+        assert_eq!(report.metadata["unknowns"], 1);
     }
 
     #[tokio::test]
