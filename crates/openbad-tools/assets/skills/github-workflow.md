@@ -23,9 +23,10 @@ repository in the workspace.
 ## Typical issue-to-merge flow
 
 1. `github` `area: "issue"`, `action: "view"`, `number: N`.
-2. Create a branch in git: `git_branch` `action: "create"`, then
-   `git_checkout`. Branch from the default branch unless the issue says
-   otherwise.
+2. Create a branch with `git_branch` and the `name` field (for example
+   `name: "feature/12-mqtt-broker"`), then switch to it with `git_checkout`
+   and the `branch` field. Branch from the default branch unless the issue
+   says otherwise.
 3. Implement with focused commits. Reference the issue in each commit.
 4. Push the branch with `git_commit`/`run_command` (`git push -u origin HEAD`).
 5. `github` `area: "pr"`, `action: "create"` with `title`, `body`, `base`,

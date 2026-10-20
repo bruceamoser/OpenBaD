@@ -15,6 +15,7 @@ import type {
   SessionView,
   KnowledgeDocument,
   KnowledgeDocumentSummary,
+  ProjectAgent,
   ProjectFileView,
   ProjectHit,
   ProjectManifest,
@@ -219,7 +220,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0011_memory_fts",
+    schema_version: "0012_subagents",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -624,6 +625,21 @@ export async function loadProjectRepos(workspacePath: string): Promise<ProjectRe
   return isTauri
     ? invoke<ProjectRepo[]>("project_repos", { workspacePath })
     : [...mockRepos];
+}
+
+export async function loadProjectAgents(
+  workspacePath: string,
+): Promise<ProjectAgent[]> {
+  return isTauri
+    ? invoke<ProjectAgent[]>("project_agents", { workspacePath })
+    : [];
+}
+
+export async function cancelProjectAgent(id: string): Promise<ProjectAgent> {
+  if (!isTauri) {
+    throw new Error("subagents are unavailable outside the desktop app");
+  }
+  return invoke<ProjectAgent>("cancel_agent", { id });
 }
 
 export async function addProjectRepo(

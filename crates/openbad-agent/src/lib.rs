@@ -14,8 +14,8 @@ use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
-    CheckpointSink, MemoryStore, OutsideGrant, ProjectAreas, ToolContext, ToolRegistry,
-    WorkspaceSearch, discover_plugins, discover_skills,
+    CheckpointSink, MemoryStore, OutsideGrant, ProjectAreas, SubagentRuntime, ToolContext,
+    ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
@@ -145,6 +145,7 @@ pub struct Agent<T: HttpTransport> {
     checkpoints: Option<Arc<dyn CheckpointSink>>,
     memory: Option<Arc<dyn MemoryStore>>,
     project: Option<Arc<dyn ProjectAreas>>,
+    subagents: Option<Arc<dyn SubagentRuntime>>,
     outside_grants: Vec<OutsideGrant>,
     steering: Option<Arc<SteeringInbox>>,
     redactions: Vec<String>,
@@ -167,6 +168,7 @@ impl<T: HttpTransport> Agent<T> {
             checkpoints: None,
             memory: None,
             project: None,
+            subagents: None,
             outside_grants: Vec::new(),
             steering: None,
             redactions: Vec::new(),
@@ -195,6 +197,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_project(mut self, project: Arc<dyn ProjectAreas>) -> Self {
         self.project = Some(project);
+        self
+    }
+
+    #[must_use]
+    pub fn with_subagents(mut self, subagents: Arc<dyn SubagentRuntime>) -> Self {
+        self.subagents = Some(subagents);
         self
     }
 
@@ -237,6 +245,19 @@ impl<T: HttpTransport> Agent<T> {
         let start_len = messages.len();
 
         let tool_schemas = self.tools.openai_tools();
+        if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+            let names: Vec<&str> = tool_schemas
+                .iter()
+                .filter_map(|tool| tool.get("function").and_then(|f| f.get("name")))
+                .filter_map(Value::as_str)
+                .collect();
+            eprintln!(
+                "[agent] tools={} subagents={} names={}",
+                tool_schemas.len(),
+                self.subagents.is_some(),
+                names.join(",")
+            );
+        }
         let tools_hash = hash_bytes(canonical_json(&Value::Array(tool_schemas.clone())).as_bytes());
         let system_hash = hash_bytes(system_prompt.as_bytes());
         let series_id = Uuid::now_v7();
@@ -251,6 +272,7 @@ impl<T: HttpTransport> Agent<T> {
             context.checkpoints = self.checkpoints.clone();
             context.memory = self.memory.clone();
             context.project = self.project.clone();
+            context.subagents = self.subagents.clone();
             context.set_outside_grants(self.outside_grants.clone());
             context
         });
@@ -575,6 +597,11 @@ Use git_log/git_blame/repo_health for repository archaeology and state, git_comm
 than prose. Cite knowledge locators. Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         );
+        if self.subagents.is_some() {
+            prompt.push_str(
+                "\nUse subagent action \"spawn\" to hand a well-scoped independent task to a background worker when parallel work or a fresh focused context helps. It inherits this session's access mode, runs in the same workspace, appears in Project → Agents, and cannot ask the human questions. Collect its result with action \"status\" instead of assuming it finished.",
+            );
+        }
         if let Ok(policy) = openbad_workspace::load_context_policy(self.workspace.root()) {
             let summary = policy.summary();
             if !summary.is_empty() {

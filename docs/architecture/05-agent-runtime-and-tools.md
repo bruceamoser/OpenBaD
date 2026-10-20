@@ -232,7 +232,7 @@ The registry scopes tools by session and workspace:
 - **Workspace tools** — enabled by trust state and capabilities.
 - **MCP tools** — exposed through `mcp_call`.
 - **Skill tools** — exposed through `skill`.
-- **Subagent tools** — a restricted subset.
+- **Subagent tools** — a directed worker gets the normal built-in surface minus `subagent` itself, so depth stays at one.
 
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
@@ -390,7 +390,7 @@ Implemented:
 | `git_worktree` | command | Add, list, and remove worktrees |
 | `repo_health` / `git_commit_context` | read | Ahead/behind, dirty state, and commit-message context |
 | `github` | command | Full GitHub surface through `gh`: status, repositories, branches and protection, issues, labels, milestones, pull requests, reviews and merges, Actions, releases, Pages, search, and generic `gh api`; destructive actions require `confirm=true` |
-| `github_issue` / `github_pr` / `github_ci` | command | Compatibility aliases for the most common issue, PR, and CI operations |
+| `subagent` | execute | Spawn, list, inspect, or cancel a focused background worker. `spawn` returns immediately; `status` returns the result and recent activity. Workers inherit the session access mode and cannot spawn further workers |
 | `plugin_list` / `plugin_describe` | read | Discover installed and bundled plugins and their actions |
 | `plugin_call` / `plugin_test` | command | Run a plugin action or its declared test command with JSON stdin/stdout and evidence |
 | `write_plugin` / `plugin_install_builtin` | write | Scaffold a plugin or install the bundled AsciiDoc plugin |
@@ -634,41 +634,47 @@ approval UI; it receives an `is_error` tool result when denied.
 
 ## 9. Subagents
 
-Subagents isolate context and parallelize work.
+The main chat delegates a directed task through the `subagent` tool. A worker is
+a full agent run in the same workspace, not a forked chat transcript.
 
 ```rust
 pub struct SubagentSpec {
-    pub role: SubagentRole,        // explore, review, test, implement
     pub task: String,
-    pub model_route: Option<RouteId>,
-    pub tools: ToolScope,          // read-only by default
-    pub write_access: bool,
-    pub max_steps: u32,
-    pub max_tokens: u64,
-    pub max_cost_usd: Option<f64>,
-    pub depth: u8,                 // max 2
+    pub title: String,
+    pub model: Option<String>,
+    pub allow_writes: bool,
+    pub allow_commands: bool,
 }
 ```
 
 Rules:
 
-- A child session stores `parent_session_id` and `forked_from_seq`.
-- The child gets a fresh context budget, not a copy of the parent's history
-  unless explicitly forked.
-- The child's tool scope is restricted; write access is opt-in.
-- The child uses `deepseek-flash` by default; review/planning children may use
-  `deepseek-v4-pro`.
-- The child cannot spawn beyond depth 2.
-- The parent receives a structured summary plus artifact references, appended
-  as a `user/message` with `source=subagent`.
-- Subagent runs are visible in the UI and can be cancelled.
+- `action: "spawn"` starts the worker in the Tauri async runtime and returns an
+  id immediately. The parent turn keeps going.
+- `action: "status"` returns status, steps, the final result, and recent
+  activity; `action: "list"` shows workers for the project; `action: "cancel"`
+  sets the worker's cancellation flag.
+- Workers inherit the parent session's access mode. `write: false` can narrow a
+  worker to read-only, but a read-only parent cannot grant writes.
+- Workers share the parent workspace, outside-access grants, memory, project
+  knowledge, and indexed search.
+- A worker gets a fresh context, a directed prompt, and the normal tool surface.
+  The `subagent` tool is not available inside a worker, so depth is one.
+- Worker records live in the `subagents` table with status, step count, activity
+  log, result, error, model, and timestamps. The activity log is capped at
+  32 KB.
+- The project panel's Agents area lists workers, updates while one is running,
+  opens a completed result as a Markdown artifact, and can cancel a running
+  worker.
+- If the app exits while a worker is running, its last persisted status is
+  `running`; a later turn can inspect the record but cannot resume it.
 
-Typical subagents:
+Typical directed tasks:
 
-- **Explore** — map a codebase area, return file spans.
-- **Review** — review a diff for bugs and security.
-- **Test triage** — run tests, cluster failures, propose fixes (read-only).
-- **Implement** — a scoped edit in a separate worktree (opt-in).
+- Map a codebase area and return file spans.
+- Review a diff for bugs or security issues.
+- Run a test suite, cluster failures, and report the first cause.
+- Implement a scoped change when the parent session has write access.
 
 ## 10. Plan mode, todos, and goal loop
 

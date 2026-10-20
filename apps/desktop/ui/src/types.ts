@@ -285,3 +285,20 @@ export type ProjectTodo = {
   done_when: string | null;
   updated_at: number;
 };
+
+export type ProjectAgent = {
+  id: string;
+  workspace_id: string;
+  parent_session_id: string | null;
+  title: string;
+  task: string;
+  model: string;
+  status: "running" | "completed" | "failed" | "cancelled" | string;
+  log: string;
+  result: string;
+  error: string | null;
+  steps: number;
+  created_at: number;
+  updated_at: number;
+  finished_at: number | null;
+};

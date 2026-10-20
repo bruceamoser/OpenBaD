@@ -196,14 +196,16 @@ The desktop layout is intentionally conversation-first:
 - The application menu bar carries project-wide actions and a View menu that
   opens every project area, so the header can stay focused on breadcrumbs and
   status.
-- The project sidebar exposes Overview, Workspace, References, Knowledge,
-  Retrieval, and Memory links beneath the active project.
+- The project sidebar exposes Overview, Workspace, Agents, References,
+  Knowledge, Retrieval, and Memory links beneath the active project.
 - Selecting an area opens it on the right without hiding the conversation.
 - The panel is resizable with a 320 px floor and a viewport-aware ceiling.
 - On narrow windows the full sidebar collapses when the panel opens so chat
   keeps a usable width.
-- The panel tabs include Edits (checkpoints) and Diagnostics for operations that
-  do not deserve permanent chrome.
+- The panel tabs include Agents, Edits (checkpoints), and Diagnostics. Agents
+  lists background workers from the `subagents` table, refreshes every two
+  seconds while one is running, opens results as Markdown artifacts, and can
+  cancel a running worker.
 - While open, project areas poll for changes and also refresh after turns,
   checkpoint restores, and knowledge/reference mutations. Open artifacts reload
   without clearing the pane.
