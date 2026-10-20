@@ -7,6 +7,22 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (() => {
+        const showFatal = (message) => {
+          const root = document.getElementById("root");
+          if (root && root.childElementCount === 0) {
+            root.textContent = `OpenBaD failed to start: ${message}`;
+            root.style.cssText =
+              "padding:24px;color:#fca5a5;font:14px/1.5 ui-monospace,monospace;white-space:pre-wrap";
+          }
+        };
+        window.addEventListener("error", (event) => showFatal(event.message || "script error"));
+        window.addEventListener("unhandledrejection", (event) =>
+          showFatal(String(event.reason ?? "unhandled rejection")),
+        );
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -268,9 +268,13 @@ fn workspace_index_status(
     let workspace = store
         .ensure_workspace(name, &workspace_path)
         .map_err(|error| error.to_string())?;
-    store
+    let summary = store
         .workspace_index_summary(workspace)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+        eprintln!("[index] status {workspace_path}: {summary:?}");
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -290,9 +294,21 @@ async fn refresh_workspace_index(
         let workspace = store
             .ensure_workspace(workspace_name(&path), &path.to_string_lossy())
             .map_err(|error| error.to_string())?;
-        WorkspaceIndexer::new(&store, workspace, &path)
+        let report = WorkspaceIndexer::new(&store, workspace, &path)
             .refresh()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+            eprintln!(
+                "[index] refresh {}: seen={} added={} updated={} removed={} elapsed={}ms",
+                path.display(),
+                report.seen,
+                report.added,
+                report.updated,
+                report.removed,
+                report.elapsed_ms
+            );
+        }
+        Ok(report)
     })
     .await
     .map_err(|error| format!("index task failed: {error}"))?
