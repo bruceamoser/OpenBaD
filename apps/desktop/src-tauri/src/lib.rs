@@ -266,6 +266,7 @@ async fn chat(
     message: String,
     allow_writes: bool,
     allow_commands: bool,
+    max_steps: Option<u32>,
     on_event: Channel<AgentEvent>,
 ) -> Result<ChatReply, String> {
     let message = message.trim().to_owned();
@@ -358,6 +359,7 @@ async fn chat(
         AgentConfig {
             allow_writes,
             allow_commands,
+            max_steps: max_steps.unwrap_or(64).clamp(1, 256),
             ..AgentConfig::default()
         },
     );

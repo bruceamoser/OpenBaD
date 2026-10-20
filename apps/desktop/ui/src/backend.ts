@@ -100,6 +100,7 @@ export type ChatInput = {
   message: string;
   allowWrites: boolean;
   allowCommands: boolean;
+  maxSteps: number;
 };
 
 export async function chat(
@@ -115,6 +116,7 @@ export async function chat(
       message: input.message,
       allowWrites: input.allowWrites,
       allowCommands: input.allowCommands,
+      maxSteps: input.maxSteps,
       onEvent: channel,
     });
   }

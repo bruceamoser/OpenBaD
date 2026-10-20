@@ -22,6 +22,7 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [allowWrites, setAllowWrites] = useState(false);
   const [allowCommands, setAllowCommands] = useState(false);
+  const [maxSteps, setMaxSteps] = useState(64);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -136,6 +137,7 @@ export default function App() {
           message: text,
           allowWrites,
           allowCommands,
+          maxSteps,
         },
         (event) => {
           setEntries((current) =>
@@ -219,7 +221,7 @@ export default function App() {
       setBusy(false);
       setStopRequested(false);
     }
-  }, [allowCommands, allowWrites, busy, loadFoundation, message, sessionId, workspacePath]);
+  }, [allowCommands, allowWrites, busy, loadFoundation, maxSteps, message, sessionId, workspacePath]);
 
   const openSession = useCallback(async (session: SessionSummary) => {
     setError(null);
@@ -413,6 +415,19 @@ export default function App() {
                       className="accent-emerald-400"
                     />
                     Allow commands
+                  </label>
+                  <label className="flex items-center gap-2">
+                    Max steps
+                    <input
+                      type="number"
+                      min={1}
+                      max={256}
+                      value={maxSteps}
+                      onChange={(event) =>
+                        setMaxSteps(Math.max(1, Math.min(256, Number(event.target.value) || 1)))
+                      }
+                      className="w-16 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200 outline-none focus:border-emerald-400/40"
+                    />
                   </label>
                 </div>
                 <div className="flex items-center gap-2">
