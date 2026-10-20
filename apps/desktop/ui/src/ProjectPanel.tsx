@@ -625,6 +625,11 @@ function MemoryPanel({
 }) {
   return (
     <div className="space-y-2">
+      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-600">
+        Memory snippets: short durable preferences, gotchas, constraints, and decisions.
+        They are full-text indexed and injected when relevant. Use Knowledge for
+        documents.
+      </p>
       {memories.length === 0 && (
         <p className="px-1 py-2 text-[11px] text-slate-600">No saved memories yet.</p>
       )}

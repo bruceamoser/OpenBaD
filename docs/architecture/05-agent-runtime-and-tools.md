@@ -332,10 +332,10 @@ Implemented:
 
 | Tool | Risk | Notes |
 | --- | --- | --- |
-| `recall` | read | Durable workspace memory |
-| `remember` | write | Scoped decision or preference; contradictions require `supersedes` |
+| `recall` | read | Search indexed durable-memory snippets (atomic facts/preferences, not documents) |
+| `remember` | write | Save one scoped snippet; contradictions require `supersedes`; use `add_knowledge` for documents |
 | `list_project_sources` | read | Reference folders and knowledge documents |
-| `search_project` | read | Fused knowledge, indexed code, and memory with locators |
+| `search_project` | read | Fused knowledge documents, indexed code, and memory snippets with locators |
 | `list_repo_dir` | read | List a reference-folder directory with sizes and `.gitignore` filtering |
 | `glob_repo` | read | Find reference-folder files by glob |
 | `grep_repo` | read | Search reference-folder text; case-insensitive by default |

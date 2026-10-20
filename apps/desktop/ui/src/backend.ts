@@ -219,7 +219,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0010_outside_access",
+    schema_version: "0011_memory_fts",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -688,6 +688,53 @@ export async function loadKnowledgeDocument(
     throw new Error(`knowledge document not found: ${documentId}`);
   }
   return { summary, content: mockKnowledgeContent.get(documentId) ?? "" };
+}
+
+function knowledgeSlug(title: string): string {
+  return (
+    title
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "knowledge"
+  );
+}
+
+async function saveTextExport(
+  fileName: string,
+  content: string,
+): Promise<string | null> {
+  if (isTauri) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      defaultPath: fileName,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (path === null) {
+      return null;
+    }
+    return invoke<string>("write_export_file", { path, content });
+  }
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+  return fileName;
+}
+
+export async function downloadKnowledgeDocument(
+  workspacePath: string,
+  documentId: string,
+): Promise<string | null> {
+  const document = await loadKnowledgeDocument(workspacePath, documentId);
+  return saveTextExport(
+    `${knowledgeSlug(document.summary.title)}.md`,
+    document.content,
+  );
 }
 
 export async function addKnowledgeNote(

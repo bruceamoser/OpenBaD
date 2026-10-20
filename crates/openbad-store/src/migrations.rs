@@ -44,6 +44,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0010_outside_access",
         include_str!("../migrations/0010_outside_access.sql"),
     ),
+    (
+        "0011_memory_fts",
+        include_str!("../migrations/0011_memory_fts.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

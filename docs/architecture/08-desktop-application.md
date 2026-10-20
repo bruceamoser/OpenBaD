@@ -51,7 +51,8 @@ keeps a usable width.
 - **Session sidebar** — grouped by workspace, pinned, recent, archived.
 - **Workspace switcher** — recent folders, open folder, trust state.
 - **Project panel tabs** — overview, workspace, repos, knowledge, retrieval,
-  memory, checkpoints, diagnostics, and the active artifact.
+  memory, checkpoints, diagnostics, and the active artifact. Knowledge is for
+  long-form documents; Memory is for short indexed snippets.
 - **Split artifacts** — assistant-presented web pages, images, Markdown, diffs,
   and workspace files open beside the conversation.
 - **Bottom panel** — terminal, problems, job output (planned).
@@ -63,7 +64,10 @@ keeps a usable width.
 - Streaming GitHub-flavored Markdown: headings, lists, task lists, tables,
   blockquotes, links, images, footnotes, strikethrough, and inline/display math
   through KaTeX.
-- Syntax-highlighted code blocks with a copy action.
+- Syntax-highlighted code blocks with a copy action, plus a copy-response
+  icon in each assistant message header that copies the raw Markdown.
+- Project knowledge can be downloaded as Markdown or opened in a print/PDF view
+  with light-document styling; the native print dialog provides Save as PDF.
 - Mermaid diagrams rendered from fenced `mermaid` blocks, with the source
   available in a disclosure and render errors shown inline.
 - Tool cards: name, status, duration, risk, result summary, expandable output.

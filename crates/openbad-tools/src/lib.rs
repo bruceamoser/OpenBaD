@@ -3431,7 +3431,7 @@ impl Tool for RememberTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "remember",
-            "Save a durable project decision or preference to workspace memory. Repeating the same content updates it. Contradicting an existing memory requires its id in supersedes.",
+            "Save one short, durable snippet to workspace memory: a preference, gotcha, constraint, or decision. Memory is indexed and searchable; use add_knowledge for documents. Repeating the same content updates it; contradicting an existing snippet requires its id in supersedes.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -3543,7 +3543,7 @@ impl Tool for RecallTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "recall",
-            "Search durable workspace memory for prior decisions, preferences, and context.",
+            "Search the indexed durable-memory snippets for prior decisions, preferences, constraints, and gotchas. Returns snippets, not knowledge documents.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -3745,7 +3745,7 @@ impl Tool for SearchProjectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "search_project",
-            "Search this project's knowledge library, indexed code, and durable memories. Cite the returned locator when using a hit.",
+            "Search the indexed project sources together: knowledge documents, code, and memory snippets. Cite the returned locator; use get_knowledge for full documents and recall for snippet-only searches.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -3814,7 +3814,7 @@ impl Tool for AddKnowledgeTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "add_knowledge",
-            "Add a curated project note or reference to the knowledge library. Use a precise title and optional tags so later retrieval can cite it.",
+            "Add a long-form project document to the knowledge library: a note, decision, reference, procedure, finding, or glossary entry. Documents are chunked and full-text indexed; use remember for short atomic snippets instead.",
             RiskLevel::Write,
         )
         .with_schema(json!({

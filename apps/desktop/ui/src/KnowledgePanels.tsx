@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   BookOpen,
+  Download,
   FileCode2,
   Loader2,
   Plus,
+  Printer,
   Search,
   Trash2,
 } from "lucide-react";
@@ -11,13 +14,17 @@ import {
 import {
   addKnowledgeNote,
   deleteKnowledgeDocument,
+  downloadKnowledgeDocument,
   importKnowledgeFile,
+  loadKnowledgeDocument,
   loadKnowledgeDocuments,
   loadKnowledgeStaleDocuments,
   searchProject,
 } from "./backend";
+import MarkdownMessage from "./MarkdownMessage";
 import type {
   Artifact,
+  KnowledgeDocument,
   KnowledgeDocumentSummary,
   ProjectHit,
 } from "./types";
@@ -48,6 +55,8 @@ export function KnowledgePanel({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  const [printDocument, setPrintDocument] = useState<KnowledgeDocument | null>(null);
 
   const refresh = useCallback(async () => {
     if (workspacePath.length === 0) {
@@ -79,6 +88,17 @@ export function KnowledgePanel({
   useEffect(() => {
     void refresh();
   }, [refresh, revision]);
+
+  useEffect(() => {
+    if (printDocument === null) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      window.print();
+      window.setTimeout(() => setPrintDocument(null), 1_000);
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [printDocument]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -158,8 +178,36 @@ export function KnowledgePanel({
     }
   };
 
+  const download = async (document: KnowledgeDocumentSummary) => {
+    setExportingId(document.id);
+    try {
+      const path = await downloadKnowledgeDocument(workspacePath, document.id);
+      setNotice(path === null ? "Download cancelled" : `Saved ${path}`);
+      setError(null);
+    } catch (cause) {
+      setError(describeError(cause));
+    } finally {
+      setExportingId(null);
+    }
+  };
+
+  const print = async (document: KnowledgeDocumentSummary) => {
+    try {
+      setPrintDocument(await loadKnowledgeDocument(workspacePath, document.id));
+      setNotice("Preparing print / PDF view…");
+      setError(null);
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
   return (
     <div className="space-y-2">
+      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-600">
+        Knowledge documents: long-form notes, decisions, references, procedures, and
+        findings. They are chunked, full-text indexed, and cited by document. Use Memory
+        for short atomic snippets.
+      </p>
       <SearchField value={query} onChange={setQuery} label="Filter knowledge" />
       {loading && knowledge.length === 0 && (
         <p className="flex items-center gap-1.5 px-1 py-2 text-[10px] text-slate-600">
@@ -210,18 +258,43 @@ export function KnowledgePanel({
               </p>
             )}
           </button>
-          <div className="mt-1.5 flex items-center justify-between">
-            <span className="truncate font-mono text-[9px] text-slate-700">
+          <div className="mt-1.5 flex items-center justify-between gap-2">
+            <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-slate-700">
               {document.source ?? "project note"}
             </span>
-            <button
-              type="button"
-              aria-label={`Delete ${document.title}`}
-              onClick={() => void remove(document)}
-              className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
-            >
-              <Trash2 size={11} />
-            </button>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                aria-label={`Download ${document.title}`}
+                title="Download Markdown"
+                onClick={() => void download(document)}
+                disabled={exportingId === document.id}
+                className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-emerald-300 disabled:opacity-40"
+              >
+                {exportingId === document.id ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <Download size={11} />
+                )}
+              </button>
+              <button
+                type="button"
+                aria-label={`Export ${document.title} as PDF`}
+                title="Print / save as PDF"
+                onClick={() => void print(document)}
+                className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-emerald-300"
+              >
+                <Printer size={11} />
+              </button>
+              <button
+                type="button"
+                aria-label={`Delete ${document.title}`}
+                onClick={() => void remove(document)}
+                className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
           </div>
         </div>
       ))}
@@ -333,6 +406,20 @@ export function KnowledgePanel({
       )}
       {notice !== null && <p className="text-[10px] text-emerald-300">{notice}</p>}
       {error !== null && <p className="text-[10px] text-amber-300">{error}</p>}
+      {printDocument !== null &&
+        createPortal(
+          <div className="knowledge-print">
+            <p className="knowledge-print-kicker">OpenBaD project knowledge</p>
+            <h1>{printDocument.summary.title}</h1>
+            <p className="knowledge-print-meta">
+              {printDocument.summary.kind} · {printDocument.summary.confidence}
+              {printDocument.summary.tags.length > 0 &&
+                ` · ${printDocument.summary.tags.join(", ")}`}
+            </p>
+            <MarkdownMessage text={printDocument.content} />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

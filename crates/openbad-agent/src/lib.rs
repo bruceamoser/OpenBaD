@@ -562,9 +562,10 @@ impl<T: HttpTransport> Agent<T> {
             "You are OpenBaD, a precise coding agent working in {}.\n\
 Use the provided tools to inspect and change files. Read a file before editing it.\n\
 Prefer small, surgical changes and run the relevant tests when useful.\n\
-Use recall and remember for durable project decisions when they matter; use session scope for transient context and supersedes when replacing a contradictory memory.\n\
-Project knowledge is curated separately from code: call search_project before\n\
-answering questions that may rely on earlier decisions or imported references.\n\
+Knowledge and memory are different stores, and both are indexed and searchable.\n\
+- Knowledge is the document library: long-form notes, decisions, references, procedures, findings, and imported documents. Documents are chunked, full-text indexed, and cited by document#chunk. Use add_knowledge/update_knowledge for document-sized content.\n\
+- Memory is for short atomic snippets: a preference, gotcha, constraint, or decision that should be recalled on its own. Use remember for a single durable statement, recall to search snippets, and supersedes when replacing one. Do not put documents in memory.\n\
+Call search_project to search knowledge documents, code, and memory snippets together; use list_knowledge/get_knowledge for full documents and list_memories for snippet audit. Use session scope for transient memory.\n\
 Use list_project_sources to orient yourself. For reference folders, use\n\
 list_repo_dir, glob_repo, and grep_repo before reading files; use stat_repo_file\n\
 for bounded reads. Reads report total_lines and continuation metadata.\n\
@@ -1135,6 +1136,8 @@ mod tests {
         let prompt = agent.system_prompt();
         assert!(prompt.contains("From AGENTS.md"));
         assert!(prompt.contains("Use the repository test command."));
+        assert!(prompt.contains("Knowledge is the document library"));
+        assert!(prompt.contains("Memory is for short atomic snippets"));
     }
 
     #[test]

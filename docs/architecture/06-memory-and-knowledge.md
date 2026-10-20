@@ -93,10 +93,20 @@ in `supersedes`. `update_memory` corrects content, tags, pinned state, or scope.
 The system prompt reports how many memories were injected, including pinned
 count and scope.
 
-**Memory is not knowledge.** Memory holds working commitments, preferences, and
-decisions with a lifecycle (scope, supersession, expiry). Knowledge holds
-curated reference documents with confidence and source staleness. They use
-different writes, search surfaces, and audit tools.
+**Memory is not knowledge.** Memory holds short atomic snippets: preferences,
+gotchas, constraints, and decisions with a lifecycle (scope, supersession,
+expiry). Knowledge holds long-form documents: notes, decisions, references,
+procedures, findings, and imported files with confidence and source staleness.
+They use different writes, audit tools, and citation units.
+
+Both stores are full-text indexed and searchable:
+
+- Knowledge documents are chunked into `knowledge_fts`; hits cite
+  `document#chunk` and full content is loaded with `get_knowledge`.
+- Memory snippets are indexed in `memory_fts` (content plus tags); `recall`
+  returns the snippet and `search_project` fuses it with knowledge and code.
+- `remember` is for one durable statement, not a document. Use
+  `add_knowledge`/`update_knowledge` for document-sized content.
 
 ## 4. ACT-R activation
 
@@ -482,8 +492,9 @@ Rules:
 The desktop UI keeps the conversation primary and opens project areas on the
 right. In the current build:
 
-- **Memory** — pinned and recent project memories with forget actions.
-- **Knowledge** — filter, open, add notes, import UTF-8 files, and delete.
+- **Memory** — short indexed snippets with scope, provenance, and forget actions.
+- **Knowledge** — long-form documents with filter, open, note/import, delete,
+  Markdown download, and print/PDF export.
 - **Workspace** — filter indexed files and open them as artifacts.
 - **References** — add read-only folders with the native picker and remove
   them.

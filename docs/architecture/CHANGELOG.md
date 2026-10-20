@@ -33,6 +33,15 @@ session knows what moved without re-reading every document.
   specific absolute path. Grants live in the project database
   (`outside_access_grants`), are read/write scoped, and are managed in Settings
   → Access. See sections 7.1 and 11.1 of `05-agent-runtime-and-tools.md`.
+- **Copy response.** Assistant messages have a header copy action that copies
+  the raw Markdown response. See `08-desktop-application.md`.
+- **Knowledge export.** Knowledge rows have Markdown download and print/PDF
+  actions. Printable output uses a light document theme and hides the app
+  chrome; the native print dialog provides Save as PDF.
+- **Knowledge vs memory.** Prompt and tool descriptions now state that
+  Knowledge is the long-form document library and Memory is short atomic
+  snippets. Both are full-text indexed: `knowledge_fts` and `memory_fts`.
+  `search_project` fuses both with code.
 - **Steering and queuing.** A running turn accepts steering messages through
   `steer_chat`; they are appended before the next provider request. The desktop
   composer also queues messages for the next turn. See the turn rules in

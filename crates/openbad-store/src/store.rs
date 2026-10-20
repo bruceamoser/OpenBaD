@@ -852,28 +852,24 @@ impl Store {
             });
         }
 
-        let pattern = format!(
-            "%{}%",
-            query
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
         let mut memories = connection.prepare(
-            "SELECT id, content FROM memories
-             WHERE workspace_id = ?1 AND forgotten_at IS NULL
-               AND content LIKE ?2 ESCAPE '\\'
-             ORDER BY pinned DESC, updated_at DESC LIMIT 4",
+            "SELECT m.id, snippet(memory_fts, 2, '<<', '>>', '…', 24)
+             FROM memory_fts
+             JOIN memories m ON m.id = memory_fts.id
+             WHERE memory_fts.workspace_id = ?1
+               AND memory_fts MATCH ?2
+               AND m.forgotten_at IS NULL
+             ORDER BY m.pinned DESC, memory_fts.rank LIMIT 4",
         )?;
-        let rows = memories.query_map(params![workspace_id.to_string(), pattern], |row| {
+        let rows = memories.query_map(params![workspace_id.to_string(), terms], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         for (rank, row) in rows.enumerate() {
-            let (id, content) = row?;
+            let (id, snippet) = row?;
             hits.push(ProjectHit {
                 source: "memory".to_owned(),
                 title: "Durable memory".to_owned(),
-                snippet: content,
+                snippet,
                 locator: id,
                 score: reciprocal_rank(rank) + 0.01,
             });
@@ -1074,7 +1070,36 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<MemoryRecord>, StoreError> {
         let connection = self.reader()?;
-        let has_query = query.is_some_and(|query| !query.is_empty());
+        let query = query.map(str::trim).filter(|query| !query.is_empty());
+        let terms = query.map(fts_terms).filter(|terms| !terms.is_empty());
+        if let Some(terms) = terms {
+            let mut statement = connection.prepare(
+                "SELECT m.id, m.content, m.tags_json, m.pinned, m.created_at, m.updated_at,
+                        m.access_count, m.origin_turn, m.origin_task, m.author, m.scope,
+                        m.supersedes, m.expires_at
+                 FROM memory_fts
+                 JOIN memories m ON m.id = memory_fts.id
+                 WHERE memory_fts.workspace_id = ?1
+                   AND memory_fts MATCH ?2
+                   AND m.forgotten_at IS NULL
+                   AND (m.expires_at IS NULL OR m.expires_at > ?3)
+                 ORDER BY m.pinned DESC, memory_fts.rank
+                 LIMIT ?4",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    workspace_id.to_string(),
+                    terms,
+                    now_millis(),
+                    i64::from(limit)
+                ],
+                memory_record_from_row,
+            )?;
+            return rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from);
+        }
+
         let pattern = query.map_or_else(String::new, |query| {
             format!(
                 "%{}%",
@@ -1090,20 +1115,20 @@ impl Store {
              FROM memories
              WHERE workspace_id = ?1
                AND forgotten_at IS NULL
-               AND (expires_at IS NULL OR expires_at > ?5)
+               AND (expires_at IS NULL OR expires_at > ?4)
                AND (?2 = 0
                     OR lower(content) LIKE lower(?3) ESCAPE '\\'
                     OR lower(tags_json) LIKE lower(?3) ESCAPE '\\')
              ORDER BY pinned DESC, updated_at DESC
-             LIMIT ?4",
+             LIMIT ?5",
         )?;
         let rows = statement.query_map(
             params![
                 workspace_id.to_string(),
-                i64::from(has_query),
+                i64::from(query.is_some()),
                 pattern,
-                i64::from(limit),
-                now_millis()
+                now_millis(),
+                i64::from(limit)
             ],
             memory_record_from_row,
         )?;
@@ -3031,10 +3056,7 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(
-            store.schema_version().expect("version"),
-            "0010_outside_access"
-        );
+        assert_eq!(store.schema_version().expect("version"), "0011_memory_fts");
     }
 
     #[test]
@@ -3381,6 +3403,75 @@ mod tests {
                 .recall_memories(workspace, None, 10)
                 .expect("recall after forget")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn memory_fts_tracks_content_tags_updates_and_forgetting() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("memory", "/tmp/openbad-memory-fts")
+            .expect("workspace");
+        let memory = store
+            .remember_memory(
+                workspace,
+                "Prefer conventional commits for git history.",
+                vec!["style".to_owned()],
+                false,
+            )
+            .expect("memory");
+        assert_eq!(
+            store
+                .recall_memories(workspace, Some("commit"), 10)
+                .expect("stemmed recall")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .recall_memories(workspace, Some("style"), 10)
+                .expect("tag recall")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .retrieve_project(workspace, "conventional", 10)
+                .expect("retrieval")
+                .iter()
+                .any(|hit| hit.source == "memory")
+        );
+
+        store
+            .update_memory(
+                &memory.id,
+                Some("Use squash merges for feature branches."),
+                Some(vec!["git".to_owned()]),
+                None,
+                None,
+            )
+            .expect("update");
+        assert!(
+            store
+                .recall_memories(workspace, Some("conventional"), 10)
+                .expect("stale recall")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .recall_memories(workspace, Some("squash"), 10)
+                .expect("updated recall")
+                .len(),
+            1
+        );
+
+        store.forget_memory(&memory.id).expect("forget");
+        assert!(
+            store
+                .retrieve_project(workspace, "squash", 10)
+                .expect("retrieval after forget")
+                .iter()
+                .all(|hit| hit.source != "memory")
         );
     }
 

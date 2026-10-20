@@ -986,6 +986,28 @@ fn knowledge_stale_documents(
 }
 
 #[tauri::command]
+fn write_export_file(path: String, content: String) -> Result<String, String> {
+    let path = PathBuf::from(&path);
+    if !path.is_absolute() {
+        return Err("export path must be absolute".to_owned());
+    }
+    if path.is_dir() {
+        return Err(format!("export path is a directory: {}", path.display()));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.is_dir() {
+            return Err(format!(
+                "export directory does not exist: {}",
+                parent.display()
+            ));
+        }
+    }
+    std::fs::write(&path, content)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
 fn knowledge_document(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -2318,6 +2340,7 @@ pub fn run() {
             knowledge_documents,
             knowledge_stale_documents,
             knowledge_document,
+            write_export_file,
             add_knowledge_note,
             import_knowledge_file,
             delete_knowledge_document,
@@ -2375,7 +2398,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0010_outside_access");
+        assert_eq!(payload.doctor.schema_version, "0011_memory_fts");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);
