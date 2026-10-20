@@ -20,8 +20,10 @@ import ArtifactViewer from "./ArtifactViewer";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import {
   addProjectRepo,
+  answerProjectQuestion,
   listProjectFiles,
   loadProjectManifest,
+  loadProjectQuestions,
   loadProjectOverview,
   loadProjectRepos,
   loadProjectTodos,
@@ -35,6 +37,7 @@ import type {
   MemoryRecord,
   ProjectManifest,
   ProjectOverview,
+  ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
   WorkspaceIndexSummary,
@@ -49,6 +52,7 @@ export type PanelTab =
   | "retrieval"
   | "memory"
   | "todos"
+  | "questions"
   | "checkpoints"
   | "diagnostics"
   | "artifact";
@@ -61,6 +65,7 @@ const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "retrieval", label: "Retrieval" },
   { id: "memory", label: "Memory" },
   { id: "todos", label: "Todos" },
+  { id: "questions", label: "Questions" },
   { id: "checkpoints", label: "Edits" },
   { id: "diagnostics", label: "Diag" },
 ];
@@ -134,6 +139,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   const [repos, setRepos] = useState<ProjectRepo[]>([]);
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [todos, setTodos] = useState<ProjectTodo[]>([]);
+  const [questions, setQuestions] = useState<ProjectQuestion[]>([]);
   const [dataError, setDataError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -141,19 +147,27 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       return;
     }
     try {
-      const [nextOverview, nextRepos, nextFiles, nextManifest, nextTodos] =
-        await Promise.all([
-          loadProjectOverview(workspacePath),
-          loadProjectRepos(workspacePath),
-          listProjectFiles(workspacePath),
-          loadProjectManifest(workspacePath),
-          loadProjectTodos(workspacePath),
-        ]);
+      const [
+        nextOverview,
+        nextRepos,
+        nextFiles,
+        nextManifest,
+        nextTodos,
+        nextQuestions,
+      ] = await Promise.all([
+        loadProjectOverview(workspacePath),
+        loadProjectRepos(workspacePath),
+        listProjectFiles(workspacePath),
+        loadProjectManifest(workspacePath),
+        loadProjectTodos(workspacePath),
+        loadProjectQuestions(workspacePath),
+      ]);
       setOverview(nextOverview);
       setRepos(nextRepos);
       setFiles(nextFiles);
       setManifest(nextManifest);
       setTodos(nextTodos);
+      setQuestions(nextQuestions);
       setDataError(null);
     } catch (cause) {
       setDataError(describeError(cause));
@@ -166,6 +180,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     setFiles([]);
     setManifest(null);
     setTodos([]);
+    setQuestions([]);
     setFileQuery("");
     setDataError(null);
     void refresh();
@@ -177,7 +192,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       tab === "repos" ||
       tab === "knowledge" ||
       tab === "workspace" ||
-      tab === "todos"
+      tab === "todos" ||
+      tab === "questions"
     ) {
       void refresh();
     }
@@ -441,6 +457,17 @@ export default function ProjectPanel(props: ProjectPanelProps) {
 
         {tab === "todos" && <TodoPanel todos={todos} />}
 
+        {tab === "questions" && (
+          <QuestionsPanel
+            questions={questions}
+            onAnswer={async (id, answer) => {
+              await answerProjectQuestion(workspacePath, id, answer);
+              onWorkspaceChanged();
+              void refresh();
+            }}
+          />
+        )}
+
         {tab === "checkpoints" && (
           <CheckpointsPanel
             sessionId={sessionId}
@@ -604,6 +631,118 @@ function MemoryPanel({
         </div>
       ))}
       {memoryError !== null && <p className="text-[10px] text-amber-300">{memoryError}</p>}
+    </div>
+  );
+}
+
+function QuestionsPanel({
+  questions,
+  onAnswer,
+}: {
+  questions: ProjectQuestion[];
+  onAnswer: (id: string, answer: string) => Promise<void>;
+}) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (id: string, answer: string) => {
+    if (answer.trim().length === 0) {
+      return;
+    }
+    setBusy(id);
+    try {
+      await onAnswer(id, answer.trim());
+      setDrafts((current) => ({ ...current, [id]: "" }));
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (questions.length === 0) {
+    return (
+      <p className="px-1 py-2 text-[11px] text-slate-600">
+        No questions yet. The assistant can queue a decision with ask_question.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {questions.map((question) => (
+        <div
+          key={question.id}
+          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-[11px] leading-5 text-slate-200">{question.question}</p>
+            <span
+              className={
+                question.answer === null
+                  ? "shrink-0 rounded bg-amber-400/15 px-1 py-0.5 text-[9px] text-amber-300"
+                  : "shrink-0 rounded bg-emerald-400/15 px-1 py-0.5 text-[9px] text-emerald-300"
+              }
+            >
+              {question.answer === null ? "pending" : "answered"}
+            </span>
+          </div>
+          {question.context !== null && (
+            <p className="mt-1 text-[10px] text-slate-500">{question.context}</p>
+          )}
+          {question.answer !== null ? (
+            <p className="mt-2 text-[11px] text-emerald-300">{question.answer}</p>
+          ) : (
+            <div className="mt-2 space-y-1.5">
+              {question.options.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {question.options.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      disabled={busy === question.id}
+                      onClick={() => void submit(question.id, option)}
+                      className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] text-slate-200 hover:bg-white/[0.08] disabled:opacity-40"
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-1.5">
+                <input
+                  value={drafts[question.id] ?? ""}
+                  onChange={(event) =>
+                    setDrafts((current) => ({
+                      ...current,
+                      [question.id]: event.target.value,
+                    }))
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void submit(question.id, drafts[question.id] ?? "");
+                    }
+                  }}
+                  aria-label={`Answer ${question.question}`}
+                  placeholder="Type an answer…"
+                  className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+                />
+                <button
+                  type="button"
+                  disabled={busy === question.id}
+                  onClick={() => void submit(question.id, drafts[question.id] ?? "")}
+                  className="rounded-md bg-emerald-400 px-2 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
+                >
+                  Answer
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+      {error !== null && <p className="text-[10px] text-amber-300">{error}</p>}
     </div>
   );
 }

@@ -50,6 +50,9 @@ Migration `0006_project_areas` adds the project areas; migration
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
 
+Structured questions live in `.openbad/questions.json` and are answered in the
+Project → Questions panel. The assistant reads the answer on its next turn.
+
 `.openbad/context.yaml` pins files that should stay resident and excludes paths
 that must never load. `.openbad/dead-ends.json` records negative knowledge so a
 later session does not repeat a ruled-out search.
