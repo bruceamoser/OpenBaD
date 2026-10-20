@@ -381,14 +381,19 @@ impl<T: HttpTransport> Agent<T> {
         if let Some(prompt) = &self.config.system_prompt {
             return prompt.clone();
         }
-        format!(
+        let mut prompt = format!(
             "You are OpenBaD, a precise coding agent working in {}.\n\
 Use the provided tools to inspect and change files. Read a file before editing it.\n\
 Prefer small, surgical changes and run the relevant tests when useful.\n\
 Use recall and remember for durable project decisions when they matter.\n\
 Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
-        )
+        );
+        if let Some(instructions) = load_project_instructions(self.workspace.root()) {
+            prompt.push_str("\n\nProject conventions (follow unless they conflict with safety or explicit user instructions):\n");
+            prompt.push_str(&instructions);
+        }
+        prompt
     }
 }
 
@@ -673,6 +678,29 @@ mod tests {
         assert_eq!(run.text, "It says hello over http.");
         assert_eq!(run.steps, 2);
         server.join().expect("server");
+    }
+
+    #[test]
+    fn system_prompt_includes_project_instructions() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(
+            directory.path().join("AGENTS.md"),
+            "Use the repository test command.",
+        )
+        .expect("instructions");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig::default(),
+        );
+        let prompt = agent.system_prompt();
+        assert!(prompt.contains("From AGENTS.md"));
+        assert!(prompt.contains("Use the repository test command."));
     }
 
     #[test]
