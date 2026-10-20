@@ -19,6 +19,8 @@ than a command needs.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
+│ Menu bar: OpenBaD · File · Edit · View · Project · Help             │
+├─────────────────────────────────────────────────────────────────────┤
 │ Project header: project · path · session · model · access mode      │
 ├──────────┬───────────────────────────────────────┬──────────────────┤
 │ Sidebar  │ Chat / Agent                          │ Project panel    │
@@ -40,6 +42,9 @@ keeps a usable width.
 
 ### Navigation
 
+- **Application menu bar** — File, Edit, View, Project, and Help. It owns
+  project-wide actions (new session, settings, project areas, refresh index,
+  shortcuts), keeping the permanent header down to breadcrumbs and status.
 - **Command palette** (`Ctrl/Cmd+K`) — every action, file, session, and
   setting.
 - **Quick ask** (`Ctrl/Cmd+Shift+Space`) — floating prompt from any app.

@@ -132,8 +132,9 @@ context, and Phase 6 workspace skills load on demand. Project conventions from
 `AGENTS.md`/`CLAUDE.md` are included in the system prompt. Migration
 `0006_project_areas` adds project-scoped repositories, knowledge documents and
 chunks, retrieval, and overview counts. The desktop UI now has a project/session
-sidebar, inline session rename, project area navigation, a compact composer with
-access modes, a resizable split workspace for artifacts, and no fixed step cap.
+sidebar, inline session rename, a Codex-style top menu and project area
+navigation, a compact composer with access modes, a resizable split workspace
+for artifacts, and no fixed step cap.
 Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind,
 embedding-backed retrieval, richer document ingestion, subagents, workflows, and
 packaging remain.

@@ -67,8 +67,11 @@ marker (`.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`,
 `Makefile`, `AGENTS.md`, or `.openbad`) and its sessions are grouped beneath it.
 Sessions can be renamed from the sidebar.
 
-Each project exposes Overview, Workspace, Repos, Knowledge, Retrieval, and
-Memory beneath its name. These open in a resizable split panel beside the chat.
+A top application menu (File, Edit, View, Project, Help) owns project-wide
+actions, including new session, settings, every project area, index refresh, and
+keyboard shortcuts. Each project also exposes Overview, Workspace, Repos,
+Knowledge, Retrieval, and Memory beneath its name. These open in a resizable
+split panel beside the chat.
 Additional repositories are read-only references. Knowledge notes and imported
 UTF-8 files are chunked and searchable through the same retrieval surface as
 indexed code and durable memory. Assistant-presented artifacts (web pages,

@@ -2,17 +2,34 @@ import { expect, test } from "@playwright/test";
 
 const prompt = "Summarize the workspace";
 
+async function clickMenu(
+  page: import("@playwright/test").Page,
+  menu: string,
+  item: string,
+) {
+  await page
+    .getByRole("menubar")
+    .getByRole("menuitem", { name: menu, exact: true })
+    .click();
+  await page
+    .getByRole("menu", { name: `${menu} menu` })
+    .getByRole("menuitem", { name: item })
+    .click();
+}
+
 async function openSettings(page: import("@playwright/test").Page) {
-  await page.getByRole("button", { name: "Settings" }).first().click();
+  await clickMenu(page, "File", "Settings…");
   await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
 }
 
 async function openContext(
   page: import("@playwright/test").Page,
-  tab: "Workspace" | "Memory" | "Edits" | "Diag",
+  tab: "Workspace" | "Memory" | "Checkpoints" | "Diagnostics",
 ) {
-  await page.getByRole("button", { name: "Project", exact: true }).first().click();
-  await page.getByRole("button", { name: tab, exact: true }).click();
+  await clickMenu(page, "View", tab);
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }),
+  ).toBeVisible();
 }
 
 async function sendPrompt(page: import("@playwright/test").Page, text = prompt) {
@@ -120,7 +137,7 @@ test("adds a project", async ({ page }) => {
 test("lists and restores a file checkpoint", async ({ page }) => {
   await page.goto("/");
   await sendPrompt(page);
-  await openContext(page, "Edits");
+  await openContext(page, "Checkpoints");
 
   await expect(page.getByText("/mnt/disk4/repos/OpenBaD/src/main.rs")).toBeVisible();
   await page.getByRole("button", { name: "Diff" }).click();
@@ -222,4 +239,22 @@ test("opens workspace files in the split pane", async ({ page }) => {
   await page.getByRole("button", { name: "apps/desktop/ui/src/App.tsx" }).click();
 
   await expect(page.getByText("Mock preview for the browser harness.")).toBeVisible();
+});
+
+
+test("uses the application menu to open project areas and help", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await clickMenu(page, "View", "Knowledge");
+
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Product thesis note/ })).toBeVisible();
+
+  await clickMenu(page, "Help", "Keyboard Shortcuts");
+  await expect(
+    page.getByRole("dialog", { name: "Keyboard shortcuts" }),
+  ).toBeVisible();
 });

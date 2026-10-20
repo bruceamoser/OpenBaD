@@ -113,12 +113,17 @@ earlier decisions or imported references, and to cite returned locators.
 The desktop layout is intentionally conversation-first:
 
 ```text
-┌──────────┬────────────────────────────┬──────────────────────────┐
+┌──────────────────────────────────────────────────────────────────┐
+│ menu bar: File · Edit · View · Project · Help                    │
+├──────────┬────────────────────────────┬──────────────────────────┤
 │ project  │ chat                       │ project panel / artifact │
 │ sidebar  │ messages + composer        │ resizable, closable      │
 └──────────┴────────────────────────────┴──────────────────────────┘
 ```
 
+- The application menu bar carries project-wide actions and a View menu that
+  opens every project area, so the header can stay focused on breadcrumbs and
+  status.
 - The project sidebar exposes Overview, Workspace, Repos, Knowledge,
   Retrieval, and Memory links beneath the active project.
 - Selecting an area opens it on the right without hiding the conversation.

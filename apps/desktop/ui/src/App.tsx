@@ -17,13 +17,10 @@ import {
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRight,
-  Network,
   Pencil,
   Plus,
   Search,
   Send,
-  Settings,
   Shield,
   Square,
   Trash2,
@@ -51,10 +48,13 @@ import {
   renameSession as renameStoredSession,
   restoreCheckpoint as restoreStoredCheckpoint,
   saveApiKey as persistApiKey,
+  quitApp,
   searchSessions as searchStoredSessions,
   workspaceDefault,
   workspaceIndexStatus as fetchIndexStatus,
 } from "./backend";
+import AppMenuBar from "./AppMenuBar";
+import type { AppMenu } from "./AppMenuBar";
 import ProjectPanel from "./ProjectPanel";
 import type { PanelTab } from "./ProjectPanel";
 import type {
@@ -144,6 +144,7 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectPath, setNewProjectPath] = useState("");
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -151,6 +152,7 @@ export default function App() {
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const sessionSearchRef = useRef<HTMLInputElement | null>(null);
   const followRef = useRef(true);
   const autoCollapsedSidebar = useRef(false);
 
@@ -777,6 +779,9 @@ export default function App() {
       } else if (command && event.key === ",") {
         event.preventDefault();
         openSettings("model");
+      } else if (command && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarOpen((open) => !open);
       }
     };
     window.addEventListener("keydown", handleShortcut);
@@ -792,8 +797,171 @@ export default function App() {
   );
   const visibleSessions = sessionQuery.trim().length > 0 ? sessions : projectSessions;
 
+  const menus: AppMenu[] = [
+    {
+      label: "File",
+      items: [
+        { label: "New Session", shortcut: "Ctrl N", onSelect: newSession },
+        {
+          label: "Add Project…",
+          onSelect: () => setProjectDialogOpen(true),
+        },
+        { label: "separator", separator: true },
+        {
+          label: "Knowledge Library",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("knowledge"),
+        },
+        {
+          label: "Settings…",
+          shortcut: "Ctrl ,",
+          onSelect: () => openSettings("model"),
+        },
+        { label: "separator", separator: true },
+        { label: "Quit OpenBaD", onSelect: () => void quitApp() },
+      ],
+    },
+    {
+      label: "Edit",
+      items: [
+        {
+          label: "Command Palette…",
+          shortcut: "Ctrl K",
+          onSelect: () => setCommandOpen(true),
+        },
+        {
+          label: "Find Sessions",
+          onSelect: () => {
+            setSidebarOpen(true);
+            window.setTimeout(() => sessionSearchRef.current?.focus(), 0);
+          },
+        },
+        {
+          label: "Rename Current Session…",
+          disabled: activeSession === null,
+          onSelect: () => {
+            if (activeSession !== null) {
+              setSidebarOpen(true);
+              beginRenameSession(activeSession);
+            }
+          },
+        },
+      ],
+    },
+    {
+      label: "View",
+      items: [
+        {
+          label: "Toggle Sidebar",
+          shortcut: "Ctrl B",
+          checked: sidebarOpen,
+          onSelect: () => setSidebarOpen((open) => !open),
+        },
+        {
+          label: "Toggle Project Panel",
+          checked: panelOpen,
+          onSelect: () => {
+            if (panelOpen) {
+              setPanelOpen(false);
+            } else {
+              openPanel(panelTab);
+            }
+          },
+        },
+        { label: "separator", separator: true },
+        {
+          label: "Overview",
+          checked: panelOpen && panelTab === "overview",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("overview"),
+        },
+        {
+          label: "Workspace",
+          checked: panelOpen && panelTab === "workspace",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("workspace"),
+        },
+        {
+          label: "Repos",
+          checked: panelOpen && panelTab === "repos",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("repos"),
+        },
+        {
+          label: "Knowledge",
+          checked: panelOpen && panelTab === "knowledge",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("knowledge"),
+        },
+        {
+          label: "Retrieval",
+          checked: panelOpen && panelTab === "retrieval",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("retrieval"),
+        },
+        {
+          label: "Memory",
+          checked: panelOpen && panelTab === "memory",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("memory"),
+        },
+        {
+          label: "Checkpoints",
+          checked: panelOpen && panelTab === "checkpoints",
+          onSelect: () => openPanel("checkpoints"),
+        },
+        {
+          label: "Diagnostics",
+          checked: panelOpen && panelTab === "diagnostics",
+          onSelect: () => openPanel("diagnostics"),
+        },
+      ],
+    },
+    {
+      label: "Project",
+      items: [
+        {
+          label: "Project Settings…",
+          disabled: activeProject === null,
+          onSelect: () => openSettings("project"),
+        },
+        {
+          label: "Refresh Workspace Index",
+          disabled: activeProject === null || indexing,
+          onSelect: () => void refreshWorkspaceIndex(),
+        },
+        { label: "separator", separator: true },
+        {
+          label: "Add Repository…",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("repos"),
+        },
+        {
+          label: "Add Knowledge…",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("knowledge"),
+        },
+      ],
+    },
+    {
+      label: "Help",
+      items: [
+        {
+          label: "Keyboard Shortcuts",
+          onSelect: () => setShortcutsOpen(true),
+        },
+        {
+          label: "About OpenBaD",
+          onSelect: () => openSettings("about"),
+        },
+      ],
+    },
+  ];
+
   return (
-    <main className="flex h-screen overflow-hidden bg-[#0a0d11] text-slate-100">
+    <div className="flex h-screen flex-col overflow-hidden bg-[#0a0d11] text-slate-100">
+      <AppMenuBar menus={menus} />
+      <main className="flex min-h-0 flex-1 overflow-hidden bg-[#0a0d11] text-slate-100">
       {sidebarOpen && (
         <aside className="flex w-[276px] shrink-0 flex-col border-r border-white/[0.07] bg-[#0c1015]">
           <div className="flex h-14 items-center gap-2 border-b border-white/[0.06] px-3">
@@ -825,6 +993,7 @@ export default function App() {
             <label className="mt-3 flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
               <Search size={13} className="shrink-0 text-slate-600" />
               <input
+                ref={sessionSearchRef}
                 type="search"
                 value={sessionQuery}
                 onChange={(event) => setSessionQuery(event.target.value)}
@@ -955,14 +1124,7 @@ export default function App() {
           </div>
 
           <div className="border-t border-white/[0.06] p-2">
-            <button
-              type="button"
-              onClick={() => openSettings("model")}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-[12px] text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
-            >
-              <Settings size={14} /> Settings
-            </button>
-            <div className="flex items-center gap-2 px-2 pt-1 text-[10px] text-slate-600">
+            <div className="flex items-center gap-2 px-2 py-1 text-[10px] text-slate-600">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
                   apiKeyStatus ? "bg-emerald-400" : "bg-amber-400"
@@ -1004,25 +1166,6 @@ export default function App() {
             </div>
             <h1 className="truncate text-[13px] font-medium text-slate-200">{currentTitle}</h1>
           </div>
-          <button
-            type="button"
-            onClick={() => openPanel(panelTab)}
-            className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
-              panelOpen
-                ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
-                : "border-white/[0.08] bg-white/[0.03] text-slate-400 hover:bg-white/[0.06]"
-            }`}
-          >
-            <PanelRight size={14} /> Project
-          </button>
-          <button
-            type="button"
-            aria-label="Settings"
-            onClick={() => openSettings("model")}
-            className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
-          >
-            <Settings size={16} />
-          </button>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col">
@@ -1223,6 +1366,10 @@ export default function App() {
         </>
       )}
 
+      {shortcutsOpen && (
+        <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />
+      )}
+
       {settingsOpen && (
         <SettingsDialog
           tab={settingsTab}
@@ -1350,7 +1497,8 @@ export default function App() {
           </div>
         </div>
       )}
-    </main>
+      </main>
+    </div>
   );
 }
 
@@ -1521,6 +1669,62 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
             out · ${entry.usage.cost_usd.toFixed(4)}
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+function ShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const shortcuts = [
+    ["Command menu", "Ctrl K"],
+    ["New session", "Ctrl N"],
+    ["Toggle sidebar", "Ctrl B"],
+    ["Settings", "Ctrl ,"],
+    ["Send message", "Enter"],
+    ["New line", "Shift Enter"],
+    ["Close menu or dialog", "Esc"],
+  ];
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Keyboard shortcuts"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-[14px] font-medium">Keyboard shortcuts</h2>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              Menus carry project actions; the canvas stays yours.
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Close keyboard shortcuts"
+            onClick={onClose}
+            className="rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <div className="mt-4 space-y-1">
+          {shortcuts.map(([label, keys]) => (
+            <div
+              key={label}
+              className="flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] text-slate-300 hover:bg-white/[0.03]"
+            >
+              <span>{label}</span>
+              <span className="rounded border border-white/[0.08] bg-black/30 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+                {keys}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
