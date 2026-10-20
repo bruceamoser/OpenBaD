@@ -149,6 +149,8 @@ enum WriteCommand {
         content: String,
         confidence: String,
         source_hash: Option<String>,
+        supersedes: Option<String>,
+        review_status: String,
         reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
     },
     UpdateKnowledgeDocument {
@@ -159,7 +161,14 @@ enum WriteCommand {
         tags: Option<Vec<String>>,
         confidence: Option<String>,
         source_hash: Option<String>,
+        supersedes: Option<String>,
+        review_status: Option<String>,
         reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
+    },
+    SetKnowledgeKind {
+        document_id: String,
+        kind: String,
+        reply: SyncSender<Result<(), StoreError>>,
     },
     DeleteKnowledgeDocument {
         document_id: String,
@@ -429,7 +438,7 @@ impl Store {
             "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                     length(d.content),
                     (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                    d.created_at, d.updated_at, d.confidence, d.source_hash
+                    d.created_at, d.updated_at, d.confidence, d.source_hash, d.supersedes, d.review_status
              FROM knowledge_documents d
              WHERE d.workspace_id = ?1
              ORDER BY d.updated_at DESC",
@@ -448,14 +457,14 @@ impl Store {
                 "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                         length(d.content),
                         (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                        d.created_at, d.updated_at, d.confidence, d.source_hash, d.content
+                        d.created_at, d.updated_at, d.confidence, d.source_hash, d.supersedes, d.review_status, d.content
                  FROM knowledge_documents d WHERE d.id = ?1",
                 [document_id],
                 |row| {
                     let summary = knowledge_summary_from_row(row)?;
                     Ok(KnowledgeDocument {
                         summary,
-                        content: row.get(12)?,
+                        content: row.get(14)?,
                     })
                 },
             )
@@ -497,6 +506,34 @@ impl Store {
         confidence: &str,
         source_hash: Option<&str>,
     ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.add_knowledge_document_with_metadata(
+            workspace_id,
+            title,
+            kind,
+            source,
+            tags,
+            content,
+            confidence,
+            source_hash,
+            None,
+            "accepted",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_knowledge_document_with_metadata(
+        &self,
+        workspace_id: WorkspaceId,
+        title: &str,
+        kind: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+        content: &str,
+        confidence: &str,
+        source_hash: Option<&str>,
+        supersedes: Option<&str>,
+        review_status: &str,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
         self.write(|reply| WriteCommand::AddKnowledgeDocument {
             workspace_id,
             title: title.to_owned(),
@@ -506,6 +543,8 @@ impl Store {
             content: content.to_owned(),
             confidence: confidence.to_owned(),
             source_hash: source_hash.map(str::to_owned),
+            supersedes: supersedes.map(str::to_owned),
+            review_status: review_status.to_owned(),
             reply,
         })
     }
@@ -541,6 +580,32 @@ impl Store {
         confidence: Option<&str>,
         source_hash: Option<&str>,
     ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.update_knowledge_document_with_metadata(
+            document_id,
+            title,
+            content,
+            source,
+            tags,
+            confidence,
+            source_hash,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_knowledge_document_with_metadata(
+        &self,
+        document_id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+        confidence: Option<&str>,
+        source_hash: Option<&str>,
+        supersedes: Option<&str>,
+        review_status: Option<&str>,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
         self.write(|reply| WriteCommand::UpdateKnowledgeDocument {
             document_id: document_id.to_owned(),
             title: title.map(str::to_owned),
@@ -549,6 +614,34 @@ impl Store {
             tags,
             confidence: confidence.map(str::to_owned),
             source_hash: source_hash.map(str::to_owned),
+            supersedes: supersedes.map(str::to_owned),
+            review_status: review_status.map(str::to_owned),
+            reply,
+        })
+    }
+
+    pub fn set_knowledge_review_status(
+        &self,
+        document_id: &str,
+        review_status: &str,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.update_knowledge_document_with_metadata(
+            document_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(review_status),
+        )
+    }
+
+    pub fn set_knowledge_kind(&self, document_id: &str, kind: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::SetKnowledgeKind {
+            document_id: document_id.to_owned(),
+            kind: kind.to_owned(),
             reply,
         })
     }
@@ -611,7 +704,9 @@ impl Store {
             "SELECT f.title, f.document_id, f.seq,
                     snippet(knowledge_fts, 4, '<<', '>>', '…', 24)
              FROM knowledge_fts f
+             JOIN knowledge_documents d ON d.id = f.document_id
              WHERE f.workspace_id = ?1 AND knowledge_fts MATCH ?2
+               AND d.review_status NOT IN ('rejected', 'superseded')
              ORDER BY rank LIMIT ?3",
         )?;
         let rows = knowledge.query_map(
@@ -1611,6 +1706,8 @@ fn knowledge_summary_from_row(
         updated_at: row.get(9)?,
         confidence: row.get(10)?,
         source_hash: row.get(11)?,
+        supersedes: row.get(12)?,
+        review_status: row.get(13)?,
     })
 }
 
@@ -1681,13 +1778,37 @@ fn add_knowledge_document(
     content: &str,
     confidence: &str,
     source_hash: Option<&str>,
+    supersedes: Option<&str>,
+    review_status: &str,
 ) -> Result<KnowledgeDocumentSummary, StoreError> {
+    if !matches!(
+        review_status,
+        "proposed" | "accepted" | "rejected" | "superseded"
+    ) {
+        return Err(StoreError::InvalidData(format!(
+            "review_status must be proposed, accepted, rejected, or superseded: {review_status}"
+        )));
+    }
     if content.trim().is_empty() {
         return Err(StoreError::InvalidData(
             "knowledge content cannot be empty".to_owned(),
         ));
     }
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    if let Some(previous) = supersedes {
+        let valid: Option<String> = connection
+            .query_row(
+                "SELECT id FROM knowledge_documents WHERE id = ?1 AND workspace_id = ?2",
+                params![previous, workspace_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if valid.is_none() {
+            return Err(StoreError::InvalidData(format!(
+                "superseded knowledge document not found: {previous}"
+            )));
+        }
+    }
     let existing: Option<String> = connection
         .query_row(
             "SELECT id FROM knowledge_documents WHERE workspace_id = ?1 AND content_hash = ?2",
@@ -1701,7 +1822,7 @@ fn add_knowledge_document(
                 "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                         length(d.content),
                         (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                        d.created_at, d.updated_at, d.confidence, d.source_hash
+                        d.created_at, d.updated_at, d.confidence, d.source_hash, d.supersedes, d.review_status
                  FROM knowledge_documents d WHERE d.id = ?1",
                 [id],
                 knowledge_summary_from_row,
@@ -1726,8 +1847,8 @@ fn add_knowledge_document(
     transaction.execute(
         "INSERT INTO knowledge_documents
             (id, workspace_id, title, kind, source, tags_json, content, content_hash,
-             confidence, source_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+             confidence, source_hash, supersedes, review_status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
         params![
             document_id,
             workspace_id.to_string(),
@@ -1739,6 +1860,8 @@ fn add_knowledge_document(
             hash,
             confidence,
             source_hash,
+            supersedes,
+            review_status,
             now
         ],
     )?;
@@ -1767,6 +1890,14 @@ fn add_knowledge_document(
             ],
         )?;
     }
+    if let Some(previous) = supersedes {
+        transaction.execute(
+            "UPDATE knowledge_documents
+             SET review_status = 'superseded', updated_at = ?1
+             WHERE id = ?2",
+            params![now, previous],
+        )?;
+    }
     transaction.commit()?;
 
     connection
@@ -1774,7 +1905,7 @@ fn add_knowledge_document(
             "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                 length(d.content),
                 (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                d.created_at, d.updated_at, d.confidence, d.source_hash
+                d.created_at, d.updated_at, d.confidence, d.source_hash, d.supersedes, d.review_status
          FROM knowledge_documents d WHERE d.id = ?1",
             [&document_id],
             knowledge_summary_from_row,
@@ -1792,7 +1923,19 @@ fn update_knowledge_document(
     tags: Option<Vec<String>>,
     confidence: Option<&str>,
     source_hash: Option<&str>,
+    supersedes: Option<&str>,
+    review_status: Option<&str>,
 ) -> Result<KnowledgeDocumentSummary, StoreError> {
+    if let Some(review_status) = review_status {
+        if !matches!(
+            review_status,
+            "proposed" | "accepted" | "rejected" | "superseded"
+        ) {
+            return Err(StoreError::InvalidData(format!(
+                "review_status must be proposed, accepted, rejected, or superseded: {review_status}"
+            )));
+        }
+    }
     let existing = connection
         .query_row(
             "SELECT workspace_id, title, kind, source, content, tags_json, confidence, source_hash
@@ -1856,8 +1999,11 @@ fn update_knowledge_document(
     transaction.execute(
         "UPDATE knowledge_documents
          SET title = ?1, kind = ?2, source = ?3, tags_json = ?4, content = ?5,
-             content_hash = ?6, confidence = ?7, source_hash = ?8, updated_at = ?9
-         WHERE id = ?10",
+             content_hash = ?6, confidence = ?7, source_hash = ?8,
+             supersedes = COALESCE(?9, supersedes),
+             review_status = COALESCE(?10, review_status),
+             updated_at = ?11
+         WHERE id = ?12",
         params![
             title,
             kind,
@@ -1867,6 +2013,8 @@ fn update_knowledge_document(
             hash,
             confidence,
             source_hash,
+            supersedes,
+            review_status,
             now,
             document_id
         ],
@@ -1891,7 +2039,7 @@ fn update_knowledge_document(
             "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                     length(d.content),
                     (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                    d.created_at, d.updated_at, d.confidence, d.source_hash
+                    d.created_at, d.updated_at, d.confidence, d.source_hash, d.supersedes, d.review_status
              FROM knowledge_documents d WHERE d.id = ?1",
             [document_id],
             knowledge_summary_from_row,
@@ -2382,6 +2530,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 content,
                 confidence,
                 source_hash,
+                supersedes,
+                review_status,
                 reply,
             } => {
                 let _ = reply.send(add_knowledge_document(
@@ -2394,6 +2544,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     &content,
                     &confidence,
                     source_hash.as_deref(),
+                    supersedes.as_deref(),
+                    &review_status,
                 ));
             }
             WriteCommand::UpdateKnowledgeDocument {
@@ -2404,6 +2556,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 tags,
                 confidence,
                 source_hash,
+                supersedes,
+                review_status,
                 reply,
             } => {
                 let _ = reply.send(update_knowledge_document(
@@ -2415,7 +2569,23 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     tags,
                     confidence.as_deref(),
                     source_hash.as_deref(),
+                    supersedes.as_deref(),
+                    review_status.as_deref(),
                 ));
+            }
+            WriteCommand::SetKnowledgeKind {
+                document_id,
+                kind,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "UPDATE knowledge_documents SET kind = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![kind, now_millis(), document_id],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
             }
             WriteCommand::DeleteKnowledgeDocument { document_id, reply } => {
                 let result = (|| -> Result<(), StoreError> {
@@ -2649,7 +2819,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0008_memory_provenance"
+            "0009_knowledge_review"
         );
     }
 
@@ -3346,6 +3516,69 @@ mod tests {
                 .expect("retrieval after delete")
                 .iter()
                 .all(|hit| hit.source != "knowledge")
+        );
+    }
+
+    #[test]
+    fn knowledge_supersession_and_review_status_control_retrieval() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("knowledge-review", "/tmp/openbad-knowledge-review")
+            .expect("workspace");
+        let first = store
+            .add_knowledge_document(
+                workspace,
+                "Old decision",
+                "decision",
+                None,
+                vec!["storage".to_owned()],
+                "The parser uses only an in-memory cache.",
+            )
+            .expect("first");
+        let second = store
+            .add_knowledge_document_with_metadata(
+                workspace,
+                "New decision",
+                "decision",
+                None,
+                vec!["storage".to_owned()],
+                "The parser uses a persistent cache and snapshots.",
+                "verified",
+                None,
+                Some(&first.id),
+                "accepted",
+            )
+            .expect("second");
+        assert_eq!(second.supersedes.as_deref(), Some(first.id.as_str()));
+        assert_eq!(second.review_status, "accepted");
+        let documents = store.list_knowledge_documents(workspace).expect("list");
+        assert_eq!(documents.len(), 2);
+        assert_eq!(
+            documents
+                .iter()
+                .find(|document| document.id == first.id)
+                .expect("first present")
+                .review_status,
+            "superseded"
+        );
+        let hits = store
+            .retrieve_project(workspace, "cache", 10)
+            .expect("retrieve");
+        assert!(hits.iter().all(|hit| !hit.locator.starts_with(&first.id)));
+        assert!(hits.iter().any(|hit| hit.locator.starts_with(&second.id)));
+
+        let rejected = store
+            .set_knowledge_review_status(&second.id, "rejected")
+            .expect("reject");
+        assert_eq!(rejected.review_status, "rejected");
+        let hits = store
+            .retrieve_project(workspace, "persistent cache", 10)
+            .expect("retrieve rejected");
+        assert!(hits.iter().all(|hit| !hit.locator.starts_with(&second.id)));
+        assert!(
+            store
+                .set_knowledge_review_status(&second.id, "invalid")
+                .is_err()
         );
     }
 

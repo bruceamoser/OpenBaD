@@ -36,6 +36,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0008_memory_provenance",
         include_str!("../migrations/0008_memory_provenance.sql"),
     ),
+    (
+        "0009_knowledge_review",
+        include_str!("../migrations/0009_knowledge_review.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

@@ -345,6 +345,8 @@ Implemented:
 | `get_knowledge` | read | Read a whole knowledge document by id |
 | `update_knowledge` | write | Correct title, content, source, tags, or confidence; rebuilds chunks |
 | `delete_knowledge` | write | Delete a knowledge document and its retrieval chunks |
+| `review_knowledge` | write | Proposed/accepted/rejected/superseded curation state |
+| `export_knowledge` / `import_knowledge` | write | Git-friendly Markdown export/import under `knowledge/` |
 | `list_memories` | read | Audit memories with ids, scope, provenance, and pinned state |
 | `update_memory` | write | Correct memory content, tags, pinned state, or scope |
 | `forget_memory` | write | Forget a memory by id |
@@ -369,6 +371,13 @@ The desktop implementation backs project tools with `StoreProjectAreas`, which
 implements `ProjectAreas` against the active workspace id. `present_artifact`
 returns `metadata.openbad_artifact`; the event stream carries that metadata to
 the UI, which opens the split workspace.
+
+Knowledge documents are typed (`note`, `decision`, `reference`, `gotcha`,
+`procedure`, `glossary`, `finding`, `question`) and carry review state. A note
+whose content likely contradicts an existing note must pass `supersedes`;
+rejected and superseded documents remain auditable but leave retrieval. The
+Markdown round trip writes `knowledge/*.md` with frontmatter so review can
+happen in git.
 
 Knowledge documents carry a confidence level and, for imported files, a BLAKE3
 source hash. `list_knowledge` and `get_knowledge` flag a document as `STALE`
