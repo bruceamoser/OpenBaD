@@ -224,6 +224,7 @@ impl ToolRegistry {
         registry.register(WriteFileTool);
         registry.register(EditFileTool);
         registry.register(RunCommandTool);
+        registry.register(RunTestsTool);
         registry.register(GitStatusTool);
         registry.register(GitDiffTool);
         registry.register(RepoMapTool);
@@ -991,7 +992,7 @@ impl Tool for RunCommandTool {
             "properties": {
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "description": "Workspace-relative directory"},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
             },
             "required": ["command"],
             "additionalProperties": false
@@ -1013,7 +1014,7 @@ impl Tool for RunCommandTool {
         };
         let timeout = optional_usize(&arguments, "timeout_seconds")
             .unwrap_or(30)
-            .clamp(1, 120) as u64;
+            .clamp(1, 600) as u64;
 
         let mut process = if cfg!(windows) {
             let mut process = std::process::Command::new("cmd");
@@ -1097,6 +1098,141 @@ fn kill_process_tree(child: &mut std::process::Child) {
             .status();
     }
     let _ = child.kill();
+}
+
+struct RunTestsTool;
+
+#[async_trait]
+impl Tool for RunTestsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "run_tests",
+            "Detect and run the workspace test suite (Cargo, pnpm/npm, pytest, Go, or make). Requires command approval.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(120)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative project directory"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired("run_tests".to_owned()));
+        }
+        let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let directory = context.workspace.resolve(Path::new(&relative))?;
+        let (command, kind) = detect_test_command(&directory)?;
+        let timeout = optional_usize(&arguments, "timeout_seconds")
+            .unwrap_or(300)
+            .clamp(1, 600);
+        let result = RunCommandTool
+            .execute(
+                json!({
+                    "command": command,
+                    "cwd": directory.display().to_string(),
+                    "timeout_seconds": timeout
+                }),
+                context,
+            )
+            .await?;
+        let summary = test_failure_summary(&result.content);
+        let mut content = format!("{kind}: {command}\n{}", result.content);
+        if let Some(summary) = summary {
+            content.push_str("\nfailures:\n");
+            content.push_str(&summary);
+        }
+        Ok(
+            ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(json!({
+                "kind": kind,
+                "command": command,
+                "success": result.metadata.get("success").and_then(Value::as_bool),
+            })),
+        )
+    }
+}
+
+fn detect_test_command(directory: &Path) -> Result<(String, &'static str), ToolError> {
+    if directory.join("Cargo.toml").is_file() {
+        let manifest = std::fs::read_to_string(directory.join("Cargo.toml"))?;
+        let command = if manifest.contains("[workspace]") {
+            "cargo test --workspace"
+        } else {
+            "cargo test"
+        };
+        return Ok((command.to_owned(), "cargo"));
+    }
+    if directory.join("package.json").is_file() {
+        let package = std::fs::read_to_string(directory.join("package.json"))?;
+        let package: Value = serde_json::from_str(&package)
+            .map_err(|error| ToolError::Failed(format!("invalid package.json: {error}")))?;
+        if package
+            .get("scripts")
+            .and_then(|scripts| scripts.get("test"))
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return Err(ToolError::Failed(
+                "package.json has no test script".to_owned(),
+            ));
+        }
+        let command = if directory.join("pnpm-lock.yaml").is_file() {
+            "pnpm test"
+        } else if directory.join("yarn.lock").is_file() {
+            "yarn test"
+        } else {
+            "npm test"
+        };
+        return Ok((command.to_owned(), "node"));
+    }
+    if directory.join("pyproject.toml").is_file()
+        || directory.join("pytest.ini").is_file()
+        || directory.join("setup.cfg").is_file()
+        || directory.join("tox.ini").is_file()
+    {
+        return Ok(("python3 -m pytest -q".to_owned(), "pytest"));
+    }
+    if directory.join("go.mod").is_file() {
+        return Ok(("go test ./...".to_owned(), "go"));
+    }
+    if directory.join("Makefile").is_file() {
+        let makefile = std::fs::read_to_string(directory.join("Makefile"))?;
+        if makefile.lines().any(|line| line.trim() == "test:") {
+            return Ok(("make test".to_owned(), "make"));
+        }
+    }
+    Err(ToolError::Failed(format!(
+        "no recognized test project in {}",
+        directory.display()
+    )))
+}
+
+fn test_failure_summary(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output
+        .lines()
+        .filter(|line| {
+            line.contains("test result: FAILED")
+                || line.contains("FAILED")
+                || line.starts_with("Tests:")
+                || line.contains(" failed,")
+                || line.trim_start().starts_with("FAILED ")
+        })
+        .take(12)
+        .collect();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 struct GitStatusTool;
@@ -1550,11 +1686,47 @@ mod tests {
         assert!(symbols.content.contains("src/indexed.rs:9: fn lookup()"));
     }
 
+    #[test]
+    fn detects_test_commands_and_failure_lines() {
+        let cargo = tempdir().expect("cargo");
+        fs::write(
+            cargo.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("manifest");
+        assert_eq!(
+            detect_test_command(cargo.path()).expect("cargo command"),
+            ("cargo test --workspace".to_owned(), "cargo")
+        );
+
+        let node = tempdir().expect("node");
+        fs::write(
+            node.path().join("package.json"),
+            r#"{"scripts":{"test":"vitest run"}}"#,
+        )
+        .expect("package");
+        fs::write(node.path().join("pnpm-lock.yaml"), "").expect("lock");
+        assert_eq!(
+            detect_test_command(node.path()).expect("node command"),
+            ("pnpm test".to_owned(), "node")
+        );
+
+        let empty = tempdir().expect("empty");
+        assert!(detect_test_command(empty.path()).is_err());
+
+        let summary = test_failure_summary(
+            "ok\ntest result: FAILED. 2 passed; 1 failed\nTests: 1 failed, 2 passed\n",
+        )
+        .expect("summary");
+        assert!(summary.contains("test result: FAILED"));
+        assert!(summary.contains("Tests: 1 failed"));
+    }
+
     #[tokio::test]
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
-        assert!(definitions.len() >= 12);
+        assert!(definitions.len() >= 13);
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
     }
