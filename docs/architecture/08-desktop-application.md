@@ -338,3 +338,20 @@ number after a disconnect.
 
 Mock provider fixtures cover DeepSeek streaming, tool calls, thinking output,
 cache usage, errors, and rate limits.
+
+### Native automation
+
+The desktop shell is covered by a WebDriver suite in
+`apps/desktop/native-e2e/`. It launches the real Tauri binary through
+`tauri-driver` and `WebKitWebDriver`, uses an isolated SQLite database, and
+serves a mock DeepSeek SSE endpoint. The suite verifies project counts, the
+Agents area, a real chat round-trip, and both copy controls.
+
+CI installs `webkitgtk-webdriver` and `tauri-driver`, builds
+`target/debug/openbad-desktop`, and runs the suite under `xvfb-run`. Run it
+locally with:
+
+```bash
+cd apps/desktop && ./ui/node_modules/.bin/tauri build --no-bundle --debug
+cd native-e2e && npm test
+```

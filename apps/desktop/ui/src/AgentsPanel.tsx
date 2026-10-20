@@ -87,10 +87,9 @@ export default function AgentsPanel({
   );
 
   useEffect(() => {
-    if (!running) return;
     const timer = window.setInterval(() => {
       void refresh();
-    }, 2000);
+    }, running ? 2000 : 5000);
     return () => window.clearInterval(timer);
   }, [refresh, running]);
 
@@ -134,7 +133,8 @@ export default function AgentsPanel({
             </code>{" "}
             tool with <code className="text-slate-300">action: "spawn"</code>, then
             collect results with <code className="text-slate-300">action: "status"</code>.
-            Workers share this project&apos;s workspace and access mode.
+            Workers share this project&apos;s workspace and access mode. Finished
+            workers are removed automatically after a short retention window.
           </div>
         )}
         {agents.map((agent) => (

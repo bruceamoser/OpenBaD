@@ -665,7 +665,9 @@ Rules:
   The `subagent` tool is not available inside a worker, so depth is one.
 - Worker records live in the `subagents` table with status, step count, activity
   log, result, error, model, and timestamps. The activity log is capped at
-  32 KB.
+  32 KB. Terminal records are pruned automatically after 60 seconds (override
+  with `OPENBAD_SUBAGENT_RETENTION_SECONDS`), so finished workers do not
+  accumulate in the project Agents area.
 - The project panel's Agents area lists workers, updates while one is running,
   opens a completed result as a Markdown artifact, and can cancel a running
   worker.
