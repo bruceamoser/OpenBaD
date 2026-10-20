@@ -325,6 +325,9 @@ Implemented:
 | `glob_repo` | read | Find reference-folder files by glob |
 | `grep_repo` | read | Search reference-folder text; case-insensitive by default |
 | `read_repo_file` | read | UTF-8 file inside a read-only reference folder; reports total lines |
+| `pin_context` / `exclude_context` | write | Maintain `.openbad/context.yaml` residency rules |
+| `list_context_rules` / `context_map` | read | Audit pinned/excluded rules and files loaded this turn |
+| `record_dead_end` / `list_dead_ends` | write/read | Negative knowledge in `.openbad/dead-ends.json` |
 | `stat_file` / `stat_repo_file` | read | Size, line count, mtime, and BLAKE3 hash without loading content |
 | `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
@@ -363,6 +366,12 @@ source that has disappeared is treated as stale.
 the written path. Validators execute only in Full access; a failing validator
 restores the previous file content and returns its output. Writes and edits that target
 generated or historical scope return a manifest-derived warning.
+
+`.openbad/context.yaml` declares `pinned` and `excluded` globs. Excluded paths
+are refused by direct reads and filtered from list, grep, glob, symbol, and
+indexed-search results. `context_map` reports loaded files for the current turn,
+the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
+`.openbad/dead-ends.json` and are injected into the system prompt.
 
 `.openbad/permissions.yaml` can restrict writes by glob (`allow_paths`,
 `deny_paths`, `allow_writes: false`) and commands by class or substring

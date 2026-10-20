@@ -406,6 +406,14 @@ impl ToolContext {
         (turn > 0).then_some(turn)
     }
 
+    #[must_use]
+    pub fn loaded_paths(&self) -> Vec<PathBuf> {
+        self.read_paths
+            .lock()
+            .map(|paths| paths.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn mark_read(&self, path: &Path) {
         if let Ok(mut paths) = self.read_paths.lock() {
             paths.insert(path.to_path_buf());
@@ -483,6 +491,12 @@ impl ToolRegistry {
         registry.register(GlobRepoTool);
         registry.register(GrepRepoTool);
         registry.register(PresentArtifactTool);
+        registry.register(PinContextTool);
+        registry.register(ExcludeContextTool);
+        registry.register(ListContextRulesTool);
+        registry.register(ContextMapTool);
+        registry.register(RecordDeadEndTool);
+        registry.register(ListDeadEndsTool);
         registry.register(ReadProjectManifestTool);
         registry.register(ClassifyPathTool);
         registry.register(RunTaskTool);
@@ -831,6 +845,79 @@ fn outline_entries(path: &Path, content: &str, max_entries: usize) -> Vec<String
     entries
 }
 
+fn context_policy(context: &ToolContext) -> Result<openbad_workspace::ContextPolicy, ToolError> {
+    openbad_workspace::load_context_policy(context.workspace.root())
+        .map_err(|error| ToolError::Failed(error.to_string()))
+}
+
+fn ensure_not_excluded(context: &ToolContext, path: &Path) -> Result<(), ToolError> {
+    let relative = relative_to_root(context, path);
+    let policy = context_policy(context)?;
+    if policy.is_excluded(&relative) {
+        return Err(ToolError::Failed(format!(
+            "{relative} is excluded by .openbad/context.yaml; do not load it"
+        )));
+    }
+    Ok(())
+}
+
+fn path_is_excluded(context: &ToolContext, path: &Path) -> bool {
+    let relative = relative_to_root(context, path);
+    context_policy(context)
+        .map(|policy| policy.is_excluded(&relative))
+        .unwrap_or(false)
+}
+
+fn update_context_rule(
+    arguments: &Value,
+    context: &ToolContext,
+    excluded: bool,
+) -> Result<ToolResult, ToolError> {
+    if !context.allow_writes {
+        return Err(ToolError::ApprovalRequired(if excluded {
+            "exclude_context".to_owned()
+        } else {
+            "pin_context".to_owned()
+        }));
+    }
+    let path = string_arg(arguments, "path")?;
+    if path.trim().is_empty() {
+        return Err(ToolError::InvalidArgument(
+            "path must not be empty".to_owned(),
+        ));
+    }
+    let note = optional_string(arguments, "note");
+    let mut policy = context_policy(context)?;
+    if optional_bool(arguments, "remove").unwrap_or(false) {
+        if !policy.remove(&path) {
+            return Err(ToolError::InvalidArgument(format!(
+                "no context rule matches {path}"
+            )));
+        }
+    } else if excluded {
+        policy.add_excluded(&path, note.as_deref());
+    } else {
+        policy.add_pinned(&path, note.as_deref());
+    }
+    openbad_workspace::save_context_policy(context.workspace.root(), &policy)
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+    Ok(ToolResult::ok(format!(
+        "{} context rule for {path}",
+        if optional_bool(arguments, "remove").unwrap_or(false) {
+            "removed"
+        } else if excluded {
+            "excluded"
+        } else {
+            "pinned"
+        }
+    ))
+    .with_metadata(json!({
+        "path": path,
+        "pinned": policy.pinned.len(),
+        "excluded": policy.excluded.len()
+    })))
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1100,6 +1187,7 @@ impl Tool for ReadFileTool {
         let path = context
             .workspace
             .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        ensure_not_excluded(context, &path)?;
         let content = std::fs::read_to_string(&path)?;
         context.mark_read(&path);
 
@@ -1258,7 +1346,9 @@ impl Tool for ReadFilesTool {
         let mut files = Vec::new();
         for raw in paths {
             match context.workspace.resolve(Path::new(&raw)) {
-                Ok(path) => match std::fs::read_to_string(&path) {
+                Ok(path) => match ensure_not_excluded(context, &path)
+                    .and_then(|()| std::fs::read_to_string(&path).map_err(ToolError::from))
+                {
                     Ok(content) => {
                         context.mark_read(&path);
                         files.push(json!({
@@ -1384,6 +1474,7 @@ impl Tool for OutlineTool {
             }
             None => context.workspace.resolve(Path::new(&raw))?,
         };
+        ensure_not_excluded(context, &path)?;
         let content = std::fs::read_to_string(&path)?;
         context.mark_read(&path);
         let cap = optional_usize(&arguments, "max_entries")
@@ -1712,6 +1803,9 @@ impl Tool for ListDirTool {
             if entry.path() == root {
                 continue;
             }
+            if path_is_excluded(context, entry.path()) {
+                continue;
+            }
             let relative = entry
                 .path()
                 .strip_prefix(context.workspace.root())
@@ -1783,7 +1877,9 @@ impl Tool for GrepTool {
             if matches.len() >= max_results {
                 break;
             }
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            if !entry.file_type().is_some_and(|kind| kind.is_file())
+                || path_is_excluded(context, entry.path())
+            {
                 continue;
             }
             let metadata = match entry.metadata() {
@@ -1862,7 +1958,14 @@ impl Tool for SearchCodeTool {
         if let Some(search) = &context.search {
             let hits = search
                 .search(&query, max_results)
-                .map_err(ToolError::Failed)?;
+                .map_err(ToolError::Failed)?
+                .into_iter()
+                .filter(|hit| {
+                    !context_policy(context)
+                        .map(|policy| policy.is_excluded(&hit.path))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
             let content = hits
                 .iter()
                 .map(|hit| format!("{}: {}", hit.path, hit.snippet.replace('\n', " ")))
@@ -1925,7 +2028,9 @@ impl Tool for GlobTool {
             if matches.len() >= max_results {
                 break;
             }
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            if !entry.file_type().is_some_and(|kind| kind.is_file())
+                || path_is_excluded(context, entry.path())
+            {
                 continue;
             }
             let path = entry
@@ -1993,7 +2098,14 @@ impl Tool for FindSymbolsTool {
         if let Some(search) = &context.search {
             let hits = search
                 .find_symbols(&query, kind_filter.as_deref(), max_results)
-                .map_err(ToolError::Failed)?;
+                .map_err(ToolError::Failed)?
+                .into_iter()
+                .filter(|hit| {
+                    !context_policy(context)
+                        .map(|policy| policy.is_excluded(&hit.path))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
             let content = hits
                 .iter()
                 .map(|hit| format!("{}:{}: {}", hit.path, hit.line, hit.signature))
@@ -2016,7 +2128,7 @@ impl Tool for FindSymbolsTool {
                 continue;
             }
             let path = entry.path();
-            if !is_code_file(path) {
+            if !is_code_file(path) || path_is_excluded(context, path) {
                 continue;
             }
             if entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > 1024 * 1024 {
@@ -3504,7 +3616,9 @@ impl Tool for GrepRepoTool {
             if matches.len() >= max_results {
                 break;
             }
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            if !entry.file_type().is_some_and(|kind| kind.is_file())
+                || path_is_excluded(context, entry.path())
+            {
                 continue;
             }
             let metadata = match entry.metadata() {
@@ -3619,6 +3733,272 @@ impl Tool for PresentArtifactTool {
             "Presented {kind} artifact \"{title}\" beside the chat."
         ))
         .with_metadata(json!({"openbad_artifact": artifact})))
+    }
+}
+
+struct PinContextTool;
+
+#[async_trait]
+impl Tool for PinContextTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "pin_context",
+            "Keep a path resident in working context. Writes .openbad/context.yaml; use remove=true to drop the rule.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative glob"},
+                "note": {"type": "string"},
+                "remove": {"type": "boolean"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        update_context_rule(&arguments, context, false)
+    }
+}
+
+struct ExcludeContextTool;
+
+#[async_trait]
+impl Tool for ExcludeContextTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "exclude_context",
+            "Guarantee a path is never loaded. Writes .openbad/context.yaml; use remove=true to drop the rule.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative glob"},
+                "note": {"type": "string", "description": "Why this must not be loaded"},
+                "remove": {"type": "boolean"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        update_context_rule(&arguments, context, true)
+    }
+}
+
+struct ListContextRulesTool;
+
+#[async_trait]
+impl Tool for ListContextRulesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_context_rules",
+            "List pinned and excluded context rules from .openbad/context.yaml.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let policy = context_policy(context)?;
+        if policy.pinned.is_empty() && policy.excluded.is_empty() {
+            return Ok(ToolResult::ok("no context rules"));
+        }
+        Ok(ToolResult::ok(policy.summary()).with_metadata(json!({
+            "pinned": policy.pinned.len(),
+            "excluded": policy.excluded.len()
+        })))
+    }
+}
+
+struct ContextMapTool;
+
+#[async_trait]
+impl Tool for ContextMapTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "context_map",
+            "Report what this turn has loaded, pinned rules, excluded rules, and ruled-out findings.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let policy = context_policy(context)?;
+        let dead_ends = openbad_workspace::load_dead_ends(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let mut loaded = context
+            .loaded_paths()
+            .into_iter()
+            .map(|path| relative_to_root(context, &path))
+            .collect::<Vec<_>>();
+        loaded.sort();
+        loaded.dedup();
+        let mut content = format!(
+            "Holding {} file(s) this turn: {}\nPinned rules: {} · Excluded rules: {} · Ruled out: {}",
+            loaded.len(),
+            if loaded.is_empty() {
+                "none".to_owned()
+            } else {
+                loaded.join(", ")
+            },
+            policy.pinned.len(),
+            policy.excluded.len(),
+            dead_ends.len()
+        );
+        let summary = policy.summary();
+        if !summary.is_empty() {
+            content.push('\n');
+            content.push_str(&summary);
+        }
+        let ruled_out = openbad_workspace::dead_end_summary(&dead_ends, 10);
+        if !ruled_out.is_empty() {
+            content.push('\n');
+            content.push_str(&ruled_out);
+        }
+        Ok(
+            ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(json!({
+                "loaded_files": loaded,
+                "pinned": policy.pinned,
+                "excluded": policy.excluded,
+                "dead_ends": dead_ends.len()
+            })),
+        )
+    }
+}
+
+struct RecordDeadEndTool;
+
+#[async_trait]
+impl Tool for RecordDeadEndTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "record_dead_end",
+            "Record a ruled-out path, search, or hypothesis in .openbad/dead-ends.json so future sessions do not re-explore it.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Path, symbol, or hypothesis that was ruled out"},
+                "reason": {"type": "string", "description": "Evidence that rules it out"},
+                "hypothesis": {"type": "string"}
+            },
+            "required": ["pattern", "reason"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("record_dead_end".to_owned()));
+        }
+        let pattern = string_arg(&arguments, "pattern")?;
+        let reason = string_arg(&arguments, "reason")?;
+        if pattern.trim().is_empty() || reason.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "pattern and reason must not be empty".to_owned(),
+            ));
+        }
+        let mut dead_ends = openbad_workspace::load_dead_ends(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let entry = openbad_workspace::DeadEnd {
+            pattern: pattern.clone(),
+            reason,
+            hypothesis: optional_string(&arguments, "hypothesis"),
+            created_at: now_millis(),
+        };
+        if let Some(existing) = dead_ends
+            .iter_mut()
+            .find(|existing| existing.pattern == pattern)
+        {
+            *existing = entry;
+        } else {
+            dead_ends.push(entry);
+        }
+        openbad_workspace::save_dead_ends(context.workspace.root(), &dead_ends)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "recorded ruled-out finding for {pattern} ({} total)",
+            dead_ends.len()
+        ))
+        .with_metadata(json!({"pattern": pattern, "dead_ends": dead_ends.len()})))
+    }
+}
+
+struct ListDeadEndsTool;
+
+#[async_trait]
+impl Tool for ListDeadEndsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_dead_ends",
+            "List ruled-out paths and hypotheses recorded in .openbad/dead-ends.json.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}}
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let query = optional_string(&arguments, "query").map(|query| query.to_lowercase());
+        let dead_ends = openbad_workspace::load_dead_ends(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let filtered = dead_ends
+            .iter()
+            .filter(|entry| {
+                query.as_ref().is_none_or(|query| {
+                    entry.pattern.to_lowercase().contains(query)
+                        || entry.reason.to_lowercase().contains(query)
+                        || entry
+                            .hypothesis
+                            .as_deref()
+                            .is_some_and(|hypothesis| hypothesis.to_lowercase().contains(query))
+                })
+            })
+            .collect::<Vec<_>>();
+        if filtered.is_empty() {
+            return Ok(
+                ToolResult::ok("no ruled-out findings").with_metadata(json!({"dead_ends": 0}))
+            );
+        }
+        let count = filtered.len();
+        let owned = filtered.into_iter().cloned().collect::<Vec<_>>();
+        Ok(
+            ToolResult::ok(openbad_workspace::dead_end_summary(&owned, 100))
+                .with_metadata(json!({"dead_ends": count})),
+        )
     }
 }
 
@@ -4678,6 +5058,95 @@ validators:
             fs::read_to_string(directory.path().join("src/value.rs")).expect("rollback"),
             "GOOD\n"
         );
+    }
+
+    #[tokio::test]
+    async fn context_rules_exclude_reads_and_track_dead_ends() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join("assets")).expect("assets");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        fs::write(directory.path().join("assets/logo.txt"), "needle asset\n").expect("asset");
+        fs::write(directory.path().join("src/main.rs"), "needle source\n").expect("source");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        ExcludeContextTool
+            .execute(
+                json!({"path": "assets/**", "note": "binary blobs"}),
+                &context,
+            )
+            .await
+            .expect("exclude");
+        PinContextTool
+            .execute(
+                json!({"path": "src/**", "note": "authoritative code"}),
+                &context,
+            )
+            .await
+            .expect("pin");
+
+        let blocked = ReadFileTool
+            .execute(json!({"path": "assets/logo.txt"}), &context)
+            .await
+            .expect_err("excluded read");
+        assert!(
+            blocked
+                .to_string()
+                .contains("excluded by .openbad/context.yaml")
+        );
+        ReadFileTool
+            .execute(json!({"path": "src/main.rs"}), &context)
+            .await
+            .expect("allowed read");
+
+        let grep = GrepTool
+            .execute(json!({"query": "needle", "case_sensitive": true}), &context)
+            .await
+            .expect("grep");
+        assert!(grep.content.contains("src/main.rs"));
+        assert!(!grep.content.contains("assets/logo.txt"));
+
+        let rules = ListContextRulesTool
+            .execute(json!({}), &context)
+            .await
+            .expect("rules");
+        assert!(rules.content.contains("Pinned context"));
+        assert!(rules.content.contains("Excluded context"));
+
+        RecordDeadEndTool
+            .execute(
+                json!({
+                    "pattern": "src/legacy/**",
+                    "reason": "No parser entry point exists",
+                    "hypothesis": "Legacy parser"
+                }),
+                &context,
+            )
+            .await
+            .expect("dead end");
+        let dead_ends = ListDeadEndsTool
+            .execute(json!({"query": "legacy"}), &context)
+            .await
+            .expect("dead ends");
+        assert!(dead_ends.content.contains("No parser entry point"));
+
+        let map = ContextMapTool
+            .execute(json!({}), &context)
+            .await
+            .expect("context map");
+        assert!(map.content.contains("Holding 1 file"));
+        assert!(map.content.contains("src/main.rs"));
+        assert!(map.content.contains("Ruled out"));
+        assert_eq!(map.metadata["dead_ends"], 1);
+
+        ExcludeContextTool
+            .execute(json!({"path": "assets/**", "remove": true}), &context)
+            .await
+            .expect("remove rule");
+        ReadFileTool
+            .execute(json!({"path": "assets/logo.txt"}), &context)
+            .await
+            .expect("allowed after removal");
     }
 
     #[tokio::test]
