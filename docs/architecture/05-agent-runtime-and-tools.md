@@ -339,6 +339,10 @@ Implemented:
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
 | `delete_file` | write | Soft delete to `.openbad/trash`; hard delete requires `hard=true` |
 | `job_start` / `job_status` / `job_logs` / `job_stop` / `job_list` | command/read | Background commands with logs under `.openbad/jobs` |
+| `archive_list` / `archive_read` | read | Inspect zip entries without extraction |
+| `diff_files` / `file_citation` | read | Cross-path diffs and stable `path@hash:line` citations |
+| `git_changes_since` | read | Commits and changed paths since a revision |
+| `registry_lookup` | read | crates.io/npm/PyPI version checks with network policy |
 | `context_report` | read | Estimate loaded files/knowledge/memory tokens and rules |
 | `record_claim` / `list_claims` | write/read | Provenance-tagged claims with evidence |
 | `record_unknown` / `list_unknowns` | write/read | Known-unknown register |
@@ -444,6 +448,11 @@ timestamp, turn, tool, argument/result BLAKE3 digests and 500-character
 previews, error state, and duration. `run_command` tees its full output to
 `.openbad/logs/command-<timestamp>.log` and returns head/tail plus the log path,
 so large builds do not flood context.
+
+`archive_list`/`archive_read` inspect zip archives in place. `diff_files`
+compares workspace or reference files; `file_citation` emits
+`path@blake3:Lstart-Lend` locators. `git_changes_since` summarizes drift, and
+`registry_lookup` verifies package versions against crates.io, npm, or PyPI.
 
 `web_fetch` requires Full access, enforces the `network_hosts` allowlist
 (including redirects), strips scripts/styles from HTML, and stores each body
