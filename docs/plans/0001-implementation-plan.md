@@ -440,7 +440,8 @@ schedules.
   (`.openbad` wins on duplicate names). Both flat `.md` files and
   `<name>/SKILL.md` directories are supported.
 - Skill frontmatter provides `name` and `description`. Only the index is added
-  to the stable system prompt; `read_skill` loads the body on demand.
+  to the stable system prompt; `read_skill` loads the body on demand. Discovery
+  and reads canonicalize skill paths and reject symlinks outside the workspace.
 - Still open for Phase 6: subagents, plan/goal loops, workflows, schedules,
   off-peak execution, and skill scripts/tool allowlists.
 

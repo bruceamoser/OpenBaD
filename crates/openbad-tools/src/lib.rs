@@ -179,6 +179,9 @@ pub struct Skill {
 #[must_use]
 pub fn discover_skills(root: &Path) -> Vec<Skill> {
     let mut skills = BTreeMap::new();
+    let Ok(canonical_root) = root.canonicalize() else {
+        return Vec::new();
+    };
     for relative in [".claude/skills", ".openbad/skills"] {
         let directory = root.join(relative);
         let Ok(entries) = std::fs::read_dir(&directory) else {
@@ -194,6 +197,12 @@ pub fn discover_skills(root: &Path) -> Vec<Skill> {
                 continue;
             };
             if !candidate.is_file() {
+                continue;
+            }
+            let Ok(candidate) = candidate.canonicalize() else {
+                continue;
+            };
+            if !candidate.starts_with(&canonical_root) {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&candidate) else {
@@ -1407,7 +1416,14 @@ impl Tool for ReadSkillTool {
             .into_iter()
             .find(|skill| skill.name == name)
             .ok_or_else(|| ToolError::Failed(format!("skill not found: {name}")))?;
-        let content = std::fs::read_to_string(&skill.path)?;
+        let canonical = skill.path.canonicalize()?;
+        let root = context.workspace.root().canonicalize()?;
+        if !canonical.starts_with(&root) {
+            return Err(ToolError::Failed(format!(
+                "skill path escapes the workspace: {name}"
+            )));
+        }
+        let content = std::fs::read_to_string(&canonical)?;
         Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
             .with_metadata(json!({"name": skill.name, "path": skill.path})))
     }
@@ -2124,6 +2140,22 @@ mod tests {
             .await
             .expect("read");
         assert!(read.content.contains("# Checklist"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_discovery_rejects_symlinks_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside");
+        let outside_skill = outside.path().join("secret.md");
+        fs::write(&outside_skill, "---\nname: secret\n---\n").expect("secret");
+        let skills_dir = directory.path().join(".openbad/skills");
+        fs::create_dir_all(&skills_dir).expect("skills");
+        symlink(&outside_skill, skills_dir.join("secret.md")).expect("symlink");
+
+        assert!(discover_skills(directory.path()).is_empty());
     }
 
     #[test]
