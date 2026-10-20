@@ -205,6 +205,12 @@ export type ProjectManifest = {
     scratch?: string[];
   };
   commands?: Record<string, string | ProjectCommand>;
+  recipes?: Record<string, string | ProjectCommand>;
+  validators?: {
+    pattern: string;
+    command: string;
+    description?: string | null;
+  }[];
   invariants?: {
     id: string;
     statement: string;

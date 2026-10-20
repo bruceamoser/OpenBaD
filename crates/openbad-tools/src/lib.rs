@@ -437,6 +437,8 @@ impl ToolRegistry {
         registry.register(ReadProjectManifestTool);
         registry.register(ClassifyPathTool);
         registry.register(RunTaskTool);
+        registry.register(ListRecipesTool);
+        registry.register(RunRecipeTool);
         registry.register(TodoWriteTool);
         registry.register(TodoReadTool);
         registry.register(WriteHandoffTool);
@@ -778,6 +780,64 @@ fn outline_entries(path: &Path, content: &str, max_entries: usize) -> Vec<String
         }
     }
     entries
+}
+
+async fn run_validators(context: &ToolContext, path: &Path) -> Result<Option<String>, ToolError> {
+    let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+    let Some(manifest) = manifest else {
+        return Ok(None);
+    };
+    let root = context
+        .workspace
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+    let relative = path
+        .strip_prefix(&root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let validators = manifest.validators_for(&relative);
+    if validators.is_empty() {
+        return Ok(None);
+    }
+    if !context.allow_commands {
+        return Ok(Some(format!(
+            "validation skipped: {} validator(s) match {relative} but commands require Full access",
+            validators.len()
+        )));
+    }
+    for validator in validators {
+        let result = RunCommandTool
+            .execute(
+                json!({
+                    "command": validator.command,
+                    "timeout_seconds": 120
+                }),
+                context,
+            )
+            .await?;
+        if !result.metadata["success"].as_bool().unwrap_or(false) {
+            return Err(ToolError::Failed(format!(
+                "validation failed for {relative} with `{}`:\n{}",
+                validator.command, result.content
+            )));
+        }
+    }
+    Ok(Some(format!("validation passed for {relative}")))
+}
+
+fn restore_previous(path: &Path, previous: Option<&str>) -> Result<(), ToolError> {
+    match previous {
+        Some(content) => atomic_write(path, content),
+        None => {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn scope_warning(context: &ToolContext, path: &Path) -> Option<String> {
@@ -1928,23 +1988,40 @@ impl Tool for WriteFileTool {
             )));
         }
         let content = string_arg(&arguments, "content")?;
+        let previous = if path.exists() {
+            Some(std::fs::read_to_string(&path)?)
+        } else {
+            None
+        };
         let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &content)?;
+        let validation = match run_validators(context, &path).await {
+            Ok(validation) => validation,
+            Err(error) => {
+                restore_previous(&path, previous.as_deref())?;
+                return Err(error);
+            }
+        };
         let warning = scope_warning(context, &path);
         Ok(ToolResult::ok(format!(
-            "wrote {} bytes to {}{}",
+            "wrote {} bytes to {}{}{}",
             content.len(),
             path.display(),
             warning
                 .as_deref()
                 .map(|warning| format!("\n{warning}"))
+                .unwrap_or_default(),
+            validation
+                .as_deref()
+                .map(|validation| format!("\n{validation}"))
                 .unwrap_or_default()
         ))
         .with_metadata(json!({
             "path": path,
             "bytes": content.len(),
             "checkpoint": checkpoint,
-            "scope_warning": warning
+            "scope_warning": warning,
+            "validation": validation
         })))
     }
 }
@@ -2012,22 +2089,35 @@ impl Tool for EditFileTool {
         } else {
             content.replacen(&old, &new, 1)
         };
+        let previous = Some(content);
         let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &updated)?;
+        let validation = match run_validators(context, &path).await {
+            Ok(validation) => validation,
+            Err(error) => {
+                restore_previous(&path, previous.as_deref())?;
+                return Err(error);
+            }
+        };
         let warning = scope_warning(context, &path);
         Ok(ToolResult::ok(format!(
-            "updated {}{}",
+            "updated {}{}{}",
             path.display(),
             warning
                 .as_deref()
                 .map(|warning| format!("\n{warning}"))
+                .unwrap_or_default(),
+            validation
+                .as_deref()
+                .map(|validation| format!("\n{validation}"))
                 .unwrap_or_default()
         ))
         .with_metadata(json!({
             "path": path,
             "replacements": count,
             "checkpoint": checkpoint,
-            "scope_warning": warning
+            "scope_warning": warning,
+            "validation": validation
         })))
     }
 }
@@ -3419,6 +3509,128 @@ impl Tool for RunTaskTool {
     }
 }
 
+struct ListRecipesTool;
+
+#[async_trait]
+impl Tool for ListRecipesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_recipes",
+            "List verification recipes declared in .openbad/project.yaml (lint, test, build, schema checks).",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let Some(manifest) = manifest else {
+            return Ok(ToolResult::ok("no recipes (no .openbad/project.yaml)"));
+        };
+        if manifest.recipes.is_empty() {
+            return Ok(ToolResult::ok("no recipes declared"));
+        }
+        let content = manifest
+            .recipes
+            .iter()
+            .map(|(name, spec)| {
+                let (command, description) = match spec {
+                    openbad_workspace::CommandSpec::Shell(command) => (command.clone(), None),
+                    openbad_workspace::CommandSpec::Detailed(definition) => {
+                        (definition.command.clone(), definition.description.clone())
+                    }
+                };
+                format!(
+                    "- {name}: `{command}`{}",
+                    description
+                        .map(|description| format!(" — {description}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "recipes": manifest.recipes.keys().cloned().collect::<Vec<_>>()
+        })))
+    }
+}
+
+struct RunRecipeTool;
+
+#[async_trait]
+impl Tool for RunRecipeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "run_recipe",
+            "Run a named verification recipe from .openbad/project.yaml. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(600)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Recipe name from the project manifest"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let name = string_arg(&arguments, "name")?;
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(|| {
+                ToolError::Failed("no .openbad/project.yaml in this workspace".to_owned())
+            })?;
+        let recipe = manifest.recipe(&name).ok_or_else(|| {
+            ToolError::InvalidArgument(format!(
+                "unknown recipe: {name}; available recipes: {}",
+                manifest
+                    .recipes
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        let timeout = optional_usize(&arguments, "timeout_seconds")
+            .map(|value| value as u64)
+            .or(recipe.timeout_seconds)
+            .unwrap_or(300);
+        let mut command = json!({
+            "command": recipe.command,
+            "timeout_seconds": timeout,
+        });
+        if let Some(cwd) = recipe.cwd {
+            command["cwd"] = json!(cwd);
+        }
+        let result = RunCommandTool.execute(command, context).await?;
+        let success = result.metadata["success"].as_bool().unwrap_or(false);
+        Ok(ToolResult::ok(format!(
+            "recipe {name}: {}\n{}",
+            if success { "passed" } else { "failed" },
+            result.content
+        ))
+        .with_metadata(json!({
+            "recipe": name,
+            "command": recipe.command,
+            "success": success,
+            "result": result.metadata
+        })))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct TodoRecord {
     id: String,
@@ -4075,6 +4287,78 @@ mod tests {
             .expect("partial read");
         assert_eq!(partial.metadata["has_more"], true);
         assert_eq!(partial.metadata["next_start_line"], 3);
+    }
+
+    #[tokio::test]
+    async fn recipes_run_and_failed_validation_rolls_back_writes() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join(".openbad")).expect("openbad");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        fs::write(
+            directory.path().join(".openbad/project.yaml"),
+            r#"
+name: Validation
+recipes:
+  check: grep -q GOOD src/value.rs
+validators:
+  - pattern: "src/**/*.rs"
+    command: grep -q GOOD src/value.rs
+"#,
+        )
+        .expect("manifest");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+
+        let recipes = ListRecipesTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list recipes");
+        assert!(recipes.content.contains("check"));
+
+        WriteFileTool
+            .execute(
+                json!({"path": "src/value.rs", "content": "GOOD\n"}),
+                &context,
+            )
+            .await
+            .expect("valid write");
+        let recipe = RunRecipeTool
+            .execute(json!({"name": "check"}), &context)
+            .await
+            .expect("recipe");
+        assert!(recipe.content.contains("passed"));
+        assert_eq!(recipe.metadata["success"], true);
+
+        ReadFileTool
+            .execute(json!({"path": "src/value.rs"}), &context)
+            .await
+            .expect("read before overwrite");
+        let failed = WriteFileTool
+            .execute(
+                json!({"path": "src/value.rs", "content": "BAD\n"}),
+                &context,
+            )
+            .await
+            .expect_err("validator failure");
+        assert!(failed.to_string().contains("validation failed"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("src/value.rs")).expect("rollback"),
+            "GOOD\n"
+        );
+
+        let created = EditFileTool
+            .execute(
+                json!({"path": "src/value.rs", "old": "GOOD", "new": "BAD"}),
+                &context,
+            )
+            .await
+            .expect_err("edit validation failure");
+        assert!(created.to_string().contains("validation failed"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("src/value.rs")).expect("rollback"),
+            "GOOD\n"
+        );
     }
 
     #[tokio::test]

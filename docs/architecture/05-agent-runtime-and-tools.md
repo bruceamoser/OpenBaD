@@ -342,6 +342,8 @@ Implemented:
 | `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |
 | `classify_path` | read | Classify a path as authoritative, generated, historical, or external |
 | `run_task` | command | Run a named manifest command; requires Full access |
+| `list_recipes` | read | List verification recipes declared in the project manifest |
+| `run_recipe` | command | Run a lint/test/build/schema recipe; requires Full access |
 | `todo_write` | write | Replace the durable project todo list in `.openbad/todos.json` |
 | `todo_read` | read | Read the project todo list |
 | `write_handoff` | write | Write a handoff summary to `.openbad/handoff.md` |
@@ -354,7 +356,11 @@ the UI, which opens the split workspace.
 Knowledge documents carry a confidence level and, for imported files, a BLAKE3
 source hash. `list_knowledge` and `get_knowledge` flag a document as `STALE`
 when the source file's current hash differs from the captured hash, and a
-source that has disappeared is treated as stale. Writes and edits that target
+source that has disappeared is treated as stale.
+
+`write_file` and `edit_file` run every manifest validator whose glob matches
+the written path. Validators execute only in Full access; a failing validator
+restores the previous file content and returns its output. Writes and edits that target
 generated or historical scope return a manifest-derived warning.
 
 `run_command` classifies each command as `read-only`, `write-workspace`,
