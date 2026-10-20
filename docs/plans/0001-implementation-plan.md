@@ -263,6 +263,9 @@ commands with approvals.
   debounces input before querying.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
+- The agent appends root project conventions from `AGENTS.md`, `CLAUDE.md`,
+  `.github/copilot-instructions.md`, `.openbad/instructions.md`, and
+  `.cursorrules` to its stable system prompt (32 KiB cap).
 - `run_tests` detects Cargo, pnpm/npm/yarn, pytest, Go, and make projects,
   runs the suite through the gated command tool, and surfaces failure summary
   lines.
