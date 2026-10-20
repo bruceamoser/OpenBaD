@@ -45,6 +45,7 @@ import {
   revokeOutsideAccess as revokeFilesystemAccess,
   listProjects as fetchProjects,
   loadCheckpoints as fetchCheckpoints,
+  loadProjectAreaCounts,
   loadFoundation as fetchFoundation,
   loadMemories as fetchMemories,
   loadSession as fetchSession,
@@ -77,6 +78,7 @@ import type {
   MemoryRecord,
   OutsideAccessGrant,
   OutsideAccessRequest,
+  ProjectAreaCounts,
   SessionSummary,
   Usage,
   WorkspaceIndexSummary,
@@ -91,6 +93,13 @@ type Preferences = {
 
 type PermissionMode = AccessMode;
 type SettingsTab = "model" | "access" | "secrets" | "project" | "about";
+
+function countSuffix(primary?: number, total?: number): string {
+  if (primary === undefined) {
+    return "";
+  }
+  return total === undefined || total === primary ? ` (${primary})` : ` (${primary}/${total})`;
+}
 
 const defaultPreferences: Preferences = {
   model: "deepseek-flash",
@@ -156,6 +165,7 @@ export default function App() {
   const [panelWidth, setPanelWidth] = useState(460);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [projectRevision, setProjectRevision] = useState(0);
+  const [areaCounts, setAreaCounts] = useState<ProjectAreaCounts | null>(null);
   const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
@@ -370,6 +380,29 @@ export default function App() {
       active = false;
     };
   }, [refreshWorkspaceIndex, workspacePath]);
+
+  useEffect(() => {
+    if (workspacePath.length === 0) {
+      setAreaCounts(null);
+      return;
+    }
+    let active = true;
+    const load = () => {
+      void loadProjectAreaCounts(workspacePath)
+        .then((counts) => {
+          if (active) {
+            setAreaCounts(counts);
+          }
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [projectRevision, workspacePath]);
 
   useEffect(() => {
     void loadMemories();
@@ -1300,55 +1333,75 @@ export default function App() {
                         />
                         <ProjectAreaButton
                           icon={<Folder size={12} />}
-                          label="Workspace"
+                          label={`Workspace${countSuffix(areaCounts?.workspace_files)}`}
                           active={panelOpen && panelTab === "workspace"}
                           onClick={() => openPanel("workspace")}
                         />
                         <ProjectAreaButton
                           icon={<Bot size={12} />}
-                          label="Agents"
+                          label={`Agents${countSuffix(areaCounts?.agents)}`}
                           active={panelOpen && panelTab === "agents"}
+                          pulse={(areaCounts?.running_agents ?? 0) > 0}
                           onClick={() => openPanel("agents")}
                         />
                         <ProjectAreaButton
                           icon={<FolderGit2 size={12} />}
-                          label="References"
+                          label={`References${countSuffix(areaCounts?.references)}`}
                           active={panelOpen && panelTab === "repos"}
                           onClick={() => openPanel("repos")}
                         />
                         <ProjectAreaButton
                           icon={<BookOpen size={12} />}
-                          label="Knowledge"
+                          label={`Knowledge${countSuffix(areaCounts?.knowledge)}`}
                           active={panelOpen && panelTab === "knowledge"}
                           onClick={() => openPanel("knowledge")}
                         />
                         <ProjectAreaButton
                           icon={<Search size={12} />}
-                          label="Retrieval"
+                          label={`Retrieval${countSuffix(
+                            areaCounts === null
+                              ? undefined
+                              : areaCounts.workspace_files + areaCounts.knowledge,
+                          )}`}
                           active={panelOpen && panelTab === "retrieval"}
                           onClick={() => openPanel("retrieval")}
                         />
                         <ProjectAreaButton
                           icon={<Database size={12} />}
-                          label="Memory"
+                          label={`Memory${countSuffix(areaCounts?.memories)}`}
                           active={panelOpen && panelTab === "memory"}
                           onClick={() => openPanel("memory")}
                         />
                         <ProjectAreaButton
                           icon={<ListTodo size={12} />}
-                          label="Todos"
+                          label={`Todos${countSuffix(
+                            areaCounts === null
+                              ? undefined
+                              : areaCounts.todos_open,
+                            areaCounts?.todos_total,
+                          )}`}
                           active={panelOpen && panelTab === "todos"}
                           onClick={() => openPanel("todos")}
                         />
                         <ProjectAreaButton
                           icon={<MessageSquare size={12} />}
-                          label="Questions"
+                          label={`Questions${countSuffix(
+                            areaCounts === null
+                              ? undefined
+                              : areaCounts.questions_open,
+                            areaCounts?.questions_total,
+                          )}`}
                           active={panelOpen && panelTab === "questions"}
                           onClick={() => openPanel("questions")}
                         />
                         <ProjectAreaButton
                           icon={<ListTodo size={12} />}
-                          label="Plan"
+                          label={`Plan${countSuffix(
+                            areaCounts === null
+                              ? undefined
+                              : areaCounts.plan_open_steps,
+                            areaCounts?.plan_steps,
+                          )}`}
                           active={panelOpen && panelTab === "plan"}
                           onClick={() => openPanel("plan")}
                         />
@@ -1858,11 +1911,13 @@ function ProjectAreaButton({
   icon,
   label,
   active,
+  pulse = false,
   onClick,
 }: {
   icon: ReactNode;
   label: string;
   active: boolean;
+  pulse?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -1877,6 +1932,12 @@ function ProjectAreaButton({
     >
       {icon}
       <span className="truncate">{label}</span>
+      {pulse && (
+        <span
+          aria-label="Background work running"
+          className="ml-auto h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400"
+        />
+      )}
     </button>
   );
 }
@@ -1962,7 +2023,15 @@ function SessionRow({
   );
 }
 
-function CopyMessageButton({ text, label }: { text: string; label: string }) {
+function CopyMessageButton({
+  text,
+  label,
+  showLabel = false,
+}: {
+  text: string;
+  label: string;
+  showLabel?: boolean;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -1981,9 +2050,14 @@ function CopyMessageButton({ text, label }: { text: string; label: string }) {
           })
           .catch(() => undefined);
       }}
-      className="ml-1 rounded p-0.5 text-slate-600 hover:text-slate-300 focus-visible:text-slate-300"
+      className={
+        showLabel
+          ? "inline-flex items-center gap-1 rounded border border-white/[0.06] px-1.5 py-1 text-[10px] text-slate-500 hover:border-white/[0.12] hover:text-slate-300"
+          : "ml-1 rounded p-0.5 text-slate-600 hover:text-slate-300 focus-visible:text-slate-300"
+      }
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
+      {showLabel && <span>{copied ? "Copied" : label}</span>}
     </button>
   );
 }
@@ -1999,6 +2073,9 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
             </p>
           )}
           {entry.text}
+          <div className="mt-2 flex justify-end">
+            <CopyMessageButton text={entry.text} label="Copy message" showLabel />
+          </div>
         </div>
       </div>
     );
@@ -2054,6 +2131,11 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
             {cacheHitShare(entry.usage).toFixed(0)}%) · {entry.usage.output_tokens.toLocaleString()}{" "}
             out · ${entry.usage.cost_usd.toFixed(4)}
           </p>
+        )}
+        {entry.text.length > 0 && (
+          <div className="mt-2 flex justify-end">
+            <CopyMessageButton text={entry.text} label="Copy response" showLabel />
+          </div>
         )}
       </div>
     </div>

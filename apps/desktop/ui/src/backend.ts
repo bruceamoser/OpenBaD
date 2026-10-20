@@ -16,6 +16,7 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentSummary,
   ProjectAgent,
+  ProjectAreaCounts,
   ProjectFileView,
   ProjectHit,
   ProjectManifest,
@@ -88,6 +89,8 @@ const mockKnowledgeContent = new Map<string, string>([
     "OpenBaD is a desktop coding harness. Projects own one workspace plus reference folders, a knowledge library, retrieval corpus, and durable memories. Keep the chat focused and open visual artifacts beside it.",
   ],
 ]);
+
+const mockAgents: ProjectAgent[] = [];
 
 let mockFiles = [
   "apps/desktop/ui/src/App.tsx",
@@ -627,12 +630,35 @@ export async function loadProjectRepos(workspacePath: string): Promise<ProjectRe
     : [...mockRepos];
 }
 
+export async function loadProjectAreaCounts(
+  workspacePath: string,
+): Promise<ProjectAreaCounts> {
+  if (isTauri) {
+    return invoke<ProjectAreaCounts>("project_area_counts", { workspacePath });
+  }
+  return {
+    workspace_files: mockIndex.files,
+    agents: mockAgents.length,
+    running_agents: mockAgents.filter((agent) => agent.status === "running").length,
+    references: mockRepos.length,
+    knowledge: mockKnowledge.length,
+    memories: mockMemories.length,
+    todos_open: mockTodos.filter((todo) => todo.state !== "done" && todo.state !== "dropped")
+      .length,
+    todos_total: mockTodos.length,
+    questions_open: mockQuestions.filter((question) => question.answer === null).length,
+    questions_total: mockQuestions.length,
+    plan_steps: mockPlan?.steps.length ?? 0,
+    plan_open_steps: mockPlan?.steps.filter((step) => step.status !== "done").length ?? 0,
+  };
+}
+
 export async function loadProjectAgents(
   workspacePath: string,
 ): Promise<ProjectAgent[]> {
   return isTauri
     ? invoke<ProjectAgent[]>("project_agents", { workspacePath })
-    : [];
+    : [...mockAgents];
 }
 
 export async function cancelProjectAgent(id: string): Promise<ProjectAgent> {
@@ -959,6 +985,25 @@ async function mockChat(
   onEvent: (event: AgentEvent) => void,
 ): Promise<ChatReply> {
   mockCancelled = false;
+  if (/subagent|spawn agent/i.test(input.message)) {
+    const now = Date.now();
+    mockAgents.push({
+      id: `mock-agent-${mockAgents.length + 1}`,
+      workspace_id: "mock-workspace",
+      parent_session_id: input.sessionId,
+      title: "Repository inventory",
+      task: "Inspect the repository and report the main packages.",
+      model: "deepseek-flash",
+      status: "running",
+      log: "[step 1] -> list_dir({\"path\":\".\"})\n",
+      result: "",
+      error: null,
+      steps: 1,
+      created_at: now,
+      updated_at: now,
+      finished_at: null,
+    });
+  }
   if (/slow/i.test(input.message)) {
     await tick(1_400);
   }
