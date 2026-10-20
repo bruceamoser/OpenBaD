@@ -47,6 +47,9 @@ test("streams reasoning, tool progress, and the answer", async ({ page }) => {
   await expect(page.getByText("Reasoning")).toBeVisible();
   await expect(page.getByText("2 tool events")).toBeVisible();
   await expect(page.getByText("Done · 2 steps")).toBeVisible();
+  await expect(
+    page.getByTitle("Cumulative tokens and cost for this session"),
+  ).toBeVisible();
   await expect(page.getByText(prompt, { exact: true }).first()).toBeVisible();
 });
 

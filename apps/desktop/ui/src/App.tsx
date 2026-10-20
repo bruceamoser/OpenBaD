@@ -67,6 +67,7 @@ import type {
   FoundationState,
   MemoryRecord,
   SessionSummary,
+  Usage,
   WorkspaceIndexSummary,
   WorkspaceSummary,
 } from "./types";
@@ -169,6 +170,33 @@ export default function App() {
     [sessionId, sessions],
   );
   const currentTitle = activeSession?.title ?? (sessionId === null ? "New session" : "Session");
+  const sessionUsage = useMemo<Usage>(
+    () =>
+      entries.reduce<Usage>(
+        (total, entry) => {
+          if (entry.usage === undefined) {
+            return total;
+          }
+          return {
+            input_tokens: total.input_tokens + entry.usage.input_tokens,
+            cache_read_tokens: total.cache_read_tokens + entry.usage.cache_read_tokens,
+            cache_write_tokens: total.cache_write_tokens + entry.usage.cache_write_tokens,
+            output_tokens: total.output_tokens + entry.usage.output_tokens,
+            reasoning_tokens: total.reasoning_tokens + entry.usage.reasoning_tokens,
+            cost_usd: total.cost_usd + entry.usage.cost_usd,
+          };
+        },
+        {
+          input_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0,
+          cost_usd: 0,
+        },
+      ),
+    [entries],
+  );
   const allowWrites = permissionMode !== "read";
   const allowCommands = permissionMode === "full";
 
@@ -1201,6 +1229,21 @@ export default function App() {
             </div>
             <h1 className="truncate text-[13px] font-medium text-slate-200">{currentTitle}</h1>
           </div>
+          {sessionUsage.input_tokens + sessionUsage.output_tokens > 0 && (
+            <div
+              className="shrink-0 text-right text-[10px] leading-4 text-slate-500"
+              title="Cumulative tokens and cost for this session"
+            >
+              <p className="font-mono">
+                {formatCompactTokens(sessionUsage.input_tokens + sessionUsage.cache_read_tokens)} in
+                · {formatCompactTokens(sessionUsage.output_tokens)} out
+              </p>
+              <p className="font-mono text-slate-600">
+                ${sessionUsage.cost_usd.toFixed(4)} · {cacheHitShare(sessionUsage).toFixed(0)}%
+                cached
+              </p>
+            </div>
+          )}
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col">
@@ -2185,6 +2228,13 @@ function formatRelativeTime(timestamp: number): string {
   }
   const days = Math.floor(hours / 24);
   return `${days}d`;
+}
+
+function formatCompactTokens(tokens: number): string {
+  if (tokens < 1_000) {
+    return `${tokens}`;
+  }
+  return `${(tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
 }
 
 function cacheHitShare(usage: { input_tokens: number; cache_read_tokens: number }): number {

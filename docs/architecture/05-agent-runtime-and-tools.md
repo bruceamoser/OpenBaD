@@ -325,6 +325,12 @@ Implemented:
 | `glob_repo` | read | Find reference-folder files by glob |
 | `grep_repo` | read | Search reference-folder text; case-insensitive by default |
 | `read_repo_file` | read | UTF-8 file inside a read-only reference folder; reports total lines |
+| `stat_file` / `stat_repo_file` | read | Size, line count, mtime, and BLAKE3 hash without loading content |
+| `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
+| `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
+| `delete_file` | write | Soft delete to `.openbad/trash`; hard delete requires `hard=true` |
+| `move_file` | write | Rename or move a file inside the workspace |
+| `list_trash` / `restore_trash` | read/write | Inspect and restore soft-deleted files |
 | `add_knowledge` | write | Add a curated project note with `verified`, `inferred`, or `uncertain` confidence |
 | `list_knowledge` | read | List knowledge documents with ids, tags, sources, and chunk counts |
 | `get_knowledge` | read | Read a whole knowledge document by id |
@@ -350,6 +356,12 @@ source hash. `list_knowledge` and `get_knowledge` flag a document as `STALE`
 when the source file's current hash differs from the captured hash, and a
 source that has disappeared is treated as stale. Writes and edits that target
 generated or historical scope return a manifest-derived warning.
+
+`run_command` classifies each command as `read-only`, `write-workspace`,
+`network`, `destructive`, or `privileged`, reports the class in metadata, and
+requires `confirm_destructive=true` before running destructive commands such as
+`rm -rf` or `git reset --hard`. File deletion is reversible by default: the
+file moves to `.openbad/trash` and can be restored by name.
 
 `read_file` and `read_repo_file` return `total_lines`, `start_line`, `end_line`,
 `has_more`, and `next_start_line` metadata. Reference discovery follows the

@@ -461,7 +461,7 @@ Use recall and remember for durable project decisions when they matter.\n\
 Project knowledge is curated separately from code: call search_project before\n\
 answering questions that may rely on earlier decisions or imported references.\n\
 Use list_project_sources to orient yourself. For reference folders, use\n\
-list_repo_dir, glob_repo, and grep_repo before reading files, and read_repo_file\n\
+list_repo_dir, glob_repo, and grep_repo before reading files; use stat_repo_file\n\
 for bounded reads. Reads report total_lines and continuation metadata.\n\
 Use list_knowledge/get_knowledge to audit knowledge, update_knowledge or\n\
 delete_knowledge to correct it, and list_memories/forget_memory to audit memory.\n\
@@ -477,6 +477,7 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
             prompt.push_str("\n\nProject manifest (.openbad/project.yaml):\n");
             prompt.push_str(&manifest.summary());
             prompt.push_str("\nClassify paths before editing when scope matters; historical and generated paths need care. Use run_task for named manifest tasks, todo_write/todo_read for durable work state, and write_handoff before ending a long session.\n");
+            prompt.push_str("Use stat_file/stat_repo_file before guessing line counts, read_files for small related files, and outline to navigate long files. Prefer delete_file (soft delete) and move_file over shell commands. Destructive shell commands require confirm_destructive after checking the blast radius.\n");
         }
         let skills = discover_skills(self.workspace.root());
         if !skills.is_empty() {
