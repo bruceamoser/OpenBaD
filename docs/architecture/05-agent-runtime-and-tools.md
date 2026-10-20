@@ -614,7 +614,7 @@ evidence before final synthesis.
 
 ```rust
 pub struct TurnBudget {
-    pub max_steps: u32,          // default 24
+    pub max_steps: u32,          // default 0 = unlimited; explicit cap optional
     pub max_tool_calls: u32,     // default 64
     pub max_input_tokens: u64,   // default 400_000 (of 1M)
     pub max_output_tokens: u64,  // default 32_000 (max 384K)

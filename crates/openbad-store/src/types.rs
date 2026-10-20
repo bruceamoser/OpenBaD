@@ -163,6 +163,16 @@ pub struct ModelRouteRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSummary {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub path: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub session_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: SessionId,
     pub workspace_id: Option<WorkspaceId>,

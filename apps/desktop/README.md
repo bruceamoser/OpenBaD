@@ -65,7 +65,9 @@ cancellation, and preference persistence.
 | --- | --- |
 | `health` | Returns the store status and SQLite schema version |
 | `foundation` | Returns schema/integrity/event metrics, audit chain state, providers, and model routes |
-| `sessions` / `session_view` | Lists recent sessions and loads their messages |
+| `list_projects` / `add_project` / `rename_project` / `remove_project` | Manage workspace projects |
+| `rename_session` | Rename a session |
+| `sessions` / `search_sessions` / `session_view` | List, search, and load sessions |
 | `save_api_key` / `clear_api_key` / `api_key_status` | Manage the DeepSeek key in the OS keychain |
 | `chat` | Runs the DeepSeek agent loop with workspace tools and persists the turn |
 

@@ -245,25 +245,37 @@ commands with approvals.
   they can be overwritten or edited. Writes use a temporary file plus rename and
   preserve existing Unix permissions; new files are created as `0644`.
 - `openbad-agent` runs the DeepSeek turn/step loop, accumulates usage and cost,
-  feeds tool errors back to the model as tool messages, and enforces a 64-step
-  default budget. It streams reasoning and content deltas through an
-  `AgentObserver` and emits tool call/result progress.
+  and feeds tool errors back to the model as tool messages. The step budget is
+  unlimited by default (`max_steps = 0`) so long coding tasks are not cut off;
+  callers can still set an explicit cap. Reasoning and content deltas stream
+  through an `AgentObserver`, which also emits tool call/result progress.
 - The Tauri `chat` command connects the agent to the SQLite store, persists
   user/assistant/tool messages, records usage, and streams agent events over a
-  Tauri channel. The React UI shows live reasoning, response text, tool progress,
-  token/cache/cost, workspace chat, API-key settings, write/command toggles,
-  recent-session resume, and store diagnostics.
+  Tauri channel. The React UI uses a project sidebar, a focused chat column, a
+  compact composer, and an on-demand Context drawer for index, memory,
+  checkpoints, and diagnostics. Settings live in a modal rather than permanent
+  panels.
 - New sessions reuse the workspace row by path. The chat panel has bounded
   height and follows new content unless the user scrolls up.
 - `ui/src/backend.ts` provides a browser mock backend when Tauri internals are
   absent, so streaming, scrolling, and layout can be tested in a normal browser
   without rebuilding the native app.
-- The chat settings expose `deepseek-flash` vs `deepseek-v4-pro`, thinking mode,
-  reasoning effort, and the step budget. A Stop button cancels the active turn.
-  Usage lines show cache-hit share, and resumed sessions restore reasoning.
-- Recent sessions can be searched by title or message text from the sidebar.
-  The store uses a literal `LIKE` search with escaped wildcards, and the UI
-  debounces input before querying.
+- Settings expose `deepseek-flash` vs `deepseek-v4-pro`, thinking mode, and
+  reasoning effort. The composer exposes a read-only / can-edit / full-access
+  selector, which resets to read-only on launch. A Stop button cancels the
+  active turn. Usage lines show cache-hit share, and resumed sessions restore
+  reasoning.
+- Projects are workspace rows with a name, root path, and session count. The
+  sidebar lists projects, expands the active one, and remembers the last active
+  path. Projects can be added, renamed, or removed; sessions are grouped under
+  their project, can be renamed inline, and can be searched by title or message
+  text from the sidebar.
+- First launch only auto-creates a project when the current directory contains
+  a project marker (`Cargo.toml`, `package.json`, `.git`, and similar).
+  Otherwise the UI opens the Add project dialog instead of treating a build
+  output directory as a workspace. The store uses a literal
+  `LIKE` search with escaped wildcards, and the UI debounces input before
+  querying.
 - `openbad-agent` has a `live_chat` example for headless end-to-end checks
   against the real DeepSeek endpoint; it uses the desktop keychain entry or
   `DEEPSEEK_API_KEY`.

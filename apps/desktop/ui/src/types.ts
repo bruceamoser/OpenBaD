@@ -95,6 +95,15 @@ export type FileCheckpointSummary = {
   created_at: number;
 };
 
+export type WorkspaceSummary = {
+  id: string;
+  name: string;
+  path: string;
+  created_at: number;
+  updated_at: number;
+  session_count: number;
+};
+
 export type SessionSummary = {
   id: string;
   workspace_id: string | null;

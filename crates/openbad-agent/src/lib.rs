@@ -32,7 +32,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_steps: 64,
+            max_steps: 0,
             max_output_tokens: 16_384,
             allow_writes: false,
             allow_commands: false,
@@ -174,7 +174,12 @@ impl<T: HttpTransport> Agent<T> {
             context
         });
 
-        for step in 1..=self.config.max_steps {
+        let step_budget = if self.config.max_steps == 0 {
+            u32::MAX
+        } else {
+            self.config.max_steps
+        };
+        for step in 1..=step_budget {
             if observer.is_cancelled() {
                 return Err(AgentError::Cancelled);
             }
@@ -298,12 +303,12 @@ impl<T: HttpTransport> Agent<T> {
                 messages.push(ChatMessage::tool(call.id, content));
             }
 
-            if step == self.config.max_steps {
-                return Err(AgentError::MaxSteps(self.config.max_steps));
+            if step == step_budget {
+                return Err(AgentError::MaxSteps(step_budget));
             }
         }
 
-        Err(AgentError::MaxSteps(self.config.max_steps))
+        Err(AgentError::MaxSteps(step_budget))
     }
 
     async fn stream_step(
