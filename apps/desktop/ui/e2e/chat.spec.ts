@@ -159,6 +159,7 @@ test("lists and forgets workspace memories", async ({ page }) => {
   await openContext(page, "Memory");
 
   await expect(page.getByText("Keep the model-visible prompt prefix immutable.")).toBeVisible();
+  await expect(page.getByText(/project · agent/)).toBeVisible();
   await page.getByRole("button", { name: "Forget memory" }).click();
   await expect(page.getByText("No saved memories yet.")).toBeVisible();
 });

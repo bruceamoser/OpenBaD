@@ -318,7 +318,7 @@ Implemented:
 | Tool | Risk | Notes |
 | --- | --- | --- |
 | `recall` | read | Durable workspace memory |
-| `remember` | write | Durable decision or preference |
+| `remember` | write | Scoped decision or preference; contradictions require `supersedes` |
 | `list_project_sources` | read | Reference folders and knowledge documents |
 | `search_project` | read | Fused knowledge, indexed code, and memory with locators |
 | `list_repo_dir` | read | List a reference-folder directory with sizes and `.gitignore` filtering |
@@ -336,7 +336,8 @@ Implemented:
 | `get_knowledge` | read | Read a whole knowledge document by id |
 | `update_knowledge` | write | Correct title, content, source, tags, or confidence; rebuilds chunks |
 | `delete_knowledge` | write | Delete a knowledge document and its retrieval chunks |
-| `list_memories` | read | Audit durable memories with ids and pinned state |
+| `list_memories` | read | Audit memories with ids, scope, provenance, and pinned state |
+| `update_memory` | write | Correct memory content, tags, pinned state, or scope |
 | `forget_memory` | write | Forget a memory by id |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 | `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |

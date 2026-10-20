@@ -110,6 +110,20 @@ enum WriteCommand {
         content: String,
         tags: Vec<String>,
         pinned: bool,
+        scope: String,
+        author: String,
+        origin_turn: Option<u32>,
+        origin_task: Option<String>,
+        supersedes: Option<String>,
+        expires_at: Option<i64>,
+        reply: SyncSender<Result<MemoryRecord, StoreError>>,
+    },
+    UpdateMemory {
+        memory_id: String,
+        content: Option<String>,
+        tags: Option<Vec<String>>,
+        pinned: Option<bool>,
+        scope: Option<String>,
         reply: SyncSender<Result<MemoryRecord, StoreError>>,
     },
     ForgetMemory {
@@ -791,11 +805,63 @@ impl Store {
         tags: Vec<String>,
         pinned: bool,
     ) -> Result<MemoryRecord, StoreError> {
+        self.remember_memory_scoped(
+            workspace_id,
+            content,
+            tags,
+            pinned,
+            "project",
+            "agent",
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_memory_scoped(
+        &self,
+        workspace_id: WorkspaceId,
+        content: &str,
+        tags: Vec<String>,
+        pinned: bool,
+        scope: &str,
+        author: &str,
+        origin_turn: Option<u32>,
+        origin_task: Option<&str>,
+        supersedes: Option<&str>,
+        expires_at: Option<i64>,
+    ) -> Result<MemoryRecord, StoreError> {
         self.write(|reply| WriteCommand::RememberMemory {
             workspace_id,
             content: content.to_owned(),
             tags,
             pinned,
+            scope: scope.to_owned(),
+            author: author.to_owned(),
+            origin_turn,
+            origin_task: origin_task.map(str::to_owned),
+            supersedes: supersedes.map(str::to_owned),
+            expires_at,
+            reply,
+        })
+    }
+
+    pub fn update_memory(
+        &self,
+        memory_id: &str,
+        content: Option<&str>,
+        tags: Option<Vec<String>>,
+        pinned: Option<bool>,
+        scope: Option<&str>,
+    ) -> Result<MemoryRecord, StoreError> {
+        self.write(|reply| WriteCommand::UpdateMemory {
+            memory_id: memory_id.to_owned(),
+            content: content.map(str::to_owned),
+            tags,
+            pinned,
+            scope: scope.map(str::to_owned),
             reply,
         })
     }
@@ -818,10 +884,12 @@ impl Store {
             )
         });
         let mut statement = connection.prepare(
-            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count
+            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count,
+                    origin_turn, origin_task, author, scope, supersedes, expires_at
              FROM memories
              WHERE workspace_id = ?1
                AND forgotten_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?5)
                AND (?2 = 0
                     OR lower(content) LIKE lower(?3) ESCAPE '\\'
                     OR lower(tags_json) LIKE lower(?3) ESCAPE '\\')
@@ -833,7 +901,8 @@ impl Store {
                 workspace_id.to_string(),
                 i64::from(has_query),
                 pattern,
-                i64::from(limit)
+                i64::from(limit),
+                now_millis()
             ],
             memory_record_from_row,
         )?;
@@ -1879,15 +1948,42 @@ fn fts_terms(query: &str) -> String {
     terms.join(" AND ")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn remember_memory(
     connection: &Connection,
     workspace_id: WorkspaceId,
     content: &str,
     tags: Vec<String>,
     pinned: bool,
+    scope: &str,
+    author: &str,
+    origin_turn: Option<u32>,
+    origin_task: Option<&str>,
+    supersedes: Option<&str>,
+    expires_at: Option<i64>,
 ) -> Result<MemoryRecord, StoreError> {
+    if !matches!(scope, "session" | "project" | "global") {
+        return Err(StoreError::InvalidData(format!(
+            "memory scope must be session, project, or global: {scope}"
+        )));
+    }
     let workspace = workspace_id.to_string();
     let tags_json = serde_json::to_string(&tags)?;
+    if let Some(supersedes) = supersedes {
+        let valid: Option<String> = connection
+            .query_row(
+                "SELECT id FROM memories
+                 WHERE id = ?1 AND workspace_id = ?2 AND forgotten_at IS NULL",
+                params![supersedes, workspace],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if valid.is_none() {
+            return Err(StoreError::InvalidData(format!(
+                "superseded memory not found in this project: {supersedes}"
+            )));
+        }
+    }
     let existing: Option<String> = connection
         .query_row(
             "SELECT id FROM memories
@@ -1900,26 +1996,101 @@ pub fn remember_memory(
     let id = if let Some(id) = existing {
         connection.execute(
             "UPDATE memories
-         SET tags_json = ?1, pinned = MAX(pinned, ?2), updated_at = ?3
-         WHERE id = ?4",
-            params![tags_json, pinned, now, id],
+         SET tags_json = ?1, pinned = MAX(pinned, ?2), updated_at = ?3,
+             scope = ?4, author = ?5, origin_turn = COALESCE(?6, origin_turn),
+             origin_task = COALESCE(?7, origin_task), expires_at = ?8
+         WHERE id = ?9",
+            params![
+                tags_json,
+                pinned,
+                now,
+                scope,
+                author,
+                origin_turn.map(i64::from),
+                origin_task,
+                expires_at,
+                id
+            ],
         )?;
         id
     } else {
         let id = Uuid::now_v7().to_string();
         connection.execute(
             "INSERT INTO memories
-            (id, workspace_id, content, tags_json, pinned, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, workspace, content, tags_json, pinned, now],
+            (id, workspace_id, content, tags_json, pinned, created_at, updated_at,
+             scope, author, origin_turn, origin_task, supersedes, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                id,
+                workspace,
+                content,
+                tags_json,
+                pinned,
+                now,
+                scope,
+                author,
+                origin_turn.map(i64::from),
+                origin_task,
+                supersedes,
+                expires_at
+            ],
         )?;
         id
     };
+    if let Some(supersedes) = supersedes {
+        connection.execute(
+            "UPDATE memories SET forgotten_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now, supersedes],
+        )?;
+    }
     connection
         .query_row(
-            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count
+            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count,
+                    origin_turn, origin_task, author, scope, supersedes, expires_at
          FROM memories WHERE id = ?1",
             [id],
+            memory_record_from_row,
+        )
+        .map_err(StoreError::from)
+}
+
+fn update_memory(
+    connection: &Connection,
+    memory_id: &str,
+    content: Option<&str>,
+    tags: Option<Vec<String>>,
+    pinned: Option<bool>,
+    scope: Option<&str>,
+) -> Result<MemoryRecord, StoreError> {
+    if let Some(scope) = scope {
+        if !matches!(scope, "session" | "project" | "global") {
+            return Err(StoreError::InvalidData(format!(
+                "memory scope must be session, project, or global: {scope}"
+            )));
+        }
+    }
+    let tags_json = tags.map(|tags| serde_json::to_string(&tags)).transpose()?;
+    let changed = connection.execute(
+        "UPDATE memories
+         SET content = COALESCE(?1, content),
+             tags_json = COALESCE(?2, tags_json),
+             pinned = COALESCE(?3, pinned),
+             scope = COALESCE(?4, scope),
+             updated_at = ?5
+         WHERE id = ?6 AND forgotten_at IS NULL",
+        params![content, tags_json, pinned, scope, now_millis(), memory_id],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::InvalidData(format!(
+            "memory not found: {memory_id}"
+        )));
+    }
+    connection
+        .query_row(
+            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count,
+                    origin_turn, origin_task, author, scope, supersedes, expires_at
+             FROM memories WHERE id = ?1",
+            [memory_id],
             memory_record_from_row,
         )
         .map_err(StoreError::from)
@@ -1935,6 +2106,14 @@ fn memory_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRec
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         access_count: row.get::<_, i64>(6)? as u32,
+        origin_turn: row
+            .get::<_, Option<i64>>(7)?
+            .and_then(|turn| u32::try_from(turn).ok()),
+        origin_task: row.get(8)?,
+        author: row.get(9)?,
+        scope: row.get(10)?,
+        supersedes: row.get(11)?,
+        expires_at: row.get(12)?,
     })
 }
 
@@ -2129,6 +2308,12 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 content,
                 tags,
                 pinned,
+                scope,
+                author,
+                origin_turn,
+                origin_task,
+                supersedes,
+                expires_at,
                 reply,
             } => {
                 let _ = reply.send(remember_memory(
@@ -2137,7 +2322,31 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     &content,
                     tags,
                     pinned,
+                    &scope,
+                    &author,
+                    origin_turn,
+                    origin_task.as_deref(),
+                    supersedes.as_deref(),
+                    expires_at,
                 ));
+            }
+            WriteCommand::UpdateMemory {
+                memory_id,
+                content,
+                tags,
+                pinned,
+                scope,
+                reply,
+            } => {
+                let result = update_memory(
+                    &connection,
+                    &memory_id,
+                    content.as_deref(),
+                    tags,
+                    pinned,
+                    scope.as_deref(),
+                );
+                let _ = reply.send(result);
             }
             WriteCommand::ForgetMemory { memory_id, reply } => {
                 let result = connection
@@ -2440,7 +2649,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0007_knowledge_confidence"
+            "0008_memory_provenance"
         );
     }
 
@@ -2723,6 +2932,98 @@ mod tests {
                 .expect("recall after forget")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn memory_provenance_supersedes_updates_and_expiry() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("memory", "/tmp/openbad-memory-provenance")
+            .expect("workspace");
+        let first = store
+            .remember_memory_scoped(
+                workspace,
+                "Use tabs for indentation.",
+                vec!["style".to_owned()],
+                false,
+                "session",
+                "human",
+                Some(3),
+                Some("issue-1"),
+                None,
+                None,
+            )
+            .expect("first memory");
+        assert_eq!(first.scope, "session");
+        assert_eq!(first.author, "human");
+        assert_eq!(first.origin_turn, Some(3));
+        assert_eq!(first.origin_task.as_deref(), Some("issue-1"));
+
+        let second = store
+            .remember_memory_scoped(
+                workspace,
+                "Use spaces for indentation.",
+                vec!["style".to_owned()],
+                true,
+                "project",
+                "agent",
+                Some(4),
+                None,
+                Some(&first.id),
+                None,
+            )
+            .expect("superseding memory");
+        assert_eq!(second.supersedes.as_deref(), Some(first.id.as_str()));
+        let active = store.recall_memories(workspace, None, 10).expect("recall");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, second.id);
+
+        let updated = store
+            .update_memory(
+                &second.id,
+                Some("Use spaces for indentation, never tabs."),
+                Some(vec!["style".to_owned(), "formatting".to_owned()]),
+                Some(false),
+                Some("global"),
+            )
+            .expect("update memory");
+        assert_eq!(updated.scope, "global");
+        assert!(!updated.pinned);
+        assert_eq!(updated.tags.len(), 2);
+
+        let expired = store
+            .remember_memory_scoped(
+                workspace,
+                "This temporary note has expired.",
+                vec![],
+                false,
+                "session",
+                "agent",
+                None,
+                None,
+                None,
+                Some(now_millis() - 1),
+            )
+            .expect("expired memory");
+        assert!(expired.expires_at.is_some());
+        let active = store
+            .recall_memories(workspace, None, 10)
+            .expect("recall without expired");
+        assert!(active.iter().all(|memory| memory.id != expired.id));
+
+        let missing = store.remember_memory_scoped(
+            workspace,
+            "Use two-space indentation.",
+            vec![],
+            false,
+            "project",
+            "agent",
+            None,
+            None,
+            Some("missing-id"),
+            None,
+        );
+        assert!(missing.is_err());
     }
 
     #[test]

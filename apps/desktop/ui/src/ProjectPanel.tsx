@@ -588,6 +588,8 @@ function MemoryPanel({
           </p>
           <div className="mt-2 flex items-center justify-between gap-2">
             <span className="truncate font-mono text-[9px] text-slate-600">
+              {memory.scope} · {memory.author}
+              {memory.origin_turn !== null ? ` · turn ${memory.origin_turn}` : ""} ·{" "}
               {memory.tags.length > 0 ? memory.tags.join(", ") : "untagged"}
             </span>
             <button

@@ -198,6 +198,7 @@ impl<T: HttpTransport> Agent<T> {
             self.config.max_steps
         };
         for step in 1..=step_budget {
+            context.set_turn(step);
             if observer.is_cancelled() {
                 return Err(AgentError::Cancelled);
             }
@@ -436,14 +437,27 @@ impl<T: HttpTransport> Agent<T> {
         if entries.is_empty() {
             return String::new();
         }
-        let mut context =
-            String::from("\n\nRecent workspace memory (verify before relying on it):\n");
+        let pinned = entries.iter().filter(|entry| entry.pinned).count();
+        let mut context = format!(
+            "\n\nWorkspace memory loaded {} entr{} ({} pinned; verify before relying on it):\n",
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" },
+            pinned
+        );
         for entry in entries {
             let content: String = entry.content.chars().take(1_000).collect();
+            let origin = entry
+                .origin_task
+                .as_deref()
+                .map(|task| format!(" ({task})"))
+                .or_else(|| entry.origin_turn.map(|turn| format!(" (turn {turn})")))
+                .unwrap_or_default();
             context.push_str(&format!(
-                "- {}{}\n",
+                "- {}[{}] {}{}\n",
                 if entry.pinned { "[pinned] " } else { "" },
-                content
+                entry.scope,
+                content,
+                origin
             ));
         }
         context
@@ -457,7 +471,7 @@ impl<T: HttpTransport> Agent<T> {
             "You are OpenBaD, a precise coding agent working in {}.\n\
 Use the provided tools to inspect and change files. Read a file before editing it.\n\
 Prefer small, surgical changes and run the relevant tests when useful.\n\
-Use recall and remember for durable project decisions when they matter.\n\
+Use recall and remember for durable project decisions when they matter; use session scope for transient context and supersedes when replacing a contradictory memory.\n\
 Project knowledge is curated separately from code: call search_project before\n\
 answering questions that may rely on earlier decisions or imported references.\n\
 Use list_project_sources to orient yourself. For reference folders, use\n\
@@ -909,6 +923,12 @@ mod tests {
                 content: content.to_owned(),
                 tags,
                 pinned,
+                scope: "project".to_owned(),
+                author: "agent".to_owned(),
+                origin_turn: None,
+                origin_task: None,
+                supersedes: None,
+                expires_at: None,
             })
         }
 
@@ -922,6 +942,12 @@ mod tests {
                 content: "Use the cache-first prompt order.".to_owned(),
                 tags: vec!["decision".to_owned()],
                 pinned: true,
+                scope: "project".to_owned(),
+                author: "agent".to_owned(),
+                origin_turn: Some(2),
+                origin_task: None,
+                supersedes: None,
+                expires_at: None,
             }])
         }
     }
@@ -954,9 +980,10 @@ mod tests {
         let transport = agent.client.transport();
         let requests = transport.requests.lock().expect("requests");
         let body = String::from_utf8_lossy(&requests[0].body);
-        assert!(body.contains("Recent workspace memory"));
+        assert!(body.contains("Workspace memory loaded 1 entry (1 pinned"));
         assert!(body.contains("cache-first prompt order"));
-        assert!(body.contains("[pinned]"));
+        assert!(body.contains("[pinned] [project]"));
+        assert!(body.contains("turn 2"));
     }
 
     #[test]
