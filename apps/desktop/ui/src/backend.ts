@@ -10,6 +10,7 @@ import type {
   FileCheckpointSummary,
   IndexReport,
   MemoryRecord,
+  OutsideAccessGrant,
   SessionSummary,
   SessionView,
   KnowledgeDocument,
@@ -51,6 +52,7 @@ let mockMemories: MemoryRecord[] = [
     expires_at: null,
   },
 ];
+let mockAccessGrants: OutsideAccessGrant[] = [];
 let mockRepos: ProjectRepo[] = [
   {
     id: "mock-repo-1",
@@ -217,7 +219,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0009_knowledge_review",
+    schema_version: "0010_outside_access",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -327,6 +329,60 @@ export async function removeProject(projectId: string): Promise<void> {
   }
   mockProjects = mockProjects.filter((project) => project.id !== projectId);
   mockSessions.splice(0, mockSessions.length, ...mockSessions.filter((s) => s.workspace_id !== projectId));
+}
+
+export async function loadOutsideAccessGrants(
+  workspacePath: string,
+): Promise<OutsideAccessGrant[]> {
+  if (isTauri) {
+    return invoke<OutsideAccessGrant[]>("outside_access_grants", { workspacePath });
+  }
+  return mockAccessGrants.filter(
+    (grant) => grant.workspace_id === "mock-workspace",
+  );
+}
+
+export async function grantOutsideAccess(
+  workspacePath: string,
+  path: string,
+  writeAccess: boolean,
+  reason: string,
+): Promise<OutsideAccessGrant> {
+  if (isTauri) {
+    return invoke<OutsideAccessGrant>("grant_outside_access", {
+      workspacePath,
+      path,
+      writeAccess,
+      reason,
+    });
+  }
+  const existing = mockAccessGrants.find((grant) => grant.path === path);
+  if (existing) {
+    existing.write_access = writeAccess;
+    existing.reason = reason;
+    return { ...existing };
+  }
+  const grant: OutsideAccessGrant = {
+    id: `mock-access-${Date.now()}`,
+    workspace_id: "mock-workspace",
+    path,
+    write_access: writeAccess,
+    reason,
+    created_at: Date.now(),
+  };
+  mockAccessGrants = [...mockAccessGrants, grant];
+  return { ...grant };
+}
+
+export async function revokeOutsideAccess(
+  workspacePath: string,
+  grantId: string,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("revoke_outside_access", { workspacePath, grantId });
+    return;
+  }
+  mockAccessGrants = mockAccessGrants.filter((grant) => grant.id !== grantId);
 }
 
 export async function renameSession(sessionId: string, title: string): Promise<void> {
@@ -831,8 +887,46 @@ async function mockChat(
 ): Promise<ChatReply> {
   mockCancelled = false;
   const sessionId = input.sessionId ?? `mock-session-${mockSessionCounter++}`;
-  const text =
-    "I read `Cargo.toml`. It is a virtual workspace with twelve `openbad-*` crates plus the Tauri desktop app. The core crates are store, harness, llm, tools, agent, workspace, governance, memory, knowledge, autonomic, and mcp.";
+  const text = /markdown|mermaid/i.test(input.message)
+    ? [
+        "# Markdown features",
+        "",
+        "Some **bold**, *italic*, ~~strikethrough~~, `inline code`, and a [link](https://example.com).",
+        "",
+        "| Feature | Supported |",
+        "| --- | --- |",
+        "| Tables | yes |",
+        "| Task lists | yes |",
+        "",
+        "- [x] headings and lists",
+        "- [ ] follow-up work",
+        "",
+        "> Blockquotes work too.",
+        "",
+        "```rust",
+        "fn main() {",
+        "    println!(\"hello\");",
+        "}",
+        "```",
+        "",
+        "Inline math $E = mc^2$ and display math:",
+        "",
+        "$$",
+        "x^2 + y^2 = z^2",
+        "$$",
+        "",
+        "```mermaid",
+        "graph TD",
+        "  A[Start] --> B{Tests pass?}",
+        "  B -->|yes| C[Ship]",
+        "  B -->|no| D[Fix]",
+        "```",
+        "",
+        "Footnote reference[^1].",
+        "",
+        "[^1]: Footnotes render at the end.",
+      ].join("\n")
+    : "I read `Cargo.toml`. It is a virtual workspace with twelve `openbad-*` crates plus the Tauri desktop app. The core crates are store, harness, llm, tools, agent, workspace, governance, memory, knowledge, autonomic, and mcp.";
 
   onEvent({ type: "step", step: 1 });
   await tick(120);
@@ -883,6 +977,31 @@ async function mockChat(
           kind: "web",
           title: "OpenBaD architecture",
           uri: "https://example.com",
+        },
+      },
+    });
+  }
+  if (/outside|external.*(?:access|folder)/i.test(input.message)) {
+    onEvent({
+      type: "tool_call",
+      step: 2,
+      name: "request_fs_access",
+      arguments:
+        '{"path":"/home/you/other-project","write":false,"reason":"Compare the implementation"}',
+    });
+    await tick(80);
+    onEvent({
+      type: "tool_result",
+      step: 2,
+      name: "request_fs_access",
+      content:
+        "Filesystem access requested for /home/you/other-project (read only). Stop this turn and ask the human to approve it in OpenBaD; retry only after approval.",
+      is_error: false,
+      metadata: {
+        openbad_access_request: {
+          path: "/home/you/other-project",
+          write: false,
+          reason: "Compare the implementation",
         },
       },
     });

@@ -43,7 +43,8 @@ test("streams reasoning, tool progress, and the answer", async ({ page }) => {
 
   await sendPrompt(page);
 
-  await expect(page.getByText("I read `Cargo.toml`", { exact: false })).toBeVisible();
+  await expect(page.locator(".chat-markdown")).toContainText("I read");
+  await expect(page.locator(".chat-markdown")).toContainText("Cargo.toml");
   await expect(page.getByText("Reasoning")).toBeVisible();
   await expect(page.getByText("2 tool events")).toBeVisible();
   await expect(page.getByText("Done · 2 steps")).toBeVisible();
@@ -51,6 +52,40 @@ test("streams reasoning, tool progress, and the answer", async ({ page }) => {
     page.getByTitle("Cumulative tokens and cost for this session"),
   ).toBeVisible();
   await expect(page.getByText(prompt, { exact: true }).first()).toBeVisible();
+});
+
+test("requests and grants access outside the workspace", async ({ page }) => {
+  await page.goto("/");
+  await sendPrompt(page, "I need access to an external folder");
+
+  const dialog = page.getByRole("dialog", { name: "Filesystem access request" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("/home/you/other-project")).toBeVisible();
+  await expect(dialog.getByText("Compare the implementation")).toBeVisible();
+  await dialog.getByRole("button", { name: "Grant access" }).click();
+  await expect(page.getByText(/Access granted to/)).toBeVisible();
+
+  await openSettings(page);
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByRole("button", { name: "Access", exact: true }).click();
+  await expect(settings.getByText("/home/you/other-project")).toBeVisible();
+  await settings
+    .getByRole("button", { name: "Revoke access to /home/you/other-project" })
+    .click();
+  await expect(settings.getByText("No external filesystem grants.")).toBeVisible();
+});
+
+test("renders rich markdown and mermaid diagrams", async ({ page }) => {
+  await page.goto("/");
+  await sendPrompt(page, "Show markdown and mermaid");
+
+  await expect(page.getByRole("heading", { name: "Markdown features" })).toBeVisible();
+  await expect(page.getByRole("table")).toBeVisible();
+  await expect(page.getByText("Blockquotes work too.")).toBeVisible();
+  await expect(page.getByText("inline code")).toBeVisible();
+  await expect(page.getByText("fn main()", { exact: false })).toBeVisible();
+  await expect(page.locator(".katex").first()).toBeVisible();
+  await expect(page.locator(".mermaid-diagram svg")).toBeVisible({ timeout: 15_000 });
 });
 
 test("follows streamed output unless the user scrolls away", async ({ page }) => {

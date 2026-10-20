@@ -60,7 +60,12 @@ keeps a usable width.
 
 ### 3.1 Chat / Agent
 
-- Streaming markdown with code blocks.
+- Streaming GitHub-flavored Markdown: headings, lists, task lists, tables,
+  blockquotes, links, images, footnotes, strikethrough, and inline/display math
+  through KaTeX.
+- Syntax-highlighted code blocks with a copy action.
+- Mermaid diagrams rendered from fenced `mermaid` blocks, with the source
+  available in a disclosure and render errors shown inline.
 - Tool cards: name, status, duration, risk, result summary, expandable output.
 - Reasoning: collapsible "Thinking" section, hidden by default.
 - Citations: file path + line range; clicking opens the editor at the range.
@@ -70,6 +75,10 @@ keeps a usable width.
 - Access mode: Read only, Can edit, or Full access. The choice is stored in
   the session metadata, restored when the session is reopened, and applied to
   every tool call in the turn. New sessions start read-only.
+- Outside-workspace access: when the assistant calls `request_fs_access`, a
+  dialog shows the exact path, requested read/write scope, and reason. Approving
+  it stores a project-scoped grant; Settings → Access lists and revokes grants.
+  Write grants still require Can edit or Full access for the session.
 - "Continue", "Retry", "Fork", "Compact" actions.
 
 ### 3.2 Editor and inline completion

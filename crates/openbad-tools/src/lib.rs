@@ -788,6 +788,14 @@ pub trait CheckpointSink: Send + Sync {
     fn save(&self, path: &str, existed: bool, content: Option<&[u8]>) -> Result<String, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideGrant {
+    pub id: String,
+    pub path: PathBuf,
+    pub write_access: bool,
+    pub reason: String,
+}
+
 pub struct ToolContext {
     pub workspace: Arc<WorkspaceService>,
     pub allow_writes: bool,
@@ -799,6 +807,7 @@ pub struct ToolContext {
     pub project: Option<Arc<dyn ProjectAreas>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
+    outside_grants: Vec<OutsideGrant>,
 }
 
 impl ToolContext {
@@ -815,6 +824,78 @@ impl ToolContext {
             project: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
+            outside_grants: Vec::new(),
+        }
+    }
+
+    pub fn set_outside_grants(&mut self, grants: Vec<OutsideGrant>) {
+        self.outside_grants = grants
+            .into_iter()
+            .map(|grant| OutsideGrant {
+                path: grant.path.canonicalize().unwrap_or(grant.path),
+                ..grant
+            })
+            .collect();
+    }
+
+    #[must_use]
+    pub fn outside_grants(&self) -> &[OutsideGrant] {
+        &self.outside_grants
+    }
+
+    pub fn resolve_read(&self, path: &Path) -> Result<PathBuf, ToolError> {
+        match self.workspace.resolve(path) {
+            Ok(resolved) => Ok(resolved),
+            Err(openbad_workspace::WorkspaceError::OutsideRoot(_)) => {
+                self.resolve_granted(path, false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn resolve_write(&self, path: &Path) -> Result<PathBuf, ToolError> {
+        match self.workspace.resolve(path) {
+            Ok(resolved) => Ok(resolved),
+            Err(openbad_workspace::WorkspaceError::OutsideRoot(_)) => {
+                self.resolve_granted(path, true)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn resolve_granted(&self, path: &Path, write: bool) -> Result<PathBuf, ToolError> {
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace.root().join(path)
+        };
+        let candidate = normalize_lexical(&candidate);
+        let resolved = if candidate.exists() {
+            candidate.canonicalize()?
+        } else {
+            let mut resolved = None;
+            let mut ancestor = candidate.parent();
+            while let Some(parent) = ancestor {
+                if parent.exists() {
+                    let canonical = parent.canonicalize()?;
+                    let suffix = candidate
+                        .strip_prefix(parent)
+                        .map_err(|_| ToolError::OutsideRoot(path.display().to_string()))?;
+                    resolved = Some(canonical.join(suffix));
+                    break;
+                }
+                ancestor = parent.parent();
+            }
+            resolved.ok_or_else(|| ToolError::OutsideRoot(path.display().to_string()))?
+        };
+        if self
+            .outside_grants
+            .iter()
+            .any(|grant| resolved.starts_with(&grant.path) && (!write || grant.write_access))
+        {
+            Ok(resolved)
+        } else {
+            Err(ToolError::OutsideRoot(path.display().to_string()))
         }
     }
 
@@ -876,6 +957,7 @@ impl ToolRegistry {
         let mut registry = Self::new();
         registry.register(ReadFileTool);
         registry.register(StatFileTool);
+        registry.register(RequestFilesystemAccessTool);
         registry.register(StatRepoFileTool);
         registry.register(ReadFilesTool);
         registry.register(ReadRepoFilesTool);
@@ -1639,6 +1721,20 @@ fn check_write_policy(context: &ToolContext, path: &Path) -> Result<(), ToolErro
     Ok(())
 }
 
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 fn check_command_policy(
     context: &ToolContext,
     class: CommandClass,
@@ -1789,7 +1885,7 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "read_file",
-            "Read a UTF-8 text file from the workspace. Returns the requested line range.",
+            "Read a UTF-8 text file from the workspace or an approved external path. Returns the requested line range.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -1811,9 +1907,7 @@ impl Tool for ReadFileTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
         ensure_not_excluded(context, &path)?;
         let content = std::fs::read_to_string(&path)?;
         context.mark_read(&path);
@@ -1869,7 +1963,7 @@ impl Tool for StatFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "stat_file",
-            "Report a workspace file's size, line count, modification time, and BLAKE3 hash without reading its contents into context.",
+            "Report a workspace or approved external file's size, line count, modification time, and BLAKE3 hash without reading its contents into context.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -1885,9 +1979,7 @@ impl Tool for StatFileTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
         let metadata = file_metadata(&path)?;
         Ok(ToolResult::ok(format!(
             "{}: {} bytes, {} lines, modified {}, blake3 {}",
@@ -1942,6 +2034,108 @@ impl Tool for StatRepoFileTool {
     }
 }
 
+struct RequestFilesystemAccessTool;
+
+#[async_trait]
+impl Tool for RequestFilesystemAccessTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "request_fs_access",
+            "Ask the human for access to a file or directory outside the workspace. This records a request; it does not grant access. Stop after requesting and wait for approval in OpenBaD, then retry the operation.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path to a file or directory outside the workspace"},
+                "write": {"type": "boolean", "description": "Request write access as well as read access"},
+                "reason": {"type": "string", "description": "Why this path is needed"}
+            },
+            "required": ["path", "reason"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let raw = string_arg(&arguments, "path")?;
+        let requested = Path::new(&raw);
+        if !requested.is_absolute() {
+            return Err(ToolError::InvalidArgument(
+                "request_fs_access requires an absolute path".to_owned(),
+            ));
+        }
+        let normalized = normalize_lexical(requested);
+        let resolved = if normalized.exists() {
+            normalized.canonicalize()?
+        } else {
+            let parent = normalized
+                .parent()
+                .ok_or_else(|| ToolError::InvalidArgument("path has no parent".to_owned()))?;
+            parent.canonicalize()?.join(
+                normalized
+                    .file_name()
+                    .ok_or_else(|| ToolError::InvalidArgument("path has no name".to_owned()))?,
+            )
+        };
+        if resolved.parent().is_none() {
+            return Err(ToolError::InvalidArgument(
+                "refusing to request the filesystem root".to_owned(),
+            ));
+        }
+        if context.workspace.resolve(&resolved).is_ok() {
+            return Ok(ToolResult::ok(format!(
+                "{0} is already inside the workspace",
+                resolved.display()
+            )));
+        }
+        let write = optional_bool(&arguments, "write").unwrap_or(false);
+        let reason = string_arg(&arguments, "reason")?;
+        let already_granted = context
+            .outside_grants
+            .iter()
+            .any(|grant| resolved.starts_with(&grant.path) && (!write || grant.write_access));
+        if already_granted {
+            let access_note = if write && !context.allow_writes {
+                " The grant includes write access, but this session is read-only; switch the session access mode to Can edit or Full access before writing."
+            } else {
+                ""
+            };
+            return Ok(ToolResult::ok(format!(
+                "access already granted for {}{access_note}",
+                resolved.display()
+            ))
+            .with_metadata(json!({
+                "outside_access": {
+                    "granted": true,
+                    "path": resolved,
+                    "write": write
+                }
+            })));
+        }
+        let mode_note = if write && !context.allow_writes {
+            " The human must also switch the session access mode to Can edit or Full access for writes."
+        } else {
+            ""
+        };
+        Ok(ToolResult::ok(format!(
+            "Filesystem access requested for {}{}. Stop this turn and ask the human to approve it in OpenBaD; retry only after approval.{mode_note}",
+            resolved.display(),
+            if write { " (read and write)" } else { " (read only)" }
+        ))
+        .with_metadata(json!({
+            "openbad_access_request": {
+                "path": resolved,
+                "write": write,
+                "reason": reason
+            }
+        })))
+    }
+}
+
 struct ReadFilesTool;
 
 #[async_trait]
@@ -1949,7 +2143,7 @@ impl Tool for ReadFilesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "read_files",
-            "Read several workspace files in one call. Each file is capped independently; failures are reported per path.",
+            "Read several workspace or approved external files in one call. Each file is capped independently; failures are reported per path.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -1977,7 +2171,7 @@ impl Tool for ReadFilesTool {
         let mut sections = Vec::new();
         let mut files = Vec::new();
         for raw in paths {
-            match context.workspace.resolve(Path::new(&raw)) {
+            match context.resolve_read(Path::new(&raw)) {
                 Ok(path) => match ensure_not_excluded(context, &path)
                     .and_then(|()| std::fs::read_to_string(&path).map_err(ToolError::from))
                 {
@@ -2078,7 +2272,7 @@ impl Tool for OutlineTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "outline",
-            "Extract headings, YAML identifiers, or code declarations with line numbers. Use it to navigate long files before reading.",
+            "Extract headings, YAML identifiers, or code declarations from a workspace or approved external file. Use it to navigate long files before reading.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -2104,7 +2298,7 @@ impl Tool for OutlineTool {
                 let root = repo_root(context, &reference)?.1;
                 resolve_repo_path(&root, &raw)?
             }
-            None => context.workspace.resolve(Path::new(&raw))?,
+            None => context.resolve_read(Path::new(&raw))?,
         };
         ensure_not_excluded(context, &path)?;
         let content = std::fs::read_to_string(&path)?;
@@ -2157,9 +2351,7 @@ impl Tool for DeleteFileTool {
         if !context.allow_writes {
             return Err(ToolError::ApprovalRequired("delete_file".to_owned()));
         }
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         check_write_policy(context, &path)?;
         if !path.is_file() {
             return Err(ToolError::InvalidArgument(format!(
@@ -2221,12 +2413,8 @@ impl Tool for MoveFileTool {
         if !context.allow_writes {
             return Err(ToolError::ApprovalRequired("move_file".to_owned()));
         }
-        let from = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "from")?))?;
-        let to = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "to")?))?;
+        let from = context.resolve_write(Path::new(&string_arg(&arguments, "from")?))?;
+        let to = context.resolve_write(Path::new(&string_arg(&arguments, "to")?))?;
         check_write_policy(context, &from)?;
         check_write_policy(context, &to)?;
         if !from.is_file() {
@@ -2364,7 +2552,7 @@ impl Tool for RestoreTrashTool {
                 .map(|(_, path)| path.replace("__", "/"))
                 .unwrap_or_else(|| name.clone()),
         };
-        let destination = context.workspace.resolve(Path::new(&relative))?;
+        let destination = context.resolve_write(Path::new(&relative))?;
         check_write_policy(context, &destination)?;
         if destination.exists() {
             return Err(ToolError::Failed(format!(
@@ -2390,7 +2578,7 @@ impl Tool for ListDirTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "list_dir",
-            "List files and directories in the workspace, respecting .gitignore.",
+            "List files and directories in the workspace or an approved external directory, respecting .gitignore.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -2410,7 +2598,7 @@ impl Tool for ListDirTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
-        let root = context.workspace.resolve(Path::new(&relative))?;
+        let root = context.resolve_read(Path::new(&relative))?;
         if !root.is_dir() {
             return Err(ToolError::InvalidArgument(format!(
                 "not a directory: {relative}"
@@ -2465,7 +2653,7 @@ impl Tool for GrepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "grep",
-            "Search workspace text files for a substring. Respects .gitignore and returns path:line matches.",
+            "Search workspace or approved external text files for a substring. Respects .gitignore and returns path:line matches.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -2493,7 +2681,7 @@ impl Tool for GrepTool {
             ));
         }
         let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
-        let root = context.workspace.resolve(Path::new(&relative))?;
+        let root = context.resolve_read(Path::new(&relative))?;
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(100)
             .clamp(1, 500);
@@ -2619,7 +2807,7 @@ impl Tool for GlobTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "glob",
-            "Find workspace files whose path matches a glob such as **/*.rs or src/**/*.ts. Respects .gitignore.",
+            "Find files in the workspace or an approved external directory whose path matches a glob such as **/*.rs or src/**/*.ts. Respects .gitignore.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -2646,7 +2834,7 @@ impl Tool for GlobTool {
             ));
         }
         let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
-        let root = context.workspace.resolve(Path::new(&relative))?;
+        let root = context.resolve_read(Path::new(&relative))?;
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(500)
             .clamp(1, 5_000);
@@ -2723,7 +2911,7 @@ impl Tool for FindSymbolsTool {
         let query = query.to_lowercase();
         let kind_filter = optional_string(&arguments, "kind").map(|kind| kind.to_lowercase());
         let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
-        let root = context.workspace.resolve(Path::new(&relative))?;
+        let root = context.resolve_read(Path::new(&relative))?;
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(100)
             .clamp(1, 500);
@@ -2863,7 +3051,7 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "write_file",
-            "Write a complete UTF-8 file. Existing files must be read first.",
+            "Write a complete UTF-8 file inside the workspace or an approved external path. Existing files must be read first.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -2885,9 +3073,7 @@ impl Tool for WriteFileTool {
         if !context.allow_writes {
             return Err(ToolError::ApprovalRequired("write_file".to_owned()));
         }
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         check_write_policy(context, &path)?;
         if path.exists() && !context.was_read(&path) {
             return Err(ToolError::Failed(format!(
@@ -2947,7 +3133,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "edit_file",
-            "Replace an exact string in a workspace file. The file must be read first.",
+            "Replace an exact string in a workspace or approved external file. The file must be read first.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -2971,9 +3157,7 @@ impl Tool for EditFileTool {
         if !context.allow_writes {
             return Err(ToolError::ApprovalRequired("edit_file".to_owned()));
         }
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         check_write_policy(context, &path)?;
         if !context.was_read(&path) {
             return Err(ToolError::Failed(format!(
@@ -3108,7 +3292,7 @@ impl Tool for RunCommandTool {
                     }
                     canonical
                 } else {
-                    context.workspace.resolve(candidate)?
+                    context.resolve_write(candidate)?
                 }
             }
             None => context.workspace.root().to_path_buf(),
@@ -4037,7 +4221,7 @@ impl Tool for ExportKnowledgeTool {
             .project
             .as_ref()
             .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
-        let directory = context.workspace.resolve(Path::new(
+        let directory = context.resolve_write(Path::new(
             &optional_string(&arguments, "directory").unwrap_or_else(|| "knowledge".to_owned()),
         ))?;
         std::fs::create_dir_all(&directory)?;
@@ -4128,7 +4312,7 @@ impl Tool for ImportKnowledgeTool {
             .project
             .as_ref()
             .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
-        let directory = context.workspace.resolve(Path::new(
+        let directory = context.resolve_read(Path::new(
             &optional_string(&arguments, "directory").unwrap_or_else(|| "knowledge".to_owned()),
         ))?;
         if !directory.is_dir() {
@@ -5442,9 +5626,7 @@ impl Tool for UndoLastTool {
         let content = std::fs::read_to_string(record.path())?;
         let value: Value =
             serde_json::from_str(&content).map_err(|error| ToolError::Failed(error.to_string()))?;
-        let path = context
-            .workspace
-            .resolve(Path::new(value["path"].as_str().unwrap_or_default()))?;
+        let path = context.resolve_write(Path::new(value["path"].as_str().unwrap_or_default()))?;
         check_write_policy(context, &path)?;
         let existed = value["existed"].as_bool().unwrap_or(false);
         if existed {
@@ -5499,7 +5681,7 @@ impl Tool for InstructionsForTool {
                     .root()
                     .canonicalize()
                     .unwrap_or_else(|_| context.workspace.root().to_path_buf());
-                match context.workspace.resolve(Path::new(&raw)) {
+                match context.resolve_read(Path::new(&raw)) {
                     Ok(path) => (path, own_root),
                     Err(error) => {
                         let mut resolved = None;
@@ -5944,12 +6126,8 @@ impl Tool for GoldenCompareTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
-        let baseline = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "baseline")?))?;
+        let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
+        let baseline = context.resolve_read(Path::new(&string_arg(&arguments, "baseline")?))?;
         let current = std::fs::read_to_string(&path)?;
         let expected = std::fs::read_to_string(&baseline)?;
         let diff = similar::TextDiff::from_lines(&expected, &current)
@@ -6001,12 +6179,8 @@ impl Tool for GoldenAcceptTool {
                 "golden_accept requires confirm=true".to_owned(),
             ));
         }
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
-        let baseline = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "baseline")?))?;
+        let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
+        let baseline = context.resolve_write(Path::new(&string_arg(&arguments, "baseline")?))?;
         check_write_policy(context, &baseline)?;
         if let Some(parent) = baseline.parent() {
             std::fs::create_dir_all(parent)?;
@@ -6569,11 +6743,11 @@ impl Tool for DiffFilesTool {
         let b = string_arg(&arguments, "b")?;
         let path_a = match optional_string(&arguments, "repo_a") {
             Some(reference) => resolve_repo_path(&repo_root(context, &reference)?.1, &a)?,
-            None => context.workspace.resolve(Path::new(&a))?,
+            None => context.resolve_read(Path::new(&a))?,
         };
         let path_b = match optional_string(&arguments, "repo_b") {
             Some(reference) => resolve_repo_path(&repo_root(context, &reference)?.1, &b)?,
-            None => context.workspace.resolve(Path::new(&b))?,
+            None => context.resolve_read(Path::new(&b))?,
         };
         ensure_not_excluded(context, &path_a)?;
         ensure_not_excluded(context, &path_b)?;
@@ -6629,7 +6803,7 @@ impl Tool for FileCitationTool {
         let raw = string_arg(&arguments, "path")?;
         let path = match optional_string(&arguments, "repo") {
             Some(reference) => resolve_repo_path(&repo_root(context, &reference)?.1, &raw)?,
-            None => context.workspace.resolve(Path::new(&raw))?,
+            None => context.resolve_read(Path::new(&raw))?,
         };
         ensure_not_excluded(context, &path)?;
         let bytes = std::fs::read(&path)?;
@@ -6678,9 +6852,7 @@ impl Tool for ArchiveListTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
         ensure_not_excluded(context, &path)?;
         let file = std::fs::File::open(&path)?;
         let mut archive = zip::ZipArchive::new(file)
@@ -6734,9 +6906,7 @@ impl Tool for ArchiveReadTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
         ensure_not_excluded(context, &path)?;
         let entry = string_arg(&arguments, "entry")?;
         let file = std::fs::File::open(&path)?;
@@ -6990,9 +7160,7 @@ impl Tool for PreviewWriteTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         ensure_not_excluded(context, &path)?;
         let old = if path.exists() {
             std::fs::read_to_string(&path)?
@@ -7219,9 +7387,7 @@ impl Tool for AssertProjectTool {
                 .with_metadata(json!({"action": "count", "count": count, "success": success})))
             }
             "schema" => {
-                let path = context
-                    .workspace
-                    .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+                let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
                 ensure_not_excluded(context, &path)?;
                 let content = std::fs::read_to_string(&path)?;
                 let value: serde_json::Value = serde_json::from_str(&content)
@@ -9786,7 +9952,7 @@ impl Tool for CanonLintTool {
             paths
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|path| context.workspace.resolve(Path::new(path)))
+                .map(|path| context.resolve_read(Path::new(path)))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .filter(|path| path.is_file())
@@ -10268,9 +10434,7 @@ impl Tool for YamlQueryTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let path = context
-            .workspace
-            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let path = context.resolve_read(Path::new(&string_arg(&arguments, "path")?))?;
         ensure_not_excluded(context, &path)?;
         let content = std::fs::read_to_string(&path)?;
         context.mark_read(&path);
@@ -12387,7 +12551,7 @@ impl Tool for RunTestsTool {
             ));
         }
         let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
-        let directory = context.workspace.resolve(Path::new(&relative))?;
+        let directory = context.resolve_write(Path::new(&relative))?;
         let (command, kind) = detect_test_command(&directory)?;
         let timeout = optional_usize(&arguments, "timeout_seconds")
             .unwrap_or(300)
@@ -12559,7 +12723,7 @@ impl Tool for GitDiffTool {
             command.arg("--staged");
         }
         if let Some(path) = optional_string(&arguments, "path") {
-            let path = context.workspace.resolve(Path::new(&path))?;
+            let path = context.resolve_read(Path::new(&path))?;
             command.arg("--").arg(path);
         }
         let output = command.output()?;
@@ -15139,6 +15303,121 @@ invariants:
             "files": ["../escape.zip"]
         }));
         assert!(matches!(traversal, Err(ToolError::InvalidArgument(_))));
+    }
+
+    #[tokio::test]
+    async fn outside_access_grants_are_scoped_and_enforced() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        let file = outside.path().join("notes.txt");
+        fs::write(&file, "outside").expect("file");
+        let mut context = context(workspace.path());
+        context.allow_writes = true;
+
+        let read = ReadFileTool
+            .execute(json!({"path": file.to_string_lossy()}), &context)
+            .await;
+        assert!(matches!(read, Err(ToolError::OutsideRoot(_))));
+
+        context.set_outside_grants(vec![OutsideGrant {
+            id: "grant-1".to_owned(),
+            path: outside.path().to_path_buf(),
+            write_access: false,
+            reason: "test".to_owned(),
+        }]);
+        let read = ReadFileTool
+            .execute(json!({"path": file.to_string_lossy()}), &context)
+            .await
+            .expect("read granted path");
+        assert_eq!(read.content, "outside");
+
+        let blocked = WriteFileTool
+            .execute(
+                json!({"path": outside.path().join("new.txt").to_string_lossy(), "content": "x"}),
+                &context,
+            )
+            .await;
+        assert!(matches!(blocked, Err(ToolError::OutsideRoot(_))));
+
+        context.set_outside_grants(vec![OutsideGrant {
+            id: "grant-1".to_owned(),
+            path: outside.path().to_path_buf(),
+            write_access: true,
+            reason: "test".to_owned(),
+        }]);
+        WriteFileTool
+            .execute(
+                json!({"path": outside.path().join("new.txt").to_string_lossy(), "content": "x"}),
+                &context,
+            )
+            .await
+            .expect("write granted path");
+        assert_eq!(
+            fs::read_to_string(outside.path().join("new.txt")).expect("new file"),
+            "x"
+        );
+
+        let other = tempdir().expect("other");
+        let denied = ReadFileTool
+            .execute(
+                json!({"path": other.path().join("nope.txt").to_string_lossy()}),
+                &context,
+            )
+            .await;
+        assert!(matches!(denied, Err(ToolError::OutsideRoot(_))));
+    }
+
+    #[tokio::test]
+    async fn filesystem_access_requests_do_not_grant_access() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        let file = outside.path().join("notes.txt");
+        fs::write(&file, "outside").expect("file");
+        let mut context = context(workspace.path());
+        let request = RequestFilesystemAccessTool
+            .execute(
+                json!({"path": file.to_string_lossy(), "write": true, "reason": "compare"}),
+                &context,
+            )
+            .await
+            .expect("request");
+        assert_eq!(
+            request.metadata["openbad_access_request"]["path"],
+            json!(file.to_string_lossy())
+        );
+        assert_eq!(request.metadata["openbad_access_request"]["write"], true);
+
+        let relative = RequestFilesystemAccessTool
+            .execute(json!({"path": "elsewhere", "reason": "test"}), &context)
+            .await;
+        assert!(matches!(relative, Err(ToolError::InvalidArgument(_))));
+
+        context.set_outside_grants(vec![OutsideGrant {
+            id: "grant-1".to_owned(),
+            path: outside.path().to_path_buf(),
+            write_access: false,
+            reason: "test".to_owned(),
+        }]);
+        let existing = RequestFilesystemAccessTool
+            .execute(
+                json!({"path": file.to_string_lossy(), "write": false, "reason": "compare"}),
+                &context,
+            )
+            .await
+            .expect("existing grant");
+        assert!(
+            existing.content.contains("already granted"),
+            "{}",
+            existing.content
+        );
+        let upgrade = RequestFilesystemAccessTool
+            .execute(
+                json!({"path": file.to_string_lossy(), "write": true, "reason": "compare"}),
+                &context,
+            )
+            .await
+            .expect("upgrade request");
+        assert!(upgrade.metadata["openbad_access_request"].is_object());
     }
 
     #[tokio::test]

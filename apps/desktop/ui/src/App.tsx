@@ -38,6 +38,9 @@ import {
   checkpointDiff as fetchCheckpointDiff,
   clearApiKey as clearStoredApiKey,
   forgetMemory as forgetStoredMemory,
+  grantOutsideAccess as grantFilesystemAccess,
+  loadOutsideAccessGrants as fetchAccessGrants,
+  revokeOutsideAccess as revokeFilesystemAccess,
   listProjects as fetchProjects,
   loadCheckpoints as fetchCheckpoints,
   loadFoundation as fetchFoundation,
@@ -59,6 +62,7 @@ import {
 } from "./backend";
 import AppMenuBar from "./AppMenuBar";
 import type { AppMenu } from "./AppMenuBar";
+import MarkdownMessage from "./MarkdownMessage";
 import ProjectPanel from "./ProjectPanel";
 import type { PanelTab } from "./ProjectPanel";
 import type {
@@ -68,6 +72,8 @@ import type {
   FileCheckpointSummary,
   FoundationState,
   MemoryRecord,
+  OutsideAccessGrant,
+  OutsideAccessRequest,
   SessionSummary,
   Usage,
   WorkspaceIndexSummary,
@@ -147,6 +153,9 @@ export default function App() {
   const [panelWidth, setPanelWidth] = useState(460);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [projectRevision, setProjectRevision] = useState(0);
+  const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
+  const [accessNotice, setAccessNotice] = useState<string | null>(null);
+  const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -223,6 +232,22 @@ export default function App() {
       setError(describeError(cause));
     }
   }, []);
+
+  const loadAccessGrants = useCallback(async () => {
+    if (activeProject === null) {
+      setAccessGrants([]);
+      return;
+    }
+    try {
+      setAccessGrants(await fetchAccessGrants(activeProject.path));
+    } catch {
+      setAccessGrants([]);
+    }
+  }, [activeProject]);
+
+  useEffect(() => {
+    void loadAccessGrants();
+  }, [loadAccessGrants]);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -407,6 +432,7 @@ export default function App() {
     setSessionId(null);
     setEntries([]);
     setPermissionMode("read");
+    setAccessRequest(null);
     setError(null);
     followRef.current = true;
   }, []);
@@ -415,6 +441,7 @@ export default function App() {
     setSessionId(null);
     setEntries([]);
     setPermissionMode("read");
+    setAccessRequest(null);
     setError(null);
     followRef.current = true;
     composerRef.current?.focus();
@@ -436,6 +463,48 @@ export default function App() {
       });
     },
     [sessionId],
+  );
+
+  const grantAccess = useCallback(async () => {
+    if (accessRequest === null || workspacePath.length === 0) {
+      return;
+    }
+    try {
+      const grant = await grantFilesystemAccess(
+        workspacePath,
+        accessRequest.path,
+        accessRequest.write,
+        accessRequest.reason,
+      );
+      setAccessRequest(null);
+      setAccessGrants((items) => [
+        ...items.filter((item) => item.path !== grant.path),
+        grant,
+      ]);
+      setAccessNotice(
+        `Access granted to ${grant.path}. Continue when ready; the next turn will use it.`,
+      );
+      setMessage(`Access granted for ${grant.path}. Continue with the task.`);
+      composerRef.current?.focus();
+      window.setTimeout(() => setAccessNotice(null), 8_000);
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  }, [accessRequest, workspacePath]);
+
+  const revokeAccess = useCallback(
+    async (grant: OutsideAccessGrant) => {
+      if (activeProject === null) {
+        return;
+      }
+      try {
+        await revokeFilesystemAccess(activeProject.path, grant.id);
+        setAccessGrants((items) => items.filter((item) => item.id !== grant.id));
+      } catch (cause) {
+        setError(describeError(cause));
+      }
+    },
+    [activeProject],
   );
 
   const saveApiKey = useCallback(async () => {
@@ -612,6 +681,10 @@ export default function App() {
             if (nextArtifact !== null) {
               openArtifact(nextArtifact);
             }
+            const nextAccessRequest = accessRequestFromMetadata(event.metadata);
+            if (nextAccessRequest !== null) {
+              setAccessRequest(nextAccessRequest);
+            }
           }
           setEntries((current) =>
             current.map((entry) => {
@@ -730,6 +803,7 @@ export default function App() {
         const view = await fetchSession(session.id);
         setSessionId(view.session_id);
         setPermissionMode(session.access_mode);
+        setAccessRequest(null);
         if (session.workspace_id !== null) {
           const project = projects.find((item) => item.id === session.workspace_id);
           if (project !== undefined) {
@@ -844,10 +918,14 @@ export default function App() {
     }
   }, [loadProjects, newProjectName, selectProject]);
 
-  const openSettings = useCallback((tab: SettingsTab) => {
-    setSettingsTab(tab);
-    setSettingsOpen(true);
-  }, []);
+  const openSettings = useCallback(
+    (tab: SettingsTab) => {
+      setSettingsTab(tab);
+      setSettingsOpen(true);
+      void loadAccessGrants();
+    },
+    [loadAccessGrants],
+  );
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -1371,6 +1449,15 @@ export default function App() {
 
           <div className="shrink-0 border-t border-white/[0.06] bg-[#0b0e12]/95 px-4 py-3">
             <div className="mx-auto max-w-3xl">
+              {accessNotice !== null && (
+                <div className="mb-2 flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-[11px] text-emerald-200">
+                  <Shield size={13} className="mt-0.5 shrink-0" />
+                  <span className="flex-1">{accessNotice}</span>
+                  <button type="button" onClick={() => setAccessNotice(null)}>
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
               {error !== null && (
                 <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200">
                   <CircleAlert size={13} className="mt-0.5 shrink-0" />
@@ -1501,6 +1588,14 @@ export default function App() {
         </>
       )}
 
+      {accessRequest !== null && (
+        <AccessRequestDialog
+          request={accessRequest}
+          onGrant={() => void grantAccess()}
+          onDeny={() => setAccessRequest(null)}
+        />
+      )}
+
       {shortcutsOpen && (
         <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
@@ -1518,6 +1613,8 @@ export default function App() {
           onReasoningEffort={setReasoningEffort}
           permissionMode={permissionMode}
           onPermissionMode={changePermissionMode}
+          accessGrants={accessGrants}
+          onRevokeAccess={(grant) => void revokeAccess(grant)}
           apiKeyStatus={apiKeyStatus}
           apiKeyInput={apiKeyInput}
           onApiKeyInput={setApiKeyInput}
@@ -1772,8 +1869,8 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
           </details>
         )}
         {entry.text.length > 0 && (
-          <div className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-slate-200">
-            {entry.text}
+          <div className="mt-2 text-[13px] leading-6 text-slate-200">
+            <MarkdownMessage text={entry.text} />
           </div>
         )}
         {entry.tools !== undefined && entry.tools.length > 0 && (
@@ -1875,6 +1972,8 @@ function SettingsDialog({
   onReasoningEffort,
   permissionMode,
   onPermissionMode,
+  accessGrants,
+  onRevokeAccess,
   apiKeyStatus,
   apiKeyInput,
   onApiKeyInput,
@@ -1899,6 +1998,8 @@ function SettingsDialog({
   onReasoningEffort: (value: string) => void;
   permissionMode: PermissionMode;
   onPermissionMode: (value: PermissionMode) => void;
+  accessGrants: OutsideAccessGrant[];
+  onRevokeAccess: (grant: OutsideAccessGrant) => void;
   apiKeyStatus: boolean;
   apiKeyInput: string;
   onApiKeyInput: (value: string) => void;
@@ -2027,6 +2128,48 @@ function SettingsDialog({
                 Access mode is remembered per session, so returning to a session restores
                 the mode it last used. New sessions start read-only.
               </p>
+              <div className="pt-2">
+                <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+                  Outside workspace
+                </p>
+                {accessGrants.length === 0 ? (
+                  <p className="px-1 text-[11px] leading-5 text-slate-600">
+                    No external filesystem grants. The assistant can ask for one when a
+                    task needs a path outside this project.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {accessGrants.map((grant) => (
+                      <div
+                        key={grant.id}
+                        className="flex items-start gap-2 rounded-md border border-white/[0.07] bg-white/[0.02] p-2.5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="break-all font-mono text-[10px] text-slate-300">
+                            {grant.path}
+                          </p>
+                          <p className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">
+                            {grant.write_access ? "read and write" : "read only"}
+                          </p>
+                          {grant.reason.length > 0 && (
+                            <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                              {grant.reason}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`Revoke access to ${grant.path}`}
+                          onClick={() => onRevokeAccess(grant)}
+                          className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -2341,6 +2484,81 @@ function artifactFromMetadata(metadata: unknown): Artifact | null {
   };
 }
 
+
+function accessRequestFromMetadata(metadata: unknown): OutsideAccessRequest | null {
+  if (typeof metadata !== "object" || metadata === null) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>).openbad_access_request;
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.path !== "string" || typeof record.reason !== "string") {
+    return null;
+  }
+  return {
+    path: record.path,
+    write: record.write === true,
+    reason: record.reason,
+  };
+}
+
+function AccessRequestDialog({
+  request,
+  onGrant,
+  onDeny,
+}: {
+  request: OutsideAccessRequest;
+  onGrant: () => void;
+  onDeny: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Filesystem access request"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+    >
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 text-amber-300">
+            <Shield size={16} />
+          </div>
+          <div>
+            <h2 className="text-[14px] font-medium">Allow access outside the workspace?</h2>
+            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+              OpenBaD asked for {request.write ? "read and write" : "read-only"} access.
+              The grant applies to this project until you revoke it.
+              {request.write &&
+                " Write access also requires the session access mode to be Can edit or Full access."}
+            </p>
+          </div>
+        </div>
+        <p className="mt-4 break-all rounded-md border border-white/[0.07] bg-black/30 px-2.5 py-2 font-mono text-[10px] text-slate-300">
+          {request.path}
+        </p>
+        <p className="mt-2 text-[11px] leading-5 text-slate-500">{request.reason}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onDeny}
+            className="rounded-md border border-white/10 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/5"
+          >
+            Deny
+          </button>
+          <button
+            type="button"
+            onClick={onGrant}
+            className="rounded-md border border-emerald-400/30 bg-emerald-400/15 px-3 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-400/20"
+          >
+            Grant access
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function projectSlugPreview(name: string): string {
   const slug = name

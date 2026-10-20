@@ -13,8 +13,8 @@ use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
-    CheckpointSink, MemoryStore, ProjectAreas, ToolContext, ToolRegistry, WorkspaceSearch,
-    discover_plugins, discover_skills,
+    CheckpointSink, MemoryStore, OutsideGrant, ProjectAreas, ToolContext, ToolRegistry,
+    WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
@@ -99,6 +99,7 @@ pub struct Agent<T: HttpTransport> {
     checkpoints: Option<Arc<dyn CheckpointSink>>,
     memory: Option<Arc<dyn MemoryStore>>,
     project: Option<Arc<dyn ProjectAreas>>,
+    outside_grants: Vec<OutsideGrant>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -119,6 +120,7 @@ impl<T: HttpTransport> Agent<T> {
             checkpoints: None,
             memory: None,
             project: None,
+            outside_grants: Vec::new(),
             redactions: Vec::new(),
             config,
         }
@@ -149,6 +151,12 @@ impl<T: HttpTransport> Agent<T> {
     }
 
     /// Strings that must never reach the model, observer, or persisted trace.
+    #[must_use]
+    pub fn with_outside_grants(mut self, grants: Vec<OutsideGrant>) -> Self {
+        self.outside_grants = grants;
+        self
+    }
+
     #[must_use]
     pub fn with_redactions(mut self, redactions: Vec<String>) -> Self {
         self.redactions = redactions;
@@ -189,6 +197,7 @@ impl<T: HttpTransport> Agent<T> {
             context.checkpoints = self.checkpoints.clone();
             context.memory = self.memory.clone();
             context.project = self.project.clone();
+            context.set_outside_grants(self.outside_grants.clone());
             context
         });
 
@@ -555,6 +564,7 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
                 }
             }
         }
+        prompt.push_str("\nFilesystem access outside the workspace is granted explicitly by the human. If a task needs an outside path and a read/write fails with 'outside the workspace', call request_fs_access with the absolute path, whether write access is needed, and a concrete reason. Then stop and wait for approval in OpenBaD; never assume or claim access.\n");
         let plugins = discover_plugins(self.workspace.root());
         prompt.push_str("\nPlugins extend the tool surface. Use plugin_list/plugin_describe and plugin_call to run one; write_plugin scaffolds a new plugin, then edit it, run plugin_test, and plugin_call. Install bundled plugins with plugin_install_builtin.\n");
         if !plugins.is_empty() {
@@ -582,6 +592,7 @@ fn load_project_instructions(root: &std::path::Path) -> Option<String> {
         "CLAUDE.md",
         ".github/copilot-instructions.md",
         ".openbad/instructions.md",
+        "docs/architecture/CHANGELOG.md",
         ".cursorrules",
     ];
     const MAX_TOTAL_CHARS: usize = 32 * 1024;
@@ -1016,6 +1027,16 @@ mod tests {
         let instructions = load_project_instructions(directory.path()).expect("loaded");
         assert!(instructions.contains("From AGENTS.md"));
         assert!(instructions.contains("Run cargo test."));
+
+        std::fs::create_dir_all(directory.path().join("docs/architecture")).expect("docs");
+        std::fs::write(
+            directory.path().join("docs/architecture/CHANGELOG.md"),
+            "# Architecture changelog\n\n- Tool surface moved.\n",
+        )
+        .expect("changelog");
+        let instructions = load_project_instructions(directory.path()).expect("loaded");
+        assert!(instructions.contains("From docs/architecture/CHANGELOG.md"));
+        assert!(instructions.contains("Tool surface moved."));
 
         let empty = tempfile::tempdir().expect("empty");
         assert!(load_project_instructions(empty.path()).is_none());

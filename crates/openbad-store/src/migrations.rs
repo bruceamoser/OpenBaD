@@ -40,6 +40,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0009_knowledge_review",
         include_str!("../migrations/0009_knowledge_review.sql"),
     ),
+    (
+        "0010_outside_access",
+        include_str!("../migrations/0010_outside_access.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.
