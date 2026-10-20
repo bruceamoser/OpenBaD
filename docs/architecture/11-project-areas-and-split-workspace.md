@@ -50,6 +50,10 @@ Migration `0006_project_areas` adds the project areas; migration
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
 
+Project truth lives in `.openbad/canon.yaml`, `.openbad/glossary.yaml`, and
+`.openbad/adr/`; `yaml_query` gives bounded access to project YAML documents
+without loading whole files.
+
 Structured questions live in `.openbad/questions.json` and are answered in the
 Project → Questions panel. The assistant reads the answer on its next turn.
 

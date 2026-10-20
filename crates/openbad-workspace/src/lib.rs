@@ -1,5 +1,6 @@
 //! Workspace root, manifest, and path-containment primitives.
 
+pub mod canon;
 pub mod context;
 pub mod manifest;
 pub mod policy;
@@ -7,6 +8,11 @@ pub mod questions;
 
 use std::path::{Component, Path, PathBuf};
 
+pub use canon::{
+    BannedPhrase, CanonEntry, CanonError, CanonLedger, Glossary, GlossaryEntry, adr_directory,
+    canon_path, current_truth, glossary_path, lint_text, load_canon, load_glossary, save_canon,
+    save_glossary, validate_canon_status,
+};
 pub use context::{
     ContextError, ContextPolicy, ContextRule, DeadEnd, context_path, dead_end_summary,
     dead_ends_path, load_context_policy, load_dead_ends, save_context_policy, save_dead_ends,
