@@ -17,6 +17,7 @@
 | 08 | [Desktop Application](08-desktop-application.md) | Tauri shell, React UI, views, interactions, packaging |
 | 09 | [Security and Threat Model](09-security-and-threat-model.md) | Trust boundaries, prompt injection, sandboxing, secrets |
 | 10 | [Providers, Observability, and Performance](10-providers-observability-performance.md) | Model adapters, cost accounting, telemetry, benchmarks |
+| 11 | [Project Areas and the Split Workspace](11-project-areas-and-split-workspace.md) | Project-scoped repos, knowledge, RAG, memory, tools, artifacts |
 
 Implementation planning lives in [`../plans/`](../plans/). Decisions live in
 [`../adr/`](../adr/).
@@ -26,7 +27,7 @@ Implementation planning lives in [`../plans/`](../plans/). Decisions live in
 - **New contributors:** 00 → 01 → 02 → 03 → 04 → 05.
 - **Harness/LLM work:** 04 → 05 → 10.
 - **Memory/RAG work:** 03 → 06.
-- **Desktop UI work:** 01 → 08.
+- **Desktop UI / project work:** 01 → 08 → 11.
 - **Security-sensitive work:** 09 → 07.
 
 ## Conventions

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  BookOpen,
   Bot,
   Check,
   ChevronDown,
@@ -8,13 +9,16 @@ import {
   CircleAlert,
   Database,
   Folder,
+  FolderGit2,
   FolderOpen,
+  Gauge,
   KeyRound,
   Loader2,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRight,
+  Network,
   Pencil,
   Plus,
   Search,
@@ -51,7 +55,10 @@ import {
   workspaceDefault,
   workspaceIndexStatus as fetchIndexStatus,
 } from "./backend";
+import ProjectPanel from "./ProjectPanel";
+import type { PanelTab } from "./ProjectPanel";
 import type {
+  Artifact,
   ChatEntry,
   FileCheckpointSummary,
   FoundationState,
@@ -68,7 +75,6 @@ type Preferences = {
 };
 
 type PermissionMode = "read" | "edit" | "full";
-type ContextTab = "index" | "memory" | "checkpoints" | "diagnostics";
 type SettingsTab = "model" | "access" | "secrets" | "project" | "about";
 
 const defaultPreferences: Preferences = {
@@ -130,8 +136,10 @@ export default function App() {
   const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [contextOpen, setContextOpen] = useState(false);
-  const [contextTab, setContextTab] = useState<ContextTab>("index");
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelTab, setPanelTab] = useState<PanelTab>("overview");
+  const [panelWidth, setPanelWidth] = useState(460);
+  const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -446,6 +454,43 @@ export default function App() {
     [checkpointDiffId, refreshWorkspaceIndex],
   );
 
+  const openPanel = useCallback((tab: PanelTab) => {
+    setPanelTab(tab);
+    setPanelOpen(true);
+  }, []);
+
+  const openArtifact = useCallback((next: Artifact | null) => {
+    setArtifact(next);
+    if (next !== null) {
+      setPanelTab("artifact");
+      setPanelOpen(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (panelOpen && window.innerWidth < 1180) {
+      setSidebarOpen(false);
+    }
+  }, [panelOpen]);
+
+  const startPanelResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panelWidth;
+    const move = (pointer: PointerEvent) => {
+      const available = Math.max(320, window.innerWidth - 380);
+      setPanelWidth(
+        Math.min(available, Math.max(320, startWidth - (pointer.clientX - startX))),
+      );
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }, [panelWidth]);
+
   const send = useCallback(async () => {
     const text = message.trim();
     if (text.length === 0 || busy || workspacePath.length === 0) {
@@ -483,6 +528,12 @@ export default function App() {
           reasoningEffort,
         },
         (event) => {
+          if (event.type === "tool_result") {
+            const nextArtifact = artifactFromMetadata(event.metadata);
+            if (nextArtifact !== null) {
+              openArtifact(nextArtifact);
+            }
+          }
           setEntries((current) =>
             current.map((entry) => {
               if (entry.id !== assistantId) {
@@ -576,6 +627,7 @@ export default function App() {
     loadSessions,
     message,
     model,
+    openArtifact,
     reasoningEffort,
     sessionId,
     thinking,
@@ -726,11 +778,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [newSession, openSettings]);
 
-  const openContext = useCallback((tab: ContextTab) => {
-    setContextTab(tab);
-    setContextOpen(true);
-  }, []);
-
   const projectSessions = useMemo(
     () =>
       sessions.filter(
@@ -828,7 +875,53 @@ export default function App() {
                   </button>
 
                   {isActive && (
-                    <div className="ml-4 mt-1 space-y-0.5 border-l border-white/[0.06] pl-2">
+                    <div className="ml-2 mt-1">
+                      <div className="mb-1 space-y-0.5">
+                        <ProjectAreaButton
+                          icon={<Gauge size={12} />}
+                          label="Overview"
+                          active={panelOpen && panelTab === "overview"}
+                          onClick={() => openPanel("overview")}
+                        />
+                        <ProjectAreaButton
+                          icon={<Folder size={12} />}
+                          label="Workspace"
+                          active={panelOpen && panelTab === "workspace"}
+                          onClick={() => openPanel("workspace")}
+                        />
+                        <ProjectAreaButton
+                          icon={<FolderGit2 size={12} />}
+                          label="Repos"
+                          active={panelOpen && panelTab === "repos"}
+                          onClick={() => openPanel("repos")}
+                        />
+                        <ProjectAreaButton
+                          icon={<BookOpen size={12} />}
+                          label="Knowledge"
+                          active={panelOpen && panelTab === "knowledge"}
+                          onClick={() => openPanel("knowledge")}
+                        />
+                        <ProjectAreaButton
+                          icon={<Search size={12} />}
+                          label="Retrieval"
+                          active={panelOpen && panelTab === "retrieval"}
+                          onClick={() => openPanel("retrieval")}
+                        />
+                        <ProjectAreaButton
+                          icon={<Database size={12} />}
+                          label="Memory"
+                          active={panelOpen && panelTab === "memory"}
+                          onClick={() => openPanel("memory")}
+                        />
+                      </div>
+                      <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-700">
+                        Sessions
+                      </p>
+                    </div>
+                  )}
+
+                  {isActive && (
+                    <div className="ml-4 space-y-0.5 border-l border-white/[0.06] pl-2">
                       {visibleSessions.length === 0 && (
                         <p className="px-2 py-1.5 text-[11px] text-slate-600">
                           {sessionQuery.trim().length > 0 ? "No matches" : "No sessions"}
@@ -908,14 +1001,14 @@ export default function App() {
           </div>
           <button
             type="button"
-            onClick={() => openContext("index")}
+            onClick={() => openPanel(panelTab)}
             className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
-              contextOpen
+              panelOpen
                 ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
                 : "border-white/[0.08] bg-white/[0.03] text-slate-400 hover:bg-white/[0.06]"
             }`}
           >
-            <PanelRight size={14} /> Context
+            <PanelRight size={14} /> Project
           </button>
           <button
             type="button"
@@ -1079,31 +1172,50 @@ export default function App() {
         </div>
       </div>
 
-      {contextOpen && (
-        <ContextDrawer
-          tab={contextTab}
-          onTab={setContextTab}
-          onClose={() => setContextOpen(false)}
-          indexSummary={indexSummary}
-          indexing={indexing}
-          indexError={indexError}
-          onRefreshIndex={() => void refreshWorkspaceIndex()}
-          memories={memoryList}
-          memoryError={memoryError}
-          onForgetMemory={(id) => void forgetMemory(id)}
-          checkpoints={checkpointList}
-          restoringCheckpoint={restoringCheckpoint}
-          checkpointDiffId={checkpointDiffId}
-          checkpointDiffText={checkpointDiffText}
-          checkpointNotice={checkpointNotice}
-          checkpointError={checkpointError}
-          onShowDiff={(id) => void showCheckpointDiff(id)}
-          onRestore={(id) => void restoreCheckpoint(id)}
-          foundation={foundation}
-          apiKeyStatus={apiKeyStatus}
-          sessionId={sessionId}
-          onOpenSettings={openSettings}
-        />
+      {panelOpen && (
+        <>
+          <div
+            role="separator"
+            aria-label="Resize project panel"
+            aria-orientation="vertical"
+            onPointerDown={startPanelResize}
+            className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-emerald-400/30"
+          />
+          <div
+            className="flex min-h-0 shrink-0 overflow-hidden"
+            style={{
+              width: `clamp(320px, ${panelWidth}px, calc(100vw - 380px))`,
+            }}
+          >
+            <ProjectPanel
+              tab={panelTab}
+              onTab={setPanelTab}
+              onClose={() => setPanelOpen(false)}
+              project={activeProject}
+              indexSummary={indexSummary}
+              indexing={indexing}
+              indexError={indexError}
+              onRefreshIndex={() => void refreshWorkspaceIndex()}
+              memories={memoryList}
+              memoryError={memoryError}
+              onForgetMemory={(id) => void forgetMemory(id)}
+              checkpoints={checkpointList}
+              restoringCheckpoint={restoringCheckpoint}
+              checkpointDiffId={checkpointDiffId}
+              checkpointDiffText={checkpointDiffText}
+              checkpointNotice={checkpointNotice}
+              checkpointError={checkpointError}
+              onShowDiff={(id) => void showCheckpointDiff(id)}
+              onRestore={(id) => void restoreCheckpoint(id)}
+              foundation={foundation}
+              apiKeyStatus={apiKeyStatus}
+              sessionId={sessionId}
+              onOpenSettings={openSettings}
+              artifact={artifact}
+              onArtifact={openArtifact}
+            />
+          </div>
+        </>
       )}
 
       {settingsOpen && (
@@ -1154,7 +1266,7 @@ export default function App() {
           }}
           onContext={(tab) => {
             setCommandOpen(false);
-            openContext(tab);
+            openPanel(tab);
           }}
           onToggleSidebar={() => {
             setCommandOpen(false);
@@ -1234,6 +1346,33 @@ export default function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function ProjectAreaButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] ${
+        active
+          ? "bg-emerald-400/10 text-emerald-200"
+          : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+      }`}
+    >
+      {icon}
+      <span className="truncate">{label}</span>
+    </button>
   );
 }
 
@@ -1379,251 +1518,6 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
         )}
       </div>
     </div>
-  );
-}
-
-function ContextDrawer({
-  tab,
-  onTab,
-  onClose,
-  indexSummary,
-  indexing,
-  indexError,
-  onRefreshIndex,
-  memories,
-  memoryError,
-  onForgetMemory,
-  checkpoints,
-  restoringCheckpoint,
-  checkpointDiffId,
-  checkpointDiffText,
-  checkpointNotice,
-  checkpointError,
-  onShowDiff,
-  onRestore,
-  foundation,
-  apiKeyStatus,
-  sessionId,
-  onOpenSettings,
-}: {
-  tab: ContextTab;
-  onTab: (tab: ContextTab) => void;
-  onClose: () => void;
-  indexSummary: WorkspaceIndexSummary | null;
-  indexing: boolean;
-  indexError: string | null;
-  onRefreshIndex: () => void;
-  memories: MemoryRecord[];
-  memoryError: string | null;
-  onForgetMemory: (id: string) => void;
-  checkpoints: FileCheckpointSummary[];
-  restoringCheckpoint: string | null;
-  checkpointDiffId: string | null;
-  checkpointDiffText: string;
-  checkpointNotice: string | null;
-  checkpointError: string | null;
-  onShowDiff: (id: string) => void;
-  onRestore: (id: string) => void;
-  foundation: FoundationState;
-  apiKeyStatus: boolean;
-  sessionId: string | null;
-  onOpenSettings: (tab: SettingsTab) => void;
-}) {
-  const tabs: { id: ContextTab; label: string }[] = [
-    { id: "index", label: "Index" },
-    { id: "memory", label: "Memory" },
-    { id: "checkpoints", label: "Checkpoints" },
-    { id: "diagnostics", label: "Diagnostics" },
-  ];
-  return (
-    <aside className="fixed inset-y-0 right-0 z-30 flex w-[380px] flex-col border-l border-white/[0.08] bg-[#0c1015] shadow-2xl shadow-black/40">
-      <div className="flex h-14 items-center justify-between border-b border-white/[0.06] px-4">
-        <div>
-          <p className="text-[13px] font-medium">Context</p>
-          <p className="text-[10px] text-slate-600">Index, memory, edits, diagnostics</p>
-        </div>
-        <button
-          type="button"
-          aria-label="Close context"
-          onClick={onClose}
-          className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
-        >
-          <X size={16} />
-        </button>
-      </div>
-      <div className="flex gap-1 border-b border-white/[0.06] px-2 py-2">
-        {tabs.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => onTab(item.id)}
-            className={`rounded-md px-2 py-1 text-[11px] ${
-              tab === item.id
-                ? "bg-white/[0.08] text-slate-200"
-                : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {tab === "index" && (
-          <div className="space-y-3">
-            <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-              <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                <Database size={13} className="text-emerald-300" /> Workspace index
-              </div>
-              <p className="mt-2 font-mono text-[11px] text-slate-300">
-                {indexSummary === null
-                  ? indexing
-                    ? "Indexing…"
-                    : "Not indexed"
-                  : `${indexSummary.files.toLocaleString()} files · ${indexSummary.symbols.toLocaleString()} symbols · ${formatBytes(indexSummary.bytes)}`}
-              </p>
-              <button
-                type="button"
-                onClick={onRefreshIndex}
-                disabled={indexing}
-                className="mt-3 flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
-              >
-                {indexing ? <Loader2 size={12} className="animate-spin" /> : <Wrench size={12} />}
-                {indexing ? "Indexing…" : "Refresh index"}
-              </button>
-              {indexError !== null && <p className="mt-2 text-[11px] text-amber-300">{indexError}</p>}
-            </div>
-            <p className="px-1 text-[11px] leading-5 text-slate-600">
-              Indexed search powers <code className="text-slate-500">search_code</code> and{" "}
-              <code className="text-slate-500">find_symbols</code>. The index refreshes after each
-              turn.
-            </p>
-          </div>
-        )}
-
-        {tab === "memory" && (
-          <div className="space-y-2">
-            {memories.length === 0 && (
-              <p className="px-1 py-2 text-[11px] text-slate-600">No saved memories yet.</p>
-            )}
-            {memories.map((memory) => (
-              <div
-                key={memory.id}
-                className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
-              >
-                <p className="text-[11px] leading-5 text-slate-300">
-                  {memory.pinned && <span className="mr-1 text-emerald-300">★</span>}
-                  {memory.content}
-                </p>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <span className="truncate font-mono text-[10px] text-slate-600">
-                    {memory.tags.length > 0 ? memory.tags.join(", ") : "untagged"}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onForgetMemory(memory.id)}
-                    className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
-                    aria-label="Forget memory"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              </div>
-            ))}
-            {memoryError !== null && <p className="text-[11px] text-amber-300">{memoryError}</p>}
-          </div>
-        )}
-
-        {tab === "checkpoints" && (
-          <div className="space-y-2">
-            {sessionId === null && (
-              <p className="px-1 py-2 text-[11px] text-slate-600">
-                Start a session to see file checkpoints.
-              </p>
-            )}
-            {sessionId !== null && checkpoints.length === 0 && (
-              <p className="px-1 py-2 text-[11px] text-slate-600">No checkpoints yet.</p>
-            )}
-            {checkpoints.map((checkpoint) => (
-              <div
-                key={checkpoint.id}
-                className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
-              >
-                <p className="truncate font-mono text-[10px] text-slate-400">{checkpoint.path}</p>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <span className="text-[10px] text-slate-600">
-                    {formatBytes(checkpoint.bytes)} · {formatClock(checkpoint.created_at)}
-                  </span>
-                  <div className="flex gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onShowDiff(checkpoint.id)}
-                      className="rounded border border-white/[0.08] px-2 py-1 text-[10px] text-slate-400 hover:bg-white/5"
-                    >
-                      {checkpointDiffId === checkpoint.id ? "Hide" : "Diff"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onRestore(checkpoint.id)}
-                      disabled={restoringCheckpoint !== null}
-                      className="rounded border border-white/[0.08] px-2 py-1 text-[10px] text-slate-400 hover:bg-white/5 disabled:opacity-40"
-                    >
-                      {restoringCheckpoint === checkpoint.id ? "Restoring…" : "Restore"}
-                    </button>
-                  </div>
-                </div>
-                {checkpointDiffId === checkpoint.id && checkpointDiffText.length > 0 && (
-                  <pre className="mt-2 max-h-56 overflow-auto rounded bg-black/30 p-2 font-mono text-[10px] leading-4 text-slate-500">
-                    {checkpointDiffText}
-                  </pre>
-                )}
-              </div>
-            ))}
-            {checkpointNotice !== null && (
-              <p className="text-[11px] text-emerald-300">{checkpointNotice}</p>
-            )}
-            {checkpointError !== null && (
-              <p className="text-[11px] text-amber-300">{checkpointError}</p>
-            )}
-          </div>
-        )}
-
-        {tab === "diagnostics" && (
-          <div className="space-y-3">
-            <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-              <div className="flex items-center gap-2 text-[11px] text-slate-300">
-                <KeyRound size={13} className={apiKeyStatus ? "text-emerald-300" : "text-amber-300"} />
-                DeepSeek key
-                <span className="ml-auto text-[10px] text-slate-600">
-                  {apiKeyStatus ? "ready" : "missing"}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => onOpenSettings("secrets")}
-                className="mt-2 text-[11px] text-emerald-300 hover:underline"
-              >
-                Manage key
-              </button>
-            </div>
-            {foundation.kind === "ready" && (
-              <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3 font-mono text-[10px] leading-5 text-slate-400">
-                <p>schema {foundation.foundation.doctor.schema_version}</p>
-                <p>integrity {foundation.foundation.doctor.integrity}</p>
-                <p>database {formatBytes(foundation.foundation.doctor.database_bytes)}</p>
-                <p>events {foundation.foundation.doctor.event_count.toLocaleString()}</p>
-                <p>
-                  audit {foundation.foundation.audit.valid ? "verified" : "failed"} ·{" "}
-                  {foundation.foundation.audit.records} records
-                </p>
-              </div>
-            )}
-            {foundation.kind === "error" && (
-              <p className="text-[11px] text-amber-300">{foundation.message}</p>
-            )}
-          </div>
-        )}
-      </div>
-    </aside>
   );
 }
 
@@ -1900,7 +1794,7 @@ function CommandPalette({
   onNewSession: () => void;
   onAddProject: () => void;
   onSettings: (tab: SettingsTab) => void;
-  onContext: (tab: ContextTab) => void;
+  onContext: (tab: PanelTab) => void;
   onToggleSidebar: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -1912,10 +1806,14 @@ function CommandPalette({
     { label: "Settings: Access", hint: "", run: () => onSettings("access") },
     { label: "Settings: Secrets", hint: "", run: () => onSettings("secrets") },
     { label: "Settings: Project", hint: "", run: () => onSettings("project") },
-    { label: "Context: Index", hint: "", run: () => onContext("index") },
-    { label: "Context: Memory", hint: "", run: () => onContext("memory") },
-    { label: "Context: Checkpoints", hint: "", run: () => onContext("checkpoints") },
-    { label: "Context: Diagnostics", hint: "", run: () => onContext("diagnostics") },
+    { label: "Project: Overview", hint: "", run: () => onContext("overview") },
+    { label: "Project: Workspace", hint: "", run: () => onContext("workspace") },
+    { label: "Project: Repos", hint: "", run: () => onContext("repos") },
+    { label: "Project: Knowledge", hint: "", run: () => onContext("knowledge") },
+    { label: "Project: Retrieval", hint: "", run: () => onContext("retrieval") },
+    { label: "Project: Memory", hint: "", run: () => onContext("memory") },
+    { label: "Project: Checkpoints", hint: "", run: () => onContext("checkpoints") },
+    { label: "Project: Diagnostics", hint: "", run: () => onContext("diagnostics") },
   ];
   const needle = query.trim().toLowerCase();
   const filtered =
@@ -2061,4 +1959,32 @@ function describeError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+
+function artifactFromMetadata(metadata: unknown): Artifact | null {
+  if (typeof metadata !== "object" || metadata === null) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>).openbad_artifact;
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const kind = record.kind;
+  const title = record.title;
+  if (
+    typeof kind !== "string" ||
+    !["web", "image", "markdown", "diff", "file"].includes(kind) ||
+    typeof title !== "string"
+  ) {
+    return null;
+  }
+  return {
+    kind: kind as Artifact["kind"],
+    title,
+    uri: typeof record.uri === "string" ? record.uri : undefined,
+    content: typeof record.content === "string" ? record.content : undefined,
+    language: typeof record.language === "string" ? record.language : undefined,
+  };
 }

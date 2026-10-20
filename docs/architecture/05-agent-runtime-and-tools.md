@@ -311,14 +311,32 @@ Rules:
 | `lsp_hover` | read | Type/doc info |
 | `lsp_diagnostics` | read | File or workspace |
 
-### 7.5 Memory, knowledge, web
+### 7.5 Memory, knowledge, project areas, web
+
+Implemented:
 
 | Tool | Risk | Notes |
 | --- | --- | --- |
-| `recall_memory` | read | Scope, limit, explain |
-| `remember` | write | Category, scope, confidence |
-| `search_knowledge` | read | Collection filter, citations |
-| `search_workspace` | read | Hybrid code search |
+| `recall` | read | Durable workspace memory |
+| `remember` | write | Durable decision or preference |
+| `list_project_sources` | read | Linked repositories and knowledge documents |
+| `search_project` | read | Fused knowledge, indexed code, and memory with locators |
+| `read_repo_file` | read | UTF-8 file inside a read-only linked repository |
+| `add_knowledge` | write | Add a curated project note to the knowledge library |
+| `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
+
+The desktop implementation backs project tools with `StoreProjectAreas`, which
+implements `ProjectAreas` against the active workspace id. `present_artifact`
+returns `metadata.openbad_artifact`; the event stream carries that metadata to
+the UI, which opens the split workspace.
+
+Planned:
+
+| Tool | Risk | Notes |
+| --- | --- | --- |
+| `search_knowledge` | read | Collection filter, vector/hybrid retrieval |
+| `search_workspace` | read | Extended hybrid code search |
+| `web_search` | network | DeepSeek Search API; returns URLs + snippets |
 | `web_search` | network | DeepSeek Search API; returns URLs + snippets |
 | `web_fetch` | network | DeepSeek Fetch API; returns Markdown + citation |
 | `vision_analyze` | network | `deepseek-flash` vision + Files API |

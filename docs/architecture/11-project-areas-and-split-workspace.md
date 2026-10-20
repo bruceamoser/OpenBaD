@@ -1,0 +1,182 @@
+# 11 — Project Areas and the Split Workspace
+
+## 1. Why a project is more than a folder
+
+A coding agent needs more than a root directory. It needs the code it may edit,
+references it may only read, durable decisions, curated documents, and a way to
+show the user what it found. OpenBaD therefore treats a **project** as a
+container with six project-scoped areas:
+
+| Area | Purpose | Default access |
+| --- | --- | --- |
+| Chat | Conversation and agent turns | session-scoped |
+| Workspace | Primary directory the agent can edit | read/write by access mode |
+| Repos | Additional linked repositories | read-only |
+| Knowledge | Curated notes and imported references | read/write in project |
+| Retrieval | Inspect the fused project corpus | read-only |
+| Memory | Durable decisions and preferences | read/write in project |
+
+Every row is keyed by `workspace_id`. Nothing from one project appears in
+another project's list, retrieval set, or agent context.
+
+```mermaid
+flowchart LR
+    P[Project / workspace row]
+    P --> W[Workspace root]
+    P --> R[project_repos]
+    P --> K[knowledge_documents]
+    K --> C[knowledge_chunks]
+    C --> F[knowledge_fts]
+    P --> M[memories]
+    W --> I[workspace_files / workspace_fts]
+    I --> X[Project retrieval]
+    F --> X
+    M --> X
+    X --> A[Agent tools and citations]
+```
+
+## 2. Storage model
+
+Migration `0006_project_areas` adds:
+
+- `project_repos` — `(id, workspace_id, name, path, read_only, created_at)`,
+  unique per `(workspace_id, path)`.
+- `knowledge_documents` — project-owned document metadata, full content, tags,
+  BLAKE3 content hash, timestamps.
+- `knowledge_chunks` — ordered chunk rows owned by a document.
+- `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
+  document identity so retrieval can be scoped and cited.
+
+Knowledge writes are transactional: the document, its chunks, and its FTS rows
+are inserted together. Deleting a document removes its FTS rows before the
+document cascade. Identical content in the same project is idempotent and
+returns the existing document.
+
+### Chunking
+
+Documents are split at roughly 1,400 characters with 160 characters of overlap,
+preferring newline boundaries after the first third of the window. Chunk
+identity is `(document_id, seq)`, which becomes the citation locator
+`document_id#seq`.
+
+### Repository trust
+
+A linked repository is canonicalized when added. The agent's `read_repo_file`
+tool canonicalizes both the repository root and the requested path, then
+requires the requested path to stay under the root. Linked repositories are
+read-only in this iteration.
+
+## 3. Retrieval
+
+`retrieve_project` is the single retrieval entry point used by the UI and the
+agent. It searches three sources independently:
+
+1. **Knowledge** — FTS5 `MATCH` over `knowledge_fts`, scoped by `workspace_id`.
+2. **Code** — FTS5 `MATCH` over the existing `workspace_fts` index.
+3. **Memory** — durable, non-forgotten memories matching the query, with
+   pinned entries ordered first.
+
+Results are merged with reciprocal rank fusion (`1 / (60 + rank)`) so that
+different FTS rank scales stay comparable. Each hit carries:
+
+- `source` — `knowledge`, `code`, or `memory`
+- `title`
+- `snippet` with `<<` / `>>` relevance markers where available
+- `locator` — `document#chunk`, workspace path, or memory id
+- `score`
+
+The model-facing `search_project` tool prints locators so answers can cite what
+they used. Embedding-backed semantic retrieval can later replace the ranking
+stage without changing the project model, locator contract, or tools.
+
+## 4. Agent tools
+
+| Tool | Risk | Contract |
+| --- | --- | --- |
+| `list_project_sources` | read | List linked repositories and knowledge documents. |
+| `search_project` | read | Fuse knowledge, indexed code, and memory; return citable locators. |
+| `read_repo_file` | read | Read a UTF-8 file inside a linked repository. |
+| `add_knowledge` | write | Add a curated project note or reference to the library. |
+| `present_artifact` | read | Open a web page, image, markdown note, diff, or file beside chat. |
+
+`ToolContext` carries an optional `ProjectAreas` implementation. The desktop
+shell backs it with the SQLite store and the active workspace id. Tool results
+carry a `metadata` value; `present_artifact` uses
+`metadata.openbad_artifact` to request the split pane.
+
+The agent system prompt tells the model that project knowledge is separate from
+code, to call `search_project` before answering questions that may depend on
+earlier decisions or imported references, and to cite returned locators.
+
+## 5. Split workspace
+
+The desktop layout is intentionally conversation-first:
+
+```text
+┌──────────┬────────────────────────────┬──────────────────────────┐
+│ project  │ chat                       │ project panel / artifact │
+│ sidebar  │ messages + composer        │ resizable, closable      │
+└──────────┴────────────────────────────┴──────────────────────────┘
+```
+
+- The project sidebar exposes Overview, Workspace, Repos, Knowledge,
+  Retrieval, and Memory links beneath the active project.
+- Selecting an area opens it on the right without hiding the conversation.
+- The panel is resizable with a 320 px floor and a viewport-aware ceiling.
+- On narrow windows the full sidebar collapses when the panel opens so chat
+  keeps a usable width.
+- The panel tabs include Edits (checkpoints) and Diagnostics for operations that
+  do not deserve permanent chrome.
+- Files, knowledge documents, and retrieval hits open as artifacts in the same
+  panel. The assistant can open one with `present_artifact`.
+
+### Artifact kinds
+
+| Kind | Rendering |
+| --- | --- |
+| `web` | Sandboxed iframe with an external-open link |
+| `image` | Inline image, including workspace files read as data URLs |
+| `markdown` | GitHub-flavored Markdown |
+| `diff` | Line-colored unified diff |
+| `file` | UTF-8 text from the workspace |
+
+Workspace previews are resolved through `WorkspaceService`, capped at 8 MiB,
+and returned as either UTF-8 text or a data URL. Knowledge artifacts load by
+`knowledge:<document_id>`. Artifacts are currently a view concern; persisting
+their history across restarts is follow-up work.
+
+## 6. Failure modes
+
+- **Linked repo escapes its root** — rejected by canonical path containment.
+- **Knowledge import is not UTF-8 or exceeds 4 MiB** — rejected with a clear
+  error; no partial document is written.
+- **Duplicate knowledge content** — returns the existing document.
+- **Web page refuses framing** — the iframe may be blank; the external-open
+  link remains available.
+- **Preview too large** — rejected at 8 MiB.
+- **Project panel open on a small screen** — the sidebar collapses to protect
+  the chat width.
+- **Store write fails** — mutation surfaces in the panel error region and the
+  local list is only updated after the backend succeeds.
+
+## 7. Follow-up
+
+1. Index linked repositories into the same retrieval model with a `repo` source
+   and repository-relative locators.
+2. Persist artifact history and restore the most recent artifact when a session
+   reopens.
+3. Add embedding-backed hybrid retrieval and explainable score breakdowns.
+4. Add native directory pickers for repository linking and knowledge import.
+5. Add file watching so workspace and repository panels reflect changes without
+   a manual index refresh.
+6. Add per-area access policy, especially write access to linked repositories.
+
+## 8. Verification
+
+- Store tests cover project scoping, idempotent knowledge writes, chunking,
+  retrieval, deletion, and overview counts.
+- Tool tests cover search, knowledge add, linked repository reads, path escape
+  rejection, source listing, and artifact metadata.
+- Agent tests verify tool metadata reaches the observer.
+- Playwright covers project knowledge, retrieval, repository linking, and
+  assistant-presented artifacts in the split workspace.

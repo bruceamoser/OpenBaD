@@ -16,10 +16,13 @@ use openbad_llm::chat::{ChatMessage, ChatRole, ToolCall};
 use openbad_llm::{DeepSeekClient, FLASH_MODEL, ReqwestTransport, UsageTotals};
 use openbad_store::Store;
 use openbad_store::types::{
-    AuditReport, DoctorReport, ModelRouteRecord, NewModelRoute, NewProvider, ProviderRecord,
+    AuditReport, DoctorReport, KnowledgeDocument, KnowledgeDocumentSummary, ModelRouteRecord,
+    NewModelRoute, NewProvider, ProjectHit, ProjectOverview, ProjectRepo, ProviderRecord,
     SessionMessage, SessionSummary,
 };
-use openbad_tools::{CheckpointSink, MemoryStore, WorkspaceSearch};
+use openbad_tools::{
+    CheckpointSink, KnowledgeEntryRef, MemoryStore, ProjectAreas, ProjectRepoRef, WorkspaceSearch,
+};
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,6 +92,97 @@ impl MemoryStore for WorkspaceMemory {
                 pinned: memory.pinned,
             })
             .collect())
+    }
+}
+
+struct StoreProjectAreas {
+    store: Arc<Mutex<Store>>,
+    workspace_id: WorkspaceId,
+}
+
+impl ProjectAreas for StoreProjectAreas {
+    fn list_repos(&self) -> Result<Vec<ProjectRepoRef>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .list_project_repos(self.workspace_id)
+            .map_err(|error| error.to_string())
+            .map(|repos| {
+                repos
+                    .into_iter()
+                    .map(|repo| ProjectRepoRef {
+                        id: repo.id,
+                        name: repo.name,
+                        path: repo.path,
+                        read_only: repo.read_only,
+                    })
+                    .collect()
+            })
+    }
+
+    fn list_knowledge(&self) -> Result<Vec<KnowledgeEntryRef>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .list_knowledge_documents(self.workspace_id)
+            .map_err(|error| error.to_string())
+            .map(|documents| documents.into_iter().map(knowledge_ref).collect())
+    }
+
+    fn add_knowledge(
+        &self,
+        title: &str,
+        content: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+    ) -> Result<KnowledgeEntryRef, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .add_knowledge_document(self.workspace_id, title, "note", source, tags, content)
+            .map_err(|error| error.to_string())
+            .map(knowledge_ref)
+    }
+
+    fn retrieve(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<openbad_tools::ProjectHit>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .retrieve_project(self.workspace_id, query, limit as u32)
+            .map_err(|error| error.to_string())
+            .map(|hits| {
+                hits.into_iter()
+                    .map(|hit| openbad_tools::ProjectHit {
+                        source: hit.source,
+                        title: hit.title,
+                        snippet: hit.snippet,
+                        locator: hit.locator,
+                        score: hit.score,
+                    })
+                    .collect()
+            })
+    }
+}
+
+fn knowledge_ref(document: KnowledgeDocumentSummary) -> KnowledgeEntryRef {
+    KnowledgeEntryRef {
+        id: document.id,
+        title: document.title,
+        kind: document.kind,
+        source: document.source,
+        chunks: document.chunks,
     }
 }
 
@@ -204,6 +298,7 @@ pub enum AgentEvent {
         name: String,
         content: String,
         is_error: bool,
+        metadata: Value,
     },
     Usage {
         usage: UsageTotals,
@@ -242,12 +337,20 @@ impl AgentObserver for ChannelObserver {
         });
     }
 
-    fn on_tool_result(&self, step: u32, name: &str, content: &str, is_error: bool) {
+    fn on_tool_result(
+        &self,
+        step: u32,
+        name: &str,
+        content: &str,
+        is_error: bool,
+        metadata: &Value,
+    ) {
         let _ = self.channel.send(AgentEvent::ToolResult {
             step,
             name: name.to_owned(),
             content: content.to_owned(),
             is_error,
+            metadata: metadata.clone(),
         });
     }
 
@@ -333,6 +436,285 @@ fn checkpoint_diff(state: State<'_, AppState>, checkpoint_id: String) -> Result<
         .header(&format!("a/{relative}"), &format!("b/{relative}"))
         .to_string();
     Ok(rendered.chars().take(200_000).collect())
+}
+
+fn project_workspace(store: &Store, workspace_path: &str) -> Result<WorkspaceId, String> {
+    let path = PathBuf::from(workspace_path);
+    if !path.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    store
+        .ensure_workspace(workspace_name(&path), workspace_path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_overview(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<ProjectOverview, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .project_overview(workspace)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_repos(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<ProjectRepo>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .list_project_repos(workspace)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_project_repo(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    path: String,
+    name: Option<String>,
+) -> Result<ProjectRepo, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .add_project_repo(workspace, name.as_deref().unwrap_or(""), &path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_project_repo(state: State<'_, AppState>, repo_id: String) -> Result<(), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .remove_project_repo(&repo_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn knowledge_documents(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<KnowledgeDocumentSummary>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .list_knowledge_documents(workspace)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn knowledge_document(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> Result<KnowledgeDocument, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .knowledge_document(&document_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("knowledge document not found: {document_id}"))
+}
+
+#[tauri::command]
+fn add_knowledge_note(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    title: String,
+    content: String,
+    tags: Vec<String>,
+) -> Result<KnowledgeDocumentSummary, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .add_knowledge_document(workspace, &title, "note", None, tags, &content)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn import_knowledge_file(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    path: String,
+    tags: Vec<String>,
+) -> Result<KnowledgeDocumentSummary, String> {
+    const MAX_IMPORT_BYTES: u64 = 4 * 1024 * 1024;
+    let source =
+        std::fs::canonicalize(&path).map_err(|error| format!("knowledge file: {error}"))?;
+    let metadata = std::fs::metadata(&source).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("knowledge import needs a file".to_owned());
+    }
+    if metadata.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "knowledge file is too large ({} bytes, maximum {MAX_IMPORT_BYTES})",
+            metadata.len()
+        ));
+    }
+    let content = std::fs::read_to_string(&source)
+        .map_err(|error| format!("knowledge file must be UTF-8: {error}"))?;
+    let title = source
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Imported document")
+        .to_owned();
+    let kind = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("file")
+        .to_owned();
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .add_knowledge_document(
+            workspace,
+            &title,
+            &kind,
+            Some(source.to_string_lossy().as_ref()),
+            tags,
+            &content,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_knowledge_document(
+    state: State<'_, AppState>,
+    document_id: String,
+) -> Result<(), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .delete_knowledge_document(&document_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_files(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<String>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .list_workspace_files(workspace, 400)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn search_project(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<ProjectHit>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .retrieve_project(workspace, &query, limit.unwrap_or(12).clamp(1, 50))
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Serialize)]
+pub struct ProjectFileView {
+    pub path: String,
+    pub kind: String,
+    pub content: Option<String>,
+    pub data_url: Option<String>,
+}
+
+#[tauri::command]
+fn project_file(workspace_path: String, path: String) -> Result<ProjectFileView, String> {
+    const MAX_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
+    let workspace = WorkspaceService::new(PathBuf::from(&workspace_path));
+    let resolved = workspace
+        .resolve(Path::new(&path))
+        .map_err(|error| error.to_string())?;
+    let metadata = std::fs::metadata(&resolved).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("preview path is not a file".to_owned());
+    }
+    if metadata.len() > MAX_PREVIEW_BYTES {
+        return Err(format!(
+            "file is too large to preview ({} bytes, maximum {MAX_PREVIEW_BYTES})",
+            metadata.len()
+        ));
+    }
+    let extension = resolved
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let relative = resolved
+        .strip_prefix(workspace.root())
+        .unwrap_or(&resolved)
+        .to_string_lossy()
+        .into_owned();
+    if matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico"
+    ) {
+        let bytes = std::fs::read(&resolved).map_err(|error| error.to_string())?;
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mime = match extension.as_str() {
+            "svg" => "image/svg+xml",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "ico" => "image/x-icon",
+            _ => "image/png",
+        };
+        return Ok(ProjectFileView {
+            path: relative,
+            kind: "image".to_owned(),
+            content: None,
+            data_url: Some(format!("data:{mime};base64,{encoded}")),
+        });
+    }
+    let content = std::fs::read_to_string(&resolved)
+        .map_err(|error| format!("file is not UTF-8 text: {error}"))?;
+    Ok(ProjectFileView {
+        path: relative,
+        kind: "text".to_owned(),
+        content: Some(content.chars().take(400_000).collect()),
+        data_url: None,
+    })
 }
 
 #[tauri::command]
@@ -875,10 +1257,15 @@ async fn chat(
         },
     );
     if let Ok(workspace_id) = workspace_id.parse::<WorkspaceId>() {
-        agent = agent.with_memory(Arc::new(WorkspaceMemory {
-            store: Arc::clone(&state.store),
-            workspace_id,
-        }));
+        agent = agent
+            .with_memory(Arc::new(WorkspaceMemory {
+                store: Arc::clone(&state.store),
+                workspace_id,
+            }))
+            .with_project(Arc::new(StoreProjectAreas {
+                store: Arc::clone(&state.store),
+                workspace_id,
+            }));
     }
     agent = agent
         .with_redactions(redactions)
@@ -1232,6 +1619,18 @@ pub fn run() {
             sessions,
             search_sessions,
             memories,
+            project_overview,
+            project_repos,
+            add_project_repo,
+            remove_project_repo,
+            knowledge_documents,
+            knowledge_document,
+            add_knowledge_note,
+            import_knowledge_file,
+            delete_knowledge_document,
+            search_project,
+            project_files,
+            project_file,
             forget_memory,
             checkpoints,
             checkpoint_diff,
@@ -1253,7 +1652,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0005_project_memory");
+        assert_eq!(payload.doctor.schema_version, "0006_project_areas");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

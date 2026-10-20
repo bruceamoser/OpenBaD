@@ -18,21 +18,25 @@ than a command needs.
 ## 2. Information architecture
 
 ```text
-┌────────────────────────────────────────────────────────────────────┐
-│ Title bar: workspace · branch · model · cache hit · spend · status │
-├──────────┬──────────────────────────────────────┬──────────────────┤
-│ Sidebar  │ Main                                 │ Right panel      │
-│          │                                      │                  │
-│ Sessions │ Chat / Agent                         │ Context          │
-│ Search   │ Diff / Review                        │ Plan / Todos     │
-│ Files    │ Editor (with inline completion)      │ Pulse            │
-│ Memory   │ Knowledge                            │ Jobs             │
-│ Knowledge│ Settings                             │ Approvals        │
-│ Pulse    │                                      │                  │
-├──────────┴──────────────────────────────────────┴──────────────────┤
-│ Terminal / Problems / Output (collapsible)                         │
-└────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│ Project header: project · path · session · model · access mode      │
+├──────────┬───────────────────────────────────────┬──────────────────┤
+│ Sidebar  │ Chat / Agent                          │ Project panel    │
+│          │                                       │                  │
+│ Projects │ Messages                              │ Overview         │
+│ Overview │ Composer                              │ Workspace        │
+│ Workspace│                                       │ Repos            │
+│ Repos    │                                       │ Knowledge        │
+│ Knowledge│                                       │ Retrieval        │
+│ Retrieval│                                       │ Memory / Edits   │
+│ Memory   │                                       │ Artifact         │
+│ Sessions │                                       │ Diagnostics      │
+└──────────┴───────────────────────────────────────┴──────────────────┘
 ```
+
+The project panel is resizable and only present when requested. On narrow
+windows the full sidebar collapses while the panel is open so the conversation
+keeps a usable width.
 
 ### Navigation
 
@@ -41,8 +45,11 @@ than a command needs.
 - **Quick ask** (`Ctrl/Cmd+Shift+Space`) — floating prompt from any app.
 - **Session sidebar** — grouped by workspace, pinned, recent, archived.
 - **Workspace switcher** — recent folders, open folder, trust state.
-- **Right panel tabs** — context, plan, pulse, jobs, approvals, references.
-- **Bottom panel** — terminal, problems, job output.
+- **Project panel tabs** — overview, workspace, repos, knowledge, retrieval,
+  memory, checkpoints, diagnostics, and the active artifact.
+- **Split artifacts** — assistant-presented web pages, images, Markdown, diffs,
+  and workspace files open beside the conversation.
+- **Bottom panel** — terminal, problems, job output (planned).
 
 ## 3. Views
 
@@ -85,19 +92,30 @@ than a command needs.
 
 ### 3.5 Memory
 
-- Search and filters: scope, category, activation, pinned.
-- Activation sparkline; association graph.
-- Explain panel for retrieval scores.
-- Pin, edit, forget, export.
-- Consolidation report.
+Current build:
 
-### 3.6 Knowledge
+- Project-scoped memories in the split panel.
+- Pinned markers, tags, and forget actions.
+- Recent memories are appended to the agent prompt as tail context.
 
-- Collections and documents.
-- Ingestion queue with status, errors, and retry.
-- Chunk viewer with citations and source links.
-- Re-index, version history, delete.
-- Search across collections.
+Planned: search filters, activation sparkline, association graph, score
+explanation, edit/export, and consolidation reports.
+
+### 3.6 Knowledge and retrieval
+
+Current build:
+
+- Project-scoped knowledge documents with title, kind, source, tags, chunk
+  count, and size.
+- Add a Markdown/text note, import a UTF-8 file, open a document as a Markdown
+  artifact, or delete it.
+- Retrieval panel queries knowledge, indexed workspace code, and memory through
+  one fused result list with citable locators.
+- Clicking a knowledge hit opens the document; clicking a code hit opens the
+  file.
+
+Planned: collections, PDF/DOCX/HTML ingestion, ingestion queue, chunk viewer,
+versions, embeddings, and relevance explanations.
 
 ### 3.7 Pulse
 
@@ -229,7 +247,8 @@ Targets:
 | Files | `read_file`, `write_file`, `apply_patch`, `checkpoint_rewind` |
 | Git | `git_status`, `git_diff`, `git_commit`, `git_push` |
 | Memory | `search_memory`, `remember`, `forget`, `consolidate` |
-| Knowledge | `ingest`, `search_knowledge`, `delete_document` |
+| Knowledge | `knowledge_documents`, `add_knowledge_note`, `import_knowledge_file`, `delete_knowledge_document` |
+| Project areas | `project_overview`, `project_repos`, `add_project_repo`, `remove_project_repo`, `project_files`, `project_file`, `search_project` |
 | Models | `list_routes`, `set_route`, `test_provider`, `refresh_balance` |
 | Governance | `pending_approvals`, `decide_approval`, `audit_verify` |
 | Autonomic | `jobs_list`, `job_cancel`, `schedules_list`, `pulse_snapshot` |

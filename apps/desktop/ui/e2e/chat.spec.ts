@@ -9,10 +9,10 @@ async function openSettings(page: import("@playwright/test").Page) {
 
 async function openContext(
   page: import("@playwright/test").Page,
-  tab: "Index" | "Memory" | "Checkpoints" | "Diagnostics",
+  tab: "Workspace" | "Memory" | "Edits" | "Diag",
 ) {
-  await page.getByRole("button", { name: "Context" }).click();
-  await page.getByRole("button", { name: tab }).click();
+  await page.getByRole("button", { name: "Project", exact: true }).first().click();
+  await page.getByRole("button", { name: tab, exact: true }).click();
 }
 
 async function sendPrompt(page: import("@playwright/test").Page, text = prompt) {
@@ -120,7 +120,7 @@ test("adds a project", async ({ page }) => {
 test("lists and restores a file checkpoint", async ({ page }) => {
   await page.goto("/");
   await sendPrompt(page);
-  await openContext(page, "Checkpoints");
+  await openContext(page, "Edits");
 
   await expect(page.getByText("/mnt/disk4/repos/OpenBaD/src/main.rs")).toBeVisible();
   await page.getByRole("button", { name: "Diff" }).click();
@@ -151,7 +151,10 @@ test("removes a project from settings", async ({ page }) => {
   page.on("dialog", (dialog) => void dialog.accept());
 
   await openSettings(page);
-  await page.getByRole("button", { name: "Project", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "Settings" })
+    .getByRole("button", { name: "Project", exact: true })
+    .click();
   await page.getByRole("button", { name: "Remove project" }).click();
 
   await expect(page.getByText("No project")).toBeVisible();
@@ -165,7 +168,50 @@ test("opens the command menu and navigates", async ({ page }) => {
   const menu = page.getByRole("dialog", { name: "Command menu" });
   await expect(menu).toBeVisible();
   await menu.getByRole("textbox", { name: "Command search" }).fill("memory");
-  await menu.getByRole("button", { name: "Context: Memory" }).click();
+  await menu.getByRole("button", { name: "Project: Memory" }).click();
 
   await expect(page.getByText("Keep the model-visible prompt prefix immutable.")).toBeVisible();
+});
+
+test("keeps project knowledge and retrieval in the split workspace", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Knowledge" }).first().click();
+
+  await page.getByRole("button", { name: /^Product thesis note/ }).click();
+  await expect(
+    page.getByText("OpenBaD is a desktop coding harness."),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Retrieval" }).click();
+  await page.getByLabel("Retrieval query").fill("desktop");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+
+  await expect(page.getByText("Product thesis")).toBeVisible();
+  await expect(page.getByText("apps/desktop/ui/src/App.tsx").first()).toBeVisible();
+});
+
+test("opens assistant-presented artifacts beside the chat", async ({ page }) => {
+  await page.goto("/");
+  await page
+    .getByPlaceholder("Ask OpenBaD to inspect, explain, or change the workspace…")
+    .fill("preview the architecture web page");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }),
+  ).toBeVisible();
+  await expect(page.getByText("OpenBaD architecture", { exact: true })).toBeVisible();
+  await expect(page.getByTitle("OpenBaD architecture")).toBeVisible();
+});
+
+test("links a project repository", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Repos" }).first().click();
+  await page.getByLabel("Repository path").fill("/mnt/disk4/repos/clarity");
+  await page.getByLabel("Repository name").fill("clarity");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+
+  await expect(page.getByText("clarity", { exact: true })).toBeVisible();
 });

@@ -184,6 +184,13 @@ flowchart LR
    A cheap `deepseek-flash` auxiliary call handles ambiguous natural-language
    queries; deterministic expansion handles code identifiers.
 2. Run BM25 and vector search in parallel.
+
+> **Current implementation.** Project retrieval in migration
+> `0006_project_areas` uses deterministic FTS5 terms over knowledge chunks,
+> indexed code, and durable memories, then fuses the ranked lists with RRF
+> (`k = 60`). Query expansion, vectors, reranking, MMR, and the explain panel are
+> designed here but not yet enabled. See
+> [Project Areas and the Split Workspace](11-project-areas-and-split-workspace.md).
 3. Seed graph expansion from the top 5 results.
 4. Fuse with RRF.
 5. Optionally rerank the top 30 candidates with `deepseek-flash` when the query
@@ -285,14 +292,19 @@ off-peak whenever possible.
 ### 9.1 Structure
 
 ```text
-Collection
-└── Document (versioned)
-    └── Chunk (heading path + offsets)
+Project
+└── Knowledge document (content hash)
+    └── Chunk (sequence + citation locator)
 ```
 
-- **Collection** — a named group: "Project docs", "ADRs", "Vendor docs".
-- **Document** — a source file or URL with a content hash and version.
-- **Chunk** — a retrievable unit with a heading path, offsets, and citation.
+- **Project** — the hard retrieval boundary. Every document and chunk carries
+  its `workspace_id`.
+- **Document** — a note or imported UTF-8 file with a BLAKE3 content hash,
+  tags, kind, source, and timestamps.
+- **Chunk** — roughly 1,400 characters with 160 characters of overlap,
+  addressed as `document_id#seq` for citations.
+
+Collections, document versions, and heading paths remain planned extensions.
 
 ### 9.2 Ingestion
 
@@ -308,16 +320,16 @@ flowchart LR
     Embed --> Vec[sqlite-vec]
 ```
 
-Supported formats:
+Supported formats in the current desktop build:
 
 | Format | Extractor |
 | --- | --- |
-| Markdown, text, code | Native |
-| PDF | `pdf-extract` (text layer) |
-| DOCX | `docx-rs` |
-| HTML | DeepSeek Fetch API (Markdown) or local readability |
-| CSV/TSV | Header-aware rows |
-| JSON/YAML/TOML | Pretty-printed text |
+| Markdown, text, code | Native UTF-8 import or pasted note |
+| PDF | Planned: `pdf-extract` (text layer) |
+| DOCX | Planned: `docx-rs` |
+| HTML | Planned: Fetch API (Markdown) or local readability |
+| CSV/TSV | Planned: header-aware rows |
+| JSON/YAML/TOML | Planned: pretty-printed text |
 
 For URLs, the DeepSeek Fetch API returns Markdown directly, which preserves
 structure and produces a clean citation. Local extraction remains available
@@ -334,8 +346,9 @@ Rules:
 
 ### 9.3 Chunking
 
-- **Documents:** split on headings, then paragraphs; 512–1024 tokens; 10–15%
-  overlap; keep heading path.
+- **Documents:** current implementation splits at roughly 1,400 characters
+  with 160 characters of overlap, preferring newline boundaries; future work
+  will split on headings and keep heading paths.
 - **Code:** split on tree-sitter nodes (functions, classes, impls); fall back
   to line windows; keep symbol name and line range.
 - **Tables:** keep the header with each row group.
@@ -427,28 +440,20 @@ Rules:
 
 ## 14. UI
 
-### Memory
+### Split project panel
 
-- Search with filters (scope, category, activation, pinned).
-- Activation sparkline and association graph.
-- Explain panel for retrieval scores.
-- Pin / forget / edit.
-- Consolidation report.
+The desktop UI keeps the conversation primary and opens project areas on the
+right. In the current build:
 
-### Knowledge
+- **Memory** — pinned and recent project memories with forget actions.
+- **Knowledge** — filter, open, add notes, import UTF-8 files, and delete.
+- **Workspace** — filter indexed files and open them as artifacts.
+- **Repos** — link read-only repositories and remove them.
+- **Retrieval** — query the fused corpus and inspect citations.
+- **Edits / Diag** — checkpoints and diagnostics without permanent chrome.
 
-- Collections and documents.
-- Ingestion queue with status and errors.
-- Chunk viewer with citations.
-- Re-index and version history.
-- Search across collections.
-
-### Workspace
-
-- Index status, file count, chunk count, last update.
-- Excluded paths.
-- Rebuild index.
-- Language server status.
+Future refinements include retrieval score explanations, ingestion queues,
+chunk viewers, and repository file browsing.
 
 ## 15. Evaluation
 

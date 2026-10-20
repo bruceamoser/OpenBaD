@@ -37,7 +37,14 @@ impl AgentObserver for ConsoleObserver {
         );
     }
 
-    fn on_tool_result(&self, _step: u32, name: &str, content: &str, is_error: bool) {
+    fn on_tool_result(
+        &self,
+        _step: u32,
+        name: &str,
+        content: &str,
+        is_error: bool,
+        _metadata: &serde_json::Value,
+    ) {
         println!(
             "\n[tool result] {name} (error: {is_error}): {}",
             content.chars().take(500).collect::<String>()

@@ -9,6 +9,12 @@ import type {
   MemoryRecord,
   SessionSummary,
   SessionView,
+  KnowledgeDocument,
+  KnowledgeDocumentSummary,
+  ProjectFileView,
+  ProjectHit,
+  ProjectOverview,
+  ProjectRepo,
   Usage,
   WorkspaceIndexSummary,
   WorkspaceSummary,
@@ -32,6 +38,37 @@ let mockMemories: MemoryRecord[] = [
     access_count: 2,
   },
 ];
+let mockRepos: ProjectRepo[] = [
+  {
+    id: "mock-repo-1",
+    workspace_id: "mock-workspace",
+    name: "vscode",
+    path: "/mnt/disk4/repos/vscode",
+    read_only: true,
+    created_at: Date.now() - 7_200_000,
+  },
+];
+let mockKnowledge: KnowledgeDocumentSummary[] = [
+  {
+    id: "mock-knowledge-1",
+    workspace_id: "mock-workspace",
+    title: "Product thesis",
+    kind: "note",
+    source: null,
+    tags: ["desktop", "focus"],
+    characters: 184,
+    chunks: 1,
+    created_at: Date.now() - 7_200_000,
+    updated_at: Date.now() - 7_200_000,
+  },
+];
+const mockKnowledgeContent = new Map<string, string>([
+  [
+    "mock-knowledge-1",
+    "OpenBaD is a desktop coding harness. Projects own their workspace, linked repositories, knowledge library, retrieval corpus, and durable memories. Keep the chat focused and open visual artifacts beside it.",
+  ],
+]);
+
 let mockIndex: WorkspaceIndexSummary = {
   files: 42,
   symbols: 216,
@@ -63,7 +100,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0005_project_memory",
+    schema_version: "0006_project_areas",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -257,6 +294,211 @@ export async function refreshWorkspaceIndex(
   };
 }
 
+export async function loadProjectOverview(
+  workspacePath: string,
+): Promise<ProjectOverview> {
+  if (isTauri) {
+    return invoke<ProjectOverview>("project_overview", { workspacePath });
+  }
+  return {
+    repos: mockRepos.length,
+    knowledge_documents: mockKnowledge.length,
+    knowledge_characters: mockKnowledge.reduce((sum, doc) => sum + doc.characters, 0),
+    memories: mockMemories.length,
+    index: { ...mockIndex },
+  };
+}
+
+export async function loadProjectRepos(workspacePath: string): Promise<ProjectRepo[]> {
+  return isTauri
+    ? invoke<ProjectRepo[]>("project_repos", { workspacePath })
+    : [...mockRepos];
+}
+
+export async function addProjectRepo(
+  workspacePath: string,
+  path: string,
+  name?: string,
+): Promise<ProjectRepo> {
+  if (isTauri) {
+    return invoke<ProjectRepo>("add_project_repo", { workspacePath, path, name });
+  }
+  const repo: ProjectRepo = {
+    id: `mock-repo-${mockRepos.length + 1}`,
+    workspace_id: "mock-workspace",
+    name: name?.trim() || path.split("/").filter(Boolean).at(-1) || "repository",
+    path,
+    read_only: true,
+    created_at: Date.now(),
+  };
+  mockRepos = [...mockRepos, repo];
+  return repo;
+}
+
+export async function removeProjectRepo(repoId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("remove_project_repo", { repoId });
+    return;
+  }
+  mockRepos = mockRepos.filter((repo) => repo.id !== repoId);
+}
+
+export async function loadKnowledgeDocuments(
+  workspacePath: string,
+): Promise<KnowledgeDocumentSummary[]> {
+  return isTauri
+    ? invoke<KnowledgeDocumentSummary[]>("knowledge_documents", { workspacePath })
+    : [...mockKnowledge];
+}
+
+export async function loadKnowledgeDocument(
+  documentId: string,
+): Promise<KnowledgeDocument> {
+  if (isTauri) {
+    return invoke<KnowledgeDocument>("knowledge_document", { documentId });
+  }
+  const summary = mockKnowledge.find((document) => document.id === documentId);
+  if (!summary) {
+    throw new Error(`knowledge document not found: ${documentId}`);
+  }
+  return { summary, content: mockKnowledgeContent.get(documentId) ?? "" };
+}
+
+export async function addKnowledgeNote(
+  workspacePath: string,
+  title: string,
+  content: string,
+  tags: string[],
+): Promise<KnowledgeDocumentSummary> {
+  if (isTauri) {
+    return invoke<KnowledgeDocumentSummary>("add_knowledge_note", {
+      workspacePath,
+      title,
+      content,
+      tags,
+    });
+  }
+  const summary: KnowledgeDocumentSummary = {
+    id: `mock-knowledge-${mockKnowledge.length + 1}`,
+    workspace_id: "mock-workspace",
+    title: title.trim() || "Project note",
+    kind: "note",
+    source: null,
+    tags,
+    characters: content.length,
+    chunks: Math.max(1, Math.ceil(content.length / 1400)),
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  };
+  mockKnowledge = [summary, ...mockKnowledge];
+  mockKnowledgeContent.set(summary.id, content);
+  return summary;
+}
+
+export async function importKnowledgeFile(
+  workspacePath: string,
+  path: string,
+  tags: string[],
+): Promise<KnowledgeDocumentSummary> {
+  if (isTauri) {
+    return invoke<KnowledgeDocumentSummary>("import_knowledge_file", {
+      workspacePath,
+      path,
+      tags,
+    });
+  }
+  const name = path.split("/").filter(Boolean).at(-1) ?? "Imported document";
+  return addKnowledgeNote(
+    workspacePath,
+    name,
+    `Imported reference from ${path}.`,
+    tags,
+  );
+}
+
+export async function deleteKnowledgeDocument(documentId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("delete_knowledge_document", { documentId });
+    return;
+  }
+  mockKnowledge = mockKnowledge.filter((document) => document.id !== documentId);
+  mockKnowledgeContent.delete(documentId);
+}
+
+export async function searchProject(
+  workspacePath: string,
+  query: string,
+  limit = 12,
+): Promise<ProjectHit[]> {
+  if (isTauri) {
+    return invoke<ProjectHit[]>("search_project", { workspacePath, query, limit });
+  }
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) {
+    return [];
+  }
+  const hits: ProjectHit[] = [];
+  for (const document of mockKnowledge) {
+    const content = mockKnowledgeContent.get(document.id) ?? "";
+    if (content.toLowerCase().includes(needle) || document.title.toLowerCase().includes(needle)) {
+      hits.push({
+        source: "knowledge",
+        title: document.title,
+        snippet: content.slice(0, 220),
+        locator: `${document.id}#0`,
+        score: 1,
+      });
+    }
+  }
+  for (const memory of mockMemories) {
+    if (memory.content.toLowerCase().includes(needle)) {
+      hits.push({
+        source: "memory",
+        title: "Durable memory",
+        snippet: memory.content,
+        locator: memory.id,
+        score: 0.9,
+      });
+    }
+  }
+  hits.push({
+    source: "code",
+    title: "apps/desktop/ui/src/App.tsx",
+    snippet: `Indexed code matched ${query}.`,
+    locator: "apps/desktop/ui/src/App.tsx",
+    score: 0.8,
+  });
+  return hits.slice(0, limit);
+}
+
+export async function listProjectFiles(workspacePath: string): Promise<string[]> {
+  if (isTauri) {
+    return invoke<string[]>("project_files", { workspacePath });
+  }
+  return [
+    "apps/desktop/ui/src/App.tsx",
+    "apps/desktop/ui/src/backend.ts",
+    "crates/openbad-agent/src/lib.rs",
+    "crates/openbad-store/src/store.rs",
+    "docs/architecture/00-vision-and-feature-set.md",
+  ];
+}
+
+export async function previewProjectFile(
+  workspacePath: string,
+  path: string,
+): Promise<ProjectFileView> {
+  if (isTauri) {
+    return invoke<ProjectFileView>("project_file", { workspacePath, path });
+  }
+  return {
+    path,
+    kind: "text",
+    content: `// ${path}\n// Mock preview for the browser harness.\n`,
+    data_url: null,
+  };
+}
+
 export async function apiKeyStatus(): Promise<boolean> {
   return isTauri ? invoke<boolean>("api_key_status") : mockKeyConfigured;
 }
@@ -344,11 +586,35 @@ async function mockChat(
     name: "read_file",
     content: "[workspace] members = [...12 crates...]",
     is_error: false,
+    metadata: {},
   });
   onEvent({ type: "step", step: 2 });
   for (const chunk of text.match(/.{1,36}/g) ?? [text]) {
     onEvent({ type: "content", step: 2, text: chunk });
     await tick(45);
+  }
+  if (/preview|artifact|web page/i.test(input.message)) {
+    onEvent({
+      type: "tool_call",
+      step: 2,
+      name: "present_artifact",
+      arguments: '{"kind":"web","title":"OpenBaD architecture","uri":"https://example.com"}',
+    });
+    await tick(80);
+    onEvent({
+      type: "tool_result",
+      step: 2,
+      name: "present_artifact",
+      content: 'Presented web artifact "OpenBaD architecture" beside the chat.',
+      is_error: false,
+      metadata: {
+        openbad_artifact: {
+          kind: "web",
+          title: "OpenBaD architecture",
+          uri: "https://example.com",
+        },
+      },
+    });
   }
   onEvent({ type: "usage", usage: mockUsage });
 

@@ -408,9 +408,19 @@ commands with approvals.
   when the model does not call `recall`.
 - The sidebar lists recent memories and can forget them. Memory is scoped to
   the current workspace, so a different folder starts a separate memory set.
-- Still open for Phase 5: ACT-R activation/decay, associations, hybrid
-  retrieval/RRF, extraction and consolidation, knowledge collections and
-  ingestion, embeddings, citations, and the full memory/knowledge UI.
+- Migration `0006_project_areas` adds project-scoped linked repositories,
+  knowledge documents, knowledge chunks, and a knowledge FTS5 index.
+- `search_project` fuses knowledge, indexed code, and memory with reciprocal
+  rank fusion and returns citable locators. `add_knowledge`,
+  `list_project_sources`, and `read_repo_file` cover project source workflows.
+- The desktop project panel exposes Overview, Workspace, Repos, Knowledge,
+  Retrieval, Memory, Edits, and Diagnostics in a resizable split workspace.
+  Assistant `present_artifact` results open web pages, images, Markdown, diffs,
+  or workspace files beside chat.
+- Still open for Phase 5: ACT-R activation/decay, associations, query
+  expansion, embedding-backed hybrid retrieval, MMR/reranking, extraction and
+  consolidation, richer ingestion (PDF/DOCX/HTML), knowledge collections,
+  persisted artifact history, and the full explanation UI.
 
 ## 10. Phase 6 — Autonomy
 

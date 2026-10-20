@@ -157,6 +157,46 @@ pub struct MemoryEntry {
     pub pinned: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRepoRef {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntryRef {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub source: Option<String>,
+    pub chunks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectHit {
+    pub source: String,
+    pub title: String,
+    pub snippet: String,
+    pub locator: String,
+    pub score: f64,
+}
+
+/// Project-owned knowledge, linked repositories, and retrieval.
+pub trait ProjectAreas: Send + Sync {
+    fn list_repos(&self) -> Result<Vec<ProjectRepoRef>, String>;
+    fn list_knowledge(&self) -> Result<Vec<KnowledgeEntryRef>, String>;
+    fn add_knowledge(
+        &self,
+        title: &str,
+        content: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+    ) -> Result<KnowledgeEntryRef, String>;
+    fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<ProjectHit>, String>;
+}
+
 pub trait MemoryStore: Send + Sync {
     fn remember(
         &self,
@@ -259,6 +299,7 @@ pub struct ToolContext {
     pub search: Option<Arc<dyn WorkspaceSearch>>,
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     pub memory: Option<Arc<dyn MemoryStore>>,
+    pub project: Option<Arc<dyn ProjectAreas>>,
     read_paths: Mutex<HashSet<PathBuf>>,
 }
 
@@ -273,6 +314,7 @@ impl ToolContext {
             search: None,
             checkpoints: None,
             memory: None,
+            project: None,
             read_paths: Mutex::new(HashSet::new()),
         }
     }
@@ -330,6 +372,11 @@ impl ToolRegistry {
         registry.register(RepoMapTool);
         registry.register(RememberTool);
         registry.register(RecallTool);
+        registry.register(SearchProjectTool);
+        registry.register(AddKnowledgeTool);
+        registry.register(ListProjectSourcesTool);
+        registry.register(ReadRepoFileTool);
+        registry.register(PresentArtifactTool);
         registry.register(ListSkillsTool);
         registry.register(ReadSkillTool);
         registry
@@ -1345,6 +1392,350 @@ impl Tool for RecallTool {
     }
 }
 
+struct SearchProjectTool;
+
+#[async_trait]
+impl Tool for SearchProjectTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "search_project",
+            "Search this project's knowledge library, indexed code, and durable memories. Cite the returned locator when using a hit.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 30}
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project retrieval is not available".to_owned()))?;
+        let query = string_arg(&arguments, "query")?;
+        if query.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "query must not be empty".to_owned(),
+            ));
+        }
+        let limit = optional_usize(&arguments, "max_results")
+            .unwrap_or(8)
+            .clamp(1, 30);
+        let hits = project.retrieve(&query, limit).map_err(ToolError::Failed)?;
+        if hits.is_empty() {
+            return Ok(ToolResult::ok(format!(
+                "No project knowledge, code, or memory matched {query:?}."
+            )));
+        }
+        let content = hits
+            .iter()
+            .enumerate()
+            .map(|(index, hit)| {
+                format!(
+                    "[{}] {} · {} · {}\n{}",
+                    index + 1,
+                    hit.source,
+                    hit.title,
+                    hit.locator,
+                    hit.snippet
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(
+            ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(json!({
+                "matches": hits.len(),
+                "query": query
+            })),
+        )
+    }
+}
+
+struct AddKnowledgeTool;
+
+#[async_trait]
+impl Tool for AddKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "add_knowledge",
+            "Add a curated project note or reference to the knowledge library. Use a precise title and optional tags so later retrieval can cite it.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "source": {"type": "string", "description": "Optional URL or path"},
+                "tags": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["title", "content"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let title = string_arg(&arguments, "title")?;
+        let content = string_arg(&arguments, "content")?;
+        if content.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "content must not be empty".to_owned(),
+            ));
+        }
+        let source = optional_string(&arguments, "source");
+        let tags = arguments
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let entry = project
+            .add_knowledge(&title, &content, source.as_deref(), tags)
+            .map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(format!(
+            "Added knowledge \"{}\" ({} chars, {} chunks, id {}).",
+            entry.title,
+            content.chars().count(),
+            entry.chunks,
+            entry.id
+        ))
+        .with_metadata(json!({
+            "id": entry.id,
+            "title": entry.title,
+            "chunks": entry.chunks
+        })))
+    }
+}
+
+struct ListProjectSourcesTool;
+
+#[async_trait]
+impl Tool for ListProjectSourcesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_project_sources",
+            "List linked repositories and knowledge documents in this project. Use read_repo_file to inspect a linked repository.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project sources are not available".to_owned()))?;
+        let repos = project.list_repos().map_err(ToolError::Failed)?;
+        let knowledge = project.list_knowledge().map_err(ToolError::Failed)?;
+        let mut sections = Vec::new();
+        if repos.is_empty() {
+            sections.push("Repositories: none linked.".to_owned());
+        } else {
+            let mut repo_lines = vec!["Repositories:".to_owned()];
+            for repo in repos {
+                repo_lines.push(format!(
+                    "- {} ({}){}",
+                    repo.name,
+                    repo.path,
+                    if repo.read_only { " [read-only]" } else { "" }
+                ));
+            }
+            sections.push(repo_lines.join("\n"));
+        }
+        if knowledge.is_empty() {
+            sections.push("Knowledge: empty.".to_owned());
+        } else {
+            let mut knowledge_lines = vec!["Knowledge:".to_owned()];
+            for entry in knowledge {
+                let source = entry
+                    .source
+                    .map_or_else(String::new, |source| format!(" · {source}"));
+                knowledge_lines.push(format!(
+                    "- {} [{}]{} · {} chunks · {}",
+                    entry.title, entry.kind, source, entry.chunks, entry.id
+                ));
+            }
+            sections.push(knowledge_lines.join("\n"));
+        }
+        Ok(ToolResult::ok(truncate(
+            &sections.join("\n\n"),
+            context.max_output_bytes,
+        )))
+    }
+}
+
+struct ReadRepoFileTool;
+
+#[async_trait]
+impl Tool for ReadRepoFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "read_repo_file",
+            "Read a UTF-8 file from a linked project repository. The path is confined to that repository.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Linked repository id or name"},
+                "path": {"type": "string", "description": "Repository-relative path"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1}
+            },
+            "required": ["repo", "path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context.project.as_ref().ok_or_else(|| {
+            ToolError::Failed("project repositories are not available".to_owned())
+        })?;
+        let reference = string_arg(&arguments, "repo")?;
+        let repos = project.list_repos().map_err(ToolError::Failed)?;
+        let repo = repos
+            .into_iter()
+            .find(|repo| repo.id == reference || repo.name == reference)
+            .ok_or_else(|| {
+                ToolError::InvalidArgument(format!("unknown repository: {reference}"))
+            })?;
+        let root = std::fs::canonicalize(&repo.path)?;
+        let path = root
+            .join(string_arg(&arguments, "path")?)
+            .canonicalize()
+            .map_err(|error| ToolError::InvalidArgument(format!("repository path: {error}")))?;
+        if !path.starts_with(&root) {
+            return Err(ToolError::OutsideRoot(path.display().to_string()));
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let start = optional_usize(&arguments, "start_line").unwrap_or(1).max(1);
+        let end = optional_usize(&arguments, "end_line").unwrap_or(usize::MAX);
+        if end < start {
+            return Err(ToolError::InvalidArgument(
+                "end_line must be greater than or equal to start_line".to_owned(),
+            ));
+        }
+        let selected = content
+            .lines()
+            .enumerate()
+            .filter(|(index, _)| {
+                let line = index + 1;
+                line >= start && line <= end
+            })
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(
+            ToolResult::ok(truncate(&selected, context.max_output_bytes)).with_metadata(json!({
+                "repo": repo.name,
+                "path": path,
+                "lines": selected.lines().count()
+            })),
+        )
+    }
+}
+
+struct PresentArtifactTool;
+
+#[async_trait]
+impl Tool for PresentArtifactTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "present_artifact",
+            "Open an artifact beside the conversation: a web page, image, markdown note, diff, or workspace file. Use this when visual inspection helps more than prose.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["web", "image", "markdown", "diff", "file"]},
+                "title": {"type": "string"},
+                "uri": {"type": "string", "description": "URL, workspace-relative path, or knowledge:<document_id>"},
+                "content": {"type": "string", "description": "Inline markdown or diff content"},
+                "language": {"type": "string"}
+            },
+            "required": ["kind", "title"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let kind = string_arg(&arguments, "kind")?;
+        if !matches!(
+            kind.as_str(),
+            "web" | "image" | "markdown" | "diff" | "file"
+        ) {
+            return Err(ToolError::InvalidArgument(format!(
+                "unsupported artifact kind: {kind}"
+            )));
+        }
+        let title = string_arg(&arguments, "title")?;
+        let uri = optional_string(&arguments, "uri");
+        let content = optional_string(&arguments, "content");
+        if uri.is_none() && content.is_none() {
+            return Err(ToolError::InvalidArgument(
+                "uri or content is required".to_owned(),
+            ));
+        }
+        if kind == "web" {
+            let uri = uri
+                .as_deref()
+                .ok_or_else(|| ToolError::InvalidArgument("web artifacts need a uri".to_owned()))?;
+            if !uri.starts_with("https://") && !uri.starts_with("http://") {
+                return Err(ToolError::InvalidArgument(
+                    "web artifact uri must be http(s)".to_owned(),
+                ));
+            }
+        }
+        let language = optional_string(&arguments, "language");
+        let artifact = json!({
+            "kind": kind,
+            "title": title,
+            "uri": uri,
+            "content": content,
+            "language": language,
+        });
+        Ok(ToolResult::ok(format!(
+            "Presented {kind} artifact \"{title}\" beside the chat."
+        ))
+        .with_metadata(json!({"openbad_artifact": artifact})))
+    }
+}
+
 struct ListSkillsTool;
 
 #[async_trait]
@@ -2110,6 +2501,115 @@ mod tests {
                 .contains("Keep the prompt prefix immutable")
         );
         assert!(recalled.content.contains("[cache]"));
+    }
+
+    struct FakeProject {
+        repos: Vec<ProjectRepoRef>,
+        knowledge: Mutex<Vec<KnowledgeEntryRef>>,
+    }
+
+    impl ProjectAreas for FakeProject {
+        fn list_repos(&self) -> Result<Vec<ProjectRepoRef>, String> {
+            Ok(self.repos.clone())
+        }
+
+        fn list_knowledge(&self) -> Result<Vec<KnowledgeEntryRef>, String> {
+            Ok(self.knowledge.lock().expect("lock").clone())
+        }
+
+        fn add_knowledge(
+            &self,
+            title: &str,
+            content: &str,
+            source: Option<&str>,
+            _tags: Vec<String>,
+        ) -> Result<KnowledgeEntryRef, String> {
+            let entry = KnowledgeEntryRef {
+                id: "knowledge-1".to_owned(),
+                title: title.to_owned(),
+                kind: "note".to_owned(),
+                source: source.map(str::to_owned),
+                chunks: (content.chars().count() / 1_400 + 1) as u64,
+            };
+            self.knowledge.lock().expect("lock").push(entry.clone());
+            Ok(entry)
+        }
+
+        fn retrieve(&self, query: &str, _limit: usize) -> Result<Vec<ProjectHit>, String> {
+            Ok(vec![ProjectHit {
+                source: "knowledge".to_owned(),
+                title: "Architecture".to_owned(),
+                snippet: format!("matched {query}"),
+                locator: "knowledge-1#0".to_owned(),
+                score: 1.0,
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn project_tools_search_add_and_read_linked_repositories() {
+        let directory = tempdir().expect("tempdir");
+        let repo_dir = tempdir().expect("repo");
+        fs::create_dir_all(repo_dir.path().join("docs")).expect("docs");
+        fs::write(repo_dir.path().join("docs/design.md"), "one\ntwo\nthree\n").expect("file");
+        let mut context = context(directory.path());
+        context.project = Some(Arc::new(FakeProject {
+            repos: vec![ProjectRepoRef {
+                id: "repo-1".to_owned(),
+                name: "reference".to_owned(),
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            knowledge: Mutex::new(Vec::new()),
+        }));
+
+        let hits = SearchProjectTool
+            .execute(json!({"query": "cache"}), &context)
+            .await
+            .expect("search");
+        assert!(hits.content.contains("knowledge-1#0"));
+        assert!(hits.content.contains("matched cache"));
+
+        let added = AddKnowledgeTool
+            .execute(
+                json!({"title": "Decision", "content": "Use the local index."}),
+                &context,
+            )
+            .await
+            .expect("add knowledge");
+        assert!(added.content.contains("Decision"));
+        assert_eq!(added.metadata["chunks"], 1);
+
+        let sources = ListProjectSourcesTool
+            .execute(json!({}), &context)
+            .await
+            .expect("sources");
+        assert!(sources.content.contains("reference"));
+        assert!(sources.content.contains("Decision"));
+
+        let repo_file = ReadRepoFileTool
+            .execute(
+                json!({"repo": "repo-1", "path": "docs/design.md", "start_line": 2}),
+                &context,
+            )
+            .await
+            .expect("read repo");
+        assert!(repo_file.content.contains("two"));
+        assert!(!repo_file.content.contains("one"));
+
+        let escaped = ReadRepoFileTool
+            .execute(json!({"repo": "repo-1", "path": "../escape"}), &context)
+            .await;
+        assert!(escaped.is_err());
+
+        let artifact = PresentArtifactTool
+            .execute(
+                json!({"kind": "web", "title": "Docs", "uri": "https://example.com"}),
+                &context,
+            )
+            .await
+            .expect("artifact");
+        assert_eq!(artifact.metadata["openbad_artifact"]["kind"], json!("web"));
     }
 
     #[tokio::test]
