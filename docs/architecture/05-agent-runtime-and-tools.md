@@ -329,6 +329,11 @@ Implemented:
 | `list_context_rules` / `context_map` | read | Audit pinned/excluded rules and files loaded this turn |
 | `record_dead_end` / `list_dead_ends` | write/read | Negative knowledge in `.openbad/dead-ends.json` |
 | `ask_question` / `list_questions` | write/read | Queue structured human decisions in `.openbad/questions.json` |
+| `canon_add` / `canon_query` / `canon_lint` | write/read | Canon ledger and banned-phrase lint |
+| `glossary_add` / `glossary_lookup` | write/read | Glossary terms, expansions, and aliases |
+| `adr_write` / `adr_list` / `adr_read` | write/read | Architecture decision records |
+| `yaml_query` | read | Query YAML documents by field and return line numbers (D7) |
+| `check_invariants` | command | Run manifest invariant checks with evidence |
 | `stat_file` / `stat_repo_file` | read | Size, line count, mtime, and BLAKE3 hash without loading content |
 | `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
@@ -364,6 +369,12 @@ Knowledge documents carry a confidence level and, for imported files, a BLAKE3
 source hash. `list_knowledge` and `get_knowledge` flag a document as `STALE`
 when the source file's current hash differs from the captured hash, and a
 source that has disappeared is treated as stale.
+
+The project-model sidecars are `.openbad/canon.yaml` (canonical,
+superseded, disputed, unknown entries plus banned phrases),
+`.openbad/glossary.yaml`, and `.openbad/adr/`. `canon_lint` reports obsolete
+phrases with their canonical replacement and citation; `check_invariants` runs
+declared invariant checks and writes evidence under `.openbad/invariants/`.
 
 Manifest `gates:` group recipes into named pre-flight checks. `run_gate`
 executes them in order and writes a JSON evidence file under `.openbad/gates/`.

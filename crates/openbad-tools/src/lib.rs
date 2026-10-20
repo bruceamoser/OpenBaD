@@ -491,6 +491,16 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(CanonAddTool);
+        registry.register(CanonQueryTool);
+        registry.register(CanonLintTool);
+        registry.register(GlossaryAddTool);
+        registry.register(GlossaryLookupTool);
+        registry.register(AdrWriteTool);
+        registry.register(AdrListTool);
+        registry.register(AdrReadTool);
+        registry.register(YamlQueryTool);
+        registry.register(CheckInvariantsTool);
         registry.register(AskQuestionTool);
         registry.register(ListQuestionsTool);
         registry.register(PinContextTool);
@@ -4017,6 +4027,778 @@ impl Tool for PresentArtifactTool {
     }
 }
 
+struct CanonAddTool;
+
+#[async_trait]
+impl Tool for CanonAddTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "canon_add",
+            "Add or replace a canon-ledger entry in .openbad/canon.yaml. Status: canonical, superseded, disputed, or unknown.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "statement": {"type": "string"},
+                "status": {"type": "string", "enum": ["canonical", "superseded", "disputed", "unknown"]},
+                "superseded_by": {"type": "string"},
+                "evidence": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["id", "statement"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("canon_add".to_owned()));
+        }
+        let id = string_arg(&arguments, "id")?;
+        let statement = string_arg(&arguments, "statement")?;
+        let status =
+            optional_string(&arguments, "status").unwrap_or_else(|| "canonical".to_owned());
+        if !openbad_workspace::validate_canon_status(&status) {
+            return Err(ToolError::InvalidArgument(
+                "status must be canonical, superseded, disputed, or unknown".to_owned(),
+            ));
+        }
+        let evidence = arguments
+            .get("evidence")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut canon = openbad_workspace::load_canon(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let entry = openbad_workspace::CanonEntry {
+            id: id.clone(),
+            statement,
+            status,
+            superseded_by: optional_string(&arguments, "superseded_by"),
+            evidence,
+            updated_at: now_millis(),
+        };
+        if let Some(existing) = canon.entries.iter_mut().find(|entry| entry.id == id) {
+            *existing = entry;
+        } else {
+            canon.entries.push(entry);
+        }
+        openbad_workspace::save_canon(context.workspace.root(), &canon)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "canon entry {id} saved ({} total)",
+            canon.entries.len()
+        ))
+        .with_metadata(json!({"id": id, "entries": canon.entries.len()})))
+    }
+}
+
+struct CanonQueryTool;
+
+#[async_trait]
+impl Tool for CanonQueryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "canon_query",
+            "Query the canon ledger. By default returns only current canonical entries; set include_all=true to audit superseded/disputed entries.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "include_all": {"type": "boolean"}
+            }
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let canon = openbad_workspace::load_canon(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let query = optional_string(&arguments, "query").map(|query| query.to_ascii_lowercase());
+        let include_all = optional_bool(&arguments, "include_all").unwrap_or(false);
+        let mut entries = canon
+            .entries
+            .iter()
+            .filter(|entry| include_all || entry.status == "canonical")
+            .filter(|entry| {
+                query.as_ref().is_none_or(|query| {
+                    entry.id.to_ascii_lowercase().contains(query)
+                        || entry.statement.to_ascii_lowercase().contains(query)
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.id.cmp(&right.id));
+        if entries.is_empty() {
+            return Ok(ToolResult::ok("no canon entries").with_metadata(json!({"entries": 0})));
+        }
+        let content = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "- [{}] {} ({}){}",
+                    entry.id,
+                    entry.statement,
+                    entry.status,
+                    entry
+                        .superseded_by
+                        .as_deref()
+                        .map(|next| format!(" → {next}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({"entries": entries.len()})))
+    }
+}
+
+struct CanonLintTool;
+
+#[async_trait]
+impl Tool for CanonLintTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "canon_lint",
+            "Scan files for banned canon phrases in .openbad/canon.yaml and report the canonical replacement with citations.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 200},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 1000}
+            }
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let canon = openbad_workspace::load_canon(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        if canon.banned_phrases.is_empty() {
+            return Ok(ToolResult::ok(
+                "no banned phrases declared in .openbad/canon.yaml",
+            ));
+        }
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(200)
+            .clamp(1, 1_000);
+        let paths = arguments.get("paths").and_then(Value::as_array);
+        let candidates = if let Some(paths) = paths {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|path| context.workspace.resolve(Path::new(path)))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>()
+        } else {
+            let mut files = Vec::new();
+            for entry in WalkBuilder::new(context.workspace.root())
+                .max_depth(Some(8))
+                .build()
+                .filter_map(Result::ok)
+            {
+                if files.len() >= 2_000 {
+                    break;
+                }
+                let path = entry.path();
+                if !entry.file_type().is_some_and(|kind| kind.is_file())
+                    || path_is_excluded(context, path)
+                    || path.components().any(|component| {
+                        matches!(
+                            component.as_os_str().to_str(),
+                            Some(".git" | "target" | "node_modules" | "dist" | ".openbad")
+                        )
+                    })
+                {
+                    continue;
+                }
+                if path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension,
+                            "md" | "markdown" | "adoc" | "yaml" | "yml" | "json" | "txt"
+                        )
+                    })
+                {
+                    files.push(path.to_path_buf());
+                }
+            }
+            files
+        };
+        let mut hits = Vec::new();
+        for path in candidates {
+            if hits.len() >= max_results {
+                break;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let relative = relative_to_root(context, &path);
+            for (index, line) in content.lines().enumerate() {
+                for (phrase, replacement, citation) in openbad_workspace::lint_text(&canon, line) {
+                    hits.push(json!({
+                        "path": relative,
+                        "line": index + 1,
+                        "phrase": phrase,
+                        "replacement": replacement,
+                        "citation": citation,
+                        "text": line.trim()
+                    }));
+                    if hits.len() >= max_results {
+                        break;
+                    }
+                }
+            }
+        }
+        if hits.is_empty() {
+            return Ok(ToolResult::ok("canon lint clean").with_metadata(json!({"hits": 0})));
+        }
+        let content = hits
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}:{}: `{}` → `{}`{}",
+                    hit["path"].as_str().unwrap_or_default(),
+                    hit["line"],
+                    hit["phrase"].as_str().unwrap_or_default(),
+                    hit["replacement"].as_str().unwrap_or_default(),
+                    hit["citation"]
+                        .as_str()
+                        .map(|citation| format!(" ({citation})"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({"hits": hits})))
+    }
+}
+
+struct GlossaryAddTool;
+
+#[async_trait]
+impl Tool for GlossaryAddTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "glossary_add",
+            "Add or replace a glossary entry in .openbad/glossary.yaml.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "term": {"type": "string"},
+                "definition": {"type": "string"},
+                "expansion": {"type": "string"},
+                "aliases": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["term", "definition"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("glossary_add".to_owned()));
+        }
+        let term = string_arg(&arguments, "term")?;
+        let definition = string_arg(&arguments, "definition")?;
+        let aliases = arguments
+            .get("aliases")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut glossary = openbad_workspace::load_glossary(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let entry = openbad_workspace::GlossaryEntry {
+            term: term.clone(),
+            definition,
+            expansion: optional_string(&arguments, "expansion"),
+            aliases,
+        };
+        if let Some(existing) = glossary
+            .entries
+            .iter_mut()
+            .find(|entry| entry.term.eq_ignore_ascii_case(&term))
+        {
+            *existing = entry;
+        } else {
+            glossary.entries.push(entry);
+        }
+        openbad_workspace::save_glossary(context.workspace.root(), &glossary)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!("glossary term {term} saved")))
+    }
+}
+
+struct GlossaryLookupTool;
+
+#[async_trait]
+impl Tool for GlossaryLookupTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "glossary_lookup",
+            "Look up glossary terms by term, expansion, or alias.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let query = string_arg(&arguments, "query")?.to_ascii_lowercase();
+        let glossary = openbad_workspace::load_glossary(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let matches = glossary
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.term.to_ascii_lowercase().contains(&query)
+                    || entry.definition.to_ascii_lowercase().contains(&query)
+                    || entry
+                        .expansion
+                        .as_deref()
+                        .is_some_and(|expansion| expansion.to_ascii_lowercase().contains(&query))
+                    || entry
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_ascii_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Ok(ToolResult::ok("no matching glossary terms"));
+        }
+        Ok(ToolResult::ok(
+            matches
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "- {}{}: {}",
+                        entry.term,
+                        entry
+                            .expansion
+                            .as_deref()
+                            .map(|expansion| format!(" ({expansion})"))
+                            .unwrap_or_default(),
+                        entry.definition
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
+    }
+}
+
+struct AdrWriteTool;
+
+#[async_trait]
+impl Tool for AdrWriteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "adr_write",
+            "Write an architecture decision record under .openbad/adr/.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "context": {"type": "string"},
+                "decision": {"type": "string"},
+                "consequences": {"type": "string"},
+                "status": {"type": "string", "enum": ["proposed", "accepted", "superseded", "rejected"]},
+                "supersedes": {"type": "string"}
+            },
+            "required": ["title", "context", "decision", "consequences"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("adr_write".to_owned()));
+        }
+        let directory = openbad_workspace::adr_directory(context.workspace.root());
+        std::fs::create_dir_all(&directory)?;
+        let next = std::fs::read_dir(&directory)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .split_once('-')
+                    .and_then(|(number, _)| number.parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let title = string_arg(&arguments, "title")?;
+        let slug = title
+            .to_ascii_lowercase()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let name = format!("{next:04}-{slug}.md");
+        let status = optional_string(&arguments, "status").unwrap_or_else(|| "proposed".to_owned());
+        let body = format!(
+            "# ADR-{next:04}: {title}\n\n- Status: {status}\n- Date: {}\n{}\n\n## Context\n\n{}\n\n## Decision\n\n{}\n\n## Consequences\n\n{}\n",
+            now_millis(),
+            optional_string(&arguments, "supersedes")
+                .map(|supersedes| format!("- Supersedes: {supersedes}\n"))
+                .unwrap_or_default(),
+            string_arg(&arguments, "context")?,
+            string_arg(&arguments, "decision")?,
+            string_arg(&arguments, "consequences")?
+        );
+        std::fs::write(directory.join(&name), body)?;
+        Ok(ToolResult::ok(format!("wrote ADR {name}"))
+            .with_metadata(json!({"name": name, "number": next, "status": status})))
+    }
+}
+
+struct AdrListTool;
+
+#[async_trait]
+impl Tool for AdrListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "adr_list",
+            "List architecture decision records.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let directory = openbad_workspace::adr_directory(context.workspace.root());
+        if !directory.is_dir() {
+            return Ok(ToolResult::ok("no ADRs"));
+        }
+        let mut names = std::fs::read_dir(directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".md"))
+            .collect::<Vec<_>>();
+        names.sort();
+        if names.is_empty() {
+            return Ok(ToolResult::ok("no ADRs"));
+        }
+        Ok(ToolResult::ok(names.join("\n")).with_metadata(json!({"adrs": names.len()})))
+    }
+}
+
+struct AdrReadTool;
+
+#[async_trait]
+impl Tool for AdrReadTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "adr_read",
+            "Read an ADR by number or filename.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"]
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let id = string_arg(&arguments, "id")?;
+        let directory = openbad_workspace::adr_directory(context.workspace.root());
+        let mut names = std::fs::read_dir(&directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&id) || name.trim_end_matches(".md") == id)
+            .collect::<Vec<_>>();
+        names.sort();
+        let name = names
+            .first()
+            .ok_or_else(|| ToolError::InvalidArgument(format!("unknown ADR: {id}")))?;
+        let content = std::fs::read_to_string(directory.join(name))?;
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"name": name})))
+    }
+}
+
+struct YamlQueryTool;
+
+#[async_trait]
+impl Tool for YamlQueryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "yaml_query",
+            "Query YAML documents in a file (single or multi-document) with an optional top-level field=value filter, returning selected fields and line numbers (D7).",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "filter": {"type": "string", "description": "Top-level field=value, for example type=card"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 500}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        ensure_not_excluded(context, &path)?;
+        let content = std::fs::read_to_string(&path)?;
+        context.mark_read(&path);
+        let filter = optional_string(&arguments, "filter");
+        let fields = arguments
+            .get("fields")
+            .and_then(Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec!["_id".to_owned(), "name".to_owned(), "type".to_owned()]);
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let mut documents = Vec::new();
+        let mut start = 0_usize;
+        let mut parts = Vec::new();
+        for (index, line) in content.lines().enumerate() {
+            if line.trim() == "---" {
+                parts.push((
+                    start,
+                    content
+                        .lines()
+                        .take(index)
+                        .skip(start)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ));
+                start = index + 1;
+            }
+        }
+        parts.push((
+            start,
+            content.lines().skip(start).collect::<Vec<_>>().join("\n"),
+        ));
+        for (offset, part) in parts {
+            if part.trim().is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&part) else {
+                continue;
+            };
+            if let Some(filter) = &filter {
+                let (field, expected) = filter
+                    .split_once('=')
+                    .or_else(|| filter.split_once(':'))
+                    .unwrap_or((filter.as_str(), ""));
+                let actual = value
+                    .get(field.trim())
+                    .map(|value| match value {
+                        serde_yaml::Value::String(value) => value.clone(),
+                        other => serde_yaml::to_string(other)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_owned(),
+                    })
+                    .unwrap_or_default();
+                if actual != expected.trim() {
+                    continue;
+                }
+            }
+            let line = part
+                .lines()
+                .position(|line| line.trim_start().starts_with("_id:"))
+                .map_or(offset + 1, |line| offset + line + 1);
+            let fields = fields
+                .iter()
+                .filter_map(|field| {
+                    value.get(field).map(|value| {
+                        let value = match value {
+                            serde_yaml::Value::String(value) => value.clone(),
+                            other => serde_yaml::to_string(other)
+                                .unwrap_or_default()
+                                .trim()
+                                .to_owned(),
+                        };
+                        format!("{field}={value}")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            documents.push(format!("{line}: {fields}"));
+            if documents.len() >= max_results {
+                break;
+            }
+        }
+        if documents.is_empty() {
+            return Ok(ToolResult::ok("no matching YAML documents"));
+        }
+        Ok(ToolResult::ok(documents.join("\n"))
+            .with_metadata(json!({"documents": documents.len()})))
+    }
+}
+
+struct CheckInvariantsTool;
+
+#[async_trait]
+impl Tool for CheckInvariantsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "check_invariants",
+            "Run every invariant in .openbad/project.yaml that declares a check (recipe name or shell command) and record evidence.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(600)
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(|| ToolError::Failed("no project manifest".to_owned()))?;
+        if manifest.invariants.is_empty() {
+            return Ok(ToolResult::ok("no invariants declared"));
+        }
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "check_invariants (requires Full access)".to_owned(),
+            ));
+        }
+        let mut checks = Vec::new();
+        for invariant in &manifest.invariants {
+            let Some(check) = invariant.check.as_deref() else {
+                checks.push(json!({
+                    "id": invariant.id,
+                    "severity": invariant.severity,
+                    "status": "skipped",
+                    "reason": "no check declared"
+                }));
+                continue;
+            };
+            let command = manifest
+                .recipe(check)
+                .map(|recipe| recipe.command)
+                .unwrap_or_else(|| check.to_owned());
+            let result = RunCommandTool
+                .execute(json!({"command": command}), context)
+                .await?;
+            checks.push(json!({
+                "id": invariant.id,
+                "statement": invariant.statement,
+                "severity": invariant.severity,
+                "check": check,
+                "status": if result.metadata["success"].as_bool().unwrap_or(false) { "passed" } else { "failed" },
+                "output_preview": result.content.chars().take(1_000).collect::<String>(),
+                "log_path": result.metadata["log_path"]
+            }));
+        }
+        let directory = context.workspace.root().join(".openbad").join("invariants");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{}.json", now_millis()));
+        let evidence = json!({"created_at": now_millis(), "checks": checks});
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&evidence)
+                .map_err(|error| ToolError::Failed(error.to_string()))?,
+        )?;
+        let summary = checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "- [{}] {}",
+                    check["status"].as_str().unwrap_or_default(),
+                    check["id"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(
+            ToolResult::ok(format!("{summary}\nevidence: {}", path.display()))
+                .with_metadata(evidence),
+        )
+    }
+}
+
 struct AskQuestionTool;
 
 #[async_trait]
@@ -5721,6 +6503,117 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn canon_glossary_adr_yaml_and_invariants_work() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        fs::create_dir_all(directory.path().join(".openbad")).expect("openbad");
+        fs::write(directory.path().join("src/main.rs"), "pub fn main() {}\n").expect("main");
+        fs::write(directory.path().join("docs.md"), "This says two phials.\n").expect("docs");
+        fs::write(
+            directory.path().join("cards.yaml"),
+            "---\n_id: card-a\nname: Alpha\ntype: card\n---\n_id: card-b\nname: Beta\ntype: pack\n",
+        )
+        .expect("yaml");
+        fs::write(
+            directory.path().join(".openbad/canon.yaml"),
+            r#"
+banned_phrases:
+  - phrase: two phials
+    replacement: one phial
+    citation: rewrite#ch3
+"#,
+        )
+        .expect("canon");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+
+        let added = CanonAddTool
+            .execute(
+                json!({"id": "CANON-1", "statement": "The case has one phial.", "evidence": ["rewrite#ch3"]}),
+                &context,
+            )
+            .await
+            .expect("canon add");
+        assert!(added.content.contains("CANON-1"));
+        let queried = CanonQueryTool
+            .execute(json!({"query": "phial"}), &context)
+            .await
+            .expect("canon query");
+        assert!(queried.content.contains("one phial"));
+        let lint = CanonLintTool
+            .execute(json!({"paths": ["docs.md"]}), &context)
+            .await
+            .expect("canon lint");
+        assert!(lint.content.contains("two phials"));
+        assert!(lint.content.contains("one phial"));
+
+        GlossaryAddTool
+            .execute(
+                json!({"term": "CT", "definition": "Containment Truth", "aliases": ["containment truth"]}),
+                &context,
+            )
+            .await
+            .expect("glossary add");
+        let lookup = GlossaryLookupTool
+            .execute(json!({"query": "containment"}), &context)
+            .await
+            .expect("glossary lookup");
+        assert!(lookup.content.contains("CT"));
+
+        let adr = AdrWriteTool
+            .execute(
+                json!({
+                    "title": "Use SQLite",
+                    "context": "Desktop storage",
+                    "decision": "Use SQLite with a single writer",
+                    "consequences": "Simple local durability",
+                    "status": "accepted"
+                }),
+                &context,
+            )
+            .await
+            .expect("adr write");
+        assert!(adr.content.contains("0001"));
+        let adrs = AdrListTool
+            .execute(json!({}), &context)
+            .await
+            .expect("adr list");
+        assert!(adrs.content.contains("0001-use-sqlite.md"));
+        let adr_read = AdrReadTool
+            .execute(json!({"id": "0001"}), &context)
+            .await
+            .expect("adr read");
+        assert!(adr_read.content.contains("single writer"));
+
+        let yaml = YamlQueryTool
+            .execute(
+                json!({"path": "cards.yaml", "filter": "type=card"}),
+                &context,
+            )
+            .await
+            .expect("yaml query");
+        assert!(yaml.content.contains("Alpha"));
+        assert!(!yaml.content.contains("Beta"));
+
+        fs::write(
+            directory.path().join(".openbad/project.yaml"),
+            r#"
+invariants:
+  - id: INV-1
+    statement: Main exists
+    check: test -f src/main.rs
+"#,
+        )
+        .expect("manifest");
+        let invariants = CheckInvariantsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("invariants");
+        assert!(invariants.content.contains("passed"));
     }
 
     #[tokio::test]
