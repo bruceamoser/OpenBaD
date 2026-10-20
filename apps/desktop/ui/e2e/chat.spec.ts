@@ -156,3 +156,16 @@ test("removes a project from settings", async ({ page }) => {
 
   await expect(page.getByText("No project")).toBeVisible();
 });
+
+test("opens the command menu and navigates", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "New session" }).first().waitFor();
+  await page.keyboard.press("Control+k");
+
+  const menu = page.getByRole("dialog", { name: "Command menu" });
+  await expect(menu).toBeVisible();
+  await menu.getByRole("textbox", { name: "Command search" }).fill("memory");
+  await menu.getByRole("button", { name: "Context: Memory" }).click();
+
+  await expect(page.getByText("Keep the model-visible prompt prefix immutable.")).toBeVisible();
+});

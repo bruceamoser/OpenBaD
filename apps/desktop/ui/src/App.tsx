@@ -135,6 +135,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectPath, setNewProjectPath] = useState("");
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -707,6 +708,24 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      const command = event.metaKey || event.ctrlKey;
+      if (command && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen(true);
+      } else if (command && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        newSession();
+      } else if (command && event.key === ",") {
+        event.preventDefault();
+        openSettings("model");
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [newSession, openSettings]);
+
   const openContext = useCallback((tab: ContextTab) => {
     setContextTab(tab);
     setContextOpen(true);
@@ -1115,6 +1134,32 @@ export default function App() {
             setNewProjectPath(workspacePath);
           }}
           foundation={foundation}
+        />
+      )}
+
+      {commandOpen && (
+        <CommandPalette
+          onClose={() => setCommandOpen(false)}
+          onNewSession={() => {
+            setCommandOpen(false);
+            newSession();
+          }}
+          onAddProject={() => {
+            setCommandOpen(false);
+            setProjectDialogOpen(true);
+          }}
+          onSettings={(tab) => {
+            setCommandOpen(false);
+            openSettings(tab);
+          }}
+          onContext={(tab) => {
+            setCommandOpen(false);
+            openContext(tab);
+          }}
+          onToggleSidebar={() => {
+            setCommandOpen(false);
+            setSidebarOpen((open) => !open);
+          }}
         />
       )}
 
@@ -1837,6 +1882,95 @@ function SettingsDialog({
               </Section>
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CommandPalette({
+  onClose,
+  onNewSession,
+  onAddProject,
+  onSettings,
+  onContext,
+  onToggleSidebar,
+}: {
+  onClose: () => void;
+  onNewSession: () => void;
+  onAddProject: () => void;
+  onSettings: (tab: SettingsTab) => void;
+  onContext: (tab: ContextTab) => void;
+  onToggleSidebar: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const actions = [
+    { label: "New session", hint: "Ctrl N", run: onNewSession },
+    { label: "Add project", hint: "", run: onAddProject },
+    { label: "Toggle sidebar", hint: "", run: onToggleSidebar },
+    { label: "Settings: Model", hint: "", run: () => onSettings("model") },
+    { label: "Settings: Access", hint: "", run: () => onSettings("access") },
+    { label: "Settings: Secrets", hint: "", run: () => onSettings("secrets") },
+    { label: "Settings: Project", hint: "", run: () => onSettings("project") },
+    { label: "Context: Index", hint: "", run: () => onContext("index") },
+    { label: "Context: Memory", hint: "", run: () => onContext("memory") },
+    { label: "Context: Checkpoints", hint: "", run: () => onContext("checkpoints") },
+    { label: "Context: Diagnostics", hint: "", run: () => onContext("diagnostics") },
+  ];
+  const needle = query.trim().toLowerCase();
+  const filtered =
+    needle.length === 0
+      ? actions
+      : actions.filter((action) => action.label.toLowerCase().includes(needle));
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Command menu"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-6 pt-[15vh] backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-[#0f141a] shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-2.5">
+          <Search size={14} className="text-slate-500" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                onClose();
+              }
+            }}
+            aria-label="Command search"
+            placeholder="Type a command…"
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-slate-200 outline-none placeholder:text-slate-600"
+          />
+          <span className="rounded border border-white/[0.08] px-1.5 py-0.5 font-mono text-[9px] text-slate-600">
+            esc
+          </span>
+        </div>
+        <div className="max-h-80 overflow-y-auto p-1.5">
+          {filtered.length === 0 && (
+            <p className="px-2 py-3 text-[11px] text-slate-600">No matching commands.</p>
+          )}
+          {filtered.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={action.run}
+              className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-[12px] text-slate-300 hover:bg-white/[0.06] hover:text-slate-100"
+            >
+              <span>{action.label}</span>
+              {action.hint !== "" && (
+                <span className="font-mono text-[9px] text-slate-600">{action.hint}</span>
+              )}
+            </button>
+          ))}
         </div>
       </div>
     </div>
