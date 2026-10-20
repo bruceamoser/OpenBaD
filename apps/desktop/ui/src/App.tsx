@@ -4,6 +4,7 @@ import {
   apiKeyStatus as fetchApiKeyStatus,
   cancelChat,
   chat as sendChat,
+  checkpointDiff as fetchCheckpointDiff,
   loadCheckpoints as fetchCheckpoints,
   clearApiKey as clearStoredApiKey,
   loadFoundation as fetchFoundation,
@@ -85,6 +86,8 @@ export default function App() {
   const [indexError, setIndexError] = useState<string | null>(null);
   const [checkpointList, setCheckpointList] = useState<FileCheckpointSummary[]>([]);
   const [restoringCheckpoint, setRestoringCheckpoint] = useState<string | null>(null);
+  const [checkpointDiffId, setCheckpointDiffId] = useState<string | null>(null);
+  const [checkpointDiffText, setCheckpointDiffText] = useState("");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -257,6 +260,21 @@ export default function App() {
     }
   }, []);
 
+  const showCheckpointDiff = useCallback(async (checkpointId: string) => {
+    if (checkpointDiffId === checkpointId) {
+      setCheckpointDiffId(null);
+      return;
+    }
+    setCheckpointDiffId(checkpointId);
+    setCheckpointDiffText("");
+    setCheckpointError(null);
+    try {
+      setCheckpointDiffText(await fetchCheckpointDiff(checkpointId));
+    } catch (cause) {
+      setCheckpointError(describeError(cause));
+    }
+  }, [checkpointDiffId]);
+
   const restoreCheckpoint = useCallback(
     async (checkpointId: string) => {
       setRestoringCheckpoint(checkpointId);
@@ -265,6 +283,9 @@ export default function App() {
       try {
         const path = await restoreStoredCheckpoint(checkpointId);
         setCheckpointList((items) => items.filter((item) => item.id !== checkpointId));
+        if (checkpointDiffId === checkpointId) {
+          setCheckpointDiffId(null);
+        }
         setCheckpointNotice(`Restored ${path}`);
         void refreshWorkspaceIndex();
       } catch (cause) {
@@ -273,7 +294,7 @@ export default function App() {
         setRestoringCheckpoint(null);
       }
     },
-    [refreshWorkspaceIndex],
+    [checkpointDiffId, refreshWorkspaceIndex],
   );
 
   const send = useCallback(async () => {
@@ -740,18 +761,32 @@ export default function App() {
                         {formatBytes(checkpoint.bytes)} ·{" "}
                         {new Date(checkpoint.created_at).toLocaleTimeString()}
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => void restoreCheckpoint(checkpoint.id)}
-                        disabled={busy || restoringCheckpoint !== null}
-                        className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-300 hover:bg-white/10 disabled:opacity-40"
-                      >
-                        {restoringCheckpoint === checkpoint.id ? "Restoring…" : "Restore"}
-                      </button>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void showCheckpointDiff(checkpoint.id)}
+                          className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-300 hover:bg-white/10"
+                        >
+                          {checkpointDiffId === checkpoint.id ? "Hide diff" : "Diff"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void restoreCheckpoint(checkpoint.id)}
+                          disabled={busy || restoringCheckpoint !== null}
+                          className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-300 hover:bg-white/10 disabled:opacity-40"
+                        >
+                          {restoringCheckpoint === checkpoint.id ? "Restoring…" : "Restore"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
+              {checkpointDiffId !== null && checkpointDiffText.length > 0 && (
+                <pre className="mt-2 max-h-64 overflow-auto rounded bg-black/40 p-2 font-mono text-[10px] leading-4 text-slate-400">
+                  {checkpointDiffText}
+                </pre>
+              )}
               {checkpointNotice !== null && (
                 <p className="mt-2 text-xs text-emerald-300">{checkpointNotice}</p>
               )}

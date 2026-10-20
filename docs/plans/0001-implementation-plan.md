@@ -318,12 +318,13 @@ commands with approvals.
   extension allowlist covers common source, config, and documentation formats;
   binary files are skipped.
 - `write_file` and `edit_file` save the original file (or its absence) to
-  `file_checkpoints` before mutating. The sidebar lists recent checkpoints and
-  can restore them; restore resolves the path back inside the session workspace
-  and deletes the used checkpoint.
+  `file_checkpoints` before mutating. The sidebar lists recent checkpoints,
+  renders a unified diff against the current file, and can restore them; restore
+  resolves the path back inside the session workspace and deletes the used
+  checkpoint.
 - Still open for Phase 4: filesystem watching/debounce, LSP diagnostics, PTY and
-  job supervision, diff review, whole-turn rewind, FIM completion, and the
-  workspace doctor report.
+  job supervision, whole-turn rewind, FIM completion, and the workspace doctor
+  report.
 
 ## 9. Phase 5 — Memory and knowledge
 

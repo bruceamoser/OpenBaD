@@ -78,6 +78,16 @@ export async function loadCheckpoints(
   return mockCheckpoints.filter(() => sessionId.length > 0);
 }
 
+export async function checkpointDiff(checkpointId: string): Promise<string> {
+  if (isTauri) {
+    return invoke<string>("checkpoint_diff", { checkpointId });
+  }
+  const checkpoint = mockCheckpoints.find((item) => item.id === checkpointId);
+  return checkpoint
+    ? `--- a/${checkpoint.path}\n+++ b/${checkpoint.path}\n@@ -1 +1 @@\n-old content\n+new content\n`
+    : "";
+}
+
 export async function restoreCheckpoint(checkpointId: string): Promise<string> {
   if (isTauri) {
     return invoke<string>("restore_checkpoint", { checkpointId });

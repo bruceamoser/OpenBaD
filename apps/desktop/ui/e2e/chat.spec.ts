@@ -87,6 +87,9 @@ test("lists and restores a file checkpoint", async ({ page }) => {
   await expect(page.getByText(/cached \(/)).toBeVisible();
 
   await expect(page.getByText("/mnt/disk4/repos/OpenBaD/src/main.rs")).toBeVisible();
+  await page.getByRole("button", { name: "Diff" }).click();
+  await expect(page.getByText("+new content")).toBeVisible();
+
   await page.getByRole("button", { name: "Restore" }).click();
 
   await expect(page.getByText(/Restored /)).toBeVisible();

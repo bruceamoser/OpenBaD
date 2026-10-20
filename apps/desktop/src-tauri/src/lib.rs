@@ -242,6 +242,49 @@ fn sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
 }
 
 #[tauri::command]
+fn checkpoint_diff(state: State<'_, AppState>, checkpoint_id: String) -> Result<String, String> {
+    let checkpoint = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .load_file_checkpoint(&checkpoint_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("checkpoint not found: {checkpoint_id}"))?
+    };
+    let workspace_path = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .session_workspace_path(checkpoint.session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "session has no workspace".to_owned())?
+    };
+    let workspace = WorkspaceService::new(workspace_path);
+    let path = workspace
+        .resolve(Path::new(&checkpoint.path))
+        .map_err(|error| error.to_string())?;
+    let before = checkpoint
+        .content
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|error| format!("checkpoint is not UTF-8: {error}"))?
+        .unwrap_or_default();
+    let after = std::fs::read_to_string(&path).unwrap_or_default();
+    let relative = checkpoint.path.replace('\\', "/");
+    let diff = similar::TextDiff::from_lines(&before, &after);
+    let rendered = diff
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{relative}"), &format!("b/{relative}"))
+        .to_string();
+    Ok(rendered.chars().take(200_000).collect())
+}
+
+#[tauri::command]
 fn checkpoints(
     state: State<'_, AppState>,
     session_id: String,
@@ -953,6 +996,7 @@ pub fn run() {
             sessions,
             search_sessions,
             checkpoints,
+            checkpoint_diff,
             restore_checkpoint,
             session_view,
             chat
