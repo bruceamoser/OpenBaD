@@ -390,6 +390,9 @@ commands with approvals.
 - The agent has `remember` and `recall` tools. `recall` searches content and
   tags, surfaces pinned entries first, and is read-only; `remember` is internal
   state and does not require the file-write toggle.
+- At the start of each turn the agent prepends up to six recent memories (1,000
+  characters each) to its system prompt, so prior decisions are available even
+  when the model does not call `recall`.
 - The sidebar lists recent memories and can forget them. Memory is scoped to
   the current workspace, so a different folder starts a separate memory set.
 - Still open for Phase 5: ACT-R activation/decay, associations, hybrid

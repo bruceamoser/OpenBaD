@@ -147,7 +147,7 @@ impl<T: HttpTransport> Agent<T> {
         history: Vec<ChatMessage>,
         observer: &dyn AgentObserver,
     ) -> Result<AgentRun, AgentError> {
-        let system_prompt = self.system_prompt();
+        let system_prompt = format!("{}{}", self.system_prompt(), self.memory_context());
         let mut messages = history;
         if !matches!(
             messages.first().map(|message| &message.role),
@@ -377,6 +377,29 @@ impl<T: HttpTransport> Agent<T> {
             finish_reason,
             usage,
         ))
+    }
+
+    fn memory_context(&self) -> String {
+        let Some(memory) = &self.memory else {
+            return String::new();
+        };
+        let Ok(entries) = memory.recall(None, 6) else {
+            return String::new();
+        };
+        if entries.is_empty() {
+            return String::new();
+        }
+        let mut context =
+            String::from("\n\nRecent workspace memory (verify before relying on it):\n");
+        for entry in entries {
+            let content: String = entry.content.chars().take(1_000).collect();
+            context.push_str(&format!(
+                "- {}{}\n",
+                if entry.pinned { "[pinned] " } else { "" },
+                content
+            ));
+        }
+        context
     }
 
     fn system_prompt(&self) -> String {
@@ -754,6 +777,70 @@ mod tests {
 
         let empty = tempfile::tempdir().expect("empty");
         assert!(load_project_instructions(empty.path()).is_none());
+    }
+
+    struct StaticMemory;
+
+    impl openbad_tools::MemoryStore for StaticMemory {
+        fn remember(
+            &self,
+            content: &str,
+            tags: Vec<String>,
+            pinned: bool,
+        ) -> Result<openbad_tools::MemoryEntry, String> {
+            Ok(openbad_tools::MemoryEntry {
+                id: "memory".to_owned(),
+                content: content.to_owned(),
+                tags,
+                pinned,
+            })
+        }
+
+        fn recall(
+            &self,
+            _query: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<openbad_tools::MemoryEntry>, String> {
+            Ok(vec![openbad_tools::MemoryEntry {
+                id: "memory".to_owned(),
+                content: "Use the cache-first prompt order.".to_owned(),
+                tags: vec!["decision".to_owned()],
+                pinned: true,
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn includes_recent_memory_in_the_request() {
+        let directory = tempdir().expect("tempdir");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([HttpResponse {
+                status: 200,
+                body: br#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_vec(),
+            }])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        )
+        .with_memory(Arc::new(StaticMemory));
+        agent
+            .run(vec![ChatMessage::user("hello")])
+            .await
+            .expect("run");
+
+        let transport = agent.client.transport();
+        let requests = transport.requests.lock().expect("requests");
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("Recent workspace memory"));
+        assert!(body.contains("cache-first prompt order"));
+        assert!(body.contains("[pinned]"));
     }
 
     #[test]
