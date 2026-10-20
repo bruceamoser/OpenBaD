@@ -186,6 +186,16 @@ pub struct SessionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutsideAccessGrant {
+    pub id: String,
+    pub workspace_id: WorkspaceId,
+    pub path: String,
+    pub write_access: bool,
+    pub reason: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub schema_version: String,
     pub integrity: String,

@@ -17,9 +17,9 @@ use crate::projections;
 use crate::types::{
     AuditRecord, AuditReport, DoctorReport, FileCheckpoint, FileCheckpointSummary, IndexHit,
     IndexSummary, IndexedFile, KnowledgeDocument, KnowledgeDocumentSummary, MemoryRecord,
-    ModelRouteRecord, NewModelRoute, NewProvider, NewSession, NewWorkspace, ProjectHit,
-    ProjectOverview, ProjectRepo, ProviderRecord, SessionMessage, SessionSummary, SessionTurn,
-    SymbolHit, WorkspaceSummary,
+    ModelRouteRecord, NewModelRoute, NewProvider, NewSession, NewWorkspace, OutsideAccessGrant,
+    ProjectHit, ProjectOverview, ProjectRepo, ProviderRecord, SessionMessage, SessionSummary,
+    SessionTurn, SymbolHit, WorkspaceSummary,
 };
 
 enum WriteCommand {
@@ -53,6 +53,18 @@ enum WriteCommand {
     SetSessionAccessMode {
         session_id: SessionId,
         access_mode: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    AddOutsideAccessGrant {
+        workspace_id: WorkspaceId,
+        path: String,
+        write_access: bool,
+        reason: String,
+        reply: SyncSender<Result<OutsideAccessGrant, StoreError>>,
+    },
+    RemoveOutsideAccessGrant {
+        workspace_id: WorkspaceId,
+        grant_id: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
     DeleteWorkspace {
@@ -416,6 +428,59 @@ impl Store {
     pub fn delete_workspace(&self, workspace_id: WorkspaceId) -> Result<(), StoreError> {
         self.write(|reply| WriteCommand::DeleteWorkspace {
             workspace_id,
+            reply,
+        })
+    }
+
+    pub fn list_outside_access_grants(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<OutsideAccessGrant>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT id, workspace_id, path, write_access, reason, created_at
+             FROM outside_access_grants
+             WHERE workspace_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = statement.query_map([workspace_id.to_string()], |row| {
+            Ok(OutsideAccessGrant {
+                id: row.get(0)?,
+                workspace_id,
+                path: row.get(2)?,
+                write_access: row.get::<_, i64>(3)? != 0,
+                reason: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn add_outside_access_grant(
+        &self,
+        workspace_id: WorkspaceId,
+        path: &str,
+        write_access: bool,
+        reason: &str,
+    ) -> Result<OutsideAccessGrant, StoreError> {
+        self.write(|reply| WriteCommand::AddOutsideAccessGrant {
+            workspace_id,
+            path: path.to_owned(),
+            write_access,
+            reason: reason.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn remove_outside_access_grant(
+        &self,
+        workspace_id: WorkspaceId,
+        grant_id: &str,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::RemoveOutsideAccessGrant {
+            workspace_id,
+            grant_id: grant_id.to_owned(),
             reply,
         })
     }
@@ -2425,6 +2490,68 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 })();
                 let _ = reply.send(result);
             }
+            WriteCommand::AddOutsideAccessGrant {
+                workspace_id,
+                path,
+                write_access,
+                reason,
+                reply,
+            } => {
+                let result = (|| {
+                    let now = now_millis();
+                    connection.execute(
+                        "INSERT INTO outside_access_grants
+                             (id, workspace_id, path, write_access, reason, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(workspace_id, path) DO UPDATE SET
+                             write_access = excluded.write_access,
+                             reason = excluded.reason,
+                             created_at = excluded.created_at",
+                        params![
+                            Uuid::now_v7().to_string(),
+                            workspace_id.to_string(),
+                            path,
+                            i64::from(write_access),
+                            reason,
+                            now
+                        ],
+                    )?;
+                    connection
+                        .query_row(
+                            "SELECT id, path, write_access, reason, created_at
+                             FROM outside_access_grants
+                             WHERE workspace_id = ?1 AND path = ?2",
+                            params![workspace_id.to_string(), path],
+                            |row| {
+                                Ok(OutsideAccessGrant {
+                                    id: row.get(0)?,
+                                    workspace_id,
+                                    path: row.get(1)?,
+                                    write_access: row.get::<_, i64>(2)? != 0,
+                                    reason: row.get(3)?,
+                                    created_at: row.get(4)?,
+                                })
+                            },
+                        )
+                        .map_err(StoreError::from)
+                })();
+                let _ = reply.send(result);
+            }
+            WriteCommand::RemoveOutsideAccessGrant {
+                workspace_id,
+                grant_id,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "DELETE FROM outside_access_grants
+                         WHERE workspace_id = ?1 AND id = ?2",
+                        params![workspace_id.to_string(), grant_id],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
             WriteCommand::DeleteWorkspace {
                 workspace_id,
                 reply,
@@ -2906,7 +3033,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0009_knowledge_review"
+            "0010_outside_access"
         );
     }
 
@@ -3132,6 +3259,45 @@ mod tests {
             store.set_session_access_mode(session, "admin"),
             Err(StoreError::InvalidData(_))
         ));
+    }
+
+    #[test]
+    fn outside_access_grants_round_trip_and_upgrade() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("demo", "/tmp/openbad-access")
+            .expect("workspace");
+        let grant = store
+            .add_outside_access_grant(workspace, "/tmp/outside", false, "read docs")
+            .expect("grant");
+        assert!(!grant.write_access);
+        assert_eq!(grant.reason, "read docs");
+        assert_eq!(
+            store
+                .list_outside_access_grants(workspace)
+                .expect("list")
+                .len(),
+            1
+        );
+
+        let upgraded = store
+            .add_outside_access_grant(workspace, "/tmp/outside", true, "write docs")
+            .expect("upgrade");
+        assert_eq!(upgraded.id, grant.id);
+        assert!(upgraded.write_access);
+        let grants = store.list_outside_access_grants(workspace).expect("list");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].reason, "write docs");
+
+        store
+            .remove_outside_access_grant(workspace, &grant.id)
+            .expect("remove");
+        assert!(
+            store
+                .list_outside_access_grants(workspace)
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[test]

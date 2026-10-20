@@ -766,6 +766,87 @@ fn add_project_repo(
 }
 
 #[tauri::command]
+fn outside_access_grants(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<openbad_store::types::OutsideAccessGrant>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .list_outside_access_grants(workspace)
+        .map_err(|error| error.to_string())
+}
+
+fn canonical_grant_path(raw: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err("filesystem grants require an absolute path".to_owned());
+    }
+    let path = if path.exists() {
+        path.canonicalize()
+            .map_err(|error| format!("cannot resolve {raw}: {error}"))?
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("path has no parent: {raw}"))?
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve parent of {raw}: {error}"))?;
+        parent.join(
+            path.file_name()
+                .ok_or_else(|| format!("path has no file name: {raw}"))?,
+        )
+    };
+    if path.parent().is_none() {
+        return Err("refusing to grant the filesystem root".to_owned());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+fn grant_outside_access(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    path: String,
+    write_access: bool,
+    reason: String,
+) -> Result<openbad_store::types::OutsideAccessGrant, String> {
+    let path = canonical_grant_path(&path)?;
+    let reason = reason.trim();
+    let reason = if reason.is_empty() {
+        "granted from the OpenBaD access prompt"
+    } else {
+        reason
+    };
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .add_outside_access_grant(workspace, &path.to_string_lossy(), write_access, reason)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn revoke_outside_access(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    grant_id: String,
+) -> Result<(), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .remove_outside_access_grant(workspace, &grant_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn remove_project_repo(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -1811,6 +1892,26 @@ async fn chat(
                 store: Arc::clone(&state.store),
                 workspace_id,
             }));
+        let grants = {
+            let store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            store
+                .list_outside_access_grants(workspace_id)
+                .map_err(|error| error.to_string())?
+        };
+        agent = agent.with_outside_grants(
+            grants
+                .into_iter()
+                .map(|grant| openbad_tools::OutsideGrant {
+                    id: grant.id,
+                    path: PathBuf::from(grant.path),
+                    write_access: grant.write_access,
+                    reason: grant.reason,
+                })
+                .collect(),
+        );
     }
     agent = agent
         .with_redactions(redactions)
@@ -2178,6 +2279,9 @@ pub fn run() {
             project_repos,
             add_project_repo,
             remove_project_repo,
+            outside_access_grants,
+            grant_outside_access,
+            revoke_outside_access,
             knowledge_documents,
             knowledge_stale_documents,
             knowledge_document,
@@ -2238,7 +2342,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0009_knowledge_review");
+        assert_eq!(payload.doctor.schema_version, "0010_outside_access");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);
@@ -2286,6 +2390,18 @@ mod tests {
         assert_eq!(input.max_steps, Some(32));
         assert_eq!(input.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(input.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn filesystem_grants_require_absolute_paths_and_resolve_symlinks() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let file = directory.path().join("notes.txt");
+        std::fs::write(&file, "notes").expect("file");
+        let resolved = canonical_grant_path(&file.to_string_lossy()).expect("grant path");
+        assert_eq!(resolved, file.canonicalize().expect("canonical"));
+
+        assert!(canonical_grant_path("relative/path").is_err());
+        assert!(canonical_grant_path("/").is_err());
     }
 
     #[test]

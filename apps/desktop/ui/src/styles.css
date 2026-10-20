@@ -119,3 +119,223 @@ code {
   background: rgba(255, 255, 255, 0.04);
   color: #e2e8f0;
 }
+
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 0.9em 0 0.4em;
+  color: #e2e8f0;
+  font-weight: 600;
+}
+
+.markdown-body h4 {
+  font-size: 12.5px;
+}
+
+.markdown-body h5,
+.markdown-body h6 {
+  font-size: 12px;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  margin: 1.1em 0;
+}
+
+.markdown-body img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 0.75em 0;
+}
+
+.markdown-body del {
+  color: #94a3b8;
+}
+
+.markdown-body input[type="checkbox"] {
+  accent-color: #34d399;
+  margin-right: 0.4em;
+}
+
+.markdown-body .footnotes {
+  margin-top: 1.2em;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  padding-top: 0.7em;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.markdown-body .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+
+.chat-markdown {
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-markdown h1 {
+  font-size: 18px;
+}
+
+.chat-markdown h2 {
+  font-size: 16px;
+}
+
+.chat-markdown h3 {
+  font-size: 14px;
+}
+
+.markdown-table-wrap {
+  margin: 0.75em 0;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+.markdown-table-wrap table {
+  margin: 0;
+  border: 0;
+  min-width: 100%;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  border-width: 0 1px 0 0;
+}
+
+.markdown-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown-code-block {
+  position: relative;
+  margin: 0.75em 0;
+}
+
+.markdown-code-block pre {
+  margin: 0;
+  padding-right: 64px;
+}
+
+.markdown-copy {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 1;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  background: rgba(10, 13, 17, 0.82);
+  padding: 2px 7px;
+  color: #94a3b8;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.markdown-code-block:hover .markdown-copy,
+.markdown-copy:focus-visible {
+  opacity: 1;
+}
+
+.markdown-copy:hover {
+  color: #e2e8f0;
+}
+
+.mermaid-diagram {
+  margin: 0.85em 0;
+  overflow: hidden;
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  border-radius: 9px;
+  background: #0a0d11;
+}
+
+.mermaid-diagram-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(52, 211, 153, 0.05);
+  padding: 5px 9px;
+  color: #6ee7b7;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mermaid-diagram-status {
+  color: #64748b;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.mermaid-diagram[data-rendering="true"] .mermaid-diagram-canvas {
+  opacity: 0.65;
+}
+
+.mermaid-diagram-canvas {
+  overflow-x: auto;
+  padding: 14px;
+  transition: opacity 120ms ease;
+  text-align: center;
+}
+
+.mermaid-diagram-canvas svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.mermaid-diagram-empty,
+.mermaid-diagram-error {
+  margin: 0;
+  padding: 12px 14px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.mermaid-diagram-error {
+  color: #fca5a5;
+}
+
+.mermaid-diagram-source {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 6px 10px;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.mermaid-diagram-source summary {
+  cursor: pointer;
+}
+
+.mermaid-diagram-source pre {
+  margin: 7px 0 3px;
+  max-height: 180px;
+  overflow: auto;
+  border: 0;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.chat-markdown pre:has(.mermaid-diagram) {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}

@@ -129,6 +129,21 @@ export type SessionView = {
   messages: { role: string; text: string; reasoning: string | null }[];
 };
 
+export type OutsideAccessGrant = {
+  id: string;
+  workspace_id: string;
+  path: string;
+  write_access: boolean;
+  reason: string;
+  created_at: number;
+};
+
+export type OutsideAccessRequest = {
+  path: string;
+  write: boolean;
+  reason: string;
+};
+
 export type FoundationState =
   | { kind: "loading" }
   | { kind: "ready"; foundation: Foundation }

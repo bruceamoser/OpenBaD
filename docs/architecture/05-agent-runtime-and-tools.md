@@ -277,12 +277,23 @@ Rules:
 | `repo_map` | read | safe | Bounded structural map, not full content |
 | `search_symbols` | read | safe | Symbol index / tree-sitter |
 | `read_spill` | read | safe | Targeted read of a spilled artifact |
+| `request_fs_access` | read | safe | Ask the human for read or write access to an absolute path outside the workspace |
+
+Filesystem access outside the workspace is never inferred. When a read or
+write is denied with `outside the workspace`, the assistant calls
+`request_fs_access` with the absolute path, whether it needs write access, and
+a reason. The tool only records a request and returns
+`metadata.openbad_access_request`; it does not change policy. The human approves
+or denies it in the desktop prompt. Approval inserts a project-scoped grant in
+`outside_access_grants`, and later turns allow reads below that path (and
+writes when requested). Read-only grants cannot be used by write tools.
+Revoking a grant in Settings → Access takes effect on the next turn.
 
 ### 7.2 Execution
 
 | Tool | Risk | Concurrency | Notes |
 | --- | --- | --- | --- |
-| `run_command` | execute | serial | PTY or pipe; cwd confined to workspace |
+| `run_command` | execute | serial | PTY or pipe; cwd confined to the workspace unless `allow_external_cwd` and an approved write grant cover it |
 | `start_job` | execute | serial | Background process with ID |
 | `job_status` | read | safe | Status + progress |
 | `job_logs` | read | safe | Tail with spill |

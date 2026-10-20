@@ -49,6 +49,9 @@ Migration `0006_project_areas` adds the project areas; migration
 - `knowledge_chunks` — ordered chunk rows owned by a document.
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
+- `outside_access_grants` — project-scoped filesystem paths approved by the
+  human, with a read/write flag and reason. The assistant can request a grant
+  but cannot create one; Settings → Access revokes them.
 
 Project truth lives in `.openbad/canon.yaml`, `.openbad/glossary.yaml`, and
 `.openbad/adr/`; `yaml_query` gives bounded access to project YAML documents
