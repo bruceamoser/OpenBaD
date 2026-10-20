@@ -202,3 +202,46 @@ pub struct AuditRecord {
     pub prev_hash: Vec<u8>,
     pub hash: Vec<u8>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedSymbol {
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedFile {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub modified_at: i64,
+    pub language: Option<String>,
+    pub content: String,
+    pub symbols: Vec<IndexedSymbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexHit {
+    pub path: String,
+    pub snippet: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolHit {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub line: u32,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSummary {
+    pub files: u64,
+    pub symbols: u64,
+    pub bytes: u64,
+    pub indexed_at: Option<i64>,
+}

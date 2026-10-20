@@ -9,6 +9,7 @@ members = [
     "crates/openbad-tools",
     "crates/openbad-agent",
     "crates/openbad-workspace",
+    "crates/openbad-index",
     "crates/openbad-memory",
     "crates/openbad-knowledge",
     "crates/openbad-autonomic",

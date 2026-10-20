@@ -115,8 +115,10 @@ Phases 1–3 are working on Linux. The Rust workspace, single-writer SQLite stor
 event projections, audit hash chain, provider/model routes, backup/doctor checks,
 keychain secret storage, DeepSeek chat/streaming client, usage and cost
 accounting, built-in coding tools, agent loop, and Tauri chat UI all build and
-pass tests. Per-call approvals, token streaming, the evidence gate, and the
-Phase 4–8 systems remain.
+pass tests. Streamed reasoning, cancellation, and persisted model preferences
+are working. The Phase 4 workspace index now persists file hashes, symbol
+definitions, and FTS5 text in SQLite. Per-call approvals, the evidence gate,
+LSP/PTY/checkpoints, and the Phase 5–8 systems remain.
 
 - [Vision and feature set](docs/architecture/00-vision-and-feature-set.md)
 - [System overview](docs/architecture/01-system-overview.md)

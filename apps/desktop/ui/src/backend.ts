@@ -4,9 +4,11 @@ import type {
   AgentEvent,
   ChatReply,
   Foundation,
+  IndexReport,
   SessionSummary,
   SessionView,
   Usage,
+  WorkspaceIndexSummary,
 } from "./types";
 
 const isTauri =
@@ -15,6 +17,12 @@ const isTauri =
 let mockKeyConfigured = false;
 let mockCancelled = false;
 let mockSessionCounter = 1;
+let mockIndex: WorkspaceIndexSummary = {
+  files: 42,
+  symbols: 216,
+  bytes: 1_284_096,
+  indexed_at: Date.now() - 60_000,
+};
 const mockSessions: SessionSummary[] = [];
 const mockMessages = new Map<string, { role: string; text: string; reasoning: string | null }[]>();
 
@@ -30,7 +38,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0002_phase1_schema",
+    schema_version: "0003_workspace_index",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -75,6 +83,35 @@ export async function cancelChat(): Promise<void> {
     return;
   }
   mockCancelled = true;
+}
+
+export async function workspaceIndexStatus(
+  workspacePath: string,
+): Promise<WorkspaceIndexSummary> {
+  if (isTauri) {
+    return invoke<WorkspaceIndexSummary>("workspace_index_status", { workspacePath });
+  }
+  return { ...mockIndex };
+}
+
+export async function refreshWorkspaceIndex(
+  workspacePath: string,
+): Promise<IndexReport> {
+  if (isTauri) {
+    return invoke<IndexReport>("refresh_workspace_index", { workspacePath });
+  }
+  mockIndex = {
+    ...mockIndex,
+    indexed_at: Date.now(),
+  };
+  return {
+    seen: mockIndex.files,
+    added: 0,
+    updated: 2,
+    removed: 0,
+    elapsed_ms: 18,
+    summary: { ...mockIndex },
+  };
 }
 
 export async function apiKeyStatus(): Promise<boolean> {

@@ -8,10 +8,17 @@ import {
   loadFoundation as fetchFoundation,
   loadSession as fetchSession,
   loadSessions as fetchSessions,
+  refreshWorkspaceIndex as refreshIndex,
   saveApiKey as persistApiKey,
   workspaceDefault,
+  workspaceIndexStatus as fetchIndexStatus,
 } from "./backend";
-import type { ChatEntry, FoundationState, SessionSummary } from "./types";
+import type {
+  ChatEntry,
+  FoundationState,
+  SessionSummary,
+  WorkspaceIndexSummary,
+} from "./types";
 
 type Preferences = {
   model: string;
@@ -68,6 +75,9 @@ export default function App() {
   const [reasoningEffort, setReasoningEffort] = useState(preferences.reasoningEffort);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [indexSummary, setIndexSummary] = useState<WorkspaceIndexSummary | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [indexError, setIndexError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +100,22 @@ export default function App() {
       setSessions([]);
     }
   }, []);
+  const refreshWorkspaceIndex = useCallback(async () => {
+    if (workspacePath.length === 0) {
+      return;
+    }
+    setIndexing(true);
+    setIndexError(null);
+    try {
+      const report = await refreshIndex(workspacePath);
+      setIndexSummary(report.summary);
+    } catch (cause) {
+      setIndexError(describeError(cause));
+    } finally {
+      setIndexing(false);
+    }
+  }, [workspacePath]);
+
 
   useEffect(() => {
     void workspaceDefault()
@@ -101,6 +127,33 @@ export default function App() {
     void loadFoundation();
     void loadSessions();
   }, [loadFoundation, loadSessions]);
+
+  useEffect(() => {
+    if (workspacePath.length === 0) {
+      return;
+    }
+    let active = true;
+    setIndexSummary(null);
+    setIndexError(null);
+    void fetchIndexStatus(workspacePath)
+      .then((summary) => {
+        if (!active) {
+          return;
+        }
+        setIndexSummary(summary);
+        if (summary.files === 0) {
+          void refreshWorkspaceIndex();
+        }
+      })
+      .catch((cause) => {
+        if (active) {
+          setIndexError(describeError(cause));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [refreshWorkspaceIndex, workspacePath]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -567,6 +620,34 @@ export default function App() {
                 Changing the folder starts a new session. The agent is confined to
                 this root.
               </p>
+            </Panel>
+
+            <Panel title="Workspace index">
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-mono text-[11px] text-slate-400">
+                  {indexSummary === null
+                    ? indexing
+                      ? "Indexing…"
+                      : "Not indexed"
+                    : `${indexSummary.files.toLocaleString()} files · ${indexSummary.symbols.toLocaleString()} symbols · ${formatBytes(indexSummary.bytes)}`}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void refreshWorkspaceIndex()}
+                  disabled={indexing || workspacePath.length === 0}
+                  className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-300 transition hover:bg-white/10 disabled:opacity-40"
+                >
+                  {indexing ? "Indexing…" : "Refresh"}
+                </button>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-slate-500">
+                Indexed search powers <code>search_code</code> and{" "}
+                <code>find_symbols</code>. It refreshes automatically when the
+                index is empty.
+              </p>
+              {indexError !== null && (
+                <p className="mt-2 text-xs text-amber-300">{indexError}</p>
+              )}
             </Panel>
 
             <Panel title="Model">
