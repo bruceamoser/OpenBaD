@@ -20,6 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 similar = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 thiserror = { workspace = true }
 wait-timeout = "0.2"

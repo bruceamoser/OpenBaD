@@ -530,6 +530,12 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(DiffFilesTool);
+        registry.register(FileCitationTool);
+        registry.register(ArchiveListTool);
+        registry.register(ArchiveReadTool);
+        registry.register(GitChangesSinceTool);
+        registry.register(RegistryLookupTool);
         registry.register(JobStartTool);
         registry.register(JobStatusTool);
         registry.register(JobLogsTool);
@@ -5236,6 +5242,434 @@ impl Tool for JobListTool {
     }
 }
 
+struct DiffFilesTool;
+
+#[async_trait]
+impl Tool for DiffFilesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "diff_files",
+            "Return a unified diff between two workspace or reference-folder files.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "repo_a": {"type": "string"},
+                "repo_b": {"type": "string"},
+                "context_lines": {"type": "integer", "minimum": 0, "maximum": 20}
+            },
+            "required": ["a", "b"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let a = string_arg(&arguments, "a")?;
+        let b = string_arg(&arguments, "b")?;
+        let path_a = match optional_string(&arguments, "repo_a") {
+            Some(reference) => resolve_repo_path(&repo_root(context, &reference)?.1, &a)?,
+            None => context.workspace.resolve(Path::new(&a))?,
+        };
+        let path_b = match optional_string(&arguments, "repo_b") {
+            Some(reference) => resolve_repo_path(&repo_root(context, &reference)?.1, &b)?,
+            None => context.workspace.resolve(Path::new(&b))?,
+        };
+        ensure_not_excluded(context, &path_a)?;
+        ensure_not_excluded(context, &path_b)?;
+        let content_a = std::fs::read_to_string(&path_a)?;
+        let content_b = std::fs::read_to_string(&path_b)?;
+        let diff = similar::TextDiff::from_lines(&content_a, &content_b)
+            .unified_diff()
+            .context_radius(
+                optional_usize(&arguments, "context_lines")
+                    .unwrap_or(3)
+                    .min(20),
+            )
+            .header(&a, &b)
+            .to_string();
+        Ok(
+            ToolResult::ok(truncate(&diff, context.max_output_bytes)).with_metadata(json!({
+                "a": path_a,
+                "b": path_b,
+                "changed": content_a != content_b
+            })),
+        )
+    }
+}
+
+struct FileCitationTool;
+
+#[async_trait]
+impl Tool for FileCitationTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "file_citation",
+            "Create a stable citation locator for a workspace or reference file: path@blake3:start-end.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "repo": {"type": "string"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let raw = string_arg(&arguments, "path")?;
+        let path = match optional_string(&arguments, "repo") {
+            Some(reference) => resolve_repo_path(&repo_root(context, &reference)?.1, &raw)?,
+            None => context.workspace.resolve(Path::new(&raw))?,
+        };
+        ensure_not_excluded(context, &path)?;
+        let bytes = std::fs::read(&path)?;
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let start = optional_usize(&arguments, "start_line").unwrap_or(1);
+        let end = optional_usize(&arguments, "end_line");
+        let lines = bytes.iter().filter(|byte| **byte == b'\n').count()
+            + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
+        let suffix = match end {
+            Some(end) => format!("L{start}-L{}", end.min(lines)),
+            None => format!("L{start}-L{lines}"),
+        };
+        let locator = format!("{raw}@{hash}:{suffix}");
+        Ok(ToolResult::ok(locator.clone()).with_metadata(json!({
+            "locator": locator,
+            "path": path,
+            "hash": hash,
+            "lines": lines
+        })))
+    }
+}
+
+struct ArchiveListTool;
+
+#[async_trait]
+impl Tool for ArchiveListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "archive_list",
+            "List entries in a zip archive without extracting it.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "max_entries": {"type": "integer", "minimum": 1, "maximum": 2000}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        ensure_not_excluded(context, &path)?;
+        let file = std::fs::File::open(&path)?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|error| ToolError::Failed(format!("zip archive: {error}")))?;
+        let max_entries = optional_usize(&arguments, "max_entries")
+            .unwrap_or(500)
+            .clamp(1, 2_000);
+        let mut entries = Vec::new();
+        for index in 0..archive.len().min(max_entries) {
+            let entry = archive
+                .by_index(index)
+                .map_err(|error| ToolError::Failed(error.to_string()))?;
+            entries.push(format!(
+                "{}{} ({} bytes)",
+                entry.name(),
+                if entry.is_dir() { "/" } else { "" },
+                entry.size()
+            ));
+        }
+        Ok(ToolResult::ok(entries.join("\n")).with_metadata(json!({
+            "entries": entries.len(),
+            "total_entries": archive.len()
+        })))
+    }
+}
+
+struct ArchiveReadTool;
+
+#[async_trait]
+impl Tool for ArchiveReadTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "archive_read",
+            "Read one UTF-8 entry from a zip archive without extracting to disk.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "entry": {"type": "string"},
+                "max_bytes": {"type": "integer", "minimum": 256, "maximum": 1048576}
+            },
+            "required": ["path", "entry"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        ensure_not_excluded(context, &path)?;
+        let entry = string_arg(&arguments, "entry")?;
+        let file = std::fs::File::open(&path)?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|error| ToolError::Failed(format!("zip archive: {error}")))?;
+        let mut stream = archive
+            .by_name(&entry)
+            .map_err(|error| ToolError::InvalidArgument(format!("archive entry: {error}")))?;
+        let max_bytes = optional_usize(&arguments, "max_bytes")
+            .unwrap_or(256_000)
+            .clamp(256, 1_048_576);
+        let mut bytes = Vec::new();
+        std::io::Read::take(&mut stream, max_bytes as u64).read_to_end(&mut bytes)?;
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        Ok(
+            ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(json!({
+                "entry": entry,
+                "bytes": bytes.len()
+            })),
+        )
+    }
+}
+
+struct GitChangesSinceTool;
+
+#[async_trait]
+impl Tool for GitChangesSinceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_changes_since",
+            "Show commits and changed paths since a revision.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"rev": {"type": "string"}},
+            "required": ["rev"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let rev = string_arg(&arguments, "rev")?;
+        let names = run_tool_shell(
+            context,
+            format!("git diff --name-status {}..HEAD", sh_quote(&rev)),
+        )
+        .await?;
+        let log = run_tool_shell(
+            context,
+            format!("git log --oneline {}..HEAD", sh_quote(&rev)),
+        )
+        .await?;
+        Ok(
+            ToolResult::ok(format!("{}\n{}", log.content, names.content))
+                .with_metadata(json!({"names": names.metadata, "log": log.metadata})),
+        )
+    }
+}
+
+struct RegistryLookupTool;
+
+async fn fetch_registry_json(context: &ToolContext, url: &str) -> Result<Value, ToolError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| ToolError::InvalidArgument(format!("invalid registry URL: {error}")))?;
+    let host = parsed.host_str().unwrap_or_default().to_owned();
+    if let Some(policy) = load_policy(context)? {
+        if let Some(reason) = policy.network_denied(&host) {
+            return Err(ToolError::ApprovalRequired(reason));
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("OpenBaD/0.1")
+        .build()
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+    let response = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|error| ToolError::Failed(format!("registry request: {error}")))?;
+    if !response.status().is_success() {
+        return Err(ToolError::Failed(format!(
+            "registry returned {}",
+            response.status()
+        )));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|error| ToolError::Failed(format!("registry body: {error}")))?;
+    serde_json::from_str(&body)
+        .map_err(|error| ToolError::Failed(format!("registry JSON: {error}")))
+}
+
+#[async_trait]
+impl Tool for RegistryLookupTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "registry_lookup",
+            "Look up package metadata in crates.io, npm, or PyPI with network policy enforcement.",
+            RiskLevel::Read,
+        )
+        .with_timeout(30)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "ecosystem": {"type": "string", "enum": ["crates", "npm", "pypi"]},
+                "package": {"type": "string"},
+                "version": {"type": "string", "description": "Optional version to confirm exists"}
+            },
+            "required": ["ecosystem", "package"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "registry_lookup (network reads require Full access)".to_owned(),
+            ));
+        }
+        let ecosystem = string_arg(&arguments, "ecosystem")?;
+        let package = string_arg(&arguments, "package")?;
+        if !package.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/' | '@')
+        }) {
+            return Err(ToolError::InvalidArgument(
+                "invalid package name".to_owned(),
+            ));
+        }
+        let version = optional_string(&arguments, "version");
+        let (_, latest, versions) = match ecosystem.as_str() {
+            "crates" => {
+                let value = fetch_registry_json(
+                    context,
+                    &format!("https://crates.io/api/v1/crates/{package}"),
+                )
+                .await?;
+                let latest = value["crate"]["max_version"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let versions = value["versions"]
+                    .as_array()
+                    .map(|versions| {
+                        versions
+                            .iter()
+                            .filter_map(|version| version["num"].as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (String::new(), latest, versions)
+            }
+            "npm" => {
+                let value =
+                    fetch_registry_json(context, &format!("https://registry.npmjs.org/{package}"))
+                        .await?;
+                let latest = value["dist-tags"]["latest"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let versions = value["versions"]
+                    .as_object()
+                    .map(|versions| versions.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                (String::new(), latest, versions)
+            }
+            "pypi" => {
+                let value =
+                    fetch_registry_json(context, &format!("https://pypi.org/pypi/{package}/json"))
+                        .await?;
+                let latest = value["info"]["version"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let versions = value["releases"]
+                    .as_object()
+                    .map(|versions| versions.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                (String::new(), latest, versions)
+            }
+            other => {
+                return Err(ToolError::InvalidArgument(format!(
+                    "unknown ecosystem: {other}"
+                )));
+            }
+        };
+        let found = version
+            .as_deref()
+            .map(|version| versions.iter().any(|item| item == version));
+        if found == Some(false) {
+            return Err(ToolError::Failed(format!(
+                "{ecosystem} package {package} has no version {}",
+                version.as_deref().unwrap_or_default()
+            )));
+        }
+        let mut versions = versions;
+        versions.sort();
+        versions.reverse();
+        let content = format!(
+            "{ecosystem}:{package} latest={latest}{} ({} versions)",
+            version
+                .as_deref()
+                .map(|version| format!(" requested={version} exists={}", found.unwrap_or(false)))
+                .unwrap_or_default(),
+            versions.len()
+        );
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "ecosystem": ecosystem,
+            "package": package,
+            "latest": latest,
+            "requested": version,
+            "exists": found,
+            "versions": versions.into_iter().take(20).collect::<Vec<_>>()
+        })))
+    }
+}
+
 struct PreviewWriteTool;
 
 #[async_trait]
@@ -8863,6 +9297,56 @@ validators:
         assert!(report.content.contains("loaded files: 1"));
         assert!(report.content.contains("claims: 1"));
         assert_eq!(report.metadata["unknowns"], 1);
+    }
+
+    #[tokio::test]
+    async fn archive_diffs_and_file_citations_work() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("a.txt"), "one\n").expect("a");
+        fs::write(directory.path().join("b.txt"), "two\n").expect("b");
+        let zip_path = directory.path().join("bundle.zip");
+        {
+            let file = fs::File::create(&zip_path).expect("zip");
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .start_file("nested/readme.md", options)
+                .expect("entry");
+            std::io::Write::write_all(&mut writer, b"archive hello\n").expect("write");
+            writer.finish().expect("finish");
+        }
+        let context = context(directory.path());
+
+        let listed = ArchiveListTool
+            .execute(json!({"path": "bundle.zip"}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("nested/readme.md"));
+        let read = ArchiveReadTool
+            .execute(
+                json!({"path": "bundle.zip", "entry": "nested/readme.md"}),
+                &context,
+            )
+            .await
+            .expect("read");
+        assert!(read.content.contains("archive hello"));
+
+        let diff = DiffFilesTool
+            .execute(json!({"a": "a.txt", "b": "b.txt"}), &context)
+            .await
+            .expect("diff");
+        assert!(diff.content.contains("-one"));
+        assert!(diff.content.contains("+two"));
+
+        let citation = FileCitationTool
+            .execute(
+                json!({"path": "a.txt", "start_line": 1, "end_line": 1}),
+                &context,
+            )
+            .await
+            .expect("citation");
+        assert!(citation.content.contains("a.txt@"));
+        assert!(citation.content.contains("L1-L1"));
     }
 
     #[tokio::test]
