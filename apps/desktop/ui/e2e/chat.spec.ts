@@ -264,3 +264,21 @@ test("uses the application menu to open project areas and help", async ({
     page.getByRole("dialog", { name: "Keyboard shortcuts" }),
   ).toBeVisible();
 });
+
+
+test("refreshes open project areas without switching tabs", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "apps/desktop/ui/src/App.tsx" }),
+  ).toBeVisible();
+
+  await page
+    .getByPlaceholder("Ask OpenBaD to inspect, explain, or change the workspace…")
+    .fill("add a file to the workspace");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(
+    page.getByRole("button", { name: "src/generated.rs" }),
+  ).toBeVisible({ timeout: 8_000 });
+});

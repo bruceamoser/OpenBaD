@@ -460,9 +460,13 @@ Prefer small, surgical changes and run the relevant tests when useful.\n\
 Use recall and remember for durable project decisions when they matter.\n\
 Project knowledge is curated separately from code: call search_project before\n\
 answering questions that may rely on earlier decisions or imported references.\n\
-Use list_project_sources to orient yourself and present_artifact when showing a\n\
-web page, image, diff, or note is clearer than prose. Cite knowledge locators.\n\
-Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
+Use list_project_sources to orient yourself. For reference folders, use\n\
+list_repo_dir, glob_repo, and grep_repo before reading files, and read_repo_file\n\
+for bounded reads. Reads report total_lines and continuation metadata.\n\
+Use list_knowledge/get_knowledge to audit knowledge, update_knowledge or\n\
+delete_knowledge to correct it, and list_memories/forget_memory to audit memory.\n\
+Use present_artifact when showing a web page, image, diff, or note is clearer\n\
+than prose. Cite knowledge locators. Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         );
         if let Some(instructions) = load_project_instructions(self.workspace.root()) {

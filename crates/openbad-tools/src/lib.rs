@@ -175,6 +175,17 @@ pub struct KnowledgeEntryRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeDocumentRef {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub source: Option<String>,
+    pub tags: Vec<String>,
+    pub content: String,
+    pub chunks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectHit {
     pub source: String,
     pub title: String,
@@ -194,6 +205,22 @@ pub trait ProjectAreas: Send + Sync {
         source: Option<&str>,
         tags: Vec<String>,
     ) -> Result<KnowledgeEntryRef, String>;
+    fn get_knowledge(&self, _id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
+        Err("knowledge document lookup is not available".to_owned())
+    }
+    fn update_knowledge(
+        &self,
+        _id: &str,
+        _title: Option<&str>,
+        _content: Option<&str>,
+        _source: Option<&str>,
+        _tags: Option<Vec<String>>,
+    ) -> Result<KnowledgeDocumentRef, String> {
+        Err("knowledge updates are not available".to_owned())
+    }
+    fn delete_knowledge(&self, _id: &str) -> Result<(), String> {
+        Err("knowledge deletes are not available".to_owned())
+    }
     fn retrieve(&self, query: &str, limit: usize) -> Result<Vec<ProjectHit>, String>;
 }
 
@@ -205,6 +232,12 @@ pub trait MemoryStore: Send + Sync {
         pinned: bool,
     ) -> Result<MemoryEntry, String>;
     fn recall(&self, query: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, String>;
+    fn list(&self, limit: usize) -> Result<Vec<MemoryEntry>, String> {
+        self.recall(None, limit)
+    }
+    fn forget(&self, _id: &str) -> Result<(), String> {
+        Err("memory deletion is not available".to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,10 +405,19 @@ impl ToolRegistry {
         registry.register(RepoMapTool);
         registry.register(RememberTool);
         registry.register(RecallTool);
+        registry.register(ListMemoriesTool);
+        registry.register(ForgetMemoryTool);
         registry.register(SearchProjectTool);
         registry.register(AddKnowledgeTool);
+        registry.register(ListKnowledgeTool);
+        registry.register(GetKnowledgeTool);
+        registry.register(UpdateKnowledgeTool);
+        registry.register(DeleteKnowledgeTool);
         registry.register(ListProjectSourcesTool);
         registry.register(ReadRepoFileTool);
+        registry.register(ListRepoDirTool);
+        registry.register(GlobRepoTool);
+        registry.register(GrepRepoTool);
         registry.register(PresentArtifactTool);
         registry.register(ListSkillsTool);
         registry.register(ReadSkillTool);
@@ -543,6 +585,8 @@ impl Tool for ReadFileTool {
         }
 
         let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+        let end = end.min(total_lines);
         let selected = lines
             .into_iter()
             .enumerate()
@@ -553,11 +597,19 @@ impl Tool for ReadFileTool {
             .map(|(_, line)| line)
             .collect::<Vec<_>>()
             .join("\n");
+        let shown = selected.lines().count();
+        let truncated = selected.len() > context.max_output_bytes;
 
         Ok(
             ToolResult::ok(truncate(&selected, context.max_output_bytes)).with_metadata(json!({
                 "path": path,
-                "lines": selected.lines().count(),
+                "lines": shown,
+                "total_lines": total_lines,
+                "start_line": start.min(total_lines.saturating_add(1)),
+                "end_line": end,
+                "truncated": truncated,
+                "has_more": end < total_lines,
+                "next_start_line": if end < total_lines { Some(end + 1) } else { None },
             })),
         )
     }
@@ -1169,7 +1221,10 @@ impl Tool for RunCommandTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         if !context.allow_commands {
-            return Err(ToolError::ApprovalRequired("run_command".to_owned()));
+            return Err(ToolError::ApprovalRequired(
+                "run_command (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
         }
         let command = string_arg(&arguments, "command")?;
         let cwd = match optional_string(&arguments, "cwd") {
@@ -1392,6 +1447,97 @@ impl Tool for RecallTool {
     }
 }
 
+struct ListMemoriesTool;
+
+#[async_trait]
+impl Tool for ListMemoriesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_memories",
+            "List durable project memories with ids, tags, and pinned state so they can be audited.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 100}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let memory = context
+            .memory
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("workspace memory is not available".to_owned()))?;
+        let limit = optional_usize(&arguments, "max_results")
+            .unwrap_or(50)
+            .clamp(1, 100);
+        let entries = memory.list(limit).map_err(ToolError::Failed)?;
+        if entries.is_empty() {
+            return Ok(ToolResult::ok("no saved memories"));
+        }
+        let content = entries
+            .iter()
+            .map(|entry| {
+                let tags = if entry.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", entry.tags.join(", "))
+                };
+                format!(
+                    "{}{}{}: {}",
+                    if entry.pinned { "* " } else { "- " },
+                    tags,
+                    entry.id,
+                    entry.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"memories": entries.len()})))
+    }
+}
+
+struct ForgetMemoryTool;
+
+#[async_trait]
+impl Tool for ForgetMemoryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "forget_memory",
+            "Forget a durable project memory by id. Use list_memories first to find the id.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let memory = context
+            .memory
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("workspace memory is not available".to_owned()))?;
+        let id = string_arg(&arguments, "id")?;
+        memory.forget(&id).map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(format!("Forgot memory {id}.")))
+    }
+}
+
 struct SearchProjectTool;
 
 #[async_trait]
@@ -1529,6 +1675,202 @@ impl Tool for AddKnowledgeTool {
     }
 }
 
+struct ListKnowledgeTool;
+
+#[async_trait]
+impl Tool for ListKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_knowledge",
+            "List project knowledge documents with ids, kinds, tags, sources, and chunk counts.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let entries = project.list_knowledge().map_err(ToolError::Failed)?;
+        if entries.is_empty() {
+            return Ok(ToolResult::ok("no knowledge documents"));
+        }
+        let content = entries
+            .iter()
+            .map(|entry| {
+                let source = entry
+                    .source
+                    .as_deref()
+                    .map_or_else(String::new, |source| format!(" · {source}"));
+                format!(
+                    "- {} [{}]{} · {} chunks · {}",
+                    entry.title, entry.kind, source, entry.chunks, entry.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"documents": entries.len()})))
+    }
+}
+
+struct GetKnowledgeTool;
+
+#[async_trait]
+impl Tool for GetKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "get_knowledge",
+            "Read a project knowledge document by id, including its full content and metadata.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let id = string_arg(&arguments, "id")?;
+        let document = project
+            .get_knowledge(&id)
+            .map_err(ToolError::Failed)?
+            .ok_or_else(|| {
+                ToolError::InvalidArgument(format!("unknown knowledge document: {id}"))
+            })?;
+        let tags = if document.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", document.tags.join(", "))
+        };
+        let content = format!(
+            "{} [{}]{} · {} chunks · {}\n\n{}",
+            document.title, document.kind, tags, document.chunks, document.id, document.content
+        );
+        Ok(
+            ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(json!({
+                "id": document.id,
+                "title": document.title,
+                "chunks": document.chunks
+            })),
+        )
+    }
+}
+
+struct UpdateKnowledgeTool;
+
+#[async_trait]
+impl Tool for UpdateKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "update_knowledge",
+            "Correct a project knowledge document's title, content, source, or tags. Omitted fields stay unchanged; content changes rebuild chunks.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "source": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let id = string_arg(&arguments, "id")?;
+        let title = optional_string(&arguments, "title");
+        let content = optional_string(&arguments, "content");
+        let source = optional_string(&arguments, "source");
+        let tags = arguments.get("tags").and_then(Value::as_array).map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        if title.is_none() && content.is_none() && source.is_none() && tags.is_none() {
+            return Err(ToolError::InvalidArgument(
+                "at least one of title, content, source, or tags is required".to_owned(),
+            ));
+        }
+        let document = project
+            .update_knowledge(
+                &id,
+                title.as_deref(),
+                content.as_deref(),
+                source.as_deref(),
+                tags,
+            )
+            .map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(format!(
+            "Updated knowledge \"{}\" ({} chunks, id {}).",
+            document.title, document.chunks, document.id
+        ))
+        .with_metadata(json!({"id": document.id, "chunks": document.chunks})))
+    }
+}
+
+struct DeleteKnowledgeTool;
+
+#[async_trait]
+impl Tool for DeleteKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "delete_knowledge",
+            "Delete a project knowledge document by id. This removes its chunks from retrieval.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let id = string_arg(&arguments, "id")?;
+        project.delete_knowledge(&id).map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(format!("Deleted knowledge document {id}.")))
+    }
+}
+
 struct ListProjectSourcesTool;
 
 #[async_trait]
@@ -1645,8 +1987,11 @@ impl Tool for ReadRepoFileTool {
                 "end_line must be greater than or equal to start_line".to_owned(),
             ));
         }
-        let selected = content
-            .lines()
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+        let end = end.min(total_lines);
+        let selected = lines
+            .into_iter()
             .enumerate()
             .filter(|(index, _)| {
                 let line = index + 1;
@@ -1655,12 +2000,303 @@ impl Tool for ReadRepoFileTool {
             .map(|(_, line)| line)
             .collect::<Vec<_>>()
             .join("\n");
+        let shown = selected.lines().count();
+        let truncated = selected.len() > context.max_output_bytes;
         Ok(
             ToolResult::ok(truncate(&selected, context.max_output_bytes)).with_metadata(json!({
                 "repo": repo.name,
                 "path": path,
-                "lines": selected.lines().count()
+                "lines": shown,
+                "total_lines": total_lines,
+                "start_line": start.min(total_lines.saturating_add(1)),
+                "end_line": end,
+                "truncated": truncated,
+                "has_more": end < total_lines,
+                "next_start_line": if end < total_lines { Some(end + 1) } else { None },
             })),
+        )
+    }
+}
+
+fn project_reference(
+    context: &ToolContext,
+    arguments: &Value,
+) -> Result<ProjectRepoRef, ToolError> {
+    let project = context
+        .project
+        .as_ref()
+        .ok_or_else(|| ToolError::Failed("project references are not available".to_owned()))?;
+    let reference = string_arg(arguments, "repo")?;
+    project
+        .list_repos()
+        .map_err(ToolError::Failed)?
+        .into_iter()
+        .find(|repo| repo.id == reference || repo.name == reference)
+        .ok_or_else(|| ToolError::InvalidArgument(format!("unknown reference: {reference}")))
+}
+
+fn resolve_reference_path(
+    repo: &ProjectRepoRef,
+    relative: &str,
+) -> Result<(PathBuf, PathBuf), ToolError> {
+    let root = std::fs::canonicalize(&repo.path)?;
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| ToolError::InvalidArgument(format!("reference path: {error}")))?;
+    if !path.starts_with(&root) {
+        return Err(ToolError::OutsideRoot(path.display().to_string()));
+    }
+    Ok((root, path))
+}
+
+struct ListRepoDirTool;
+
+#[async_trait]
+impl Tool for ListRepoDirTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_repo_dir",
+            "List a directory inside a project reference folder with relative paths and sizes. Respects .gitignore.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Reference folder id or name"},
+                "path": {"type": "string", "description": "Reference-relative directory"},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 10},
+                "max_entries": {"type": "integer", "minimum": 1, "maximum": 2000}
+            },
+            "required": ["repo"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let repo = project_reference(context, &arguments)?;
+        let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let (root, path) = resolve_reference_path(&repo, &relative)?;
+        if !path.is_dir() {
+            return Err(ToolError::InvalidArgument(format!(
+                "not a directory in {}: {relative}",
+                repo.name
+            )));
+        }
+        let depth = optional_usize(&arguments, "depth")
+            .unwrap_or(2)
+            .clamp(1, 10);
+        let max_entries = optional_usize(&arguments, "max_entries")
+            .unwrap_or(500)
+            .clamp(1, 2_000);
+        let mut entries = Vec::new();
+        for entry in WalkBuilder::new(&path)
+            .max_depth(Some(depth))
+            .build()
+            .filter_map(Result::ok)
+        {
+            if entries.len() >= max_entries {
+                break;
+            }
+            if entry.path() == path {
+                continue;
+            }
+            let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+            if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                entries.push(format!("{}/", relative.display()));
+            } else {
+                let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                entries.push(format!("{} ({size} bytes)", relative.display()));
+            }
+        }
+        entries.sort();
+        Ok(
+            ToolResult::ok(truncate(&entries.join("\n"), context.max_output_bytes)).with_metadata(
+                json!({
+                    "reference": repo.name,
+                    "root": relative,
+                    "entries": entries.len(),
+                    "truncated": entries.len() >= max_entries
+                }),
+            ),
+        )
+    }
+}
+
+struct GlobRepoTool;
+
+#[async_trait]
+impl Tool for GlobRepoTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "glob_repo",
+            "Find files inside a project reference folder by glob such as src/packs/*.yaml or docs/**/*.md.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Reference folder id or name"},
+                "pattern": {"type": "string"},
+                "path": {"type": "string", "description": "Reference-relative directory"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 5000}
+            },
+            "required": ["repo", "pattern"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let repo = project_reference(context, &arguments)?;
+        let pattern = string_arg(&arguments, "pattern")?;
+        if pattern.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "pattern must not be empty".to_owned(),
+            ));
+        }
+        let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let (root, path) = resolve_reference_path(&repo, &relative)?;
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(500)
+            .clamp(1, 5_000);
+        let matcher = Glob::new(&pattern)
+            .map_err(|error| ToolError::InvalidArgument(format!("invalid glob: {error}")))?
+            .compile_matcher();
+        let match_basename = !pattern.contains('/');
+        let mut matches = Vec::new();
+        for entry in WalkBuilder::new(&path).build().filter_map(Result::ok) {
+            if matches.len() >= max_results {
+                break;
+            }
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let entry_path = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+            let candidate = if match_basename {
+                entry_path.file_name().map(Path::new).unwrap_or(entry_path)
+            } else {
+                entry_path
+            };
+            if matcher.is_match(candidate) {
+                matches.push(entry_path.display().to_string());
+            }
+        }
+        matches.sort();
+        Ok(
+            ToolResult::ok(truncate(&matches.join("\n"), context.max_output_bytes)).with_metadata(
+                json!({
+                    "reference": repo.name,
+                    "matches": matches.len(),
+                    "truncated": matches.len() >= max_results
+                }),
+            ),
+        )
+    }
+}
+
+struct GrepRepoTool;
+
+#[async_trait]
+impl Tool for GrepRepoTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "grep_repo",
+            "Search text inside a project reference folder. Returns path:line matches, case-insensitive by default.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Reference folder id or name"},
+                "query": {"type": "string"},
+                "path": {"type": "string", "description": "Reference-relative directory"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 500},
+                "case_sensitive": {"type": "boolean"}
+            },
+            "required": ["repo", "query"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let repo = project_reference(context, &arguments)?;
+        let query = string_arg(&arguments, "query")?;
+        if query.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "query must not be empty".to_owned(),
+            ));
+        }
+        let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let (root, path) = resolve_reference_path(&repo, &relative)?;
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let case_sensitive = optional_bool(&arguments, "case_sensitive").unwrap_or(false);
+        let needle = if case_sensitive {
+            query.clone()
+        } else {
+            query.to_lowercase()
+        };
+        let mut matches = Vec::new();
+        'files: for entry in WalkBuilder::new(&path).build().filter_map(Result::ok) {
+            if matches.len() >= max_results {
+                break;
+            }
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) if metadata.len() <= 1024 * 1024 => metadata,
+                _ => continue,
+            };
+            let _ = metadata;
+            let content = match std::fs::read(entry.path()) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            for (index, line) in content.lines().enumerate() {
+                let haystack = if case_sensitive {
+                    line.to_owned()
+                } else {
+                    line.to_lowercase()
+                };
+                if haystack.contains(&needle) {
+                    let entry_path = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+                    matches.push(format!(
+                        "{}:{}: {}",
+                        entry_path.display(),
+                        index + 1,
+                        line.trim()
+                    ));
+                    if matches.len() >= max_results {
+                        break 'files;
+                    }
+                }
+            }
+        }
+        Ok(
+            ToolResult::ok(truncate(&matches.join("\n"), context.max_output_bytes)).with_metadata(
+                json!({
+                    "reference": repo.name,
+                    "matches": matches.len(),
+                    "truncated": matches.len() >= max_results
+                }),
+            ),
         )
     }
 }
@@ -1847,7 +2483,10 @@ impl Tool for RunTestsTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         if !context.allow_commands {
-            return Err(ToolError::ApprovalRequired("run_tests".to_owned()));
+            return Err(ToolError::ApprovalRequired(
+                "run_tests (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
         }
         let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
         let directory = context.workspace.resolve(Path::new(&relative))?;
@@ -2115,6 +2754,19 @@ mod tests {
             .await
             .expect("read");
         assert_eq!(result.content, "two\nthree");
+        assert_eq!(result.metadata["total_lines"], 3);
+        assert_eq!(result.metadata["lines"], 2);
+        assert_eq!(result.metadata["has_more"], false);
+
+        let partial = ReadFileTool
+            .execute(
+                json!({"path": "file.txt", "start_line": 2, "end_line": 2}),
+                &context,
+            )
+            .await
+            .expect("partial read");
+        assert_eq!(partial.metadata["has_more"], true);
+        assert_eq!(partial.metadata["next_start_line"], 3);
     }
 
     #[tokio::test]
@@ -2463,6 +3115,14 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        fn forget(&self, id: &str) -> Result<(), String> {
+            self.entries
+                .lock()
+                .expect("lock")
+                .retain(|entry| entry.id != id);
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -2501,6 +3161,26 @@ mod tests {
                 .contains("Keep the prompt prefix immutable")
         );
         assert!(recalled.content.contains("[cache]"));
+
+        let listed = ListMemoriesTool
+            .execute(json!({"max_results": 10}), &context)
+            .await
+            .expect("list memories");
+        assert!(listed.content.contains("memory-1"));
+        assert!(listed.content.contains("Keep the prompt prefix immutable"));
+
+        ForgetMemoryTool
+            .execute(json!({"id": "memory-1"}), &context)
+            .await
+            .expect("forget memory");
+        assert!(
+            ListMemoriesTool
+                .execute(json!({}), &context)
+                .await
+                .expect("list after forget")
+                .content
+                .contains("no saved memories")
+        );
     }
 
     struct FakeProject {
@@ -2535,6 +3215,59 @@ mod tests {
             Ok(entry)
         }
 
+        fn get_knowledge(&self, id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
+            Ok(self
+                .knowledge
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| KnowledgeDocumentRef {
+                    id: entry.id.clone(),
+                    title: entry.title.clone(),
+                    kind: entry.kind.clone(),
+                    source: entry.source.clone(),
+                    tags: vec!["stored".to_owned()],
+                    content: "stored knowledge content".to_owned(),
+                    chunks: entry.chunks,
+                }))
+        }
+
+        fn update_knowledge(
+            &self,
+            id: &str,
+            title: Option<&str>,
+            content: Option<&str>,
+            _source: Option<&str>,
+            _tags: Option<Vec<String>>,
+        ) -> Result<KnowledgeDocumentRef, String> {
+            let mut entries = self.knowledge.lock().expect("lock");
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| format!("unknown knowledge document: {id}"))?;
+            if let Some(title) = title {
+                entry.title = title.to_owned();
+            }
+            Ok(KnowledgeDocumentRef {
+                id: entry.id.clone(),
+                title: entry.title.clone(),
+                kind: entry.kind.clone(),
+                source: entry.source.clone(),
+                tags: vec!["stored".to_owned()],
+                content: content.unwrap_or("stored knowledge content").to_owned(),
+                chunks: entry.chunks,
+            })
+        }
+
+        fn delete_knowledge(&self, id: &str) -> Result<(), String> {
+            self.knowledge
+                .lock()
+                .expect("lock")
+                .retain(|entry| entry.id != id);
+            Ok(())
+        }
+
         fn retrieve(&self, query: &str, _limit: usize) -> Result<Vec<ProjectHit>, String> {
             Ok(vec![ProjectHit {
                 source: "knowledge".to_owned(),
@@ -2551,7 +3284,10 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         let repo_dir = tempdir().expect("repo");
         fs::create_dir_all(repo_dir.path().join("docs")).expect("docs");
-        fs::write(repo_dir.path().join("docs/design.md"), "one\ntwo\nthree\n").expect("file");
+        fs::create_dir_all(repo_dir.path().join("src/packs")).expect("packs");
+        fs::write(repo_dir.path().join("docs/design.md"), "one\nTwo\nthree\n").expect("file");
+        fs::write(repo_dir.path().join("src/packs/a.yaml"), "name: one\n").expect("a");
+        fs::write(repo_dir.path().join("src/packs/b.yaml"), "name: two\n").expect("b");
         let mut context = context(directory.path());
         context.project = Some(Arc::new(FakeProject {
             repos: vec![ProjectRepoRef {
@@ -2580,12 +3316,47 @@ mod tests {
         assert!(added.content.contains("Decision"));
         assert_eq!(added.metadata["chunks"], 1);
 
+        let listed = ListKnowledgeTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list knowledge");
+        assert!(listed.content.contains("Decision"));
+
+        let fetched = GetKnowledgeTool
+            .execute(json!({"id": "knowledge-1"}), &context)
+            .await
+            .expect("get knowledge");
+        assert!(fetched.content.contains("stored knowledge content"));
+
+        let updated = UpdateKnowledgeTool
+            .execute(
+                json!({"id": "knowledge-1", "title": "Decision v2", "content": "updated"}),
+                &context,
+            )
+            .await
+            .expect("update knowledge");
+        assert!(updated.content.contains("Decision v2"));
+
+        let deleted = DeleteKnowledgeTool
+            .execute(json!({"id": "knowledge-1"}), &context)
+            .await
+            .expect("delete knowledge");
+        assert!(deleted.content.contains("Deleted"));
+        assert!(
+            ListKnowledgeTool
+                .execute(json!({}), &context)
+                .await
+                .expect("list after delete")
+                .content
+                .contains("no knowledge documents")
+        );
+
         let sources = ListProjectSourcesTool
             .execute(json!({}), &context)
             .await
             .expect("sources");
         assert!(sources.content.contains("reference"));
-        assert!(sources.content.contains("Decision"));
+        assert!(sources.content.contains("Knowledge: empty"));
 
         let repo_file = ReadRepoFileTool
             .execute(
@@ -2594,8 +3365,36 @@ mod tests {
             )
             .await
             .expect("read repo");
-        assert!(repo_file.content.contains("two"));
+        assert!(repo_file.content.contains("Two"));
         assert!(!repo_file.content.contains("one"));
+        assert_eq!(repo_file.metadata["total_lines"], 3);
+        assert_eq!(repo_file.metadata["has_more"], false);
+
+        let listing = ListRepoDirTool
+            .execute(json!({"repo": "reference", "depth": 3}), &context)
+            .await
+            .expect("list reference");
+        assert!(listing.content.contains("docs/"));
+        assert!(listing.content.contains("src/packs/a.yaml"));
+
+        let globbed = GlobRepoTool
+            .execute(
+                json!({"repo": "repo-1", "pattern": "src/packs/*.yaml"}),
+                &context,
+            )
+            .await
+            .expect("glob reference");
+        assert!(globbed.content.contains("src/packs/a.yaml"));
+        assert!(globbed.content.contains("src/packs/b.yaml"));
+
+        let grepped = GrepRepoTool
+            .execute(
+                json!({"repo": "repo-1", "query": "two", "max_results": 10}),
+                &context,
+            )
+            .await
+            .expect("grep reference");
+        assert!(grepped.content.contains("docs/design.md:2"));
 
         let escaped = ReadRepoFileTool
             .execute(json!({"repo": "repo-1", "path": "../escape"}), &context)

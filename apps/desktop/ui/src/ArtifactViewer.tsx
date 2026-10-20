@@ -9,28 +9,40 @@ import type { Artifact, ProjectFileView } from "./types";
 export default function ArtifactViewer({
   artifact,
   workspacePath,
+  revision,
 }: {
   artifact: Artifact | null;
   workspacePath: string;
+  revision: number;
 }) {
   const [file, setFile] = useState<ProjectFileView | null>(null);
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const request = useRef(0);
+  const loadedKey = useRef<string | null>(null);
 
   useEffect(() => {
     const sequence = request.current + 1;
     request.current = sequence;
-    setFile(null);
-    setMarkdown(null);
-    setError(null);
+    const key =
+      artifact === null
+        ? ""
+        : `${artifact.kind}:${artifact.uri ?? ""}:${artifact.content?.length ?? 0}`;
+    const changed = loadedKey.current !== key;
+    loadedKey.current = key;
+    if (changed) {
+      setFile(null);
+      setMarkdown(null);
+      setError(null);
+      setLoading(true);
+    }
     if (artifact === null) {
+      setLoading(false);
       return;
     }
     const uri = artifact.uri ?? "";
     const load = async () => {
-      setLoading(true);
       try {
         if (uri.startsWith("knowledge:")) {
           const document = await loadKnowledgeDocument(
@@ -75,7 +87,7 @@ export default function ArtifactViewer({
       }
     };
     void load();
-  }, [artifact, workspacePath]);
+  }, [artifact, revision, workspacePath]);
 
   if (artifact === null) {
     return (

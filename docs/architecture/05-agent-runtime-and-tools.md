@@ -321,14 +321,28 @@ Implemented:
 | `remember` | write | Durable decision or preference |
 | `list_project_sources` | read | Reference folders and knowledge documents |
 | `search_project` | read | Fused knowledge, indexed code, and memory with locators |
-| `read_repo_file` | read | UTF-8 file inside a read-only reference folder |
+| `list_repo_dir` | read | List a reference-folder directory with sizes and `.gitignore` filtering |
+| `glob_repo` | read | Find reference-folder files by glob |
+| `grep_repo` | read | Search reference-folder text; case-insensitive by default |
+| `read_repo_file` | read | UTF-8 file inside a read-only reference folder; reports total lines |
 | `add_knowledge` | write | Add a curated project note to the knowledge library |
+| `list_knowledge` | read | List knowledge documents with ids, tags, sources, and chunk counts |
+| `get_knowledge` | read | Read a whole knowledge document by id |
+| `update_knowledge` | write | Correct title, content, source, or tags; rebuilds chunks |
+| `delete_knowledge` | write | Delete a knowledge document and its retrieval chunks |
+| `list_memories` | read | Audit durable memories with ids and pinned state |
+| `forget_memory` | write | Forget a memory by id |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 
 The desktop implementation backs project tools with `StoreProjectAreas`, which
 implements `ProjectAreas` against the active workspace id. `present_artifact`
 returns `metadata.openbad_artifact`; the event stream carries that metadata to
 the UI, which opens the split workspace.
+
+`read_file` and `read_repo_file` return `total_lines`, `start_line`, `end_line`,
+`has_more`, and `next_start_line` metadata. Reference discovery follows the
+"list → glob → grep → bounded read" chain, avoiding guessed paths and line
+offsets. Command denials name the access-mode cause and the Full access remedy.
 
 Planned:
 

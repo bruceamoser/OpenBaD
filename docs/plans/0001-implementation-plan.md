@@ -419,11 +419,17 @@ commands with approvals.
 - The desktop project panel exposes Overview, Workspace, References, Knowledge,
   Retrieval, Memory, Edits, and Diagnostics in a resizable split workspace.
   Assistant `present_artifact` results open web pages, images, Markdown, diffs,
-  or workspace files beside chat.
+  or workspace files beside chat. Open project areas poll for changes and
+  refresh after turns, checkpoint restores, and knowledge/reference mutations.
+- First P0 roadmap capability pack is implemented: reference listing/glob/grep,
+  read totals and continuation metadata, knowledge list/get/update/delete,
+  memory list/forget, and actionable command-denial messages.
 - Still open for Phase 5: ACT-R activation/decay, associations, query
   expansion, embedding-backed hybrid retrieval, MMR/reranking, extraction and
-  consolidation, richer ingestion (PDF/DOCX/HTML), knowledge collections,
-  persisted artifact history, and the full explanation UI.
+  consolidation, richer ingestion (PDF/DOCX/HTML), knowledge confidence/
+  staleness/merge, memory update and provenance, project manifest/scope map,
+  command policy classes, richer context management, and persisted artifact
+  history.
 
 ## 10. Phase 6 — Autonomy
 

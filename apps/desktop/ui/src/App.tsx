@@ -142,6 +142,7 @@ export default function App() {
   const [panelTab, setPanelTab] = useState<PanelTab>("overview");
   const [panelWidth, setPanelWidth] = useState(460);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
+  const [projectRevision, setProjectRevision] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -209,6 +210,7 @@ export default function App() {
     try {
       const report = await refreshIndex(workspacePath);
       setIndexSummary(report.summary);
+      setProjectRevision((value) => value + 1);
     } catch (cause) {
       setIndexError(describeError(cause));
     } finally {
@@ -455,6 +457,7 @@ export default function App() {
           setCheckpointDiffId(null);
         }
         setCheckpointNotice(`Restored ${path}`);
+        setProjectRevision((value) => value + 1);
         void refreshWorkspaceIndex();
       } catch (cause) {
         setCheckpointError(describeError(cause));
@@ -477,6 +480,16 @@ export default function App() {
       setPanelOpen(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (!panelOpen || workspacePath.length === 0) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setProjectRevision((value) => value + 1);
+    }, 2_500);
+    return () => window.clearInterval(interval);
+  }, [panelOpen, workspacePath]);
 
   useEffect(() => {
     if (panelOpen && window.innerWidth < 1180 && sidebarOpen) {
@@ -614,6 +627,8 @@ export default function App() {
       void loadSessions();
       void loadProjects();
       void loadMemories();
+      setProjectRevision((value) => value + 1);
+      window.setTimeout(() => setProjectRevision((value) => value + 1), 1_500);
     } catch (cause) {
       const message = describeError(cause);
       setError(message);
@@ -1368,6 +1383,8 @@ export default function App() {
               onOpenSettings={openSettings}
               artifact={artifact}
               onArtifact={openArtifact}
+              revision={projectRevision}
+              onWorkspaceChanged={() => setProjectRevision((value) => value + 1)}
             />
           </div>
         </>

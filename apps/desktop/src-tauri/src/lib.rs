@@ -21,7 +21,8 @@ use openbad_store::types::{
     SessionMessage, SessionSummary,
 };
 use openbad_tools::{
-    CheckpointSink, KnowledgeEntryRef, MemoryStore, ProjectAreas, ProjectRepoRef, WorkspaceSearch,
+    CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, MemoryStore, ProjectAreas,
+    ProjectRepoRef, WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,14 @@ impl MemoryStore for WorkspaceMemory {
             tags: memory.tags,
             pinned: memory.pinned,
         })
+    }
+
+    fn forget(&self, id: &str) -> Result<(), String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store.forget_memory(id).map_err(|error| error.to_string())
     }
 
     fn recall(
@@ -150,6 +159,53 @@ impl ProjectAreas for StoreProjectAreas {
             .map(knowledge_ref)
     }
 
+    fn get_knowledge(&self, id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())
+            .map(|document| document.map(knowledge_document_ref))
+    }
+
+    fn update_knowledge(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+    ) -> Result<KnowledgeDocumentRef, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .update_knowledge_document(id, title, content, source, tags)
+            .map_err(|error| error.to_string())?;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())?
+            .map(knowledge_document_ref)
+            .ok_or_else(|| format!("knowledge document not found: {id}"))
+    }
+
+    fn delete_knowledge(&self, id: &str) -> Result<(), String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("knowledge document not found: {id}"))?;
+        store
+            .delete_knowledge_document(id)
+            .map_err(|error| error.to_string())
+    }
+
     fn retrieve(
         &self,
         query: &str,
@@ -183,6 +239,18 @@ fn knowledge_ref(document: KnowledgeDocumentSummary) -> KnowledgeEntryRef {
         kind: document.kind,
         source: document.source,
         chunks: document.chunks,
+    }
+}
+
+fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
+    KnowledgeDocumentRef {
+        id: document.summary.id,
+        title: document.summary.title,
+        kind: document.summary.kind,
+        source: document.summary.source,
+        tags: document.summary.tags,
+        content: document.content,
+        chunks: document.summary.chunks,
     }
 }
 

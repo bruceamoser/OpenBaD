@@ -135,6 +135,14 @@ enum WriteCommand {
         content: String,
         reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
     },
+    UpdateKnowledgeDocument {
+        document_id: String,
+        title: Option<String>,
+        content: Option<String>,
+        source: Option<String>,
+        tags: Option<Vec<String>>,
+        reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
+    },
     DeleteKnowledgeDocument {
         document_id: String,
         reply: SyncSender<Result<(), StoreError>>,
@@ -453,6 +461,24 @@ impl Store {
             source: source.map(str::to_owned),
             tags,
             content: content.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn update_knowledge_document(
+        &self,
+        document_id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.write(|reply| WriteCommand::UpdateKnowledgeDocument {
+            document_id: document_id.to_owned(),
+            title: title.map(str::to_owned),
+            content: content.map(str::to_owned),
+            source: source.map(str::to_owned),
+            tags,
             reply,
         })
     }
@@ -1623,6 +1649,105 @@ fn add_knowledge_document(
         .map_err(StoreError::from)
 }
 
+fn update_knowledge_document(
+    connection: &Connection,
+    document_id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    source: Option<&str>,
+    tags: Option<Vec<String>>,
+) -> Result<KnowledgeDocumentSummary, StoreError> {
+    let existing = connection
+        .query_row(
+            "SELECT workspace_id, title, kind, source, content, tags_json
+             FROM knowledge_documents WHERE id = ?1",
+            [document_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound(document_id.to_owned()))?;
+    let (workspace, old_title, kind, old_source, old_content, old_tags) = existing;
+    let title = title.unwrap_or(&old_title).trim();
+    if title.is_empty() {
+        return Err(StoreError::InvalidData(
+            "knowledge title cannot be empty".to_owned(),
+        ));
+    }
+    let content = content.unwrap_or(&old_content);
+    if content.trim().is_empty() {
+        return Err(StoreError::InvalidData(
+            "knowledge content cannot be empty".to_owned(),
+        ));
+    }
+    let source = source.or(old_source.as_deref());
+    let tags = tags.unwrap_or_else(|| serde_json::from_str(&old_tags).unwrap_or_default());
+    let tags_json = serde_json::to_string(&tags)?;
+    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    let chunks = split_knowledge_chunks(content);
+    let now = now_millis();
+
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "DELETE FROM knowledge_fts WHERE document_id = ?1",
+        [document_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM knowledge_chunks WHERE document_id = ?1",
+        [document_id],
+    )?;
+    transaction.execute(
+        "UPDATE knowledge_documents
+         SET title = ?1, kind = ?2, source = ?3, tags_json = ?4, content = ?5,
+             content_hash = ?6, updated_at = ?7
+         WHERE id = ?8",
+        params![
+            title,
+            kind,
+            source,
+            tags_json,
+            content,
+            hash,
+            now,
+            document_id
+        ],
+    )?;
+    for (seq, chunk) in chunks.iter().enumerate() {
+        let chunk_id = Uuid::now_v7().to_string();
+        transaction.execute(
+            "INSERT INTO knowledge_chunks (id, document_id, workspace_id, seq, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![chunk_id, document_id, workspace, seq as i64, chunk],
+        )?;
+        transaction.execute(
+            "INSERT INTO knowledge_fts (workspace_id, document_id, title, seq, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![workspace, document_id, title, seq as i64, chunk],
+        )?;
+    }
+    transaction.commit()?;
+
+    connection
+        .query_row(
+            "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
+                    length(d.content),
+                    (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
+                    d.created_at, d.updated_at
+             FROM knowledge_documents d WHERE d.id = ?1",
+            [document_id],
+            knowledge_summary_from_row,
+        )
+        .map_err(StoreError::from)
+}
+
 fn split_knowledge_chunks(content: &str) -> Vec<String> {
     const MAX: usize = 1_400;
     const OVERLAP: usize = 160;
@@ -1974,6 +2099,23 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     source.as_deref(),
                     tags,
                     &content,
+                ));
+            }
+            WriteCommand::UpdateKnowledgeDocument {
+                document_id,
+                title,
+                content,
+                source,
+                tags,
+                reply,
+            } => {
+                let _ = reply.send(update_knowledge_document(
+                    &connection,
+                    &document_id,
+                    title.as_deref(),
+                    content.as_deref(),
+                    source.as_deref(),
+                    tags,
                 ));
             }
             WriteCommand::DeleteKnowledgeDocument { document_id, reply } => {
@@ -2707,7 +2849,12 @@ mod tests {
             .ensure_workspace("Second", "/tmp/second")
             .expect("second workspace");
         store
-            .remember_memory(first, "Keep the parser incremental cache.", vec![], false)
+            .remember_memory(
+                first,
+                "Keep the parser incremental cache and persistent cache.",
+                vec![],
+                false,
+            )
             .expect("memory");
         let document = store
             .add_knowledge_document(
@@ -2739,17 +2886,37 @@ mod tests {
             .expect("idempotent knowledge");
         assert_eq!(duplicate.id, document.id);
 
+        let updated = store
+            .update_knowledge_document(
+                &document.id,
+                Some("Parser architecture v2"),
+                Some("The parser now uses a persistent cache and snapshots."),
+                None,
+                Some(vec!["parser".to_owned(), "cache".to_owned()]),
+            )
+            .expect("update knowledge");
+        assert_eq!(updated.title, "Parser architecture v2");
+        assert_eq!(updated.tags.len(), 2);
+        let old_hits = store
+            .retrieve_project(first, "content hashes", 10)
+            .expect("old retrieval");
+        assert!(old_hits.iter().all(|hit| hit.source != "knowledge"));
+        let new_hits = store
+            .retrieve_project(first, "persistent cache snapshots", 10)
+            .expect("new retrieval");
+        assert!(new_hits.iter().any(|hit| hit.source == "knowledge"));
+
         let hits = store
-            .retrieve_project(first, "incremental cache", 10)
+            .retrieve_project(first, "persistent cache", 10)
             .expect("retrieval");
         assert!(
             hits.iter()
-                .any(|hit| hit.source == "knowledge" && hit.title == "Parser architecture")
+                .any(|hit| hit.source == "knowledge" && hit.title == "Parser architecture v2")
         );
         assert!(hits.iter().any(|hit| hit.source == "memory"));
         assert!(
             store
-                .retrieve_project(second, "incremental cache", 10)
+                .retrieve_project(second, "persistent cache", 10)
                 .expect("scoped retrieval")
                 .is_empty()
         );
@@ -2762,14 +2929,14 @@ mod tests {
             .knowledge_document(&document.id)
             .expect("document")
             .expect("present");
-        assert!(full.content.contains("content hashes"));
+        assert!(full.content.contains("persistent cache"));
 
         store
             .delete_knowledge_document(&document.id)
             .expect("delete knowledge");
         assert!(
             store
-                .retrieve_project(first, "incremental cache", 10)
+                .retrieve_project(first, "persistent cache", 10)
                 .expect("retrieval after delete")
                 .iter()
                 .all(|hit| hit.source != "knowledge")

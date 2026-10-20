@@ -105,7 +105,10 @@ stage without changing the project model, locator contract, or tools.
 | --- | --- | --- |
 | `list_project_sources` | read | List reference folders and knowledge documents. |
 | `search_project` | read | Fuse knowledge, indexed code, and memory; return citable locators. |
-| `read_repo_file` | read | Read a UTF-8 file inside a reference folder. |
+| `list_repo_dir` | read | List a reference folder with sizes and `.gitignore` filtering. |
+| `glob_repo` | read | Find reference files by glob. |
+| `grep_repo` | read | Search reference text; case-insensitive by default. |
+| `read_repo_file` | read | Read a bounded region with total-line and continuation metadata. |
 | `add_knowledge` | write | Add a curated project note or reference to the library. |
 | `present_artifact` | read | Open a web page, image, markdown note, diff, or file beside chat. |
 
@@ -142,6 +145,9 @@ The desktop layout is intentionally conversation-first:
   keeps a usable width.
 - The panel tabs include Edits (checkpoints) and Diagnostics for operations that
   do not deserve permanent chrome.
+- While open, project areas poll for changes and also refresh after turns,
+  checkpoint restores, and knowledge/reference mutations. Open artifacts reload
+  without clearing the pane.
 - Files, knowledge documents, and retrieval hits open as artifacts in the same
   panel. The assistant can open one with `present_artifact`.
 
