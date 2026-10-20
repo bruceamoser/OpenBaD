@@ -270,6 +270,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
         .ok_or_else(|| ToolError::InvalidArgument("path has no parent".to_owned()))?;
     let mut temp = tempfile::NamedTempFile::new_in(directory)?;
     std::io::Write::write_all(&mut temp, content.as_bytes())?;
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_file(path);
+    }
     temp.persist(path)
         .map_err(|error| ToolError::Io(error.error))?;
     Ok(())
