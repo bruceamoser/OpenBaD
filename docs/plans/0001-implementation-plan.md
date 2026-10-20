@@ -255,6 +255,9 @@ commands with approvals.
 - The chat settings expose `deepseek-flash` vs `deepseek-v4-pro`, thinking mode,
   reasoning effort, and the step budget. A Stop button cancels the active turn.
   Usage lines show cache-hit share, and resumed sessions restore reasoning.
+- Recent sessions can be searched by title or message text from the sidebar.
+  The store uses a literal `LIKE` search with escaped wildcards, and the UI
+  debounces input before querying.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
 - Tool execution is currently gated by session-wide write/command toggles.

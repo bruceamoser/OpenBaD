@@ -318,6 +318,82 @@ impl Store {
         Ok(sessions)
     }
 
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SessionSummary>, StoreError> {
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT s.id, s.workspace_id, w.path, s.title, s.status, s.created_at,
+                    s.updated_at,
+                    COALESCE((SELECT MAX(t.turn) FROM session_turns t
+                              WHERE t.session_id = s.id), s.last_turn, 0)
+             FROM sessions s
+             LEFT JOIN workspaces w ON w.id = s.workspace_id
+             WHERE s.deleted_at IS NULL
+               AND (s.title LIKE ?1 ESCAPE '\\'
+                    OR EXISTS (SELECT 1 FROM session_messages m
+                               WHERE m.session_id = s.id
+                                 AND m.content_json LIKE ?1 ESCAPE '\\'))
+             ORDER BY s.updated_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![pattern, i64::from(limit)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (
+                id,
+                workspace_id,
+                workspace_path,
+                title,
+                status,
+                created_at,
+                updated_at,
+                last_turn,
+            ) = row?;
+            sessions.push(SessionSummary {
+                id: SessionId::from(
+                    Uuid::parse_str(&id)
+                        .map_err(|error| StoreError::InvalidData(error.to_string()))?,
+                ),
+                workspace_id: workspace_id
+                    .map(|value| {
+                        Uuid::parse_str(&value)
+                            .map(WorkspaceId::from)
+                            .map_err(|error| StoreError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?,
+                workspace_path,
+                title,
+                status,
+                created_at,
+                updated_at,
+                last_turn: last_turn as u32,
+            });
+        }
+        Ok(sessions)
+    }
+
     pub fn load_events(&self, session_id: SessionId) -> Result<Vec<SessionEvent>, StoreError> {
         let connection = self.reader()?;
         projections::load_events(&connection, Some(session_id))
@@ -1283,6 +1359,43 @@ mod tests {
         );
         assert_eq!(sessions[0].title.as_deref(), Some("listed"));
         assert_eq!(sessions[0].last_turn, 3);
+
+        assert_eq!(
+            store
+                .search_sessions("listed", 10)
+                .expect("title search")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .search_sessions("missing", 10)
+                .expect("empty search")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn session_search_matches_message_content() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("demo", "/tmp/openbad-session-search")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("first"))
+            .expect("session");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::UserMessage)
+                    .with_turn(1)
+                    .with_payload(json!({"content": "explain the cache ledger"})),
+            )
+            .expect("message");
+
+        let found = store.search_sessions("cache ledger", 10).expect("search");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, session);
     }
 
     #[test]

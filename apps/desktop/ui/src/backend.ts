@@ -67,6 +67,24 @@ export async function loadSessions(): Promise<SessionSummary[]> {
   return isTauri ? invoke<SessionSummary[]>("sessions") : [...mockSessions];
 }
 
+export async function searchSessions(query: string): Promise<SessionSummary[]> {
+  if (isTauri) {
+    return invoke<SessionSummary[]>("search_sessions", { query });
+  }
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) {
+    return [...mockSessions];
+  }
+  return mockSessions.filter((session) => {
+    if ((session.title ?? "").toLowerCase().includes(needle)) {
+      return true;
+    }
+    return (mockMessages.get(session.id) ?? []).some((message) =>
+      message.text.toLowerCase().includes(needle),
+    );
+  });
+}
+
 export async function loadSession(sessionId: string): Promise<SessionView> {
   if (isTauri) {
     return invoke<SessionView>("session_view", { sessionId });

@@ -10,6 +10,7 @@ import {
   loadSessions as fetchSessions,
   refreshWorkspaceIndex as refreshIndex,
   saveApiKey as persistApiKey,
+  searchSessions as searchStoredSessions,
   workspaceDefault,
   workspaceIndexStatus as fetchIndexStatus,
 } from "./backend";
@@ -67,6 +68,7 @@ export default function App() {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionQuery, setSessionQuery] = useState("");
   const [allowWrites, setAllowWrites] = useState(false);
   const [allowCommands, setAllowCommands] = useState(false);
   const [maxSteps, setMaxSteps] = useState(preferences.maxSteps);
@@ -100,6 +102,20 @@ export default function App() {
       setSessions([]);
     }
   }, []);
+  useEffect(() => {
+    const query = sessionQuery.trim();
+    if (query.length === 0) {
+      void loadSessions();
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void searchStoredSessions(query)
+        .then(setSessions)
+        .catch(() => setSessions([]));
+    }, 200);
+    return () => window.clearTimeout(timeout);
+  }, [loadSessions, sessionQuery]);
+
   const refreshWorkspaceIndex = useCallback(async () => {
     if (workspacePath.length === 0) {
       return;
@@ -580,6 +596,14 @@ export default function App() {
 
           <aside className="min-h-0 space-y-4 overflow-y-auto">
             <Panel title="Recent sessions">
+              <input
+                type="search"
+                value={sessionQuery}
+                onChange={(event) => setSessionQuery(event.target.value)}
+                placeholder="Search sessions…"
+                aria-label="Search sessions"
+                className="mb-2 w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-emerald-400/40"
+              />
               <div className="space-y-1">
                 {sessions.length === 0 && (
                   <p className="text-xs text-slate-500">No sessions yet.</p>
