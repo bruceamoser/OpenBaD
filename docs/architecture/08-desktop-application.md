@@ -1,0 +1,290 @@
+# 08 — Desktop Application
+
+## 1. Shell
+
+OpenBaD Desktop is a **Tauri v2** application:
+
+- **Rust process** — owns the harness, store, tools, workspace, memory,
+  knowledge, autonomic system, and governance.
+- **Webview** — React 19 + TypeScript + Vite + Tailwind CSS 4.
+- **IPC** — typed Tauri commands and a single typed event stream.
+- **OS integration** — tray icon, native notifications, global shortcut,
+  file dialogs, keychain, updater.
+
+The UI is a thin client over the Rust core. It never opens SQLite, never reads
+the filesystem directly, and never holds provider API keys in memory longer
+than a command needs.
+
+## 2. Information architecture
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ Title bar: workspace · branch · model · cache hit · spend · status │
+├──────────┬──────────────────────────────────────┬──────────────────┤
+│ Sidebar  │ Main                                 │ Right panel      │
+│          │                                      │                  │
+│ Sessions │ Chat / Agent                         │ Context          │
+│ Search   │ Diff / Review                        │ Plan / Todos     │
+│ Files    │ Editor (with inline completion)      │ Pulse            │
+│ Memory   │ Knowledge                            │ Jobs             │
+│ Knowledge│ Settings                             │ Approvals        │
+│ Pulse    │                                      │                  │
+├──────────┴──────────────────────────────────────┴──────────────────┤
+│ Terminal / Problems / Output (collapsible)                         │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### Navigation
+
+- **Command palette** (`Ctrl/Cmd+K`) — every action, file, session, and
+  setting.
+- **Quick ask** (`Ctrl/Cmd+Shift+Space`) — floating prompt from any app.
+- **Session sidebar** — grouped by workspace, pinned, recent, archived.
+- **Workspace switcher** — recent folders, open folder, trust state.
+- **Right panel tabs** — context, plan, pulse, jobs, approvals, references.
+- **Bottom panel** — terminal, problems, job output.
+
+## 3. Views
+
+### 3.1 Chat / Agent
+
+- Streaming markdown with code blocks.
+- Tool cards: name, status, duration, risk, result summary, expandable output.
+- Reasoning: collapsible "Thinking" section, hidden by default.
+- Citations: file path + line range; clicking opens the editor at the range.
+- Approvals: inline cards with exact command/diff and allow/deny actions.
+- Turn footer: input/output/cache tokens, cost, cache hit %, model, elapsed.
+- Cancel button always visible during a turn.
+- "Continue", "Retry", "Fork", "Compact" actions.
+
+### 3.2 Editor and inline completion
+
+- CodeMirror 6 or Monaco, chosen at implementation time.
+- File tree, tabs, breadcrumbs, symbol outline.
+- **FIM inline completion** (`deepseek-flash`, non-thinking, 4K):
+  ghost text, accept with Tab, reject with Esc, never auto-applied.
+- **Chat prefix completion** for constrained edits triggered from the editor.
+- Diagnostics from LSP shown inline and in the Problems panel.
+- Format/lint/test reflex results shown as a reviewable diff.
+
+### 3.3 Diff and review
+
+- Unified and side-by-side modes.
+- Hunk-level accept/reject.
+- Checkpoint timeline: every edit turn has a checkpoint; rewind restores only
+  tool-changed files.
+- "Review this diff" action spawns a review route with `deepseek-v4-pro`.
+- Guardrails highlight destructive changes and secrets.
+
+### 3.4 Plan and todos
+
+- Structured plan: goal, assumptions, steps, files, risks, validation.
+- Approve plan to begin execution.
+- Todo list with status, owner, and evidence links.
+- Goal-loop progress with budget and round count.
+
+### 3.5 Memory
+
+- Search and filters: scope, category, activation, pinned.
+- Activation sparkline; association graph.
+- Explain panel for retrieval scores.
+- Pin, edit, forget, export.
+- Consolidation report.
+
+### 3.6 Knowledge
+
+- Collections and documents.
+- Ingestion queue with status, errors, and retry.
+- Chunk viewer with citations and source links.
+- Re-index, version history, delete.
+- Search across collections.
+
+### 3.7 Pulse
+
+- CPU, memory, disk, GPU/VRAM, battery.
+- DB/WAL size, index lag, job health.
+- Context pressure, cache hit %, token spend, account balance.
+- Alerts with one-click actions ("Checkpoint WAL", "Pause indexing").
+- DeepSeek status: reachable, latency, rate-limit headroom, peak/off-peak.
+
+### 3.8 Settings
+
+| Section | Contents |
+| --- | --- |
+| Provider | DeepSeek key (keychain), base URL, API format, `user_id` |
+| Models | Routes, model catalog, context/output limits, pricing |
+| Thinking | Default mode and effort per route |
+| Budget | Session/monthly limits, alerts, off-peak preference |
+| Cache | Cache meter, series resets, warm-up (off by default) |
+| Workspace | Trust, indexing, ignores, formatters, reflexes |
+| Governance | Approvals, sandbox, secret scanning, audit |
+| Skills | Installed skills, enable/disable, sources |
+| MCP | Servers, tools, resources, health |
+| Data | Backup, export, retention, cloud sync (later) |
+| Appearance | Theme, density, font, motion, accessibility |
+
+## 4. Key interactions
+
+### 4.1 Sending a request
+
+1. User types in the composer; `@` mentions files/symbols, `/` runs commands.
+2. The composer shows the target model, thinking effort, and estimated cost.
+3. On send, the turn starts; the composer becomes a read-only status strip.
+4. Tool cards appear as calls start; approvals surface inline.
+5. The turn footer shows usage and cache hit.
+6. The user can cancel, retry, fork, or compact.
+
+### 4.2 Approving an action
+
+- The approval card shows the exact command or diff.
+- Destructive tokens are highlighted.
+- Options: allow once, allow for session, always for workspace, deny.
+- "Deny" returns a tool error to the model, which must adapt.
+- The decision is written to the audit log.
+
+### 4.3 Switching models
+
+- The model menu shows context, pricing, thinking support, and cache state.
+- Switching warns that the prefix cache will reset.
+- "Switch and fork" creates a child session with the new model.
+- The cache meter shows "cold" after a switch.
+
+### 4.4 Viewing cost
+
+- The header shows session spend and cache hit.
+- Clicking opens a breakdown: input, cache read, output, reasoning, by model.
+- The Pulse panel shows daily spend and balance.
+- The budget bar warns at 80% and blocks at 100% unless overridden.
+
+## 5. Design system
+
+| Token | Choice |
+| --- | --- |
+| Typography | System UI + monospace for code |
+| Density | Comfortable and compact modes |
+| Color | Neutral base, one accent, semantic risk colors |
+| Motion | Subtle; respects reduced-motion |
+| Icons | Consistent set (Lucide or similar) |
+| Theming | Light, dark, high contrast |
+| Focus | Visible focus rings; keyboard-first |
+
+Rules:
+
+- Never use color alone to convey risk or status.
+- Every icon button has a tooltip and accessible label.
+- Streaming text must not cause layout shift.
+- Long lists are virtualized (sessions, files, tool logs, memory).
+- Markdown rendering sanitizes HTML and blocks remote images by default.
+
+## 6. State management
+
+- **Server state** (sessions, events, files, memory) lives in Rust; the UI
+  caches projections.
+- **UI state** (layout, selection, drafts) lives in React stores (Zustand or
+  similar).
+- **Event stream** is the single source of live updates; no polling for
+  transcript data.
+- **Optimistic updates** are limited to composer actions and toggles; anything
+  durable waits for the Rust ack.
+- **Invalidation** is event-driven, not time-based.
+
+## 7. Performance
+
+| Concern | Approach |
+| --- | --- |
+| Transcript rendering | Virtualized list; memoized tool cards |
+| Streaming | Batch deltas at 30–60 Hz |
+| File tree | Lazy loading; watcher-driven updates |
+| Search | Debounced; server-side FTS/vector |
+| Large diffs | Virtualized diff; hunk-level rendering |
+| Memory graph | Canvas/WebGL; progressive layout |
+| Startup | Load shell first; hydrate sessions asynchronously |
+| Bundle | Code-split by view; no editor in the initial bundle |
+
+Targets:
+
+- Cold start to interactive: < 2 s.
+- Session switch: < 150 ms.
+- Streaming delta to paint: < 50 ms.
+- Typing latency in editor: < 16 ms.
+
+## 8. Accessibility
+
+- Full keyboard navigation with a documented shortcut map.
+- Screen-reader announcements for streaming status, tool completion, and
+  approvals.
+- Focus management for modals and approval cards.
+- High-contrast theme and reduced-motion support.
+- Minimum 4.5:1 contrast for text.
+- No drag-only interactions.
+
+## 9. Tauri commands and events
+
+### Command groups
+
+| Group | Examples |
+| --- | --- |
+| Session | `start_turn`, `cancel_turn`, `fork_session`, `compact`, `export` |
+| Workspace | `open_workspace`, `trust_workspace`, `index_status`, `search` |
+| Files | `read_file`, `write_file`, `apply_patch`, `checkpoint_rewind` |
+| Git | `git_status`, `git_diff`, `git_commit`, `git_push` |
+| Memory | `search_memory`, `remember`, `forget`, `consolidate` |
+| Knowledge | `ingest`, `search_knowledge`, `delete_document` |
+| Models | `list_routes`, `set_route`, `test_provider`, `refresh_balance` |
+| Governance | `pending_approvals`, `decide_approval`, `audit_verify` |
+| Autonomic | `jobs_list`, `job_cancel`, `schedules_list`, `pulse_snapshot` |
+
+### Event envelope
+
+```json
+{
+  "type": "tool_finished",
+  "data": {
+    "session_id": "...",
+    "call_id": "...",
+    "name": "apply_patch",
+    "ok": true,
+    "duration_ms": 412
+  }
+}
+```
+
+Events are batched and ordered. The UI can request a replay from a sequence
+number after a disconnect.
+
+## 10. Packaging and updates
+
+- **Linux:** AppImage and `.deb` (WebKitGTK dependency documented).
+- **macOS:** `.dmg`, universal binary (aarch64 + x86_64).
+- **Windows:** `.msi`/`.exe` via WiX or NSIS.
+- **Signing:** platform code signing; Tauri updater signatures.
+- **Updates:** signed manifest, staged rollout, rollback on startup failure.
+- **Size:** target < 30 MB shell; embedding model downloaded on demand.
+- **Telemetry:** off by default; opt-in, redacted, local viewer.
+
+## 11. Error surfaces
+
+| Error | UI |
+| --- | --- |
+| DeepSeek unreachable | Banner with retry and status link; local work continues |
+| Invalid key | Settings dialog with "Test key" |
+| Rate limited | Countdown, retry, suggestion to use flash/off-peak |
+| Budget exceeded | Blocking modal with override |
+| Context overflow | "Compact and retry" action |
+| Tool failure | Tool card error with details and retry |
+| Approval denied | Tool card shows denial; model adapts |
+| DB issue | Diagnostics panel with backup/restore |
+| Crash | Restart prompt with session recovery |
+
+## 12. Testing
+
+| Layer | Tool | What |
+| --- | --- | --- |
+| Components | Vitest + Testing Library | Rendering, interactions, accessibility |
+| Stores | Vitest | State transitions, event application |
+| E2E | Playwright + Tauri driver | Launch, chat with mock provider, approve, diff |
+| Visual | Playwright snapshots | Key views and themes |
+| Performance | Playwright traces + Rust benches | Startup, streaming, large lists |
+
+Mock provider fixtures cover DeepSeek streaming, tool calls, thinking output,
+cache usage, errors, and rate limits.

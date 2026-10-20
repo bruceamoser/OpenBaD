@@ -1,0 +1,24 @@
+[package]
+name = "openbad-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+openbad-harness = { path = "../openbad-harness" }
+openbad-llm = { path = "../openbad-llm" }
+openbad-tools = { path = "../openbad-tools" }
+openbad-workspace = { path = "../openbad-workspace" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+async-trait = "0.1"
+bytes = "1"
+futures-util = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

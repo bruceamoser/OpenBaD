@@ -1,0 +1,31 @@
+[package]
+name = "openbad-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "openbad_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["keyring"]
+keyring = ["openbad-governance/keyring"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+openbad-core = { path = "../../../crates/openbad-core" }
+openbad-store = { path = "../../../crates/openbad-store" }
+openbad-agent = { path = "../../../crates/openbad-agent" }
+openbad-llm = { path = "../../../crates/openbad-llm" }
+openbad-tools = { path = "../../../crates/openbad-tools" }
+openbad-workspace = { path = "../../../crates/openbad-workspace" }
+openbad-governance = { path = "../../../crates/openbad-governance" }

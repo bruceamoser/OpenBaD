@@ -1,136 +1,179 @@
-# OpenBaD
+# OpenBaD Desktop
 
-**Agentic Assistant. Biological as Digital.**
+**A DeepSeek-first, cache-first AI coding harness.**
 
-A biologically inspired cognitive architecture for autonomous AI agents — separating fast instincts from slow reasoning, stratifying memory into temporal hierarchies, and introducing intrinsic metabolic and endocrine drives.
+OpenBaD Desktop is a desktop coding agent that understands your repository,
+runs tools, edits code, executes tests, and remembers what matters — while
+spending as few tokens as possible. It is built in Rust with a Tauri v2 shell
+and a React/TypeScript interface, uses DeepSeek as its primary model provider,
+and keeps a fast local working store in SQLite (FTS5 + `sqlite-vec`).
+
+The design refines two earlier systems:
+
+- **OpenBaD v0** — a biologically inspired cognitive architecture. Its useful
+  ideas survive as dual-process routing, autonomic maintenance, cognitive
+  memory, system interoception, and immune-style guardrails.
+- **Clarity AI Assistant** — an enterprise cognitive assistant. Its useful
+  ideas survive as evidence-grounded answers, the knowledge library, hybrid
+  RAG, cognitive memory, and a typed connector model.
+
+The v0 implementation and concept documents are preserved in
+[`archive/openbad-v0/`](archive/openbad-v0/).
 
 ---
 
-## Documentation
+## The core bet: leverage DeepSeek's cache
 
-| Document | Description |
-| :--- | :--- |
-| [overview-spec.md](overview-spec.md) | Master conceptual specification and architectural rationale |
+DeepSeek's current models (`deepseek-flash` and `deepseek-v4-pro`) offer a 1M
+token context, up to 384K output tokens, thinking mode, and automatic prefix
+caching. A cache hit costs a small fraction of a cache miss — for
+`deepseek-flash`, **$0.003 vs. $0.15 per 1M input tokens** off-peak. A cache
+hit requires an **exact prefix match**. Most agent harnesses accidentally
+destroy the prefix by injecting timestamps, reordering tools, rewriting
+history, or compacting mid-prefix.
 
-### Implementation Phases
+OpenBaD is designed around one invariant:
 
-| Phase | Document | Focus |
-| :--- | :--- | :--- |
-| 1 | [01-environment-nervous-system.md](01-environment-nervous-system.md) | Event bus, eBPF interoception, FSM reflex arc, proprioception |
-| 2 | [02-sensory-integration.md](02-sensory-integration.md) | Vision (Wayland/PipeWire), audio (Vosk/Whisper), TTS |
-| 3 | [03-cognitive-engine-immune-system.md](03-cognitive-engine-immune-system.md) | Immune system (Amygdala), identity verification, LLM/SLM reasoning |
-| 4 | [04-memory-hierarchies-sleep.md](04-memory-hierarchies-sleep.md) | STM/LTM hierarchy, sleep consolidation (SWS/REM/pruning) |
-| 5 | [05-active-inference-endocrine.md](05-active-inference-endocrine.md) | Active Inference curiosity engine, digital endocrine system |
+> **The model-visible prefix is immutable and append-only. Volatile context
+> goes at the tail, never in the prefix.**
 
-### Phase Dependencies
+This yields:
 
+- Stable system prompts and tool schemas, hashed and versioned.
+- A request series that appends instead of rewrites.
+- Prefix-preserving retries and compaction.
+- Live cache-hit, token, and cost accounting.
+- Cache-aware model routing that refuses to silently switch models mid-session.
+- DeepSeek-native use of Files, Search, Fetch, FIM completion, prefix
+  completion, and off-peak scheduling.
+
+See [Cache-First Harness](docs/architecture/04-cache-first-harness.md) and
+[DeepSeek-First Provider Strategy](docs/adr/007-deepseek-first-provider-strategy.md).
+
+---
+
+## What it does
+
+### Coding harness
+
+- Reads, searches, edits, and patches files with reviewable diffs.
+- Runs commands in a PTY, executes tests, and surfaces diagnostics.
+- Integrates Git, LSP navigation, workspace indexing, and checkpoints/rewind.
+- Plans before acting, tracks todos, and runs bounded autonomous goal loops.
+- Delegates to isolated subagents for exploration, review, and test triage.
+- Loads skills, deterministic workflows, and MCP tools.
+- Uses a thin native connector layer for Git/GitHub, Search/Fetch, and the
+  filesystem, with MCP as the default third-party extension path.
+
+### Assistant with memory and knowledge
+
+- Cognitive memory with ACT-R decay and Hebbian associations.
+- Hybrid retrieval over memory, workspace code, and the knowledge library.
+- Ingests documents and project knowledge with citations down to file and line.
+- Evidence gate: answers are grounded in file spans, command output, test
+  results, LSP diagnostics, Git diffs, or cited web sources.
+
+### DeepSeek-native
+
+- **Context caching** with prefix accounting and cache-hit pricing.
+- **1M context** and **384K output** used deliberately, not accidentally.
+- **Thinking mode** with per-task reasoning effort.
+- **Files API** for images instead of re-uploading or inlining blobs.
+- **Search and Fetch APIs** with citations.
+- **FIM completion** for inline code completion and **chat prefix completion**
+  for constrained edits.
+- **Off-peak scheduling** for maintenance, consolidation, and batch-like work.
+
+### Autonomic system
+
+- A heartbeat scheduler for indexing, consolidation, backups, and reminders.
+- Interoception ("Pulse") for CPU, RAM, disk, GPU, context pressure, token
+  spend, latency, and error rate.
+- Reflex hooks for format/lint/test after edits and risky-command guards.
+- Approval policies, audit logging, secret redaction, and prompt-injection
+  defenses.
+
+---
+
+## Technology
+
+| Layer | Choice |
+| --- | --- |
+| Desktop shell | Tauri v2 |
+| Core runtime | Rust (edition 2024, Tokio) |
+| UI | React 19 + TypeScript + Vite + Tailwind CSS 4 |
+| Database | SQLite (WAL) + FTS5 + `sqlite-vec` |
+| Model providers | DeepSeek-first (`deepseek-flash`, `deepseek-v4-pro`), plus optional OpenAI-compatible and local models |
+| Embeddings | DeepSeek does not expose an embeddings endpoint; local ONNX (`fastembed`) by default, provider embeddings optional |
+| Packaging | Signed Tauri installers for Linux, macOS, and Windows |
+
+---
+
+## Status
+
+Phases 1–3 are working on Linux. The Rust workspace, single-writer SQLite store,
+event projections, audit hash chain, provider/model routes, backup/doctor checks,
+keychain secret storage, DeepSeek chat/streaming client, usage and cost
+accounting, built-in coding tools, agent loop, and Tauri chat UI all build and
+pass tests. Per-call approvals, token streaming, the evidence gate, and the
+Phase 4–8 systems remain.
+
+- [Vision and feature set](docs/architecture/00-vision-and-feature-set.md)
+- [System overview](docs/architecture/01-system-overview.md)
+- [Cache-first harness](docs/architecture/04-cache-first-harness.md)
+- [Implementation plan](docs/plans/0001-implementation-plan.md)
+- [Architecture decision records](docs/adr/)
+
+---
+
+## Repository layout
+
+```text
+.
+├── apps/
+│   └── desktop/            # Tauri shell + React UI
+├── crates/                 # Rust workspace
+│   ├── openbad-core/       # Domain types, events, config, errors
+│   ├── openbad-store/      # SQLite, migrations, projections, search
+│   ├── openbad-harness/    # Prompt assembly, routing, cache planning
+│   ├── openbad-llm/        # Provider adapters, cache accounting
+│   ├── openbad-agent/      # Turn/step loop and tool dispatch
+│   ├── openbad-tools/      # Tool registry and built-in tools
+│   ├── openbad-workspace/  # Files, Git, shell, LSP, indexing
+│   ├── openbad-memory/     # Engrams, ACT-R, consolidation
+│   ├── openbad-knowledge/  # Library, ingestion, RAG
+│   ├── openbad-autonomic/  # Heartbeat, jobs, schedules, pulse
+│   ├── openbad-governance/ # Policy, approvals, audit, secrets
+│   └── openbad-mcp/        # MCP client
+├── docs/                   # Architecture, plans, ADRs
+├── tests/                  # Cross-crate integration tests
+└── archive/                # Archived v0
 ```
-Phase 1 (Nervous System, Interoception, Reflexes)
-  ├── Phase 2 (Sensory Integration) ─── requires event bus
-  ├── Phase 3 (Cognitive Engine) ────── requires event bus + reflexes
-  │     └── Phase 4 (Memory) ────────── requires cognitive traces
-  └── Phase 5 (Endocrine) ──────────── modulates all phases
-```
 
-## Install and Setup (Linux/WSL)
+---
 
-Use the installer as root:
+## Development
 
 ```bash
-sudo ./scripts/install.sh --bootstrap --configure-wsl-systemd
+# Rust workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Desktop app
+cd apps/desktop
+pnpm --dir ui install
+pnpm --dir ui build
+./ui/node_modules/.bin/tauri dev
 ```
 
-Notes:
+`pnpm --dir ui build` produces `apps/desktop/ui/dist`, which the Tauri shell
+embeds. Provider keys use the `SecretStore` abstraction; the platform keychain
+backend is available behind the `keyring` feature and is never written to the
+repository or the SQLite database.
 
-- `--bootstrap` installs Linux prerequisites (Ubuntu/Debian apt path) and broker deps.
-- Full install requires `systemd` (Linux + WSL).
-- In WSL, `--configure-wsl-systemd` writes `/etc/wsl.conf` and prompts for WSL restart.
-- If `mosquitto.service` already exists, the installer reuses it instead of creating a second broker service.
-- System installs generate and persist an identity secret in `/etc/openbad/identity.yaml` on first install.
-- Use `--skip-services` only for development mode.
-
-Validate setup/config:
-
-```bash
-openbad setup --check
-```
-
-Control the installed stack with:
-
-```bash
-openbad start
-openbad stop
-openbad restart
-openbad update
-openbad health
-openbad tui
-openbad version
-```
-
-Notes:
-
-- `openbad start` starts the managed OpenBaD services and returns immediately.
-- `openbad stop` stops all managed services.
-- `openbad restart` restarts all managed services.
-- `openbad update` pulls latest code, re-runs the install script, and restarts services. Requires `sudo`.
-- `openbad health` reports systemd service state, MQTT reachability, and the WUI health endpoint.
-- `openbad tui` attaches a terminal UI to the running MQTT-backed stack.
-
-## Web UI
-
-Once running, the Web UI is available at **http://localhost:9200**.
-
-The WUI is a SvelteKit single-page application served by the aiohttp backend.
-It provides panels for Providers, Senses, Toolbelt, Entity, Chat, and Health,
-plus a first-run setup wizard.
-
-### Building the WUI
-
-If you need to rebuild the SvelteKit frontend (requires Node.js):
-
-```bash
-make wui
-```
-
-This increments the patch version, runs `npm install && npm run build` in
-`wui-svelte/`, and copies the output to `src/openbad/wui/build/` where the
-aiohttp server serves it.
-
-### Development Mode (no systemd)
-
-For local development without a full system install:
-
-```bash
-# Install in editable mode
-pip install -e ".[dev]"
-
-# Set config dir to the repo's config/ (avoids /etc/openbad permission issues)
-export OPENBAD_CONFIG_DIR=./config
-
-# Start the WUI server directly
-openbad wui --host 127.0.0.1 --port 9200
-```
-
-Or run the SvelteKit dev server with hot-reload (proxies API calls to aiohttp):
-
-```bash
-# Terminal 1: start the backend
-export OPENBAD_CONFIG_DIR=./config
-openbad wui
-
-# Terminal 2: start the SvelteKit dev server
-make wui-dev
-```
-
-## Running Tests
-
-```bash
-pytest                   # unit tests (excludes integration)
-pytest --run-all         # all tests including integration
-ruff check src/ tests/   # lint
-ruff format src/ tests/  # auto-format
-```
+---
 
 ## License
 
-See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

@@ -9,18 +9,18 @@
 
 ### 2. Create a Feature Branch
 - Branch from `main`.
-- Branch naming: `feature/<issue-number>-<short-desc>` (e.g., `feature/12-mqtt-broker-setup`).
+- Branch naming: `feature/<issue-number>-<short-desc>` (e.g., `feature/12-deepseek-adapter`).
 - Never commit directly to `main`.
 
 ### 3. Implement
 - Follow the acceptance criteria in the issue body exactly.
 - Every issue must include tests (unit tests at minimum).
-- Use `pytest` for testing, `ruff` for linting.
-- Keep commits small and focused. Each commit message references the issue: `#12: Add MQTT broker systemd config`.
+- Keep commits small and focused. Each commit message references the issue:
+  `#12: Add DeepSeek streaming adapter`.
 - Do not modify files outside the scope of the issue unless required as a direct dependency.
 
 ### 4. Create a Pull Request
-- PR title: `#<issue-number>: <short description>` (e.g., `#12: Select MQTT broker and create systemd service`).
+- PR title: `#<issue-number>: <short description>`.
 - PR body must include:
   - `Closes #<issue-number>`
   - A summary of changes
@@ -29,9 +29,10 @@
 
 ### 5. Review the PR
 - Verify all acceptance criteria from the issue are met.
-- Verify tests pass.
-- Verify no lint errors (`ruff check`).
-- Check for security issues (OWASP Top 10 awareness).
+- Verify Rust and UI tests pass.
+- Verify no lint errors (`cargo clippy -D warnings`, `pnpm lint`).
+- Verify cache invariants for harness changes (see below).
+- Check for security issues (see `docs/architecture/09-security-and-threat-model.md`).
 
 ### 6. Merge
 - Merge strategy: **Squash and merge**.
@@ -56,33 +57,69 @@
 ## Project Conventions
 
 ### Language & Runtime
-- Python ≥ 3.11, Linux, systemd, cgroup v2.
-- All dependencies must use permissive open-source licenses (MIT, Apache 2.0, BSD). No BSL, AGPL, or GPL.
+- Rust 1.85+ (edition 2024) for the core and Tauri backend.
+- TypeScript + React 19 + Vite for the desktop UI.
+- SQLite 3.45+ with FTS5 and `sqlite-vec`.
+- DeepSeek is the primary model provider (`deepseek-flash`, `deepseek-v4-pro`).
+- All dependencies must use permissive open-source licenses (MIT, Apache 2.0, BSD).
+  No BSL, AGPL, or GPL. `cargo deny` and `pnpm audit` enforce this.
 
 ### Code Style
-- Formatter/linter: `ruff` (format + check).
-- Type hints required on all public functions.
-- No docstrings on private helpers unless the logic is non-obvious.
+- Rust: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`.
+- TypeScript: `pnpm lint`, `pnpm typecheck`, `pnpm format`.
+- Public Rust APIs have doc comments; private helpers do not need them.
+- No `unwrap()`/`expect()` in library code; return typed errors.
+- No `unsafe` unless isolated, documented, and tested.
+
+### Architecture Rules
+- **The session event log is the source of truth.** Model-visible content must be logged.
+- **The model-visible prefix is immutable and append-only.** Volatile context goes at the tail.
+- **No database access from the UI.** Use Tauri commands and events.
+- **Domain crates do not depend on infrastructure crates.** Use capability traits.
+- **Tools never write to the session log directly.** The agent loop appends results.
+- **Every irreversible action is approval-gated.**
+- **Secrets live in the OS keychain**, never in the DB, logs, prompts, or fixtures.
+
+### Cache Invariants (must be tested for harness changes)
+1. Stable sections contain no timestamps, random IDs, or runtime state.
+2. Tool schemas are sorted and canonicalized.
+3. The tool schema set is stable within a request series.
+4. History is append-only.
+5. Volatile context is the last message.
+6. Retries reuse the exact frozen request bytes.
+7. Model, API format, thinking mode, and reasoning effort are epoch-level.
+8. Workspace context is snapshotted; changes append tail messages.
+9. Compaction is rare, boundary-aligned, and records a cache reset.
+10. Tool output is spilled at creation, not rewritten later.
+11. Cache hit/miss is recorded and surfaced.
+12. `reasoning_content` is passed back verbatim when tools are present.
 
 ### Testing
-- Framework: `pytest` with `pytest-asyncio` for async code.
-- Tests live in `tests/` mirroring the `src/` structure.
-- Minimum: unit tests for all public functions. Integration tests where the issue specifies.
-- Use fixtures for MQTT broker connections, mock eBPF probes, etc.
+- Rust unit tests: `#[cfg(test)]` or `crates/*/tests`.
+- Integration tests: `tests/integration/` with a temp SQLite DB and mock provider.
+- UI tests: Vitest + Testing Library; E2E with Playwright + Tauri.
+- Benchmarks: `benches/` with Criterion; cache/cost benchmarks in `tests/fixtures/cache/`.
+- Minimum: unit tests for all public functions; integration tests where the issue specifies.
+- Real DeepSeek calls only in opt-in nightly jobs with a capped budget.
 
 ### File Structure
-- Source code: `src/openbad/`
-- Tests: `tests/`
-- Protobuf schemas: `src/openbad/nervous_system/schemas/`
-- Config files: `config/`
+- Rust crates: `crates/openbad-*`
+- Desktop app: `apps/desktop/src-tauri` and `apps/desktop/ui`
+- SQL migrations: `migrations/`
+- Cross-crate tests: `tests/`
+- Architecture docs: `docs/architecture/`
+- Plans: `docs/plans/`
+- ADRs: `docs/adr/`
+- Archived v0: `archive/openbad-v0/`
 
 ### Commit Messages
-- Format: `#<issue>: <imperative verb> <what changed>` (e.g., `#5: Add protobuf schemas for telemetry messages`).
+- Format: `#<issue>: <imperative verb> <what changed>`.
 - Keep the first line under 72 characters.
 
 ### Labels
-- **Phase:** `phase-1`, `phase-2`, `phase-3`, `phase-4`, `phase-5`
-- **Type:** `setup`, `feature`, `test`, `docs`
-- **Component:** `nervous-system`, `event-bus`, `ebpf`, `reflex-arc`, `proprioception`, `interoception`
+- **Phase:** `phase-0` … `phase-8`
+- **Type:** `setup`, `feature`, `test`, `docs`, `performance`, `security`
+- **Component:** `harness`, `store`, `providers`, `tools`, `workspace`, `memory`,
+  `knowledge`, `autonomic`, `governance`, `desktop`, `mcp`
 - **Priority:** `P0-critical`, `P1-high`, `P2-medium`, `P3-low`
 - **Size:** `size-XS`, `size-S`, `size-M`, `size-L`
