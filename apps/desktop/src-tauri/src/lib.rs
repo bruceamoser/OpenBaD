@@ -64,12 +64,53 @@ impl MemoryStore for WorkspaceMemory {
         let memory = store
             .remember_memory(self.workspace_id, content, tags, pinned)
             .map_err(|error| error.to_string())?;
-        Ok(openbad_tools::MemoryEntry {
-            id: memory.id,
-            content: memory.content,
-            tags: memory.tags,
-            pinned: memory.pinned,
-        })
+        Ok(memory_entry(memory))
+    }
+
+    fn remember_scoped(
+        &self,
+        content: &str,
+        tags: Vec<String>,
+        pinned: bool,
+        options: openbad_tools::MemoryWriteOptions,
+    ) -> Result<openbad_tools::MemoryEntry, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let memory = store
+            .remember_memory_scoped(
+                self.workspace_id,
+                content,
+                tags,
+                pinned,
+                &options.scope,
+                &options.author,
+                options.origin_turn,
+                options.origin_task.as_deref(),
+                options.supersedes.as_deref(),
+                options.expires_at,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(memory_entry(memory))
+    }
+
+    fn update(
+        &self,
+        id: &str,
+        content: Option<&str>,
+        tags: Option<Vec<String>>,
+        pinned: Option<bool>,
+        scope: Option<&str>,
+    ) -> Result<openbad_tools::MemoryEntry, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .update_memory(id, content, tags, pinned, scope)
+            .map_err(|error| error.to_string())
+            .map(memory_entry)
     }
 
     fn forget(&self, id: &str) -> Result<(), String> {
@@ -92,15 +133,7 @@ impl MemoryStore for WorkspaceMemory {
         let memories = store
             .recall_memories(self.workspace_id, query, limit as u32)
             .map_err(|error| error.to_string())?;
-        Ok(memories
-            .into_iter()
-            .map(|memory| openbad_tools::MemoryEntry {
-                id: memory.id,
-                content: memory.content,
-                tags: memory.tags,
-                pinned: memory.pinned,
-            })
-            .collect())
+        Ok(memories.into_iter().map(memory_entry).collect())
     }
 }
 
@@ -242,6 +275,21 @@ impl ProjectAreas for StoreProjectAreas {
                     })
                     .collect()
             })
+    }
+}
+
+fn memory_entry(memory: openbad_store::types::MemoryRecord) -> openbad_tools::MemoryEntry {
+    openbad_tools::MemoryEntry {
+        id: memory.id,
+        content: memory.content,
+        tags: memory.tags,
+        pinned: memory.pinned,
+        scope: memory.scope,
+        author: memory.author,
+        origin_turn: memory.origin_turn,
+        origin_task: memory.origin_task,
+        supersedes: memory.supersedes,
+        expires_at: memory.expires_at,
     }
 }
 
@@ -1987,7 +2035,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0007_knowledge_confidence");
+        assert_eq!(payload.doctor.schema_version, "0008_memory_provenance");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

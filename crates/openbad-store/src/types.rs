@@ -284,6 +284,12 @@ pub struct MemoryRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub access_count: u32,
+    pub origin_turn: Option<u32>,
+    pub origin_task: Option<String>,
+    pub author: String,
+    pub scope: String,
+    pub supersedes: Option<String>,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

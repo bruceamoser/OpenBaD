@@ -76,6 +76,28 @@ pub struct Engram {
 | `system_observation` | Inferred by maintenance |
 | `import` | Imported from another machine/session |
 
+### 3.1 Current desktop memory model
+
+The desktop build stores durable memories in the `memories` table. Migration
+`0008_memory_provenance` adds:
+
+- `scope` — `session`, `project`, or `global`, with `project` as the default.
+- `author` — `agent` or `human`.
+- `origin_turn` and `origin_task` — where the memory came from.
+- `supersedes` — the explicit predecessor, which is marked forgotten.
+- `expires_at` — optional TTL; expired rows are excluded from recall.
+
+`remember` detects likely contradictions (high lexical overlap with opposite
+polarity) and refuses to append silently: the agent must pass the existing id
+in `supersedes`. `update_memory` corrects content, tags, pinned state, or scope.
+The system prompt reports how many memories were injected, including pinned
+count and scope.
+
+**Memory is not knowledge.** Memory holds working commitments, preferences, and
+decisions with a lifecycle (scope, supersession, expiry). Knowledge holds
+curated reference documents with confidence and source staleness. They use
+different writes, search surfaces, and audit tools.
+
 ## 4. ACT-R activation
 
 Base-level activation follows ACT-R:

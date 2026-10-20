@@ -40,6 +40,12 @@ let mockMemories: MemoryRecord[] = [
     created_at: Date.now() - 86_400_000,
     updated_at: Date.now() - 3_600_000,
     access_count: 2,
+    origin_turn: 4,
+    origin_task: "phase-1",
+    author: "agent",
+    scope: "project",
+    supersedes: null,
+    expires_at: null,
   },
 ];
 let mockRepos: ProjectRepo[] = [
@@ -158,7 +164,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0007_knowledge_confidence",
+    schema_version: "0008_memory_provenance",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,

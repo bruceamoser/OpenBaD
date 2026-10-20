@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -155,6 +156,22 @@ pub struct MemoryEntry {
     pub content: String,
     pub tags: Vec<String>,
     pub pinned: bool,
+    pub scope: String,
+    pub author: String,
+    pub origin_turn: Option<u32>,
+    pub origin_task: Option<String>,
+    pub supersedes: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryWriteOptions {
+    pub scope: String,
+    pub author: String,
+    pub origin_turn: Option<u32>,
+    pub origin_task: Option<String>,
+    pub supersedes: Option<String>,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +255,25 @@ pub trait MemoryStore: Send + Sync {
         pinned: bool,
     ) -> Result<MemoryEntry, String>;
     fn recall(&self, query: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, String>;
+    fn remember_scoped(
+        &self,
+        content: &str,
+        tags: Vec<String>,
+        pinned: bool,
+        _options: MemoryWriteOptions,
+    ) -> Result<MemoryEntry, String> {
+        self.remember(content, tags, pinned)
+    }
+    fn update(
+        &self,
+        _id: &str,
+        _content: Option<&str>,
+        _tags: Option<Vec<String>>,
+        _pinned: Option<bool>,
+        _scope: Option<&str>,
+    ) -> Result<MemoryEntry, String> {
+        Err("memory updates are not available".to_owned())
+    }
     fn list(&self, limit: usize) -> Result<Vec<MemoryEntry>, String> {
         self.recall(None, limit)
     }
@@ -339,6 +375,7 @@ pub struct ToolContext {
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     pub memory: Option<Arc<dyn MemoryStore>>,
     pub project: Option<Arc<dyn ProjectAreas>>,
+    turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
 }
 
@@ -354,8 +391,19 @@ impl ToolContext {
             checkpoints: None,
             memory: None,
             project: None,
+            turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
         }
+    }
+
+    pub fn set_turn(&self, turn: u32) {
+        self.turn.store(turn, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn current_turn(&self) -> Option<u32> {
+        let turn = self.turn.load(Ordering::Relaxed);
+        (turn > 0).then_some(turn)
     }
 
     fn mark_read(&self, path: &Path) {
@@ -421,6 +469,7 @@ impl ToolRegistry {
         registry.register(RememberTool);
         registry.register(RecallTool);
         registry.register(ListMemoriesTool);
+        registry.register(UpdateMemoryTool);
         registry.register(ForgetMemoryTool);
         registry.register(SearchProjectTool);
         registry.register(AddKnowledgeTool);
@@ -780,6 +829,73 @@ fn outline_entries(path: &Path, content: &str, max_entries: usize) -> Vec<String
         }
     }
     entries
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as i64)
+}
+
+fn memory_line(entry: &MemoryEntry, tags: &str) -> String {
+    let origin = entry
+        .origin_task
+        .as_deref()
+        .map(|task| format!(" via {task}"))
+        .or_else(|| entry.origin_turn.map(|turn| format!(" turn {turn}")))
+        .unwrap_or_default();
+    let id_line = format!("{}: {}", entry.id, entry.content);
+    format!(
+        "{}{}[{}]{}{}: {}",
+        if entry.pinned { "* " } else { "- " },
+        entry.scope,
+        entry.author,
+        if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" {tags}")
+        },
+        origin,
+        id_line
+    )
+}
+
+fn likely_memory_conflict(left: &str, right: &str) -> bool {
+    let left_tokens = memory_tokens(left);
+    let right_tokens = memory_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return false;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count();
+    let union = left_tokens.union(&right_tokens).count();
+    let similarity = intersection as f64 / union as f64;
+    if similarity < 0.55 {
+        return false;
+    }
+    let negation = [
+        "never", "not", "avoid", "don't", "do not", "without", "instead",
+    ];
+    let left_negated = negation
+        .iter()
+        .any(|needle| left.to_ascii_lowercase().contains(needle));
+    let right_negated = negation
+        .iter()
+        .any(|needle| right.to_ascii_lowercase().contains(needle));
+    left_negated != right_negated
+}
+
+fn memory_tokens(content: &str) -> HashSet<String> {
+    content
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token.len() > 3)
+        .filter(|token| {
+            !matches!(
+                token.as_str(),
+                "with" | "that" | "this" | "from" | "have" | "should" | "must" | "always"
+            )
+        })
+        .collect()
 }
 
 fn relative_to_root(context: &ToolContext, path: &Path) -> String {
@@ -2317,7 +2433,7 @@ impl Tool for RememberTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "remember",
-            "Save a durable project decision or preference to workspace memory. Repeating the same content updates it.",
+            "Save a durable project decision or preference to workspace memory. Repeating the same content updates it. Contradicting an existing memory requires its id in supersedes.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -2325,7 +2441,11 @@ impl Tool for RememberTool {
             "properties": {
                 "content": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "pinned": {"type": "boolean"}
+                "pinned": {"type": "boolean"},
+                "scope": {"type": "string", "enum": ["session", "project", "global"], "description": "Durability scope; project by default"},
+                "origin_task": {"type": "string", "description": "Task or issue this memory came from"},
+                "supersedes": {"type": "string", "description": "Existing memory id this statement replaces"},
+                "ttl_hours": {"type": "integer", "minimum": 1, "description": "Optional expiry in hours"}
             },
             "required": ["content"],
             "additionalProperties": false
@@ -2358,8 +2478,45 @@ impl Tool for RememberTool {
             })
             .unwrap_or_default();
         let pinned = optional_bool(&arguments, "pinned").unwrap_or(false);
+        let scope = optional_string(&arguments, "scope").unwrap_or_else(|| "project".to_owned());
+        if !matches!(scope.as_str(), "session" | "project" | "global") {
+            return Err(ToolError::InvalidArgument(
+                "scope must be session, project, or global".to_owned(),
+            ));
+        }
+        let supersedes = optional_string(&arguments, "supersedes");
+        if supersedes.is_none() {
+            let existing = memory.list(100).map_err(ToolError::Failed)?;
+            let conflicts = existing
+                .iter()
+                .filter(|entry| likely_memory_conflict(&content, &entry.content))
+                .map(|entry| format!("{}: {}", entry.id, entry.content))
+                .collect::<Vec<_>>();
+            if !conflicts.is_empty() {
+                return Err(ToolError::Failed(format!(
+                    "possible contradiction with existing memory; pass supersedes=<id> to replace it explicitly:
+{}",
+                    conflicts.join("
+")
+                )));
+            }
+        }
+        let expires_at = optional_usize(&arguments, "ttl_hours")
+            .map(|hours| now_millis().saturating_add((hours as i64) * 3_600_000));
         let entry = memory
-            .remember(&content, tags, pinned)
+            .remember_scoped(
+                &content,
+                tags,
+                pinned,
+                MemoryWriteOptions {
+                    scope: scope.clone(),
+                    author: "agent".to_owned(),
+                    origin_turn: context.current_turn(),
+                    origin_task: optional_string(&arguments, "origin_task"),
+                    supersedes,
+                    expires_at,
+                },
+            )
             .map_err(ToolError::Failed)?;
         let tags = if entry.tags.is_empty() {
             String::new()
@@ -2367,12 +2524,17 @@ impl Tool for RememberTool {
             format!(" [{}]", entry.tags.join(", "))
         };
         Ok(ToolResult::ok(format!(
-            "remembered{}{}: {}",
+            "remembered ({}){}{}: {}",
+            entry.scope,
             if entry.pinned { " (pinned)" } else { "" },
             tags,
             entry.content
         ))
-        .with_metadata(json!({"id": entry.id})))
+        .with_metadata(json!({
+            "id": entry.id,
+            "scope": entry.scope,
+            "supersedes": entry.supersedes
+        })))
     }
 }
 
@@ -2423,13 +2585,7 @@ impl Tool for RecallTool {
                 } else {
                     format!(" [{}]", entry.tags.join(", "))
                 };
-                format!(
-                    "{}{}{}: {}",
-                    if entry.pinned { "* " } else { "- " },
-                    tags,
-                    entry.id,
-                    entry.content
-                )
+                memory_line(entry, &tags)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -2445,7 +2601,7 @@ impl Tool for ListMemoriesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "list_memories",
-            "List durable project memories with ids, tags, and pinned state so they can be audited.",
+            "List durable project memories with ids, scope, provenance, tags, and pinned state so they can be audited.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -2481,18 +2637,73 @@ impl Tool for ListMemoriesTool {
                 } else {
                     format!(" [{}]", entry.tags.join(", "))
                 };
-                format!(
-                    "{}{}{}: {}",
-                    if entry.pinned { "* " } else { "- " },
-                    tags,
-                    entry.id,
-                    entry.content
-                )
+                memory_line(entry, &tags)
             })
             .collect::<Vec<_>>()
             .join("\n");
         Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
             .with_metadata(json!({"memories": entries.len()})))
+    }
+}
+
+struct UpdateMemoryTool;
+
+#[async_trait]
+impl Tool for UpdateMemoryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "update_memory",
+            "Correct a memory's content, tags, pinned state, or scope. Use list_memories first to find the id.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "content": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "pinned": {"type": "boolean"},
+                "scope": {"type": "string", "enum": ["session", "project", "global"]}
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let memory = context
+            .memory
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("workspace memory is not available".to_owned()))?;
+        let id = string_arg(&arguments, "id")?;
+        let content = optional_string(&arguments, "content");
+        let tags = arguments.get("tags").and_then(Value::as_array).map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        let pinned = optional_bool(&arguments, "pinned");
+        let scope = optional_string(&arguments, "scope");
+        if content.is_none() && tags.is_none() && pinned.is_none() && scope.is_none() {
+            return Err(ToolError::InvalidArgument(
+                "at least one of content, tags, pinned, or scope is required".to_owned(),
+            ));
+        }
+        let entry = memory
+            .update(&id, content.as_deref(), tags, pinned, scope.as_deref())
+            .map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(format!(
+            "updated memory {id} ({}, {}, updated): {}",
+            entry.scope,
+            if entry.pinned { "pinned" } else { "unpinned" },
+            entry.content
+        ))
+        .with_metadata(json!({"id": entry.id, "scope": entry.scope})))
     }
 }
 
@@ -4905,14 +5116,67 @@ validators:
             tags: Vec<String>,
             pinned: bool,
         ) -> Result<MemoryEntry, String> {
+            self.remember_scoped(
+                content,
+                tags,
+                pinned,
+                MemoryWriteOptions {
+                    scope: "project".to_owned(),
+                    author: "agent".to_owned(),
+                    ..MemoryWriteOptions::default()
+                },
+            )
+        }
+
+        fn remember_scoped(
+            &self,
+            content: &str,
+            tags: Vec<String>,
+            pinned: bool,
+            options: MemoryWriteOptions,
+        ) -> Result<MemoryEntry, String> {
             let entry = MemoryEntry {
                 id: "memory-1".to_owned(),
                 content: content.to_owned(),
                 tags,
                 pinned,
+                scope: options.scope,
+                author: options.author,
+                origin_turn: options.origin_turn,
+                origin_task: options.origin_task,
+                supersedes: options.supersedes,
+                expires_at: options.expires_at,
             };
             self.entries.lock().expect("lock").push(entry.clone());
             Ok(entry)
+        }
+
+        fn update(
+            &self,
+            id: &str,
+            content: Option<&str>,
+            tags: Option<Vec<String>>,
+            pinned: Option<bool>,
+            scope: Option<&str>,
+        ) -> Result<MemoryEntry, String> {
+            let mut entries = self.entries.lock().expect("lock");
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| format!("unknown memory: {id}"))?;
+            if let Some(content) = content {
+                entry.content = content.to_owned();
+            }
+            if let Some(tags) = tags {
+                entry.tags = tags;
+            }
+            if let Some(pinned) = pinned {
+                entry.pinned = pinned;
+            }
+            if let Some(scope) = scope {
+                entry.scope = scope.to_owned();
+            }
+            Ok(entry.clone())
         }
 
         fn recall(&self, query: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, String> {
@@ -4962,6 +5226,39 @@ validators:
                 .content
                 .contains("Keep the prompt prefix immutable")
         );
+        assert!(remembered.content.contains("(project)"));
+        assert_eq!(remembered.metadata["scope"], "project");
+
+        let conflict = RememberTool
+            .execute(
+                json!({"content": "Never keep the prompt prefix immutable"}),
+                &context,
+            )
+            .await
+            .expect_err("contradiction requires supersedes");
+        assert!(conflict.to_string().contains("supersedes"));
+
+        let superseding = RememberTool
+            .execute(
+                json!({
+                    "content": "Never keep the prompt prefix immutable",
+                    "supersedes": "memory-1",
+                    "scope": "session"
+                }),
+                &context,
+            )
+            .await
+            .expect("explicit supersede");
+        assert_eq!(superseding.metadata["supersedes"], "memory-1");
+
+        let updated = UpdateMemoryTool
+            .execute(
+                json!({"id": "memory-1", "scope": "global", "tags": ["cache", "prompt"]}),
+                &context,
+            )
+            .await
+            .expect("update memory");
+        assert!(updated.content.contains("global"));
 
         let recalled = RecallTool
             .execute(json!({"query": "immutable"}), &context)
@@ -4972,7 +5269,7 @@ validators:
                 .content
                 .contains("Keep the prompt prefix immutable")
         );
-        assert!(recalled.content.contains("[cache]"));
+        assert!(recalled.content.contains("cache"));
 
         let listed = ListMemoriesTool
             .execute(json!({"max_results": 10}), &context)

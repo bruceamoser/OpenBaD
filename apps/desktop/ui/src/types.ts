@@ -86,6 +86,12 @@ export type MemoryRecord = {
   created_at: number;
   updated_at: number;
   access_count: number;
+  origin_turn: number | null;
+  origin_task: string | null;
+  author: string;
+  scope: string;
+  supersedes: string | null;
+  expires_at: number | null;
 };
 
 export type FileCheckpointSummary = {
