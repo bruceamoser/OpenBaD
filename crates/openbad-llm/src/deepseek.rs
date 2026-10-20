@@ -162,6 +162,11 @@ impl<T: HttpTransport> DeepSeekClient<T> {
     }
 
     #[must_use]
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    #[must_use]
     pub fn model(&self) -> &str {
         &self.model
     }
