@@ -1891,7 +1891,7 @@ impl Tool for ReadFileTool {
         .with_schema(json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative path"},
+                "path": {"type": "string", "description": "Workspace-relative path, or an absolute path approved via request_fs_access"},
                 "start_line": {"type": "integer", "minimum": 1},
                 "end_line": {"type": "integer", "minimum": 1},
                 "max_bytes": {"type": "integer", "minimum": 256},
@@ -1968,7 +1968,7 @@ impl Tool for StatFileTool {
         )
         .with_schema(json!({
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "Workspace-relative path"}},
+            "properties": {"path": {"type": "string", "description": "Workspace-relative path, or an absolute path approved via request_fs_access"}},
             "required": ["path"],
             "additionalProperties": false
         }))
@@ -2584,7 +2584,7 @@ impl Tool for ListDirTool {
         .with_schema(json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative directory"},
+                "path": {"type": "string", "description": "Workspace-relative directory, or an absolute directory approved via request_fs_access"},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 10},
                 "max_entries": {"type": "integer", "minimum": 1, "maximum": 2000}
             },
@@ -2660,7 +2660,7 @@ impl Tool for GrepTool {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "path": {"type": "string", "description": "Workspace-relative directory"},
+                "path": {"type": "string", "description": "Workspace-relative directory, or an absolute directory approved via request_fs_access"},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": 500},
                 "case_sensitive": {"type": "boolean"}
             },
@@ -2814,7 +2814,7 @@ impl Tool for GlobTool {
             "type": "object",
             "properties": {
                 "pattern": {"type": "string"},
-                "path": {"type": "string", "description": "Workspace-relative directory"},
+                "path": {"type": "string", "description": "Workspace-relative directory, or an absolute directory approved via request_fs_access"},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": 5000}
             },
             "required": ["pattern"],
@@ -2888,7 +2888,7 @@ impl Tool for FindSymbolsTool {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Case-insensitive symbol name or fragment"},
-                "path": {"type": "string", "description": "Workspace-relative directory"},
+                "path": {"type": "string", "description": "Workspace-relative directory, or an absolute directory approved via request_fs_access"},
                 "kind": {"type": "string", "description": "Optional definition kind such as fn, struct, class, or def"},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": 500}
             },
@@ -3242,7 +3242,7 @@ impl Tool for RunCommandTool {
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "cwd": {"type": "string", "description": "Workspace-relative directory"},
+                "cwd": {"type": "string", "description": "Workspace-relative directory, or an approved absolute directory with allow_external_cwd"},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
                 "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"},
                 "allow_external_cwd": {"type": "boolean", "description": "Allow an absolute cwd outside the workspace"},
