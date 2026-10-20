@@ -752,6 +752,7 @@ async fn chat(
         };
         client = client.with_reasoning_effort(effort);
     }
+    let index_root = workspace_path.clone();
     let mut agent = default_agent(
         client,
         Arc::new(WorkspaceService::new(workspace_path)),
@@ -878,6 +879,36 @@ async fn chat(
             )
             .map_err(|error| error.to_string())?;
     }
+
+    let index_store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(store) = index_store.lock() else {
+            return;
+        };
+        let Ok(workspace) =
+            store.ensure_workspace(workspace_name(&index_root), &index_root.to_string_lossy())
+        else {
+            return;
+        };
+        match WorkspaceIndexer::new(&store, workspace, &index_root).refresh() {
+            Ok(report) if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() => {
+                eprintln!(
+                    "[index] post-turn {}: added={} updated={} removed={} elapsed={}ms",
+                    index_root.display(),
+                    report.added,
+                    report.updated,
+                    report.removed,
+                    report.elapsed_ms
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                    eprintln!("[index] post-turn refresh failed: {error}");
+                }
+            }
+        }
+    });
 
     Ok(ChatReply {
         session_id: session.to_string(),

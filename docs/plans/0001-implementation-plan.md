@@ -331,8 +331,9 @@ commands with approvals.
   FTS5 `workspace_fts` table. Indexed search returns snippets and symbol
   locations; `search_code` and `find_symbols` use the index when the desktop
   supplies it and fall back to live scans otherwise.
-- The desktop automatically indexes an empty workspace and exposes a Workspace
-  index panel with file/symbol counts and a refresh action. Indexing runs on a
+- The desktop automatically indexes an empty workspace, refreshes the index in
+  the background after every completed turn, and exposes a Workspace index
+  panel with file/symbol counts and a refresh action. Indexing runs on a
   blocking task so the chat UI stays responsive.
 - Default indexing limits are 512 KiB per file and 64 directory levels. The
   extension allowlist covers common source, config, and documentation formats;
