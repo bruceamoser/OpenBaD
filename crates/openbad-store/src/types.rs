@@ -245,3 +245,22 @@ pub struct IndexSummary {
     pub bytes: u64,
     pub indexed_at: Option<i64>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileCheckpointSummary {
+    pub id: String,
+    pub path: String,
+    pub existed: bool,
+    pub bytes: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileCheckpoint {
+    pub id: String,
+    pub session_id: SessionId,
+    pub path: String,
+    pub existed: bool,
+    pub content: Option<Vec<u8>>,
+    pub created_at: i64,
+}

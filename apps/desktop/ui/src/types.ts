@@ -77,6 +77,14 @@ export type IndexReport = {
   summary: WorkspaceIndexSummary;
 };
 
+export type FileCheckpointSummary = {
+  id: string;
+  path: string;
+  existed: boolean;
+  bytes: number;
+  created_at: number;
+};
+
 export type SessionSummary = {
   id: string;
   workspace_id: string | null;

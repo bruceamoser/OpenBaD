@@ -78,3 +78,20 @@ test("searches recent sessions by message text", async ({ page }) => {
   await expect(sessionButton).toHaveCount(0);
   await expect(page.getByText("No sessions yet.")).toBeVisible();
 });
+
+test("lists and restores a file checkpoint", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("textbox", { name: /Ask OpenBaD/ }).fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText(/cached \(/)).toBeVisible();
+
+  await expect(page.getByText("/mnt/disk4/repos/OpenBaD/src/main.rs")).toBeVisible();
+  await page.getByRole("button", { name: "Diff" }).click();
+  await expect(page.getByText("+new content")).toBeVisible();
+
+  await page.getByRole("button", { name: "Restore" }).click();
+
+  await expect(page.getByText(/Restored /)).toBeVisible();
+  await expect(page.getByText("No checkpoints yet.")).toBeVisible();
+});

@@ -31,3 +31,4 @@ openbad-tools = { path = "../../../crates/openbad-tools" }
 openbad-workspace = { path = "../../../crates/openbad-workspace" }
 openbad-index = { path = "../../../crates/openbad-index" }
 openbad-governance = { path = "../../../crates/openbad-governance" }
+similar = "2"

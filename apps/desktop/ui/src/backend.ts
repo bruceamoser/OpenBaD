@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   ChatReply,
   Foundation,
+  FileCheckpointSummary,
   IndexReport,
   SessionSummary,
   SessionView,
@@ -17,6 +18,7 @@ const isTauri =
 let mockKeyConfigured = false;
 let mockCancelled = false;
 let mockSessionCounter = 1;
+let mockCheckpoints: FileCheckpointSummary[] = [];
 let mockIndex: WorkspaceIndexSummary = {
   files: 42,
   symbols: 216,
@@ -38,7 +40,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0003_workspace_index",
+    schema_version: "0004_file_checkpoints",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -65,6 +67,34 @@ export async function loadFoundation(): Promise<Foundation> {
 
 export async function loadSessions(): Promise<SessionSummary[]> {
   return isTauri ? invoke<SessionSummary[]>("sessions") : [...mockSessions];
+}
+
+export async function loadCheckpoints(
+  sessionId: string,
+): Promise<FileCheckpointSummary[]> {
+  if (isTauri) {
+    return invoke<FileCheckpointSummary[]>("checkpoints", { sessionId });
+  }
+  return mockCheckpoints.filter(() => sessionId.length > 0);
+}
+
+export async function checkpointDiff(checkpointId: string): Promise<string> {
+  if (isTauri) {
+    return invoke<string>("checkpoint_diff", { checkpointId });
+  }
+  const checkpoint = mockCheckpoints.find((item) => item.id === checkpointId);
+  return checkpoint
+    ? `--- a/${checkpoint.path}\n+++ b/${checkpoint.path}\n@@ -1 +1 @@\n-old content\n+new content\n`
+    : "";
+}
+
+export async function restoreCheckpoint(checkpointId: string): Promise<string> {
+  if (isTauri) {
+    return invoke<string>("restore_checkpoint", { checkpointId });
+  }
+  const checkpoint = mockCheckpoints.find((item) => item.id === checkpointId);
+  mockCheckpoints = mockCheckpoints.filter((item) => item.id !== checkpointId);
+  return checkpoint?.path ?? "unknown";
 }
 
 export async function searchSessions(query: string): Promise<SessionSummary[]> {
@@ -243,6 +273,16 @@ async function mockChat(
       { role: "user", text: input.message, reasoning: null },
       { role: "assistant", text, reasoning: "The user wants a workspace summary." },
     ]);
+  }
+
+  if (mockCheckpoints.length === 0) {
+    mockCheckpoints.push({
+      id: `mock-checkpoint-${Date.now()}`,
+      path: "/mnt/disk4/repos/OpenBaD/src/main.rs",
+      existed: true,
+      bytes: 128,
+      created_at: Date.now(),
+    });
   }
 
   return {

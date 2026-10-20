@@ -16,6 +16,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_workspace_index",
         include_str!("../migrations/0003_workspace_index.sql"),
     ),
+    (
+        "0004_file_checkpoints",
+        include_str!("../migrations/0004_file_checkpoints.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

@@ -12,7 +12,7 @@ use openbad_llm::chat::{
 use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
-use openbad_tools::{ToolContext, ToolRegistry, WorkspaceSearch};
+use openbad_tools::{CheckpointSink, ToolContext, ToolRegistry, WorkspaceSearch};
 use openbad_workspace::WorkspaceService;
 use serde_json::Value;
 use uuid::Uuid;
@@ -85,6 +85,7 @@ pub struct Agent<T: HttpTransport> {
     tools: ToolRegistry,
     workspace: Arc<WorkspaceService>,
     search: Option<Arc<dyn WorkspaceSearch>>,
+    checkpoints: Option<Arc<dyn CheckpointSink>>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -102,6 +103,7 @@ impl<T: HttpTransport> Agent<T> {
             tools,
             workspace,
             search: None,
+            checkpoints: None,
             redactions: Vec::new(),
             config,
         }
@@ -110,6 +112,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_search(mut self, search: Arc<dyn WorkspaceSearch>) -> Self {
         self.search = Some(search);
+        self
+    }
+
+    #[must_use]
+    pub fn with_checkpoints(mut self, checkpoints: Arc<dyn CheckpointSink>) -> Self {
+        self.checkpoints = Some(checkpoints);
         self
     }
 
@@ -151,6 +159,7 @@ impl<T: HttpTransport> Agent<T> {
             context.allow_writes = self.config.allow_writes;
             context.allow_commands = self.config.allow_commands;
             context.search = self.search.clone();
+            context.checkpoints = self.checkpoints.clone();
             context
         });
 
