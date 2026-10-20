@@ -1,0 +1,26 @@
+name: asciidoc
+description: Render AsciiDoc documents with asciidoctor, with explicit dependency checks.
+version: 0.1.0
+command: python3 main.py
+timeout_seconds: 120
+actions:
+  check:
+    description: Report whether asciidoctor and asciidoctor-pdf are available.
+  render:
+    description: Render a workspace AsciiDoc file to HTML, DocBook, or PDF.
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: Workspace-relative path to the .adoc file.
+        output:
+          type: string
+          description: Optional workspace-relative output path.
+        backend:
+          type: string
+          enum: [html5, docbook, pdf]
+        attributes:
+          type: object
+          description: Optional AsciiDoc attributes.
+      required: [path]
