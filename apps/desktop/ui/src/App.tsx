@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  Copy,
   Database,
   Folder,
   FolderGit2,
@@ -1949,6 +1950,32 @@ function SessionRow({
   );
 }
 
+function CopyMessageButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={copied ? "Copied" : label}
+      title={copied ? "Copied" : label}
+      onClick={() => {
+        if (!navigator.clipboard) {
+          return;
+        }
+        void navigator.clipboard
+          .writeText(text)
+          .then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1_500);
+          })
+          .catch(() => undefined);
+      }}
+      className="ml-1 rounded p-0.5 text-slate-600 hover:text-slate-300 focus-visible:text-slate-300"
+    >
+      {copied ? <Check size={11} /> : <Copy size={11} />}
+    </button>
+  );
+}
+
 function MessageCard({ entry }: { entry: ChatEntry }) {
   if (entry.role === "user") {
     return (
@@ -1965,7 +1992,7 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
     );
   }
   return (
-    <div className="flex gap-3">
+    <div className="group/message flex gap-3">
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-slate-400">
         <Bot size={13} />
       </div>
@@ -1973,6 +2000,9 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
         <div className="flex items-center gap-2 text-[10px] text-slate-500">
           <span className="font-medium text-slate-400">OpenBaD</span>
           {entry.status !== undefined && <span>· {entry.status}</span>}
+          {entry.text.length > 0 && (
+            <CopyMessageButton text={entry.text} label="Copy response" />
+          )}
         </div>
         {entry.reasoning !== undefined && entry.reasoning.length > 0 && (
           <details className="mt-2 rounded-md border border-white/[0.05] bg-black/20 px-3 py-2">

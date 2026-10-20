@@ -116,6 +116,22 @@ test("stops an in-flight turn", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
 });
 
+test("copies the assistant response from the message header", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await sendPrompt(page);
+
+  const copy = page.getByRole("button", { name: "Copy response" });
+  await expect(copy).toBeVisible();
+  await copy.click();
+  await expect(page.getByRole("button", { name: "Copied" })).toBeVisible();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toContain("I read");
+});
+
 test("steers a running turn", async ({ page }) => {
   await page.goto("/");
   const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
@@ -300,6 +316,47 @@ test("keeps project knowledge and retrieval in the split workspace", async ({
 
   await expect(page.getByText("Product thesis")).toBeVisible();
   await expect(page.getByText("apps/desktop/ui/src/App.tsx").first()).toBeVisible();
+});
+
+test("downloads knowledge and prepares a printable PDF view", async ({ page }) => {
+  await page.addInitScript(() => {
+    const state = { printed: 0, text: "" };
+    (window as unknown as { __printState: typeof state }).__printState = state;
+    window.print = () => {
+      state.printed += 1;
+      state.text = document.querySelector(".knowledge-print")?.textContent ?? "";
+    };
+  });
+  await page.goto("/");
+  await clickMenu(page, "View", "Knowledge");
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }),
+  ).toBeVisible();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download Product thesis" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("product-thesis.md");
+
+  await page.getByRole("button", { name: "Export Product thesis as PDF" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __printState: { printed: number } }).__printState
+            .printed,
+      ),
+    )
+    .toBe(1);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __printState: { text: string } }).__printState
+            .text,
+      ),
+    )
+    .toContain("Product thesis");
 });
 
 test("opens assistant-presented artifacts beside the chat", async ({ page }) => {
