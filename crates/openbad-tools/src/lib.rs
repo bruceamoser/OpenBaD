@@ -530,6 +530,11 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(JobStartTool);
+        registry.register(JobStatusTool);
+        registry.register(JobLogsTool);
+        registry.register(JobStopTool);
+        registry.register(JobListTool);
         registry.register(ContextReportTool);
         registry.register(RecordClaimTool);
         registry.register(ListClaimsTool);
@@ -1033,6 +1038,72 @@ fn update_context_rule(
         "pinned": policy.pinned.len(),
         "excluded": policy.excluded.len()
     })))
+}
+
+fn parse_diagnostics(kind: &str, output: &str) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    let mut pending: Option<(String, String)> = None;
+    let rust = regex::Regex::new(r"^(?P<sev>error|warning)(?:\[[^\]]+\])?: (?P<msg>.*)$").ok();
+    let location = regex::Regex::new(r"^\s*-->\s+(?P<path>[^:]+):(?P<line>\d+):(?P<col>\d+)").ok();
+    let generic = regex::Regex::new(
+        r"^(?P<path>[^:\n]+):(?P<line>\d+):(?P<col>\d+)\s*[-:]?\s*(?P<sev>error|warning|note)\s*[:\-]?\s*(?P<msg>.*)$",
+    )
+    .ok();
+    let pytest =
+        regex::Regex::new(r"^FAILED (?P<path>[^:]+)::(?P<test>[^ ]+)(?: - (?P<msg>.*))?$").ok();
+    for line in output.lines() {
+        if matches!(kind, "rust" | "auto") {
+            if let (Some(rust), Some(location)) = (&rust, &location) {
+                if let Some(captures) = rust.captures(line) {
+                    pending = Some((captures["sev"].to_owned(), captures["msg"].to_owned()));
+                    continue;
+                }
+                if let Some(captures) = location.captures(line) {
+                    if let Some((severity, message)) = pending.take() {
+                        diagnostics.push(json!({
+                            "path": captures["path"].trim(),
+                            "line": captures["line"].parse::<u64>().unwrap_or(0),
+                            "column": captures["col"].parse::<u64>().unwrap_or(0),
+                            "severity": severity,
+                            "message": message
+                        }));
+                        continue;
+                    }
+                }
+            }
+        }
+        if matches!(kind, "pytest" | "auto") {
+            if let Some(captures) = pytest.as_ref().and_then(|pytest| pytest.captures(line)) {
+                diagnostics.push(json!({
+                    "path": captures["path"].trim(),
+                    "line": 0,
+                    "column": 0,
+                    "severity": "error",
+                    "message": format!(
+                        "{} {}",
+                        captures.name("test").map(|test| test.as_str()).unwrap_or_default(),
+                        captures.name("msg").map(|msg| msg.as_str()).unwrap_or_default()
+                    ).trim()
+                }));
+                continue;
+            }
+        }
+        if matches!(kind, "eslint" | "typescript" | "auto") {
+            if let Some(captures) = generic.as_ref().and_then(|generic| generic.captures(line)) {
+                let severity = captures["sev"].to_owned();
+                if severity != "note" {
+                    diagnostics.push(json!({
+                        "path": captures["path"].trim(),
+                        "line": captures["line"].parse::<u64>().unwrap_or(0),
+                        "column": captures["col"].parse::<u64>().unwrap_or(0),
+                        "severity": severity,
+                        "message": captures["msg"].trim()
+                    }));
+                }
+            }
+        }
+    }
+    diagnostics
 }
 
 static SECRET_PATTERNS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
@@ -2572,7 +2643,8 @@ impl Tool for RunCommandTool {
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "description": "Workspace-relative directory"},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-                "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"}
+                "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"},
+                "parse": {"type": "string", "enum": ["auto", "rust", "pytest", "eslint", "typescript"], "description": "Extract structured diagnostics from output"}
             },
             "required": ["command"],
             "additionalProperties": false
@@ -2659,6 +2731,8 @@ impl Tool for RunCommandTool {
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
 
+        let parse = optional_string(&arguments, "parse").unwrap_or_else(|| "auto".to_owned());
+        let diagnostics = parse_diagnostics(&parse, &format!("{stderr}\n{stdout}"));
         let full = format!(
             "$ {command}\nexit: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
             status.code().unwrap_or(-1)
@@ -2679,12 +2753,32 @@ impl Tool for RunCommandTool {
                 head_tail(&full, preview_cap / 2)
             )
         };
+        let content = if diagnostics.is_empty() {
+            content
+        } else {
+            let summary = diagnostics
+                .iter()
+                .take(20)
+                .map(|diagnostic| {
+                    format!(
+                        "- {} {}:{} {}",
+                        diagnostic["severity"].as_str().unwrap_or("error"),
+                        diagnostic["path"].as_str().unwrap_or_default(),
+                        diagnostic["line"].as_u64().unwrap_or(0),
+                        diagnostic["message"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{content}\n\ndiagnostics: {}\n{summary}", diagnostics.len())
+        };
         Ok(ToolResult::ok(content).with_metadata(json!({
             "exit_code": status.code(),
             "success": status.success(),
             "command_class": class.label(),
             "output_bytes": full.len(),
-            "log_path": log_path
+            "log_path": log_path,
+            "diagnostics": diagnostics
         })))
     }
 }
@@ -4823,6 +4917,322 @@ impl Tool for ListUnknownsTool {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct JobRecord {
+    id: String,
+    command: String,
+    pid: u32,
+    started_at: i64,
+    log_path: String,
+    #[serde(default)]
+    stopped: bool,
+}
+
+fn jobs_directory(context: &ToolContext) -> std::path::PathBuf {
+    context.workspace.root().join(".openbad").join("jobs")
+}
+
+fn load_job(context: &ToolContext, id: &str) -> Result<JobRecord, ToolError> {
+    let path = jobs_directory(context).join(format!("{id}.json"));
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| ToolError::InvalidArgument(format!("unknown job {id}: {error}")))?;
+    serde_json::from_str(&content).map_err(|error| ToolError::Failed(error.to_string()))
+}
+
+fn job_alive(pid: u32) -> bool {
+    let path = std::path::Path::new("/proc")
+        .join(pid.to_string())
+        .join("stat");
+    let Ok(stat) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    stat.split_whitespace().nth(2) != Some("Z")
+}
+
+struct JobStartTool;
+
+#[async_trait]
+impl Tool for JobStartTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "job_start",
+            "Start a background command and return a job id. Logs stream to .openbad/jobs/<id>.log. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "confirm_destructive": {"type": "boolean"}
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "job_start (requires Full access)".to_owned(),
+            ));
+        }
+        let command = string_arg(&arguments, "command")?;
+        let class = classify_command(&command);
+        if class == CommandClass::Destructive
+            && !optional_bool(&arguments, "confirm_destructive").unwrap_or(false)
+        {
+            return Err(ToolError::ApprovalRequired(
+                "job_start (destructive command; set confirm_destructive=true)".to_owned(),
+            ));
+        }
+        check_command_policy(context, class, &command)?;
+        let directory = jobs_directory(context);
+        std::fs::create_dir_all(&directory)?;
+        let id = format!("job-{}", now_millis());
+        let log_path = directory.join(format!("{id}.log"));
+        let stdout = std::fs::File::create(&log_path)?;
+        let stderr = stdout.try_clone()?;
+        let mut process = std::process::Command::new("sh");
+        process
+            .args(["-c", &command])
+            .current_dir(context.workspace.root())
+            .stdout(stdout)
+            .stderr(stderr)
+            .stdin(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        let mut child = process.spawn()?;
+        let pid = child.id();
+        let record = JobRecord {
+            id: id.clone(),
+            command: command.clone(),
+            pid,
+            started_at: now_millis(),
+            log_path: log_path.to_string_lossy().into_owned(),
+            stopped: false,
+        };
+        std::fs::write(
+            directory.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&record)
+                .map_err(|error| ToolError::Failed(error.to_string()))?,
+        )?;
+        let _ = &mut child;
+        Ok(ToolResult::ok(format!("started {id} (pid {pid})"))
+            .with_metadata(json!({"id": id, "pid": pid, "log_path": log_path})))
+    }
+}
+
+struct JobStatusTool;
+
+#[async_trait]
+impl Tool for JobStatusTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "job_status",
+            "Report whether a background job is running.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let id = string_arg(&arguments, "id")?;
+        let record = load_job(context, &id)?;
+        let alive = !record.stopped && job_alive(record.pid);
+        Ok(ToolResult::ok(format!(
+            "{id}: {} (pid {})",
+            if alive { "running" } else { "exited" },
+            record.pid
+        ))
+        .with_metadata(json!({
+            "id": record.id,
+            "command": record.command,
+            "pid": record.pid,
+            "running": alive,
+            "stopped": record.stopped,
+            "started_at": record.started_at,
+            "log_path": record.log_path
+        })))
+    }
+}
+
+struct JobLogsTool;
+
+#[async_trait]
+impl Tool for JobLogsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "job_logs",
+            "Read the tail of a background job log.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "max_bytes": {"type": "integer", "minimum": 256, "maximum": 65536}
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let id = string_arg(&arguments, "id")?;
+        let record = load_job(context, &id)?;
+        let max_bytes = optional_usize(&arguments, "max_bytes")
+            .unwrap_or(8_192)
+            .clamp(256, 65_536);
+        let content = std::fs::read_to_string(&record.log_path).unwrap_or_default();
+        let tail = if content.len() <= max_bytes {
+            content
+        } else {
+            let start = content.len().saturating_sub(max_bytes);
+            let start = content
+                .char_indices()
+                .find(|(index, _)| *index >= start)
+                .map(|(index, _)| index)
+                .unwrap_or(content.len());
+            format!("…\n{}", &content[start..])
+        };
+        Ok(
+            ToolResult::ok(truncate(&tail, max_bytes)).with_metadata(json!({
+                "id": record.id,
+                "running": !record.stopped && job_alive(record.pid),
+                "stopped": record.stopped
+            })),
+        )
+    }
+}
+
+struct JobStopTool;
+
+#[async_trait]
+impl Tool for JobStopTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "job_stop",
+            "Stop a background job process group.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "job_stop (requires Full access)".to_owned(),
+            ));
+        }
+        let id = string_arg(&arguments, "id")?;
+        let mut record = load_job(context, &id)?;
+        #[cfg(unix)]
+        {
+            unsafe {
+                libc::kill(-(record.pid as i32), libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &record.pid.to_string(), "/T", "/F"])
+                .status();
+        }
+        record.stopped = true;
+        std::fs::write(
+            jobs_directory(context).join(format!("{id}.json")),
+            serde_json::to_string_pretty(&record)
+                .map_err(|error| ToolError::Failed(error.to_string()))?,
+        )?;
+        Ok(ToolResult::ok(format!("stopped {id}")))
+    }
+}
+
+struct JobListTool;
+
+#[async_trait]
+impl Tool for JobListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("job_list", "List background jobs.", RiskLevel::Read)
+            .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let directory = jobs_directory(context);
+        if !directory.is_dir() {
+            return Ok(ToolResult::ok("no jobs"));
+        }
+        let mut records = std::fs::read_dir(directory)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    == Some("json")
+            })
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|content| serde_json::from_str::<JobRecord>(&content).ok())
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.started_at);
+        if records.is_empty() {
+            return Ok(ToolResult::ok("no jobs"));
+        }
+        Ok(ToolResult::ok(
+            records
+                .iter()
+                .map(|record| {
+                    format!(
+                        "- {}: {} ({})",
+                        record.id,
+                        if job_alive(record.pid) {
+                            "running"
+                        } else {
+                            "exited"
+                        },
+                        record.command
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .with_metadata(json!({"jobs": records.len()})))
     }
 }
 
@@ -8345,6 +8755,61 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn background_jobs_and_diagnostic_parsing_work() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+        let started = JobStartTool
+            .execute(
+                json!({"command": "printf 'hello job\\n'; sleep 0.4"}),
+                &context,
+            )
+            .await
+            .expect("job");
+        let id = started.metadata["id"].as_str().expect("id").to_owned();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let logs = JobLogsTool
+            .execute(json!({"id": id}), &context)
+            .await
+            .expect("logs");
+        assert!(logs.content.contains("hello job"));
+        let status = JobStatusTool
+            .execute(json!({"id": id}), &context)
+            .await
+            .expect("status");
+        assert!(status.content.contains(&id));
+        let listed = JobListTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains(&id));
+
+        let sleeper = JobStartTool
+            .execute(json!({"command": "sleep 30"}), &context)
+            .await
+            .expect("sleeper");
+        let sleeper_id = sleeper.metadata["id"].as_str().expect("id").to_owned();
+        JobStopTool
+            .execute(json!({"id": sleeper_id}), &context)
+            .await
+            .expect("stop");
+        let stopped = JobStatusTool
+            .execute(json!({"id": sleeper_id}), &context)
+            .await
+            .expect("stopped status");
+        assert!(stopped.content.contains("exited"));
+
+        let rust = parse_diagnostics(
+            "rust",
+            "error[E0308]: mismatched types\n  --> src/main.rs:10:5\n",
+        );
+        assert_eq!(rust[0]["path"], "src/main.rs");
+        assert_eq!(rust[0]["line"], 10);
+        let eslint = parse_diagnostics("eslint", "src/app.ts:4:9 error Unexpected token\n");
+        assert_eq!(eslint[0]["severity"], "error");
     }
 
     #[tokio::test]

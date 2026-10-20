@@ -338,6 +338,7 @@ Implemented:
 | `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
 | `delete_file` | write | Soft delete to `.openbad/trash`; hard delete requires `hard=true` |
+| `job_start` / `job_status` / `job_logs` / `job_stop` / `job_list` | command/read | Background commands with logs under `.openbad/jobs` |
 | `context_report` | read | Estimate loaded files/knowledge/memory tokens and rules |
 | `record_claim` / `list_claims` | write/read | Provenance-tagged claims with evidence |
 | `record_unknown` / `list_unknowns` | write/read | Known-unknown register |
@@ -448,6 +449,11 @@ so large builds do not flood context.
 (including redirects), strips scripts/styles from HTML, and stores each body
 under `.openbad/web-cache` by BLAKE3 hash with URL, title, content type, and
 fetch time. `prefer_cache` reuses a recent fetch instead of hitting the network.
+
+`run_command` accepts `parse` to extract structured diagnostics for Rust,
+pytest, ESLint, and TypeScript; diagnostics are summarized in the result and
+returned in metadata. Long-running commands can use the `job_*` tools, which
+record PID and log files under `.openbad/jobs` and support explicit stop.
 
 `run_command` classifies each command as `read-only`, `write-workspace`,
 `network`, `destructive`, or `privileged`, reports the class in metadata, and
