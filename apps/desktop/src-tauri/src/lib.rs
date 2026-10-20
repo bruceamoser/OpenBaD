@@ -19,7 +19,7 @@ use openbad_store::types::{
     AuditReport, DoctorReport, ModelRouteRecord, NewModelRoute, NewProvider, ProviderRecord,
     SessionMessage, SessionSummary,
 };
-use openbad_tools::{CheckpointSink, WorkspaceSearch};
+use openbad_tools::{CheckpointSink, MemoryStore, WorkspaceSearch};
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,6 +39,57 @@ pub struct AppState {
 struct StoreSearch {
     store: Arc<Mutex<Store>>,
     workspace_id: WorkspaceId,
+}
+
+struct WorkspaceMemory {
+    store: Arc<Mutex<Store>>,
+    workspace_id: WorkspaceId,
+}
+
+impl MemoryStore for WorkspaceMemory {
+    fn remember(
+        &self,
+        content: &str,
+        tags: Vec<String>,
+        pinned: bool,
+    ) -> Result<openbad_tools::MemoryEntry, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let memory = store
+            .remember_memory(self.workspace_id, content, tags, pinned)
+            .map_err(|error| error.to_string())?;
+        Ok(openbad_tools::MemoryEntry {
+            id: memory.id,
+            content: memory.content,
+            tags: memory.tags,
+            pinned: memory.pinned,
+        })
+    }
+
+    fn recall(
+        &self,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<openbad_tools::MemoryEntry>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let memories = store
+            .recall_memories(self.workspace_id, query, limit as u32)
+            .map_err(|error| error.to_string())?;
+        Ok(memories
+            .into_iter()
+            .map(|memory| openbad_tools::MemoryEntry {
+                id: memory.id,
+                content: memory.content,
+                tags: memory.tags,
+                pinned: memory.pinned,
+            })
+            .collect())
+    }
 }
 
 struct SessionCheckpoints {
@@ -282,6 +333,38 @@ fn checkpoint_diff(state: State<'_, AppState>, checkpoint_id: String) -> Result<
         .header(&format!("a/{relative}"), &format!("b/{relative}"))
         .to_string();
     Ok(rendered.chars().take(200_000).collect())
+}
+
+#[tauri::command]
+fn memories(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<openbad_store::types::MemoryRecord>, String> {
+    let path = PathBuf::from(&workspace_path);
+    if !path.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = store
+        .ensure_workspace(workspace_name(&path), &workspace_path)
+        .map_err(|error| error.to_string())?;
+    store
+        .recall_memories(workspace, None, 20)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn forget_memory(state: State<'_, AppState>, memory_id: String) -> Result<(), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .forget_memory(&memory_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -679,6 +762,12 @@ async fn chat(
             ..AgentConfig::default()
         },
     );
+    if let Ok(workspace_id) = workspace_id.parse::<WorkspaceId>() {
+        agent = agent.with_memory(Arc::new(WorkspaceMemory {
+            store: Arc::clone(&state.store),
+            workspace_id,
+        }));
+    }
     agent = agent
         .with_redactions(redactions)
         .with_checkpoints(Arc::new(SessionCheckpoints {
@@ -995,6 +1084,8 @@ pub fn run() {
             api_key_status,
             sessions,
             search_sessions,
+            memories,
+            forget_memory,
             checkpoints,
             checkpoint_diff,
             restore_checkpoint,
@@ -1015,7 +1106,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0004_file_checkpoints");
+        assert_eq!(payload.doctor.schema_version, "0005_project_memory");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

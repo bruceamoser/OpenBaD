@@ -118,7 +118,8 @@ accounting, built-in coding tools, agent loop, and Tauri chat UI all build and
 pass tests. Streamed reasoning, cancellation, and persisted model preferences
 are working. The Phase 4 workspace index now persists file hashes, symbol
 definitions, and FTS5 text in SQLite, and file edits are checkpointed for
-restore. Per-call approvals, the evidence gate, LSP/PTY, and the Phase 5–8
+restore, and workspace-scoped memory provides `remember`/`recall` tools.
+Per-call approvals, the evidence gate, LSP/PTY, and the remaining Phase 5–8
 systems remain.
 
 - [Vision and feature set](docs/architecture/00-vision-and-feature-set.md)

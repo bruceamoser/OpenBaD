@@ -6,6 +6,7 @@ import type {
   Foundation,
   FileCheckpointSummary,
   IndexReport,
+  MemoryRecord,
   SessionSummary,
   SessionView,
   Usage,
@@ -19,6 +20,17 @@ let mockKeyConfigured = false;
 let mockCancelled = false;
 let mockSessionCounter = 1;
 let mockCheckpoints: FileCheckpointSummary[] = [];
+let mockMemories: MemoryRecord[] = [
+  {
+    id: "mock-memory-1",
+    content: "Keep the model-visible prompt prefix immutable.",
+    tags: ["cache", "decision"],
+    pinned: true,
+    created_at: Date.now() - 86_400_000,
+    updated_at: Date.now() - 3_600_000,
+    access_count: 2,
+  },
+];
 let mockIndex: WorkspaceIndexSummary = {
   files: 42,
   symbols: 216,
@@ -40,7 +52,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0004_file_checkpoints",
+    schema_version: "0005_project_memory",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -67,6 +79,21 @@ export async function loadFoundation(): Promise<Foundation> {
 
 export async function loadSessions(): Promise<SessionSummary[]> {
   return isTauri ? invoke<SessionSummary[]>("sessions") : [...mockSessions];
+}
+
+export async function loadMemories(workspacePath: string): Promise<MemoryRecord[]> {
+  if (isTauri) {
+    return invoke<MemoryRecord[]>("memories", { workspacePath });
+  }
+  return [...mockMemories];
+}
+
+export async function forgetMemory(memoryId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("forget_memory", { memoryId });
+    return;
+  }
+  mockMemories = mockMemories.filter((memory) => memory.id !== memoryId);
 }
 
 export async function loadCheckpoints(

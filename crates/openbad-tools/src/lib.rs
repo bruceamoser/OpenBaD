@@ -149,6 +149,24 @@ pub trait WorkspaceSearch: Send + Sync {
     ) -> Result<Vec<WorkspaceSymbolHit>, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEntry {
+    pub id: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub pinned: bool,
+}
+
+pub trait MemoryStore: Send + Sync {
+    fn remember(
+        &self,
+        content: &str,
+        tags: Vec<String>,
+        pinned: bool,
+    ) -> Result<MemoryEntry, String>;
+    fn recall(&self, query: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, String>;
+}
+
 pub trait CheckpointSink: Send + Sync {
     fn save(&self, path: &str, existed: bool, content: Option<&[u8]>) -> Result<String, String>;
 }
@@ -160,6 +178,7 @@ pub struct ToolContext {
     pub max_output_bytes: usize,
     pub search: Option<Arc<dyn WorkspaceSearch>>,
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
+    pub memory: Option<Arc<dyn MemoryStore>>,
     read_paths: Mutex<HashSet<PathBuf>>,
 }
 
@@ -173,6 +192,7 @@ impl ToolContext {
             max_output_bytes: 256 * 1024,
             search: None,
             checkpoints: None,
+            memory: None,
             read_paths: Mutex::new(HashSet::new()),
         }
     }
@@ -228,6 +248,8 @@ impl ToolRegistry {
         registry.register(GitStatusTool);
         registry.register(GitDiffTool);
         registry.register(RepoMapTool);
+        registry.register(RememberTool);
+        registry.register(RecallTool);
         registry
     }
 
@@ -1100,6 +1122,134 @@ fn kill_process_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+struct RememberTool;
+
+#[async_trait]
+impl Tool for RememberTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "remember",
+            "Save a durable project decision or preference to workspace memory. Repeating the same content updates it.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "pinned": {"type": "boolean"}
+            },
+            "required": ["content"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let memory = context
+            .memory
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("workspace memory is not available".to_owned()))?;
+        let content = string_arg(&arguments, "content")?;
+        if content.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "content must not be empty".to_owned(),
+            ));
+        }
+        let tags = arguments
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pinned = optional_bool(&arguments, "pinned").unwrap_or(false);
+        let entry = memory
+            .remember(&content, tags, pinned)
+            .map_err(ToolError::Failed)?;
+        let tags = if entry.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", entry.tags.join(", "))
+        };
+        Ok(ToolResult::ok(format!(
+            "remembered{}{}: {}",
+            if entry.pinned { " (pinned)" } else { "" },
+            tags,
+            entry.content
+        ))
+        .with_metadata(json!({"id": entry.id})))
+    }
+}
+
+struct RecallTool;
+
+#[async_trait]
+impl Tool for RecallTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "recall",
+            "Search durable workspace memory for prior decisions, preferences, and context.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 50}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let memory = context
+            .memory
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("workspace memory is not available".to_owned()))?;
+        let query = optional_string(&arguments, "query");
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(10)
+            .clamp(1, 50);
+        let entries = memory
+            .recall(query.as_deref(), max_results)
+            .map_err(ToolError::Failed)?;
+        if entries.is_empty() {
+            return Ok(ToolResult::ok("no matching memories"));
+        }
+        let content = entries
+            .iter()
+            .map(|entry| {
+                let tags = if entry.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", entry.tags.join(", "))
+                };
+                format!(
+                    "{}{}{}: {}",
+                    if entry.pinned { "* " } else { "- " },
+                    tags,
+                    entry.id,
+                    entry.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"matches": entries.len()})))
+    }
+}
+
 struct RunTestsTool;
 
 #[async_trait]
@@ -1686,6 +1836,79 @@ mod tests {
         assert!(symbols.content.contains("src/indexed.rs:9: fn lookup()"));
     }
 
+    struct FakeMemory {
+        entries: Mutex<Vec<MemoryEntry>>,
+    }
+
+    impl MemoryStore for FakeMemory {
+        fn remember(
+            &self,
+            content: &str,
+            tags: Vec<String>,
+            pinned: bool,
+        ) -> Result<MemoryEntry, String> {
+            let entry = MemoryEntry {
+                id: "memory-1".to_owned(),
+                content: content.to_owned(),
+                tags,
+                pinned,
+            };
+            self.entries.lock().expect("lock").push(entry.clone());
+            Ok(entry)
+        }
+
+        fn recall(&self, query: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, String> {
+            let query = query.unwrap_or_default().to_lowercase();
+            Ok(self
+                .entries
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|entry| entry.content.to_lowercase().contains(&query))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn remember_and_recall_use_workspace_memory() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.memory = Some(Arc::new(FakeMemory {
+            entries: Mutex::new(Vec::new()),
+        }));
+
+        let remembered = RememberTool
+            .execute(
+                json!({
+                    "content": "Keep the prompt prefix immutable",
+                    "tags": ["cache"],
+                    "pinned": true
+                }),
+                &context,
+            )
+            .await
+            .expect("remember");
+        assert!(remembered.content.contains("pinned"));
+        assert!(
+            remembered
+                .content
+                .contains("Keep the prompt prefix immutable")
+        );
+
+        let recalled = RecallTool
+            .execute(json!({"query": "immutable"}), &context)
+            .await
+            .expect("recall");
+        assert!(
+            recalled
+                .content
+                .contains("Keep the prompt prefix immutable")
+        );
+        assert!(recalled.content.contains("[cache]"));
+    }
+
     #[test]
     fn detects_test_commands_and_failure_lines() {
         let cargo = tempdir().expect("cargo");
@@ -1726,7 +1949,7 @@ mod tests {
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
-        assert!(definitions.len() >= 13);
+        assert!(definitions.len() >= 15);
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
     }

@@ -12,7 +12,7 @@ use openbad_llm::chat::{
 use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
-use openbad_tools::{CheckpointSink, ToolContext, ToolRegistry, WorkspaceSearch};
+use openbad_tools::{CheckpointSink, MemoryStore, ToolContext, ToolRegistry, WorkspaceSearch};
 use openbad_workspace::WorkspaceService;
 use serde_json::Value;
 use uuid::Uuid;
@@ -86,6 +86,7 @@ pub struct Agent<T: HttpTransport> {
     workspace: Arc<WorkspaceService>,
     search: Option<Arc<dyn WorkspaceSearch>>,
     checkpoints: Option<Arc<dyn CheckpointSink>>,
+    memory: Option<Arc<dyn MemoryStore>>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -104,6 +105,7 @@ impl<T: HttpTransport> Agent<T> {
             workspace,
             search: None,
             checkpoints: None,
+            memory: None,
             redactions: Vec::new(),
             config,
         }
@@ -118,6 +120,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_checkpoints(mut self, checkpoints: Arc<dyn CheckpointSink>) -> Self {
         self.checkpoints = Some(checkpoints);
+        self
+    }
+
+    #[must_use]
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
+        self.memory = Some(memory);
         self
     }
 
@@ -160,6 +168,7 @@ impl<T: HttpTransport> Agent<T> {
             context.allow_commands = self.config.allow_commands;
             context.search = self.search.clone();
             context.checkpoints = self.checkpoints.clone();
+            context.memory = self.memory.clone();
             context
         });
 
@@ -376,6 +385,7 @@ impl<T: HttpTransport> Agent<T> {
             "You are OpenBaD, a precise coding agent working in {}.\n\
 Use the provided tools to inspect and change files. Read a file before editing it.\n\
 Prefer small, surgical changes and run the relevant tests when useful.\n\
+Use recall and remember for durable project decisions when they matter.\n\
 Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         )

@@ -16,8 +16,9 @@ use crate::now_millis;
 use crate::projections;
 use crate::types::{
     AuditRecord, AuditReport, DoctorReport, FileCheckpoint, FileCheckpointSummary, IndexHit,
-    IndexSummary, IndexedFile, ModelRouteRecord, NewModelRoute, NewProvider, NewSession,
-    NewWorkspace, ProviderRecord, SessionMessage, SessionSummary, SessionTurn, SymbolHit,
+    IndexSummary, IndexedFile, MemoryRecord, ModelRouteRecord, NewModelRoute, NewProvider,
+    NewSession, NewWorkspace, ProviderRecord, SessionMessage, SessionSummary, SessionTurn,
+    SymbolHit,
 };
 
 enum WriteCommand {
@@ -87,6 +88,17 @@ enum WriteCommand {
     },
     DeleteFileCheckpoint {
         checkpoint_id: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    RememberMemory {
+        workspace_id: WorkspaceId,
+        content: String,
+        tags: Vec<String>,
+        pinned: bool,
+        reply: SyncSender<Result<MemoryRecord, StoreError>>,
+    },
+    ForgetMemory {
+        memory_id: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
     Shutdown,
@@ -328,6 +340,69 @@ impl Store {
             });
         }
         Ok(sessions)
+    }
+
+    pub fn remember_memory(
+        &self,
+        workspace_id: WorkspaceId,
+        content: &str,
+        tags: Vec<String>,
+        pinned: bool,
+    ) -> Result<MemoryRecord, StoreError> {
+        self.write(|reply| WriteCommand::RememberMemory {
+            workspace_id,
+            content: content.to_owned(),
+            tags,
+            pinned,
+            reply,
+        })
+    }
+
+    pub fn recall_memories(
+        &self,
+        workspace_id: WorkspaceId,
+        query: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<MemoryRecord>, StoreError> {
+        let connection = self.reader()?;
+        let has_query = query.is_some_and(|query| !query.is_empty());
+        let pattern = query.map_or_else(String::new, |query| {
+            format!(
+                "%{}%",
+                query
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
+        let mut statement = connection.prepare(
+            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count
+             FROM memories
+             WHERE workspace_id = ?1
+               AND forgotten_at IS NULL
+               AND (?2 = 0
+                    OR lower(content) LIKE lower(?3) ESCAPE '\\'
+                    OR lower(tags_json) LIKE lower(?3) ESCAPE '\\')
+             ORDER BY pinned DESC, updated_at DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                workspace_id.to_string(),
+                i64::from(has_query),
+                pattern,
+                i64::from(limit)
+            ],
+            memory_record_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn forget_memory(&self, memory_id: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::ForgetMemory {
+            memory_id: memory_id.to_owned(),
+            reply,
+        })
     }
 
     pub fn save_file_checkpoint(
@@ -991,6 +1066,65 @@ fn fts_terms(query: &str) -> String {
     terms.join(" AND ")
 }
 
+pub fn remember_memory(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    content: &str,
+    tags: Vec<String>,
+    pinned: bool,
+) -> Result<MemoryRecord, StoreError> {
+    let workspace = workspace_id.to_string();
+    let tags_json = serde_json::to_string(&tags)?;
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT id FROM memories
+         WHERE workspace_id = ?1 AND content = ?2 AND forgotten_at IS NULL",
+            params![workspace, content],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let now = now_millis();
+    let id = if let Some(id) = existing {
+        connection.execute(
+            "UPDATE memories
+         SET tags_json = ?1, pinned = MAX(pinned, ?2), updated_at = ?3
+         WHERE id = ?4",
+            params![tags_json, pinned, now, id],
+        )?;
+        id
+    } else {
+        let id = Uuid::now_v7().to_string();
+        connection.execute(
+            "INSERT INTO memories
+            (id, workspace_id, content, tags_json, pinned, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id, workspace, content, tags_json, pinned, now],
+        )?;
+        id
+    };
+    connection
+        .query_row(
+            "SELECT id, content, tags_json, pinned, created_at, updated_at, access_count
+         FROM memories WHERE id = ?1",
+            [id],
+            memory_record_from_row,
+        )
+        .map_err(StoreError::from)
+}
+
+fn memory_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
+    let tags_json: String = row.get(2)?;
+    Ok(MemoryRecord {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+        pinned: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        access_count: row.get::<_, i64>(6)? as u32,
+    })
+}
+
 fn save_file_checkpoint(
     connection: &Connection,
     session_id: SessionId,
@@ -1131,6 +1265,31 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     .execute(
                         "DELETE FROM file_checkpoints WHERE id = ?1",
                         [&checkpoint_id],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
+            WriteCommand::RememberMemory {
+                workspace_id,
+                content,
+                tags,
+                pinned,
+                reply,
+            } => {
+                let _ = reply.send(remember_memory(
+                    &connection,
+                    workspace_id,
+                    &content,
+                    tags,
+                    pinned,
+                ));
+            }
+            WriteCommand::ForgetMemory { memory_id, reply } => {
+                let result = connection
+                    .execute(
+                        "UPDATE memories SET forgotten_at = ?1, updated_at = ?1 WHERE id = ?2",
+                        params![now_millis(), memory_id],
                     )
                     .map(|_| ())
                     .map_err(StoreError::from);
@@ -1355,7 +1514,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0004_file_checkpoints"
+            "0005_project_memory"
         );
     }
 
@@ -1560,6 +1719,49 @@ mod tests {
             store
                 .search_sessions("missing", 10)
                 .expect("empty search")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn memories_round_trip_dedupe_and_forget() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("memory", "/tmp/openbad-memory")
+            .expect("workspace");
+        let memory = store
+            .remember_memory(
+                workspace,
+                "Use the cache-first prompt order.",
+                vec!["decision".to_owned()],
+                true,
+            )
+            .expect("remember");
+        assert!(memory.pinned);
+
+        let duplicate = store
+            .remember_memory(
+                workspace,
+                "Use the cache-first prompt order.",
+                vec!["prompt".to_owned()],
+                false,
+            )
+            .expect("dedupe");
+        assert_eq!(duplicate.id, memory.id);
+        assert_eq!(duplicate.tags, vec!["prompt".to_owned()]);
+        assert!(duplicate.pinned);
+
+        let recalled = store
+            .recall_memories(workspace, Some("cache"), 10)
+            .expect("recall");
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].id, memory.id);
+
+        store.forget_memory(&memory.id).expect("forget");
+        assert!(
+            store
+                .recall_memories(workspace, None, 10)
+                .expect("recall after forget")
                 .is_empty()
         );
     }
