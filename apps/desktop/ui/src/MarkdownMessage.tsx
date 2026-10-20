@@ -133,6 +133,9 @@ function CopyButton({ text }: { text: string }) {
       type="button"
       className="markdown-copy"
       onClick={() => {
+        if (!navigator.clipboard) {
+          return;
+        }
         void navigator.clipboard
           .writeText(text)
           .then(() => {
@@ -147,7 +150,9 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function MarkdownPre({ children, ...props }: ComponentProps<"pre">) {
+type MarkdownPreProps = ComponentProps<"pre"> & { node?: unknown };
+
+function MarkdownPre({ children, node: _node, ...props }: MarkdownPreProps) {
   const child = Array.isArray(children) ? children[0] : children;
   if (isValidElement(child) && child.type === MermaidDiagram) {
     return <>{children}</>;
@@ -171,18 +176,18 @@ export default function MarkdownMessage({ text }: { text: string }) {
           [rehypeHighlight, { detect: true, ignoreMissing: true }],
         ]}
         components={{
-          a: ({ children, ...props }) => (
+          a: ({ children, node: _node, ...props }) => (
             <a {...props} target="_blank" rel="noreferrer">
               {children}
             </a>
           ),
           pre: MarkdownPre,
-          table: ({ children, ...props }) => (
+          table: ({ children, node: _node, ...props }) => (
             <div className="markdown-table-wrap">
               <table {...props}>{children}</table>
             </div>
           ),
-          code: ({ className, children, ...props }) => {
+          code: ({ className, children, node: _node, ...props }) => {
             const language = /language-([\w-]+)/.exec(className ?? "")?.[1];
             if (language === "mermaid") {
               return (
