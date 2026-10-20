@@ -1099,6 +1099,12 @@ export default function App() {
           onSelect: () => openPanel("workspace"),
         },
         {
+          label: "Agents",
+          checked: panelOpen && panelTab === "agents",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("agents"),
+        },
+        {
           label: "References",
           checked: panelOpen && panelTab === "repos",
           disabled: activeProject === null,
@@ -1297,6 +1303,12 @@ export default function App() {
                           label="Workspace"
                           active={panelOpen && panelTab === "workspace"}
                           onClick={() => openPanel("workspace")}
+                        />
+                        <ProjectAreaButton
+                          icon={<Bot size={12} />}
+                          label="Agents"
+                          active={panelOpen && panelTab === "agents"}
+                          onClick={() => openPanel("agents")}
                         />
                         <ProjectAreaButton
                           icon={<FolderGit2 size={12} />}
@@ -2437,6 +2449,7 @@ function CommandPalette({
     { label: "Settings: Project", hint: "", run: () => onSettings("project") },
     { label: "Project: Overview", hint: "", run: () => onContext("overview") },
     { label: "Project: Workspace", hint: "", run: () => onContext("workspace") },
+    { label: "Project: Agents", hint: "", run: () => onContext("agents") },
     { label: "Project: References", hint: "", run: () => onContext("repos") },
     { label: "Project: Knowledge", hint: "", run: () => onContext("knowledge") },
     { label: "Project: Retrieval", hint: "", run: () => onContext("retrieval") },

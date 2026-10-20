@@ -47,3 +47,16 @@ session knows what moved without re-reading every document.
   composer also queues messages for the next turn. See the turn rules in
   `05-agent-runtime-and-tools.md` and the composer notes in
   `08-desktop-application.md`.
+
+## 2026-10-21
+
+- **Subagents.** The `subagent` tool spawns, lists, inspects, and cancels
+  directed background workers. Records live in the `subagents` table; the
+  project panel has a new Agents area with live status, activity, result
+  artifacts, and cancellation. Workers inherit the session access mode and
+  cannot spawn further workers. See section 9 of
+  `05-agent-runtime-and-tools.md` and the project areas document.
+- **Tool budget.** Deprecated `github_issue`, `github_pr`, and `github_ci`
+  aliases were removed so the sorted built-in surface stays at 128 tools, and
+  the GitHub workflow skill now uses the real `git_branch`/`git_checkout`
+  arguments.

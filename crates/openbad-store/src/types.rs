@@ -354,3 +354,32 @@ pub struct ProjectOverview {
     pub memories: u64,
     pub index: IndexSummary,
 }
+
+/// A background subagent spawned by the main agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentRecord {
+    pub id: String,
+    pub workspace_id: WorkspaceId,
+    pub parent_session_id: Option<String>,
+    pub title: String,
+    pub task: String,
+    pub model: String,
+    pub status: String,
+    pub log: String,
+    pub result: String,
+    pub error: Option<String>,
+    pub steps: u32,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// A patch applied to a subagent record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentUpdate {
+    pub status: Option<String>,
+    pub append_log: Option<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub steps: Option<u32>,
+}

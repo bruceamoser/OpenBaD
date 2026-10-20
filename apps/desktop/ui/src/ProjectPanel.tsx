@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 
+import AgentsPanel from "./AgentsPanel";
 import ArtifactViewer from "./ArtifactViewer";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import {
@@ -50,6 +51,7 @@ import type {
 export type PanelTab =
   | "overview"
   | "workspace"
+  | "agents"
   | "repos"
   | "knowledge"
   | "retrieval"
@@ -64,6 +66,7 @@ export type PanelTab =
 const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "workspace", label: "Workspace" },
+  { id: "agents", label: "Agents" },
   { id: "repos", label: "References" },
   { id: "knowledge", label: "Knowledge" },
   { id: "retrieval", label: "Retrieval" },
@@ -426,6 +429,16 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 {indexError ?? "The workspace index is empty."}
               </p>
             )}
+          </div>
+        )}
+
+        {tab === "agents" && (
+          <div className="flex min-h-[320px] flex-1 flex-col">
+            <AgentsPanel
+              workspacePath={workspacePath}
+              revision={revision}
+              onArtifact={onArtifact}
+            />
           </div>
         )}
 

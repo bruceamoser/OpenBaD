@@ -19,7 +19,7 @@ use crate::types::{
     IndexSummary, IndexedFile, KnowledgeDocument, KnowledgeDocumentSummary, MemoryRecord,
     ModelRouteRecord, NewModelRoute, NewProvider, NewSession, NewWorkspace, OutsideAccessGrant,
     ProjectHit, ProjectOverview, ProjectRepo, ProviderRecord, SessionMessage, SessionSummary,
-    SessionTurn, SymbolHit, WorkspaceSummary,
+    SessionTurn, SubagentRecord, SubagentUpdate, SymbolHit, WorkspaceSummary,
 };
 
 enum WriteCommand {
@@ -190,6 +190,15 @@ enum WriteCommand {
     DeleteKnowledgeDocument {
         document_id: String,
         reply: SyncSender<Result<(), StoreError>>,
+    },
+    CreateSubagent {
+        record: SubagentRecord,
+        reply: SyncSender<Result<SubagentRecord, StoreError>>,
+    },
+    UpdateSubagent {
+        id: String,
+        update: SubagentUpdate,
+        reply: SyncSender<Result<SubagentRecord, StoreError>>,
     },
     Shutdown,
 }
@@ -1689,6 +1698,58 @@ impl Store {
         })
     }
 
+    pub fn create_subagent(&self, record: SubagentRecord) -> Result<SubagentRecord, StoreError> {
+        self.write(|reply| WriteCommand::CreateSubagent { record, reply })
+    }
+
+    pub fn update_subagent(
+        &self,
+        id: &str,
+        update: SubagentUpdate,
+    ) -> Result<SubagentRecord, StoreError> {
+        self.write(|reply| WriteCommand::UpdateSubagent {
+            id: id.to_owned(),
+            update,
+            reply,
+        })
+    }
+
+    pub fn get_subagent(&self, id: &str) -> Result<Option<SubagentRecord>, StoreError> {
+        let connection = self.reader()?;
+        connection
+            .query_row(
+                "SELECT id, workspace_id, parent_session_id, title, task, model, status, log,
+                        result, error, steps, created_at, updated_at, finished_at
+                 FROM subagents WHERE id = ?1",
+                [id],
+                subagent_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_subagents(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+    ) -> Result<Vec<SubagentRecord>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT id, workspace_id, parent_session_id, title, task, model, status, log,
+                    result, error, steps, created_at, updated_at, finished_at
+             FROM subagents
+             WHERE workspace_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![workspace_id.to_string(), i64::from(limit.clamp(1, 200))],
+            subagent_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     fn write<T>(
         &self,
         make_command: impl FnOnce(SyncSender<Result<T, StoreError>>) -> WriteCommand,
@@ -1714,6 +1775,108 @@ impl Drop for Store {
             }
         }
     }
+}
+
+fn subagent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubagentRecord> {
+    let workspace: String = row.get(1)?;
+    Ok(SubagentRecord {
+        id: row.get(0)?,
+        workspace_id: WorkspaceId::from(
+            Uuid::parse_str(&workspace).unwrap_or_else(|_| Uuid::nil()),
+        ),
+        parent_session_id: row.get(2)?,
+        title: row.get(3)?,
+        task: row.get(4)?,
+        model: row.get(5)?,
+        status: row.get(6)?,
+        log: row.get(7)?,
+        result: row.get(8)?,
+        error: row.get(9)?,
+        steps: row.get::<_, i64>(10)?.max(0) as u32,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        finished_at: row.get(13)?,
+    })
+}
+
+fn create_subagent(
+    connection: &Connection,
+    record: SubagentRecord,
+) -> Result<SubagentRecord, StoreError> {
+    connection.execute(
+        "INSERT INTO subagents
+            (id, workspace_id, parent_session_id, title, task, model, status, log, result,
+             error, steps, created_at, updated_at, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            record.id,
+            record.workspace_id.to_string(),
+            record.parent_session_id,
+            record.title,
+            record.task,
+            record.model,
+            record.status,
+            record.log,
+            record.result,
+            record.error,
+            i64::from(record.steps),
+            record.created_at,
+            record.updated_at,
+            record.finished_at,
+        ],
+    )?;
+    connection
+        .query_row(
+            "SELECT id, workspace_id, parent_session_id, title, task, model, status, log,
+                    result, error, steps, created_at, updated_at, finished_at
+             FROM subagents WHERE id = ?1",
+            [&record.id],
+            subagent_from_row,
+        )
+        .map_err(StoreError::from)
+}
+
+fn update_subagent(
+    connection: &Connection,
+    id: &str,
+    update: SubagentUpdate,
+) -> Result<SubagentRecord, StoreError> {
+    let now = now_millis();
+    let status = update.status;
+    let terminal = status
+        .as_deref()
+        .is_some_and(|status| matches!(status, "completed" | "failed" | "cancelled"));
+    connection.execute(
+        "UPDATE subagents SET
+            status = COALESCE(?2, status),
+            log = CASE WHEN ?3 IS NULL THEN log
+                       ELSE substr(log || ?3, -32000) END,
+            result = COALESCE(?4, result),
+            error = COALESCE(?5, error),
+            steps = COALESCE(?6, steps),
+            updated_at = ?7,
+            finished_at = CASE WHEN ?8 = 1 THEN ?7 ELSE finished_at END
+         WHERE id = ?1",
+        params![
+            id,
+            status,
+            update.append_log,
+            update.result,
+            update.error,
+            update.steps.map(i64::from),
+            now,
+            i64::from(terminal),
+        ],
+    )?;
+    connection
+        .query_row(
+            "SELECT id, workspace_id, parent_session_id, title, task, model, status, log,
+                    result, error, steps, created_at, updated_at, finished_at
+             FROM subagents WHERE id = ?1",
+            [id],
+            subagent_from_row,
+        )
+        .map_err(StoreError::from)
 }
 
 fn update_workspace_index(
@@ -2827,6 +2990,14 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 })();
                 let _ = reply.send(result);
             }
+            WriteCommand::CreateSubagent { record, reply } => {
+                let result = create_subagent(&connection, record);
+                let _ = reply.send(result);
+            }
+            WriteCommand::UpdateSubagent { id, update, reply } => {
+                let result = update_subagent(&connection, &id, update);
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown => break,
         }
     }
@@ -3056,7 +3227,75 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(store.schema_version().expect("version"), "0011_memory_fts");
+        assert_eq!(store.schema_version().expect("version"), "0012_subagents");
+    }
+
+    #[test]
+    fn subagent_lifecycle_is_recorded() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("demo", "/tmp/openbad-subagents")
+            .expect("workspace");
+        let now = now_millis();
+        let record = SubagentRecord {
+            id: "agent-1".to_owned(),
+            workspace_id: workspace,
+            parent_session_id: None,
+            title: "Inspect parser".to_owned(),
+            task: "Find the parser entry point".to_owned(),
+            model: "deepseek-flash".to_owned(),
+            status: "running".to_owned(),
+            log: String::new(),
+            result: String::new(),
+            error: None,
+            steps: 0,
+            created_at: now,
+            updated_at: now,
+            finished_at: None,
+        };
+        store.create_subagent(record).expect("create subagent");
+
+        let running = store
+            .update_subagent(
+                "agent-1",
+                SubagentUpdate {
+                    append_log: Some("[step 1] -> grep\n".to_owned()),
+                    steps: Some(1),
+                    ..SubagentUpdate::default()
+                },
+            )
+            .expect("progress");
+        assert_eq!(running.status, "running");
+        assert_eq!(running.steps, 1);
+        assert!(running.log.contains("grep"));
+        assert!(running.finished_at.is_none());
+
+        let finished = store
+            .update_subagent(
+                "agent-1",
+                SubagentUpdate {
+                    status: Some("completed".to_owned()),
+                    result: Some("parser lives in src/parse.rs".to_owned()),
+                    steps: Some(3),
+                    ..SubagentUpdate::default()
+                },
+            )
+            .expect("finish");
+        assert_eq!(finished.status, "completed");
+        assert_eq!(finished.result, "parser lives in src/parse.rs");
+        assert!(finished.finished_at.is_some());
+
+        let listed = store.list_subagents(workspace, 10).expect("list subagents");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "agent-1");
+        assert_eq!(
+            store
+                .get_subagent("agent-1")
+                .expect("get")
+                .expect("present")
+                .status,
+            "completed"
+        );
     }
 
     #[test]

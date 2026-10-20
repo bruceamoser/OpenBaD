@@ -796,6 +796,40 @@ pub struct OutsideGrant {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubagentSpec {
+    pub task: String,
+    pub title: String,
+    pub model: Option<String>,
+    pub allow_writes: bool,
+    pub allow_commands: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubagentInfo {
+    pub id: String,
+    pub title: String,
+    pub task: String,
+    pub model: String,
+    pub status: String,
+    pub log: String,
+    pub result: String,
+    pub error: Option<String>,
+    pub steps: u32,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// Starts and observes background subagents. Implemented by the host so the
+/// tool layer stays independent of the desktop runtime.
+pub trait SubagentRuntime: Send + Sync {
+    fn spawn(&self, spec: SubagentSpec) -> Result<SubagentInfo, String>;
+    fn list(&self, limit: usize) -> Result<Vec<SubagentInfo>, String>;
+    fn get(&self, id: &str) -> Result<Option<SubagentInfo>, String>;
+    fn cancel(&self, id: &str) -> Result<SubagentInfo, String>;
+}
+
 pub struct ToolContext {
     pub workspace: Arc<WorkspaceService>,
     pub allow_writes: bool,
@@ -805,6 +839,7 @@ pub struct ToolContext {
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     pub memory: Option<Arc<dyn MemoryStore>>,
     pub project: Option<Arc<dyn ProjectAreas>>,
+    pub subagents: Option<Arc<dyn SubagentRuntime>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
     outside_grants: Vec<OutsideGrant>,
@@ -822,6 +857,7 @@ impl ToolContext {
             checkpoints: None,
             memory: None,
             project: None,
+            subagents: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             outside_grants: Vec::new(),
@@ -1044,9 +1080,7 @@ impl ToolRegistry {
         registry.register(RepoHealthTool);
         registry.register(GitCommitContextTool);
         registry.register(GithubTool);
-        registry.register(GithubIssueTool);
-        registry.register(GithubPrTool);
-        registry.register(GithubCiTool);
+        registry.register(SubagentTool);
         registry.register(CanonBanTool);
         registry.register(CanonAddTool);
         registry.register(CanonQueryTool);
@@ -1271,6 +1305,17 @@ fn optional_bool(arguments: &Value, name: &str) -> Option<bool> {
     arguments.get(name).and_then(Value::as_bool)
 }
 
+fn required_string(arguments: &Value, name: &str) -> Result<String, ToolError> {
+    optional_string(arguments, name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ToolError::InvalidArgument(format!("{name} is required")))
+}
+
+fn optional_u64(arguments: &Value, name: &str) -> Option<u64> {
+    arguments.get(name).and_then(Value::as_u64)
+}
+
 fn head_tail(content: &str, max_bytes: usize) -> String {
     if content.len() <= max_bytes {
         return content.to_owned();
@@ -1339,13 +1384,6 @@ fn string_array_arg_or_empty(arguments: &Value, name: &str) -> Result<Vec<String
             })
         })
         .collect()
-}
-
-fn integer_arg(arguments: &Value, name: &str) -> Result<i64, ToolError> {
-    arguments
-        .get(name)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| ToolError::InvalidArgument(format!("missing integer argument: {name}")))
 }
 
 fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
@@ -9484,223 +9522,6 @@ impl Tool for GithubTool {
     }
 }
 
-struct GithubIssueTool;
-
-#[async_trait]
-impl Tool for GithubIssueTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            "github_issue",
-            "List, view, create, comment on, or close GitHub issues through gh.",
-            RiskLevel::Execute,
-        )
-        .with_schema(json!({
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["list", "get", "create", "comment", "close"]},
-                "number": {"type": "integer", "minimum": 1},
-                "title": {"type": "string"},
-                "body": {"type": "string"},
-                "labels": {"type": "array", "items": {"type": "string"}},
-                "state": {"type": "string", "enum": ["open", "closed", "all"]},
-                "query": {"type": "string"},
-                "confirm": {"type": "boolean"}
-            },
-            "additionalProperties": false
-        }))
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let action = optional_string(&arguments, "action").unwrap_or_else(|| "list".to_owned());
-        let command = match action.as_str() {
-            "list" => {
-                let limit = 20;
-                let state =
-                    optional_string(&arguments, "state").unwrap_or_else(|| "open".to_owned());
-                let mut command = format!(
-                    "gh issue list --limit {limit} --state {state} --json number,title,state,labels"
-                );
-                if let Some(query) = optional_string(&arguments, "query") {
-                    command.push_str(&format!(" --search {}", sh_quote(&query)));
-                }
-                command
-            }
-            "get" => format!(
-                "gh issue view {} --json number,title,body,state,labels,comments",
-                integer_arg(&arguments, "number")?
-            ),
-            "create" => {
-                let title = string_arg(&arguments, "title")?;
-                let body = string_arg(&arguments, "body")?;
-                let mut command = format!(
-                    "gh issue create --title {} --body {}",
-                    sh_quote(&title),
-                    sh_quote(&body)
-                );
-                for label in string_array_arg_or_empty(&arguments, "labels")? {
-                    command.push_str(&format!(" --label {}", sh_quote(&label)));
-                }
-                command
-            }
-            "comment" => format!(
-                "gh issue comment {} --body {}",
-                integer_arg(&arguments, "number")?,
-                sh_quote(&string_arg(&arguments, "body")?)
-            ),
-            "close" => {
-                if !optional_bool(&arguments, "confirm").unwrap_or(false) {
-                    return Err(ToolError::ApprovalRequired(
-                        "github_issue close requires confirm=true".to_owned(),
-                    ));
-                }
-                format!("gh issue close {}", integer_arg(&arguments, "number")?)
-            }
-            other => {
-                return Err(ToolError::InvalidArgument(format!(
-                    "unknown issue action: {other}"
-                )));
-            }
-        };
-        run_tool_shell(context, command).await
-    }
-}
-
-struct GithubPrTool;
-
-#[async_trait]
-impl Tool for GithubPrTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            "github_pr",
-            "View, diff, create, comment on, check, or merge GitHub pull requests through gh. Merge requires confirm=true.",
-            RiskLevel::Execute,
-        )
-        .with_schema(json!({
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["view", "diff", "create", "comment", "checks", "merge"]},
-                "number": {"type": "integer", "minimum": 1},
-                "title": {"type": "string"},
-                "body": {"type": "string"},
-                "base": {"type": "string"},
-                "head": {"type": "string"},
-                "draft": {"type": "boolean"},
-                "confirm": {"type": "boolean"}
-            },
-            "additionalProperties": false
-        }))
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let action = optional_string(&arguments, "action").unwrap_or_else(|| "view".to_owned());
-        let command = match action.as_str() {
-            "view" => format!(
-                "gh pr view {} --json number,title,body,state,mergeable,reviews,files,statusCheckRollup",
-                integer_arg(&arguments, "number")?
-            ),
-            "diff" => format!("gh pr diff {}", integer_arg(&arguments, "number")?),
-            "create" => {
-                let title = string_arg(&arguments, "title")?;
-                let body = string_arg(&arguments, "body")?;
-                let mut command = format!(
-                    "gh pr create --title {} --body {}",
-                    sh_quote(&title),
-                    sh_quote(&body)
-                );
-                if let Some(base) = optional_string(&arguments, "base") {
-                    command.push_str(&format!(" --base {}", sh_quote(&base)));
-                }
-                if let Some(head) = optional_string(&arguments, "head") {
-                    command.push_str(&format!(" --head {}", sh_quote(&head)));
-                }
-                if optional_bool(&arguments, "draft").unwrap_or(false) {
-                    command.push_str(" --draft");
-                }
-                command
-            }
-            "comment" => format!(
-                "gh pr comment {} --body {}",
-                integer_arg(&arguments, "number")?,
-                sh_quote(&string_arg(&arguments, "body")?)
-            ),
-            "checks" => format!("gh pr checks {}", integer_arg(&arguments, "number")?),
-            "merge" => {
-                if !optional_bool(&arguments, "confirm").unwrap_or(false) {
-                    return Err(ToolError::ApprovalRequired(
-                        "github_pr merge requires confirm=true".to_owned(),
-                    ));
-                }
-                format!(
-                    "gh pr merge {} --squash --delete-branch",
-                    integer_arg(&arguments, "number")?
-                )
-            }
-            other => {
-                return Err(ToolError::InvalidArgument(format!(
-                    "unknown pull request action: {other}"
-                )));
-            }
-        };
-        run_tool_shell(context, command).await
-    }
-}
-
-struct GithubCiTool;
-
-#[async_trait]
-impl Tool for GithubCiTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            "github_ci",
-            "List recent workflow runs or fetch failed logs for a run through gh.",
-            RiskLevel::Execute,
-        )
-        .with_schema(json!({
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["list", "logs"]},
-                "run_id": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
-            },
-            "additionalProperties": false
-        }))
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let action = optional_string(&arguments, "action").unwrap_or_else(|| "list".to_owned());
-        let command = match action.as_str() {
-            "list" => format!(
-                "gh run list --limit {} --json databaseId,name,status,conclusion,headBranch,createdAt",
-                optional_usize(&arguments, "limit")
-                    .unwrap_or(10)
-                    .clamp(1, 50)
-            ),
-            "logs" => format!(
-                "gh run view {} --log-failed",
-                string_arg(&arguments, "run_id")?
-            ),
-            other => {
-                return Err(ToolError::InvalidArgument(format!(
-                    "unknown CI action: {other}"
-                )));
-            }
-        };
-        run_tool_shell(context, command).await
-    }
-}
-
 struct CanonBanTool;
 
 #[async_trait]
@@ -12790,6 +12611,152 @@ impl Tool for RepoMapTool {
     }
 }
 
+struct SubagentTool;
+
+fn subagent_line(info: &SubagentInfo) -> String {
+    let detail = match info.status.as_str() {
+        "completed" => "completed",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        _ => "running",
+    };
+    format!(
+        "- {} [{}] {} ({} steps): {}",
+        info.id,
+        detail,
+        info.title,
+        info.steps,
+        truncate(info.task.lines().next().unwrap_or(""), 160)
+    )
+}
+
+fn subagent_report(info: &SubagentInfo) -> String {
+    let mut report = format!(
+        "id: {}\ntitle: {}\nstatus: {}\nmodel: {}\nsteps: {}\n\nTask:\n{}\n",
+        info.id, info.title, info.status, info.model, info.steps, info.task
+    );
+    if !info.result.trim().is_empty() {
+        report.push_str("\nResult:\n");
+        report.push_str(&truncate(&info.result, 12_000));
+        report.push('\n');
+    }
+    if let Some(error) = &info.error {
+        report.push_str("\nError:\n");
+        report.push_str(&truncate(error, 4_000));
+        report.push('\n');
+    }
+    if !info.log.trim().is_empty() {
+        report.push_str("\nRecent activity:\n");
+        report.push_str(&truncate(&info.log, 6_000));
+        report.push('\n');
+    }
+    report
+}
+
+#[async_trait]
+impl Tool for SubagentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "subagent",
+            "Spawn and manage focused background subagents. Action 'spawn' starts a directed worker and returns immediately; use 'status' to collect its result, 'list' to see all workers for the project, and 'cancel' to stop one. Subagents inherit this session's access mode and cannot spawn further subagents.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["spawn", "list", "status", "cancel"]},
+                "task": {"type": "string", "description": "Complete, self-contained instructions for a spawned subagent."},
+                "title": {"type": "string", "description": "Short label shown in the project Agents panel."},
+                "model": {"type": "string", "description": "Optional model override for the subagent."},
+                "write": {"type": "boolean", "description": "Allow writes and commands in the subagent. Defaults to true and can never exceed the parent session's access mode."},
+                "id": {"type": "string", "description": "Subagent id for status or cancel."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let runtime = context.subagents.as_ref().ok_or_else(|| {
+            ToolError::Failed("subagents are not available in this context".to_owned())
+        })?;
+        let action = required_string(&arguments, "action")?;
+        match action.as_str() {
+            "spawn" => {
+                let task = required_string(&arguments, "task")?;
+                if task.trim().is_empty() {
+                    return Err(ToolError::InvalidArgument(
+                        "task must not be empty".to_owned(),
+                    ));
+                }
+                let title = optional_string(&arguments, "title")
+                    .map(|title| title.trim().to_owned())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| {
+                        truncate(task.lines().next().unwrap_or("Subagent task"), 72)
+                    });
+                let wants_write = optional_bool(&arguments, "write").unwrap_or(true);
+                let allow_writes = context.allow_writes && wants_write;
+                let allow_commands = context.allow_commands && wants_write;
+                let info = runtime
+                    .spawn(SubagentSpec {
+                        task,
+                        title,
+                        model: optional_string(&arguments, "model"),
+                        allow_writes,
+                        allow_commands,
+                    })
+                    .map_err(ToolError::Failed)?;
+                Ok(ToolResult::ok(format!(
+                    "Spawned subagent {} ({}). It runs in the background; use subagent action \"status\" with id {} to collect the result.",
+                    info.id, info.title, info.id
+                ))
+                .with_metadata(json!({
+                    "id": info.id,
+                    "status": info.status,
+                    "title": info.title,
+                })))
+            }
+            "list" => {
+                let limit = optional_u64(&arguments, "limit").unwrap_or(20).clamp(1, 50) as usize;
+                let agents = runtime.list(limit).map_err(ToolError::Failed)?;
+                if agents.is_empty() {
+                    return Ok(ToolResult::ok(
+                        "no subagents have been spawned for this project",
+                    ));
+                }
+                let lines: Vec<String> = agents.iter().map(subagent_line).collect();
+                Ok(ToolResult::ok(lines.join("\n")).with_metadata(json!({"subagents": agents})))
+            }
+            "status" => {
+                let id = required_string(&arguments, "id")?;
+                let info = runtime
+                    .get(&id)
+                    .map_err(ToolError::Failed)?
+                    .ok_or_else(|| ToolError::InvalidArgument(format!("unknown subagent: {id}")))?;
+                Ok(ToolResult::ok(subagent_report(&info)).with_metadata(json!({"subagent": info})))
+            }
+            "cancel" => {
+                let id = required_string(&arguments, "id")?;
+                let info = runtime.cancel(&id).map_err(ToolError::Failed)?;
+                Ok(ToolResult::ok(format!(
+                    "Cancellation requested for subagent {} ({}); current status: {}.",
+                    info.id, info.title, info.status
+                ))
+                .with_metadata(json!({"subagent": info})))
+            }
+            other => Err(ToolError::InvalidArgument(format!(
+                "unknown subagent action: {other}"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -13631,11 +13598,6 @@ invariants:
             .await
             .expect("worktrees");
         assert!(worktrees.metadata["success"].as_bool().unwrap_or(true));
-        let denied = GithubIssueTool
-            .execute(json!({"action": "close", "number": 1}), &context)
-            .await
-            .expect_err("close requires confirm");
-        assert!(denied.to_string().contains("confirm"));
     }
 
     #[tokio::test]
@@ -15144,11 +15106,139 @@ invariants:
         assert!(summary.contains("Tests: 1 failed"));
     }
 
+    #[derive(Default)]
+    struct MockSubagents {
+        infos: Mutex<Vec<SubagentInfo>>,
+        specs: Mutex<Vec<SubagentSpec>>,
+    }
+
+    impl SubagentRuntime for MockSubagents {
+        fn spawn(&self, spec: SubagentSpec) -> Result<SubagentInfo, String> {
+            let id = format!("agent-{}", self.infos.lock().unwrap().len() + 1);
+            let info = SubagentInfo {
+                id: id.clone(),
+                title: spec.title.clone(),
+                task: spec.task.clone(),
+                model: spec.model.clone().unwrap_or_else(|| "mock".to_owned()),
+                status: "running".to_owned(),
+                log: String::new(),
+                result: String::new(),
+                error: None,
+                steps: 0,
+                created_at: 0,
+                updated_at: 0,
+                finished_at: None,
+            };
+            self.specs.lock().unwrap().push(spec);
+            self.infos.lock().unwrap().push(info.clone());
+            Ok(info)
+        }
+
+        fn list(&self, limit: usize) -> Result<Vec<SubagentInfo>, String> {
+            Ok(self
+                .infos
+                .lock()
+                .unwrap()
+                .iter()
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn get(&self, id: &str) -> Result<Option<SubagentInfo>, String> {
+            Ok(self
+                .infos
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|info| info.id == id)
+                .cloned())
+        }
+
+        fn cancel(&self, id: &str) -> Result<SubagentInfo, String> {
+            let mut infos = self.infos.lock().unwrap();
+            let info = infos
+                .iter_mut()
+                .find(|info| info.id == id)
+                .ok_or_else(|| format!("unknown subagent: {id}"))?;
+            info.status = "cancelled".to_owned();
+            Ok(info.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_spawns_lists_reports_and_cancels() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+        let runtime = Arc::new(MockSubagents::default());
+        context.subagents = Some(runtime.clone());
+
+        let spawned = SubagentTool
+            .execute(
+                json!({"action": "spawn", "task": "Inspect the parser", "title": "Parser"}),
+                &context,
+            )
+            .await
+            .expect("spawn");
+        assert!(spawned.content.contains("agent-1"));
+        assert_eq!(spawned.metadata["status"], "running");
+
+        {
+            let specs = runtime.specs.lock().unwrap();
+            assert_eq!(specs.len(), 1);
+            assert_eq!(specs[0].title, "Parser");
+            assert!(specs[0].allow_writes);
+            assert!(specs[0].allow_commands);
+        }
+
+        let listed = SubagentTool
+            .execute(json!({"action": "list"}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("Inspect the parser"));
+
+        let status = SubagentTool
+            .execute(json!({"action": "status", "id": "agent-1"}), &context)
+            .await
+            .expect("status");
+        assert!(status.content.contains("status: running"));
+
+        let cancelled = SubagentTool
+            .execute(json!({"action": "cancel", "id": "agent-1"}), &context)
+            .await
+            .expect("cancel");
+        assert!(cancelled.content.contains("cancelled"));
+    }
+
     #[tokio::test]
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
-        assert!(definitions.len() >= 17);
+        assert!(
+            definitions.len() <= 128,
+            "provider tool limit: {} built-ins registered",
+            definitions.len()
+        );
+        for expected in [
+            "github",
+            "plugin_list",
+            "plugin_call",
+            "request_fs_access",
+            "subagent",
+        ] {
+            assert!(
+                definitions.iter().any(|tool| tool.name == expected),
+                "missing built-in tool {expected}"
+            );
+        }
+        for removed in ["github_issue", "github_pr", "github_ci"] {
+            assert!(
+                !definitions.iter().any(|tool| tool.name == removed),
+                "deprecated tool still registered: {removed}"
+            );
+        }
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
     }

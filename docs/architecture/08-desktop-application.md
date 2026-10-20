@@ -50,9 +50,11 @@ keeps a usable width.
 - **Quick ask** (`Ctrl/Cmd+Shift+Space`) — floating prompt from any app.
 - **Session sidebar** — grouped by workspace, pinned, recent, archived.
 - **Workspace switcher** — recent folders, open folder, trust state.
-- **Project panel tabs** — overview, workspace, repos, knowledge, retrieval,
-  memory, checkpoints, diagnostics, and the active artifact. Knowledge is for
-  long-form documents; Memory is for short indexed snippets.
+- **Project panel tabs** — overview, workspace, agents, references, knowledge,
+  retrieval, memory, checkpoints, diagnostics, and the active artifact.
+  Knowledge is for long-form documents; Memory is for short indexed snippets.
+  Agents lists background workers spawned by the assistant, refreshes while a
+  worker is running, and opens completed results as Markdown artifacts.
 - **Split artifacts** — assistant-presented web pages, images, Markdown, diffs,
   and workspace files open beside the conversation.
 - **Bottom panel** — terminal, problems, job output (planned).

@@ -469,3 +469,13 @@ test("approves a draft project plan", async ({ page }) => {
   await page.getByRole("button", { name: "Approve plan" }).click();
   await expect(page.getByText("approved")).toBeVisible();
 });
+
+test("shows background agents in the project area", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Agents" }).first().click();
+
+  const panel = page.getByRole("complementary", { name: "Project workspace" });
+  await expect(panel).toBeVisible();
+  await expect(panel.getByText("No subagents yet")).toBeVisible();
+  await expect(panel.getByText(/subagent/).first()).toBeVisible();
+});

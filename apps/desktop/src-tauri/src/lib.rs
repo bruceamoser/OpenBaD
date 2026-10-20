@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use openbad_agent::{AgentConfig, AgentObserver, SteeringInbox, default_agent};
+use openbad_agent::{AgentConfig, AgentError, AgentObserver, SteeringInbox, default_agent};
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
 #[cfg(feature = "keyring")]
@@ -18,11 +20,11 @@ use openbad_store::Store;
 use openbad_store::types::{
     AuditReport, DoctorReport, KnowledgeDocument, KnowledgeDocumentSummary, ModelRouteRecord,
     NewModelRoute, NewProvider, ProjectHit, ProjectOverview, ProjectRepo, ProviderRecord,
-    SessionMessage, SessionSummary,
+    SessionMessage, SessionSummary, SubagentRecord, SubagentUpdate,
 };
 use openbad_tools::{
-    CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, MemoryStore, ProjectAreas,
-    ProjectRepoRef, WorkspaceSearch,
+    CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, MemoryStore, OutsideGrant,
+    ProjectAreas, ProjectRepoRef, SubagentInfo, SubagentRuntime, SubagentSpec, WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -39,6 +41,7 @@ pub struct AppState {
     secrets: Box<dyn SecretStore>,
     cancel: Arc<AtomicBool>,
     steering: Arc<SteeringInbox>,
+    subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 struct StoreSearch {
@@ -421,6 +424,293 @@ fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
     }
 }
 
+#[derive(Clone)]
+struct SubagentSettings {
+    store: Arc<Mutex<Store>>,
+    api_key: String,
+    workspace_id: WorkspaceId,
+    workspace_path: PathBuf,
+    parent_session: SessionId,
+    model: String,
+    thinking: bool,
+    reasoning_effort: Option<ReasoningEffort>,
+    base_url: String,
+    user_id: String,
+    grants: Vec<OutsideGrant>,
+}
+
+struct SubagentRunner {
+    settings: Arc<SubagentSettings>,
+    active: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+fn subagent_info(record: SubagentRecord) -> SubagentInfo {
+    SubagentInfo {
+        id: record.id,
+        title: record.title,
+        task: record.task,
+        model: record.model,
+        status: record.status,
+        log: record.log,
+        result: record.result,
+        error: record.error,
+        steps: record.steps,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        finished_at: record.finished_at,
+    }
+}
+
+impl SubagentRuntime for SubagentRunner {
+    fn spawn(&self, spec: SubagentSpec) -> Result<SubagentInfo, String> {
+        let id = Uuid::now_v7().to_string();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default();
+        let record = SubagentRecord {
+            id: id.clone(),
+            workspace_id: self.settings.workspace_id,
+            parent_session_id: Some(self.settings.parent_session.to_string()),
+            title: spec.title.clone(),
+            task: spec.task.clone(),
+            model: spec
+                .model
+                .clone()
+                .unwrap_or_else(|| self.settings.model.clone()),
+            status: "running".to_owned(),
+            log: String::new(),
+            result: String::new(),
+            error: None,
+            steps: 0,
+            created_at: now,
+            updated_at: now,
+            finished_at: None,
+        };
+        {
+            let store = self
+                .settings
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            store
+                .create_subagent(record.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Ok(mut active) = self.active.lock() {
+            active.insert(id.clone(), Arc::clone(&cancel));
+        }
+        let settings = Arc::clone(&self.settings);
+        let active = Arc::clone(&self.active);
+        let task_id = id.clone();
+        tauri::async_runtime::spawn(async move {
+            run_subagent(settings, task_id, spec, cancel).await;
+            if let Ok(mut active) = active.lock() {
+                active.remove(&id);
+            }
+        });
+        Ok(subagent_info(record))
+    }
+
+    fn list(&self, limit: usize) -> Result<Vec<SubagentInfo>, String> {
+        let store = self
+            .settings
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .list_subagents(self.settings.workspace_id, limit as u32)
+            .map(|records| records.into_iter().map(subagent_info).collect())
+            .map_err(|error| error.to_string())
+    }
+
+    fn get(&self, id: &str) -> Result<Option<SubagentInfo>, String> {
+        let store = self
+            .settings
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .get_subagent(id)
+            .map(|record| record.map(subagent_info))
+            .map_err(|error| error.to_string())
+    }
+
+    fn cancel(&self, id: &str) -> Result<SubagentInfo, String> {
+        if let Ok(active) = self.active.lock() {
+            if let Some(flag) = active.get(id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        let store = self
+            .settings
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .update_subagent(
+                id,
+                SubagentUpdate {
+                    status: Some("cancelled".to_owned()),
+                    append_log: Some("\n[cancelled by user]\n".to_owned()),
+                    ..SubagentUpdate::default()
+                },
+            )
+            .map(subagent_info)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn update_subagent_record(store: &Arc<Mutex<Store>>, id: &str, update: SubagentUpdate) {
+    if let Ok(store) = store.lock() {
+        let _ = store.update_subagent(id, update);
+    }
+}
+
+struct SubagentObserver {
+    store: Arc<Mutex<Store>>,
+    id: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl AgentObserver for SubagentObserver {
+    fn on_step(&self, step: u32) {
+        update_subagent_record(
+            &self.store,
+            &self.id,
+            SubagentUpdate {
+                status: Some("running".to_owned()),
+                steps: Some(step),
+                ..SubagentUpdate::default()
+            },
+        );
+    }
+
+    fn on_tool_call(&self, step: u32, call: &openbad_llm::chat::ToolCall) {
+        let args = truncate_for_ui(&call.function.arguments);
+        update_subagent_record(
+            &self.store,
+            &self.id,
+            SubagentUpdate {
+                append_log: Some(format!(
+                    "\n[step {step}] -> {}({args})\n",
+                    call.function.name
+                )),
+                ..SubagentUpdate::default()
+            },
+        );
+    }
+
+    fn on_tool_result(
+        &self,
+        step: u32,
+        name: &str,
+        content: &str,
+        is_error: bool,
+        _metadata: &Value,
+    ) {
+        let result = truncate_for_ui(content);
+        update_subagent_record(
+            &self.store,
+            &self.id,
+            SubagentUpdate {
+                append_log: Some(format!(
+                    "[step {step}] <- {name} {}: {result}\n",
+                    if is_error { "error" } else { "ok" }
+                )),
+                ..SubagentUpdate::default()
+            },
+        );
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+async fn run_subagent(
+    settings: Arc<SubagentSettings>,
+    id: String,
+    spec: SubagentSpec,
+    cancel: Arc<AtomicBool>,
+) {
+    let workspace = Arc::new(WorkspaceService::new(settings.workspace_path.clone()));
+    let mut client = DeepSeekClient::new(ReqwestTransport::new(), settings.api_key.clone())
+        .with_model(spec.model.unwrap_or_else(|| settings.model.clone()))
+        .with_base_url(settings.base_url.clone())
+        .with_user_id(settings.user_id.clone())
+        .with_thinking(settings.thinking);
+    if let Some(effort) = settings.reasoning_effort {
+        client = client.with_reasoning_effort(effort);
+    }
+    let agent = default_agent(
+        client,
+        workspace,
+        AgentConfig {
+            allow_writes: spec.allow_writes,
+            allow_commands: spec.allow_commands,
+            max_steps: 0,
+            stream: false,
+            ..AgentConfig::default()
+        },
+    )
+    .with_memory(Arc::new(WorkspaceMemory {
+        store: Arc::clone(&settings.store),
+        workspace_id: settings.workspace_id,
+    }))
+    .with_project(Arc::new(StoreProjectAreas {
+        store: Arc::clone(&settings.store),
+        workspace_id: settings.workspace_id,
+    }))
+    .with_search(Arc::new(StoreSearch {
+        store: Arc::clone(&settings.store),
+        workspace_id: settings.workspace_id,
+    }))
+    .with_outside_grants(settings.grants.clone())
+    .with_redactions(vec![settings.api_key.clone()]);
+
+    let observer = SubagentObserver {
+        store: Arc::clone(&settings.store),
+        id: id.clone(),
+        cancel: Arc::clone(&cancel),
+    };
+    let prompt = format!(
+        "You are a directed subagent spawned by the main OpenBaD agent. Work only on the task below. You share the parent workspace and access mode, cannot spawn further subagents, and must not ask the user questions. Use tools as needed, verify your work, and finish with a concise report covering what changed, what you checked, and any remaining risk.\n\nTask:\n{}",
+        spec.task
+    );
+    let outcome = agent
+        .run_with_observer(vec![ChatMessage::user(prompt)], &observer)
+        .await;
+    let update = match outcome {
+        Ok(run) => SubagentUpdate {
+            status: Some("completed".to_owned()),
+            result: Some(run.text),
+            steps: Some(run.steps),
+            append_log: Some("\n[completed]\n".to_owned()),
+            ..SubagentUpdate::default()
+        },
+        Err(error) if cancel.load(Ordering::SeqCst) || matches!(error, AgentError::Cancelled) => {
+            SubagentUpdate {
+                status: Some("cancelled".to_owned()),
+                error: Some(error.to_string()),
+                append_log: Some("\n[cancelled]\n".to_owned()),
+                ..SubagentUpdate::default()
+            }
+        }
+        Err(error) => {
+            let message = error.to_string().replace(&settings.api_key, "[redacted]");
+            SubagentUpdate {
+                status: Some("failed".to_owned()),
+                error: Some(message.clone()),
+                append_log: Some(format!("\n[failed] {message}\n")),
+                ..SubagentUpdate::default()
+            }
+        }
+    };
+    update_subagent_record(&settings.store, &id, update);
+}
+
 struct SessionCheckpoints {
     store: Arc<Mutex<Store>>,
     session_id: SessionId,
@@ -746,6 +1036,45 @@ fn project_repos(
     let workspace = project_workspace(&store, &workspace_path)?;
     store
         .list_project_repos(workspace)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_agents(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    limit: Option<u32>,
+) -> Result<Vec<SubagentRecord>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    store
+        .list_subagents(workspace, limit.unwrap_or(50))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_agent(state: State<'_, AppState>, id: String) -> Result<SubagentRecord, String> {
+    if let Ok(active) = state.subagent_cancels.lock() {
+        if let Some(flag) = active.get(&id) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .update_subagent(
+            &id,
+            SubagentUpdate {
+                status: Some("cancelled".to_owned()),
+                append_log: Some("\n[cancelled by user]\n".to_owned()),
+                ..SubagentUpdate::default()
+            },
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -1892,25 +2221,27 @@ async fn chat(
     let (history, user_id) = history;
     let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
-    let mut client = DeepSeekClient::new(ReqwestTransport::new(), api_key)
-        .with_model(model.unwrap_or_else(|| FLASH_MODEL.to_owned()))
-        .with_base_url(base_url)
-        .with_user_id(user_id);
+    let model_name = model.unwrap_or_else(|| FLASH_MODEL.to_owned());
+    let thinking_enabled = thinking.unwrap_or(true);
+    let effort = reasoning_effort.map(|effort| match effort.as_str() {
+        "low" => ReasoningEffort::Low,
+        "max" => ReasoningEffort::Max,
+        _ => ReasoningEffort::High,
+    });
+    let mut client = DeepSeekClient::new(ReqwestTransport::new(), api_key.clone())
+        .with_model(model_name.clone())
+        .with_base_url(base_url.clone())
+        .with_user_id(user_id.clone());
     if let Some(thinking) = thinking {
         client = client.with_thinking(thinking);
     }
-    if let Some(effort) = reasoning_effort {
-        let effort = match effort.as_str() {
-            "low" => ReasoningEffort::Low,
-            "max" => ReasoningEffort::Max,
-            _ => ReasoningEffort::High,
-        };
+    if let Some(effort) = effort {
         client = client.with_reasoning_effort(effort);
     }
     let index_root = workspace_path.clone();
     let mut agent = default_agent(
         client,
-        Arc::new(WorkspaceService::new(workspace_path)),
+        Arc::new(WorkspaceService::new(workspace_path.clone())),
         AgentConfig {
             allow_writes,
             allow_commands,
@@ -1937,17 +2268,33 @@ async fn chat(
                 .list_outside_access_grants(workspace_id)
                 .map_err(|error| error.to_string())?
         };
-        agent = agent.with_outside_grants(
-            grants
-                .into_iter()
-                .map(|grant| openbad_tools::OutsideGrant {
-                    id: grant.id,
-                    path: PathBuf::from(grant.path),
-                    write_access: grant.write_access,
-                    reason: grant.reason,
-                })
-                .collect(),
-        );
+        let subagent_grants: Vec<OutsideGrant> = grants
+            .iter()
+            .map(|grant| OutsideGrant {
+                id: grant.id.clone(),
+                path: PathBuf::from(&grant.path),
+                write_access: grant.write_access,
+                reason: grant.reason.clone(),
+            })
+            .collect();
+        agent = agent
+            .with_outside_grants(subagent_grants.clone())
+            .with_subagents(Arc::new(SubagentRunner {
+                settings: Arc::new(SubagentSettings {
+                    store: Arc::clone(&state.store),
+                    api_key: api_key.clone(),
+                    workspace_id,
+                    workspace_path: workspace_path.clone(),
+                    parent_session: session,
+                    model: model_name.clone(),
+                    thinking: thinking_enabled,
+                    reasoning_effort: effort,
+                    base_url: base_url.clone(),
+                    user_id: user_id.clone(),
+                    grants: subagent_grants,
+                }),
+                active: Arc::clone(&state.subagent_cancels),
+            }));
     }
     agent = agent
         .with_steering(Arc::clone(&state.steering))
@@ -2301,6 +2648,7 @@ pub fn run() {
             secrets: secret_store(),
             cancel: Arc::new(AtomicBool::new(false)),
             steering: Arc::new(SteeringInbox::default()),
+            subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             health,
@@ -2316,6 +2664,8 @@ pub fn run() {
             workspace_index_status,
             refresh_workspace_index,
             workspace_default,
+            project_agents,
+            cancel_agent,
             save_api_key,
             clear_api_key,
             cancel_chat,
@@ -2398,7 +2748,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0011_memory_fts");
+        assert_eq!(payload.doctor.schema_version, "0012_subagents");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);
