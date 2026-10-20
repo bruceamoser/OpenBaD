@@ -57,6 +57,9 @@ without loading whole files.
 Claims and known unknowns live in `.openbad/claims.json` and
 `.openbad/unknowns.json`; both are injected into the next prompt.
 
+Plan mode lives in `.openbad/plan.json`; drafts are approved in Project → Plan
+and steps carry executable `verify_with` checks.
+
 Structured questions live in `.openbad/questions.json` and are answered in the
 Project → Questions panel. The assistant reads the answer on its next turn.
 

@@ -17,6 +17,7 @@ import type {
   ProjectHit,
   ProjectManifest,
   ProjectOverview,
+  ProjectPlan,
   ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
@@ -91,6 +92,37 @@ let mockFiles = [
   "crates/openbad-store/src/store.rs",
   "docs/architecture/00-vision-and-feature-set.md",
 ];
+let mockPlan: ProjectPlan = {
+  goal: "Ship the project intelligence tranche",
+  status: "draft",
+  steps: [
+    {
+      id: "1",
+      text: "Add plan state and approval",
+      status: "done",
+      verify_with: "cargo test --workspace",
+      evidence: "tests passed",
+    },
+    {
+      id: "2",
+      text: "Render the Plan panel",
+      status: "doing",
+      verify_with: null,
+      evidence: null,
+    },
+    {
+      id: "3",
+      text: "Verify approval flow",
+      status: "todo",
+      verify_with: "pnpm test",
+      evidence: null,
+    },
+  ],
+  created_at: Date.now() - 7_200_000,
+  updated_at: Date.now() - 3_600_000,
+  approved_at: null,
+};
+
 let mockQuestions: ProjectQuestion[] = [
   {
     id: "mock-question-1",
@@ -425,6 +457,28 @@ export async function loadProjectManifest(
   return isTauri
     ? invoke<ProjectManifest | null>("project_manifest", { workspacePath })
     : mockManifest;
+}
+
+export async function loadProjectPlan(
+  workspacePath: string,
+): Promise<ProjectPlan | null> {
+  return isTauri
+    ? invoke<ProjectPlan | null>("project_plan", { workspacePath })
+    : mockPlan;
+}
+
+export async function approveProjectPlan(
+  workspacePath: string,
+): Promise<ProjectPlan> {
+  if (isTauri) {
+    return invoke<ProjectPlan>("approve_project_plan", { workspacePath });
+  }
+  mockPlan = {
+    ...mockPlan,
+    status: "approved",
+    approved_at: Date.now(),
+  };
+  return mockPlan;
 }
 
 export async function loadProjectQuestions(

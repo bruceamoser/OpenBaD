@@ -21,8 +21,10 @@ import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import {
   addProjectRepo,
   answerProjectQuestion,
+  approveProjectPlan,
   listProjectFiles,
   loadProjectManifest,
+  loadProjectPlan,
   loadProjectQuestions,
   loadProjectOverview,
   loadProjectRepos,
@@ -37,6 +39,7 @@ import type {
   MemoryRecord,
   ProjectManifest,
   ProjectOverview,
+  ProjectPlan,
   ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
@@ -53,6 +56,7 @@ export type PanelTab =
   | "memory"
   | "todos"
   | "questions"
+  | "plan"
   | "checkpoints"
   | "diagnostics"
   | "artifact";
@@ -66,6 +70,7 @@ const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "memory", label: "Memory" },
   { id: "todos", label: "Todos" },
   { id: "questions", label: "Questions" },
+  { id: "plan", label: "Plan" },
   { id: "checkpoints", label: "Edits" },
   { id: "diagnostics", label: "Diag" },
 ];
@@ -140,6 +145,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
   const [todos, setTodos] = useState<ProjectTodo[]>([]);
   const [questions, setQuestions] = useState<ProjectQuestion[]>([]);
+  const [plan, setPlan] = useState<ProjectPlan | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -154,6 +160,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         nextManifest,
         nextTodos,
         nextQuestions,
+        nextPlan,
       ] = await Promise.all([
         loadProjectOverview(workspacePath),
         loadProjectRepos(workspacePath),
@@ -161,6 +168,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         loadProjectManifest(workspacePath),
         loadProjectTodos(workspacePath),
         loadProjectQuestions(workspacePath),
+        loadProjectPlan(workspacePath),
       ]);
       setOverview(nextOverview);
       setRepos(nextRepos);
@@ -168,6 +176,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       setManifest(nextManifest);
       setTodos(nextTodos);
       setQuestions(nextQuestions);
+      setPlan(nextPlan);
       setDataError(null);
     } catch (cause) {
       setDataError(describeError(cause));
@@ -181,6 +190,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     setManifest(null);
     setTodos([]);
     setQuestions([]);
+    setPlan(null);
     setFileQuery("");
     setDataError(null);
     void refresh();
@@ -193,7 +203,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       tab === "knowledge" ||
       tab === "workspace" ||
       tab === "todos" ||
-      tab === "questions"
+      tab === "questions" ||
+      tab === "plan"
     ) {
       void refresh();
     }
@@ -459,6 +470,17 @@ export default function ProjectPanel(props: ProjectPanelProps) {
 
         {tab === "todos" && <TodoPanel todos={todos} />}
 
+        {tab === "plan" && (
+          <PlanPanel
+            plan={plan}
+            onApprove={async () => {
+              const approved = await approveProjectPlan(workspacePath);
+              setPlan(approved);
+              onWorkspaceChanged();
+            }}
+          />
+        )}
+
         {tab === "questions" && (
           <QuestionsPanel
             questions={questions}
@@ -633,6 +655,85 @@ function MemoryPanel({
         </div>
       ))}
       {memoryError !== null && <p className="text-[10px] text-amber-300">{memoryError}</p>}
+    </div>
+  );
+}
+
+function PlanPanel({
+  plan,
+  onApprove,
+}: {
+  plan: ProjectPlan | null;
+  onApprove: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  if (plan === null) {
+    return (
+      <p className="px-1 py-2 text-[11px] text-slate-600">
+        No plan yet. The assistant can draft one with plan_write.
+      </p>
+    );
+  }
+  const done = plan.steps.filter((step) => step.status === "done").length;
+  return (
+    <div className="space-y-2">
+      <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-[11px] leading-5 text-slate-200">{plan.goal}</p>
+          <span
+            className={
+              plan.status === "approved"
+                ? "shrink-0 rounded bg-emerald-400/15 px-1 py-0.5 text-[9px] text-emerald-300"
+                : "shrink-0 rounded bg-amber-400/15 px-1 py-0.5 text-[9px] text-amber-300"
+            }
+          >
+            {plan.status}
+          </span>
+        </div>
+        <p className="mt-1 text-[10px] text-slate-500">
+          {done}/{plan.steps.length} steps complete
+        </p>
+        {plan.status === "draft" && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onApprove();
+              } finally {
+                setBusy(false);
+              }
+            }}
+            className="mt-2 rounded-md bg-emerald-400 px-2 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
+          >
+            {busy ? "Approving…" : "Approve plan"}
+          </button>
+        )}
+      </div>
+      {plan.steps.map((step) => (
+        <div
+          key={step.id}
+          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-[11px] leading-5 text-slate-300">
+              {step.id}. {step.text}
+            </p>
+            <span className="shrink-0 rounded bg-white/[0.06] px-1 py-0.5 text-[9px] text-slate-400">
+              {step.status}
+            </span>
+          </div>
+          {step.verify_with !== null && (
+            <p className="mt-1 font-mono text-[9px] text-slate-600">
+              verify: {step.verify_with}
+            </p>
+          )}
+          {step.evidence !== null && (
+            <p className="mt-1 text-[9px] text-emerald-300/80">{step.evidence}</p>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
