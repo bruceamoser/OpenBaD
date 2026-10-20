@@ -152,6 +152,7 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const followRef = useRef(true);
+  const autoCollapsedSidebar = useRef(false);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -468,10 +469,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (panelOpen && window.innerWidth < 1180) {
+    if (panelOpen && window.innerWidth < 1180 && sidebarOpen) {
+      autoCollapsedSidebar.current = true;
       setSidebarOpen(false);
+    } else if (!panelOpen && autoCollapsedSidebar.current) {
+      autoCollapsedSidebar.current = false;
+      setSidebarOpen(true);
     }
-  }, [panelOpen]);
+  }, [panelOpen, sidebarOpen]);
 
   const startPanelResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
