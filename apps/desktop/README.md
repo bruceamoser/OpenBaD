@@ -57,7 +57,22 @@ scroll, and streaming tests without rebuilding the native app.
 
 `pnpm --dir ui test:e2e` runs the Playwright smoke tests against that mock
 backend. They cover streamed reasoning and tool cards, auto-scroll,
-cancellation, and preference persistence.
+cancellation, projects and sessions, checkpoints, memory, and the command menu.
+
+## Interface
+
+The workspace is organised around projects. Add a directory containing a project
+marker (`.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`,
+`Makefile`, `AGENTS.md`, or `.openbad`) and its sessions are grouped beneath it.
+Sessions can be renamed from the sidebar.
+
+The composer carries the access mode: **Read only** (default each launch),
+**Can edit**, and **Full access**. The Context drawer exposes the workspace
+index, memory, checkpoints, and diagnostics without taking permanent space.
+Settings holds model, access, secrets, project, and about tabs. Press
+`Ctrl/Cmd+K` for the command menu, `Ctrl/Cmd+N` for a new session, and
+`Ctrl/Cmd+,` for settings. Agent turns have no fixed step budget; use Stop to
+end a run.
 
 ## Commands
 
@@ -65,7 +80,9 @@ cancellation, and preference persistence.
 | --- | --- |
 | `health` | Returns the store status and SQLite schema version |
 | `foundation` | Returns schema/integrity/event metrics, audit chain state, providers, and model routes |
-| `sessions` / `session_view` | Lists recent sessions and loads their messages |
+| `list_projects` / `add_project` / `rename_project` / `remove_project` | Manage workspace projects |
+| `rename_session` | Rename a session |
+| `sessions` / `search_sessions` / `session_view` | List, search, and load sessions |
 | `save_api_key` / `clear_api_key` / `api_key_status` | Manage the DeepSeek key in the OS keychain |
 | `chat` | Runs the DeepSeek agent loop with workspace tools and persists the turn |
 

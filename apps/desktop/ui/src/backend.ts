@@ -11,6 +11,7 @@ import type {
   SessionView,
   Usage,
   WorkspaceIndexSummary,
+  WorkspaceSummary,
 } from "./types";
 
 const isTauri =
@@ -38,6 +39,16 @@ let mockIndex: WorkspaceIndexSummary = {
   indexed_at: Date.now() - 60_000,
 };
 const mockSessions: SessionSummary[] = [];
+let mockProjects: WorkspaceSummary[] = [
+  {
+    id: "mock-workspace",
+    name: "OpenBaD",
+    path: "/mnt/disk4/repos/OpenBaD",
+    created_at: Date.now() - 86_400_000,
+    updated_at: Date.now(),
+    session_count: 0,
+  },
+];
 const mockMessages = new Map<string, { role: string; text: string; reasoning: string | null }[]>();
 
 const mockUsage: Usage = {
@@ -75,6 +86,63 @@ export async function workspaceDefault(): Promise<string> {
 
 export async function loadFoundation(): Promise<Foundation> {
   return isTauri ? invoke<Foundation>("foundation") : mockFoundation;
+}
+
+export async function listProjects(): Promise<WorkspaceSummary[]> {
+  return isTauri ? invoke<WorkspaceSummary[]>("list_projects") : [...mockProjects];
+}
+
+export async function addProject(
+  path: string,
+  name?: string,
+): Promise<WorkspaceSummary> {
+  if (isTauri) {
+    return invoke<WorkspaceSummary>("add_project", { path, name });
+  }
+  const existing = mockProjects.find((project) => project.path === path);
+  if (existing) {
+    return existing;
+  }
+  const project: WorkspaceSummary = {
+    id: `mock-project-${mockProjects.length + 1}`,
+    name: name?.trim() || path.split("/").filter(Boolean).at(-1) || "Project",
+    path,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+    session_count: 0,
+  };
+  mockProjects = [project, ...mockProjects];
+  return project;
+}
+
+export async function renameProject(projectId: string, name: string): Promise<void> {
+  if (isTauri) {
+    await invoke("rename_project", { projectId, name });
+    return;
+  }
+  mockProjects = mockProjects.map((project) =>
+    project.id === projectId ? { ...project, name } : project,
+  );
+}
+
+export async function removeProject(projectId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("remove_project", { projectId });
+    return;
+  }
+  mockProjects = mockProjects.filter((project) => project.id !== projectId);
+  mockSessions.splice(0, mockSessions.length, ...mockSessions.filter((s) => s.workspace_id !== projectId));
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+  if (isTauri) {
+    await invoke("rename_session", { sessionId, title });
+    return;
+  }
+  const session = mockSessions.find((item) => item.id === sessionId);
+  if (session) {
+    session.title = title;
+  }
 }
 
 export async function loadSessions(): Promise<SessionSummary[]> {
@@ -215,7 +283,6 @@ export type ChatInput = {
   message: string;
   allowWrites: boolean;
   allowCommands: boolean;
-  maxSteps: number;
   model: string;
   thinking: boolean;
   reasoningEffort: string;
@@ -235,7 +302,6 @@ export async function chat(
         message: input.message,
         allowWrites: input.allowWrites,
         allowCommands: input.allowCommands,
-        maxSteps: input.maxSteps,
         model: input.model,
         thinking: input.thinking,
         reasoningEffort: input.reasoningEffort,
@@ -287,6 +353,10 @@ async function mockChat(
   onEvent({ type: "usage", usage: mockUsage });
 
   if (input.sessionId === null) {
+    const project = mockProjects.find((item) => item.id === "mock-workspace");
+    if (project) {
+      project.session_count += 1;
+    }
     mockSessions.unshift({
       id: sessionId,
       workspace_id: "mock-workspace",

@@ -121,9 +121,11 @@ definitions, and FTS5 text in SQLite, refreshes after each turn, and powers
 `search_code`/`find_symbols`. File edits are checkpointed with sidebar diff and
 restore. Phase 5 memory provides `remember`/`recall` plus automatic recent-memory
 context, and Phase 6 workspace skills load on demand. Project conventions from
-`AGENTS.md`/`CLAUDE.md` are included in the system prompt. Per-call approvals,
-the evidence gate, LSP/PTY, whole-turn rewind, knowledge/RAG, subagents,
-workflows, and packaging remain.
+`AGENTS.md`/`CLAUDE.md` are included in the system prompt. The desktop UI now
+has a project/session sidebar, inline session rename, a compact composer with
+access modes, and an on-demand Context drawer; long tasks have no fixed step
+cap. Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind,
+knowledge/RAG, subagents, workflows, and packaging remain.
 
 - [Vision and feature set](docs/architecture/00-vision-and-feature-set.md)
 - [System overview](docs/architecture/01-system-overview.md)

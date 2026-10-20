@@ -486,6 +486,102 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
 }
 
 #[tauri::command]
+fn list_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<openbad_store::types::WorkspaceSummary>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store.list_workspaces().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_project(
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> Result<openbad_store::types::WorkspaceSummary, String> {
+    let path = PathBuf::from(&path);
+    if !path.is_dir() {
+        return Err(format!("project is not a directory: {}", path.display()));
+    }
+    let name = name
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| workspace_name(&path).to_owned());
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = store
+        .ensure_workspace(&name, &path.to_string_lossy())
+        .map_err(|error| error.to_string())?;
+    store
+        .workspace_summary(workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "project disappeared after creation".to_owned())
+}
+
+#[tauri::command]
+fn rename_project(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("project name must not be empty".to_owned());
+    }
+    let project = WorkspaceId::from(
+        Uuid::parse_str(&project_id).map_err(|error| format!("invalid project id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .rename_workspace(project, name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_project(state: State<'_, AppState>, project_id: String) -> Result<(), String> {
+    let project = WorkspaceId::from(
+        Uuid::parse_str(&project_id).map_err(|error| format!("invalid project id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .delete_workspace(project)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rename_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("session title must not be empty".to_owned());
+    }
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .rename_session(session, title)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn workspace_index_status(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -580,9 +676,24 @@ fn foundation(state: State<'_, AppState>) -> Result<Foundation, String> {
 
 #[tauri::command]
 fn workspace_default() -> String {
-    std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| ".".to_owned())
+    let Ok(path) = std::env::current_dir() else {
+        return String::new();
+    };
+    let markers = [
+        ".git",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "Makefile",
+        "AGENTS.md",
+        ".openbad",
+    ];
+    if markers.iter().any(|marker| path.join(marker).exists()) {
+        path.display().to_string()
+    } else {
+        String::new()
+    }
 }
 
 #[tauri::command]
@@ -759,7 +870,7 @@ async fn chat(
         AgentConfig {
             allow_writes,
             allow_commands,
-            max_steps: max_steps.unwrap_or(64).clamp(1, 256),
+            max_steps: max_steps.unwrap_or(0).min(100_000),
             ..AgentConfig::default()
         },
     );
@@ -1106,6 +1217,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health,
             foundation,
+            list_projects,
+            add_project,
+            rename_project,
+            remove_project,
+            rename_session,
             workspace_index_status,
             refresh_workspace_index,
             workspace_default,

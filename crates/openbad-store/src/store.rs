@@ -18,7 +18,7 @@ use crate::types::{
     AuditRecord, AuditReport, DoctorReport, FileCheckpoint, FileCheckpointSummary, IndexHit,
     IndexSummary, IndexedFile, MemoryRecord, ModelRouteRecord, NewModelRoute, NewProvider,
     NewSession, NewWorkspace, ProviderRecord, SessionMessage, SessionSummary, SessionTurn,
-    SymbolHit,
+    SymbolHit, WorkspaceSummary,
 };
 
 enum WriteCommand {
@@ -38,6 +38,20 @@ enum WriteCommand {
     CreateSession {
         session: NewSession,
         reply: SyncSender<Result<SessionId, StoreError>>,
+    },
+    RenameWorkspace {
+        workspace_id: WorkspaceId,
+        name: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    RenameSession {
+        session_id: SessionId,
+        title: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    DeleteWorkspace {
+        workspace_id: WorkspaceId,
+        reply: SyncSender<Result<(), StoreError>>,
     },
     SetSetting {
         key: String,
@@ -232,6 +246,80 @@ impl Store {
     pub fn ensure_workspace(&self, name: &str, path: &str) -> Result<WorkspaceId, StoreError> {
         self.write(|reply| WriteCommand::EnsureWorkspace {
             workspace: NewWorkspace::new(name, path),
+            reply,
+        })
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<WorkspaceSummary>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT w.id, w.name, w.path, w.created_at, w.updated_at,
+                    (SELECT COUNT(*) FROM sessions s
+                     WHERE s.workspace_id = w.id AND s.deleted_at IS NULL)
+             FROM workspaces w
+             ORDER BY w.updated_at DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut projects = Vec::new();
+        for row in rows {
+            let (id, name, path, created_at, updated_at, session_count) = row?;
+            projects.push(WorkspaceSummary {
+                id: WorkspaceId::from(
+                    Uuid::parse_str(&id)
+                        .map_err(|error| StoreError::InvalidData(error.to_string()))?,
+                ),
+                name,
+                path,
+                created_at,
+                updated_at,
+                session_count: session_count as u64,
+            });
+        }
+        Ok(projects)
+    }
+
+    pub fn workspace_summary(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<WorkspaceSummary>, StoreError> {
+        Ok(self
+            .list_workspaces()?
+            .into_iter()
+            .find(|workspace| workspace.id == workspace_id))
+    }
+
+    pub fn rename_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::RenameWorkspace {
+            workspace_id,
+            name: name.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn rename_session(&self, session_id: SessionId, title: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::RenameSession {
+            session_id,
+            title: title.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn delete_workspace(&self, workspace_id: WorkspaceId) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::DeleteWorkspace {
+            workspace_id,
             reply,
         })
     }
@@ -1183,6 +1271,47 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             WriteCommand::CreateSession { session, reply } => {
                 let _ = reply.send(create_session(&connection, session));
             }
+            WriteCommand::RenameWorkspace {
+                workspace_id,
+                name,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![name, now_millis(), workspace_id.to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
+            WriteCommand::RenameSession {
+                session_id,
+                title,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![title, now_millis(), session_id.to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
+            WriteCommand::DeleteWorkspace {
+                workspace_id,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "DELETE FROM workspaces WHERE id = ?1",
+                        [workspace_id.to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
             WriteCommand::SetSetting { key, value, reply } => {
                 let _ = reply.send(set_setting(&connection, &key, &value));
             }
@@ -1324,7 +1453,6 @@ fn ensure_workspace(
         "INSERT INTO workspaces (id, name, path, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?4)
          ON CONFLICT(path) DO UPDATE SET
-             name = excluded.name,
              updated_at = excluded.updated_at",
         params![id.to_string(), workspace.name, workspace.path, now],
     )?;
@@ -1681,6 +1809,39 @@ mod tests {
             .ensure_workspace("renamed", "/tmp/openbad-ensure")
             .expect("second");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn projects_list_and_rename_with_sessions() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .ensure_workspace("demo", "/tmp/openbad-projects")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("original"))
+            .expect("session");
+
+        let projects = store.list_workspaces().expect("projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "demo");
+        assert_eq!(projects[0].session_count, 1);
+
+        store
+            .rename_workspace(workspace, "Renamed")
+            .expect("rename");
+        store
+            .rename_session(session, "Better title")
+            .expect("rename session");
+        let projects = store.list_workspaces().expect("projects");
+        assert_eq!(projects[0].name, "Renamed");
+        let sessions = store.list_sessions(10).expect("sessions");
+        assert_eq!(sessions[0].title.as_deref(), Some("Better title"));
+
+        store
+            .ensure_workspace("folder-name", "/tmp/openbad-projects")
+            .expect("re-ensure");
+        let projects = store.list_workspaces().expect("projects");
+        assert_eq!(projects[0].name, "Renamed");
     }
 
     #[test]
