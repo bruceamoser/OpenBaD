@@ -233,9 +233,9 @@ commands with approvals.
 ### Phase 3 implementation notes
 
 - `openbad-tools` now has a `Tool` trait, a `ToolRegistry`, OpenAI-style tool
-  schemas, and eleven built-in tools: `read_file`, `list_dir`, `grep`, `glob`,
-  `find_symbols`, `write_file`, `edit_file`, `run_command`, `git_status`,
-  `git_diff`, and `repo_map`.
+  schemas, and thirteen built-in tools: `read_file`, `list_dir`, `grep`,
+  `search_code`, `glob`, `find_symbols`, `write_file`, `edit_file`,
+  `run_command`, `run_tests`, `git_status`, `git_diff`, and `repo_map`.
 - All filesystem tools resolve through `WorkspaceService`, which canonicalizes
   paths and rejects parent or symlink escapes. Existing files must be read before
   they can be overwritten or edited. Writes use a temporary file plus rename.
@@ -261,6 +261,9 @@ commands with approvals.
   debounces input before querying.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
+- `run_tests` detects Cargo, pnpm/npm/yarn, pytest, Go, and make projects,
+  runs the suite through the gated command tool, and surfaces failure summary
+  lines.
 - `run_command` drains stdout/stderr concurrently, runs the shell in its own
   process group, and kills the whole group on timeout or exit so background
   helpers do not survive the call.
