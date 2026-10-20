@@ -242,7 +242,8 @@ commands with approvals.
   `recall`, `list_skills`, and `read_skill`.
 - All filesystem tools resolve through `WorkspaceService`, which canonicalizes
   paths and rejects parent or symlink escapes. Existing files must be read before
-  they can be overwritten or edited. Writes use a temporary file plus rename.
+  they can be overwritten or edited. Writes use a temporary file plus rename and
+  preserve existing Unix permissions; new files are created as `0644`.
 - `openbad-agent` runs the DeepSeek turn/step loop, accumulates usage and cost,
   feeds tool errors back to the model as tool messages, and enforces a 64-step
   default budget. It streams reasoning and content deltas through an

@@ -421,8 +421,21 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
     let directory = path
         .parent()
         .ok_or_else(|| ToolError::InvalidArgument("path has no parent".to_owned()))?;
+    let existing_permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
     let mut temp = tempfile::NamedTempFile::new_in(directory)?;
     std::io::Write::write_all(&mut temp, content.as_bytes())?;
+    if let Some(permissions) = existing_permissions {
+        temp.as_file().set_permissions(permissions)?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        }
+    }
     #[cfg(windows)]
     {
         let _ = std::fs::remove_file(path);
@@ -1778,6 +1791,30 @@ mod tests {
             .await
             .expect("grep");
         assert!(grep.content.contains("src/main.rs:1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_writes_preserve_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("script.sh");
+        fs::write(&path, "#!/bin/sh\n").expect("script");
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        atomic_write(&path, "#!/bin/sh\necho hi\n").expect("write");
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+
+        let new_path = directory.path().join("new.txt");
+        atomic_write(&new_path, "new").expect("new file");
+        let mode = fs::metadata(&new_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o644);
     }
 
     #[tokio::test]
