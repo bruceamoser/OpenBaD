@@ -11,7 +11,9 @@ openbad-core = { path = "../openbad-core" }
 openbad-governance = { path = "../openbad-governance" }
 openbad-workspace = { path = "../openbad-workspace" }
 async-trait = "0.1"
+globset = "0.4"
 ignore = "0.4"
+regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"

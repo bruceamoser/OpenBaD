@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use globset::Glob;
 use ignore::WalkBuilder;
 use openbad_governance::RiskLevel;
 use openbad_workspace::WorkspaceService;
@@ -183,6 +184,8 @@ impl ToolRegistry {
         registry.register(ReadFileTool);
         registry.register(ListDirTool);
         registry.register(GrepTool);
+        registry.register(GlobTool);
+        registry.register(FindSymbolsTool);
         registry.register(WriteFileTool);
         registry.register(EditFileTool);
         registry.register(RunCommandTool);
@@ -503,6 +506,226 @@ impl Tool for GrepTool {
                 .with_metadata(json!({"matches": matches.len()})),
         )
     }
+}
+
+struct GlobTool;
+
+#[async_trait]
+impl Tool for GlobTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "glob",
+            "Find workspace files whose path matches a glob such as **/*.rs or src/**/*.ts. Respects .gitignore.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string", "description": "Workspace-relative directory"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 5000}
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let pattern = string_arg(&arguments, "pattern")?;
+        if pattern.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "pattern must not be empty".to_owned(),
+            ));
+        }
+        let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let root = context.workspace.resolve(Path::new(&relative))?;
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(500)
+            .clamp(1, 5_000);
+        let matcher = Glob::new(&pattern)
+            .map_err(|error| ToolError::InvalidArgument(format!("invalid glob: {error}")))?
+            .compile_matcher();
+        let match_basename = !pattern.contains('/');
+
+        let mut matches = Vec::new();
+        for entry in WalkBuilder::new(&root).build().filter_map(Result::ok) {
+            if matches.len() >= max_results {
+                break;
+            }
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(context.workspace.root())
+                .unwrap_or(entry.path());
+            let candidate = if match_basename {
+                path.file_name().map(Path::new).unwrap_or(path)
+            } else {
+                path
+            };
+            if matcher.is_match(candidate) {
+                matches.push(path.display().to_string());
+            }
+        }
+        matches.sort();
+        Ok(
+            ToolResult::ok(truncate(&matches.join("\n"), context.max_output_bytes))
+                .with_metadata(json!({"matches": matches.len()})),
+        )
+    }
+}
+
+struct FindSymbolsTool;
+
+#[async_trait]
+impl Tool for FindSymbolsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "find_symbols",
+            "Find function, type, class, trait, and module definitions by name across code files.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Case-insensitive symbol name or fragment"},
+                "path": {"type": "string", "description": "Workspace-relative directory"},
+                "kind": {"type": "string", "description": "Optional definition kind such as fn, struct, class, or def"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 500}
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let query = string_arg(&arguments, "query")?;
+        if query.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "query must not be empty".to_owned(),
+            ));
+        }
+        let query = query.to_lowercase();
+        let kind_filter = optional_string(&arguments, "kind").map(|kind| kind.to_lowercase());
+        let relative = optional_string(&arguments, "path").unwrap_or_else(|| ".".to_owned());
+        let root = context.workspace.resolve(Path::new(&relative))?;
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let definition = symbol_pattern();
+
+        let mut matches = Vec::new();
+        'files: for entry in WalkBuilder::new(&root).build().filter_map(Result::ok) {
+            if matches.len() >= max_results {
+                break;
+            }
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let path = entry.path();
+            if !is_code_file(path) {
+                continue;
+            }
+            if entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > 1024 * 1024 {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            let Ok(content) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let display = path.strip_prefix(context.workspace.root()).unwrap_or(path);
+            for (index, line) in content.lines().enumerate() {
+                let Some(captures) = definition.captures(line) else {
+                    continue;
+                };
+                let name = captures
+                    .name("name")
+                    .map(|m| m.as_str())
+                    .unwrap_or_default();
+                if !name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                let kind = captures
+                    .name("kind")
+                    .map(|m| m.as_str().to_lowercase())
+                    .unwrap_or_default();
+                if kind_filter.as_ref().is_some_and(|filter| *filter != kind) {
+                    continue;
+                }
+                matches.push(format!(
+                    "{}:{}: {}",
+                    display.display(),
+                    index + 1,
+                    line.trim()
+                ));
+                if matches.len() >= max_results {
+                    break 'files;
+                }
+            }
+        }
+
+        Ok(
+            ToolResult::ok(truncate(&matches.join("\n"), context.max_output_bytes))
+                .with_metadata(json!({"matches": matches.len()})),
+        )
+    }
+}
+
+fn symbol_pattern() -> regex::Regex {
+    regex::Regex::new(
+        r"(?x)
+        ^\s*
+        (?:pub(?:\([^)]*\))?\s+)?
+        (?:(?:async|unsafe|export|default|abstract|final)\s+)*
+        (?P<kind>fn|func|def|struct|enum|trait|impl|mod|const|static|type|class|interface|function)\s+
+        (?:\([^)]*\)\s*)?
+        (?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    )
+    .expect("symbol regex")
+}
+
+fn is_code_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some(
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "py"
+                | "go"
+                | "java"
+                | "kt"
+                | "kts"
+                | "c"
+                | "h"
+                | "cc"
+                | "cpp"
+                | "hpp"
+                | "cs"
+                | "rb"
+                | "php"
+                | "swift"
+                | "scala"
+                | "lua"
+                | "sql"
+                | "sh"
+                | "bash"
+        )
+    )
 }
 
 struct WriteFileTool;
@@ -987,10 +1210,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn glob_and_symbol_tools_find_matching_code() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        fs::write(
+            directory.path().join("src/main.rs"),
+            "pub struct Config {}\nfn main() {}\n",
+        )
+        .expect("rust");
+        fs::write(
+            directory.path().join("src/app.ts"),
+            "export function startServer() {}\n",
+        )
+        .expect("typescript");
+        fs::write(directory.path().join("README.md"), "fn not_code").expect("readme");
+        let context = context(directory.path());
+
+        let glob = GlobTool
+            .execute(json!({"pattern": "*.rs"}), &context)
+            .await
+            .expect("glob");
+        assert!(glob.content.contains("src/main.rs"));
+        assert!(!glob.content.contains("README.md"));
+
+        let symbols = FindSymbolsTool
+            .execute(json!({"query": "config"}), &context)
+            .await
+            .expect("symbols");
+        assert!(symbols.content.contains("src/main.rs:1: pub struct Config"));
+
+        let functions = FindSymbolsTool
+            .execute(json!({"query": "start", "kind": "function"}), &context)
+            .await
+            .expect("functions");
+        assert!(functions.content.contains("startServer"));
+    }
+
+    #[tokio::test]
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
-        assert!(definitions.len() >= 9);
+        assert!(definitions.len() >= 11);
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
     }
