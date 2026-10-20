@@ -183,23 +183,106 @@ impl ProjectAreas for StoreProjectAreas {
         tags: Vec<String>,
         confidence: &str,
     ) -> Result<KnowledgeEntryRef, String> {
+        self.add_knowledge_detailed(
+            title, content, "note", source, tags, confidence, None, "accepted",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_knowledge_detailed(
+        &self,
+        title: &str,
+        content: &str,
+        kind: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+        confidence: &str,
+        supersedes: Option<&str>,
+        review_status: &str,
+    ) -> Result<KnowledgeEntryRef, String> {
         let store = self
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         store
-            .add_knowledge_document_with_confidence(
+            .add_knowledge_document_with_metadata(
                 self.workspace_id,
                 title,
-                "note",
+                kind,
                 source,
                 tags,
                 content,
                 confidence,
                 None,
+                supersedes,
+                review_status,
             )
             .map_err(|error| error.to_string())
             .map(knowledge_ref)
+    }
+
+    fn review_knowledge(&self, id: &str, status: &str) -> Result<KnowledgeDocumentRef, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .set_knowledge_review_status(id, status)
+            .map_err(|error| error.to_string())
+            .and_then(|_| {
+                store
+                    .knowledge_document(id)
+                    .map_err(|error| error.to_string())?
+                    .map(knowledge_document_ref)
+                    .ok_or_else(|| format!("knowledge document not found: {id}"))
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_knowledge_detailed(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        kind: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+        confidence: Option<&str>,
+        supersedes: Option<&str>,
+        review_status: Option<&str>,
+    ) -> Result<KnowledgeDocumentRef, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let existing = store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("knowledge document not found: {id}"))?;
+        if let Some(kind) = kind {
+            store
+                .set_knowledge_kind(id, kind)
+                .map_err(|error| error.to_string())?;
+        }
+        store
+            .update_knowledge_document_with_metadata(
+                id,
+                title,
+                content,
+                source,
+                tags,
+                confidence,
+                None,
+                supersedes,
+                review_status,
+            )
+            .map_err(|error| error.to_string())?;
+        let _ = existing;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())?
+            .map(knowledge_document_ref)
+            .ok_or_else(|| format!("knowledge document not found: {id}"))
     }
 
     fn get_knowledge(&self, id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
@@ -315,6 +398,8 @@ fn knowledge_ref(document: KnowledgeDocumentSummary) -> KnowledgeEntryRef {
         chunks: document.chunks,
         confidence: document.confidence,
         stale,
+        supersedes: document.supersedes,
+        review_status: document.review_status,
     }
 }
 
@@ -330,6 +415,8 @@ fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
         chunks: document.summary.chunks,
         confidence: document.summary.confidence,
         stale,
+        supersedes: document.summary.supersedes,
+        review_status: document.summary.review_status,
     }
 }
 
@@ -807,6 +894,7 @@ fn add_knowledge_note(
     content: String,
     tags: Vec<String>,
     confidence: Option<String>,
+    kind: Option<String>,
 ) -> Result<KnowledgeDocumentSummary, String> {
     let store = state
         .store
@@ -814,15 +902,17 @@ fn add_knowledge_note(
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let workspace = project_workspace(&store, &workspace_path)?;
     store
-        .add_knowledge_document_with_confidence(
+        .add_knowledge_document_with_metadata(
             workspace,
             &title,
-            "note",
+            kind.as_deref().unwrap_or("note"),
             None,
             tags,
             &content,
             confidence.as_deref().unwrap_or("inferred"),
             None,
+            None,
+            "proposed",
         )
         .map_err(|error| error.to_string())
 }
@@ -2078,7 +2168,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0008_memory_provenance");
+        assert_eq!(payload.doctor.schema_version, "0009_knowledge_review");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

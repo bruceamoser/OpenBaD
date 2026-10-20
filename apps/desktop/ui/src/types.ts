@@ -152,6 +152,8 @@ export type KnowledgeDocumentSummary = {
   chunks: number;
   confidence: string;
   source_hash: string | null;
+  supersedes: string | null;
+  review_status: string;
   created_at: number;
   updated_at: number;
 };

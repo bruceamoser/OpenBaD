@@ -71,6 +71,8 @@ let mockKnowledge: KnowledgeDocumentSummary[] = [
     chunks: 1,
     confidence: "verified",
     source_hash: null,
+    supersedes: null,
+    review_status: "accepted",
     created_at: Date.now() - 7_200_000,
     updated_at: Date.now() - 7_200_000,
   },
@@ -182,7 +184,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0008_memory_provenance",
+    schema_version: "0009_knowledge_review",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -559,6 +561,7 @@ export async function addKnowledgeNote(
   content: string,
   tags: string[],
   confidence = "inferred",
+  kind = "note",
 ): Promise<KnowledgeDocumentSummary> {
   if (isTauri) {
     return invoke<KnowledgeDocumentSummary>("add_knowledge_note", {
@@ -567,19 +570,22 @@ export async function addKnowledgeNote(
       content,
       tags,
       confidence,
+      kind,
     });
   }
   const summary: KnowledgeDocumentSummary = {
     id: `mock-knowledge-${mockKnowledge.length + 1}`,
     workspace_id: "mock-workspace",
     title: title.trim() || "Project note",
-    kind: "note",
+    kind,
     source: null,
     tags,
     characters: content.length,
     chunks: Math.max(1, Math.ceil(content.length / 1400)),
     confidence,
     source_hash: null,
+    supersedes: null,
+    review_status: "proposed",
     created_at: Date.now(),
     updated_at: Date.now(),
   };

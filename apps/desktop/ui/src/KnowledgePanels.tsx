@@ -42,6 +42,7 @@ export function KnowledgePanel({
   const [content, setContent] = useState("");
   const [tags, setTags] = useState("");
   const [confidence, setConfidence] = useState("inferred");
+  const [kind, setKind] = useState("note");
   const [importing, setImporting] = useState(false);
   const [importPath, setImportPath] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -113,12 +114,14 @@ export function KnowledgePanel({
           .map((tag) => tag.trim())
           .filter(Boolean),
         confidence,
+        kind,
       );
       setKnowledge((items) => [document, ...items]);
       setTitle("");
       setContent("");
       setTags("");
       setConfidence("inferred");
+      setKind("note");
       setComposing(false);
       setNotice(`Added ${document.title}`);
       setError(null);
@@ -193,6 +196,11 @@ export function KnowledgePanel({
               {stale.has(document.id) && (
                 <span className="rounded bg-amber-400/15 px-1 py-0.5 text-amber-300">
                   source changed
+                </span>
+              )}
+              {document.review_status !== "accepted" && (
+                <span className="rounded bg-sky-400/15 px-1 py-0.5 text-sky-300">
+                  {document.review_status}
                 </span>
               )}
             </p>
@@ -288,6 +296,21 @@ export function KnowledgePanel({
             placeholder="tags, comma separated"
             className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
           />
+          <select
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
+            aria-label="Knowledge kind"
+            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+          >
+            <option value="note">Note</option>
+            <option value="decision">Decision</option>
+            <option value="reference">Reference</option>
+            <option value="gotcha">Gotcha</option>
+            <option value="procedure">Procedure</option>
+            <option value="glossary">Glossary</option>
+            <option value="finding">Finding</option>
+            <option value="question">Question</option>
+          </select>
           <select
             value={confidence}
             onChange={(event) => setConfidence(event.target.value)}

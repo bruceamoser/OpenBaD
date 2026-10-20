@@ -314,6 +314,8 @@ pub struct KnowledgeDocumentSummary {
     pub chunks: u64,
     pub confidence: String,
     pub source_hash: Option<String>,
+    pub supersedes: Option<String>,
+    pub review_status: String,
     pub created_at: i64,
     pub updated_at: i64,
 }

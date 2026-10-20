@@ -74,6 +74,11 @@ Project manifests also declare a `recipes:` registry for verification
 matching a validator run it before the result is accepted; failures roll the
 file back to its previous content.
 
+Knowledge notes are typed and reviewed (proposed/accepted/rejected); a
+`supersedes` relation keeps an audit trail while removing the old note from
+retrieval. `export_knowledge`/`import_knowledge` round-trip Markdown under
+`knowledge/` with frontmatter.
+
 Knowledge writes are transactional: the document, its chunks, and its FTS rows
 are inserted together. Imported files record the source path and a BLAKE3
 source hash so later reads can flag stale notes; notes accept `verified`,

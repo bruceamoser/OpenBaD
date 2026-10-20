@@ -190,6 +190,8 @@ pub struct KnowledgeEntryRef {
     pub chunks: u64,
     pub confidence: String,
     pub stale: bool,
+    pub supersedes: Option<String>,
+    pub review_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +205,8 @@ pub struct KnowledgeDocumentRef {
     pub chunks: u64,
     pub confidence: String,
     pub stale: bool,
+    pub supersedes: Option<String>,
+    pub review_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -226,6 +230,38 @@ pub trait ProjectAreas: Send + Sync {
         tags: Vec<String>,
         confidence: &str,
     ) -> Result<KnowledgeEntryRef, String>;
+    #[allow(clippy::too_many_arguments)]
+    fn add_knowledge_detailed(
+        &self,
+        title: &str,
+        content: &str,
+        _kind: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+        confidence: &str,
+        _supersedes: Option<&str>,
+        _review_status: &str,
+    ) -> Result<KnowledgeEntryRef, String> {
+        self.add_knowledge(title, content, source, tags, confidence)
+    }
+    fn review_knowledge(&self, _id: &str, _status: &str) -> Result<KnowledgeDocumentRef, String> {
+        Err("knowledge review is not available".to_owned())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn update_knowledge_detailed(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        _kind: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+        confidence: Option<&str>,
+        _supersedes: Option<&str>,
+        _review_status: Option<&str>,
+    ) -> Result<KnowledgeDocumentRef, String> {
+        self.update_knowledge(id, title, content, source, tags, confidence)
+    }
     fn get_knowledge(&self, _id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
         Err("knowledge document lookup is not available".to_owned())
     }
@@ -483,6 +519,9 @@ impl ToolRegistry {
         registry.register(ListKnowledgeTool);
         registry.register(GetKnowledgeTool);
         registry.register(UpdateKnowledgeTool);
+        registry.register(ExportKnowledgeTool);
+        registry.register(ImportKnowledgeTool);
+        registry.register(ReviewKnowledgeTool);
         registry.register(DeleteKnowledgeTool);
         registry.register(ListProjectSourcesTool);
         registry.register(ReadRepoFileTool);
@@ -3020,9 +3059,12 @@ impl Tool for AddKnowledgeTool {
             "properties": {
                 "title": {"type": "string"},
                 "content": {"type": "string"},
+                "kind": {"type": "string", "enum": ["note", "decision", "reference", "gotcha", "procedure", "glossary", "finding", "question"]},
                 "source": {"type": "string", "description": "Optional URL or path"},
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "confidence": {"type": "string", "enum": ["verified", "inferred", "uncertain"], "description": "How firmly the content is established; verified means checked against primary sources or code."}
+                "confidence": {"type": "string", "enum": ["verified", "inferred", "uncertain"], "description": "How firmly the content is established; verified means checked against primary sources or code."},
+                "supersedes": {"type": "string", "description": "Existing knowledge id this note replaces"},
+                "review_status": {"type": "string", "enum": ["proposed", "accepted", "rejected"], "description": "Curated state; proposed by default for agent notes"}
             },
             "required": ["title", "content"],
             "additionalProperties": false
@@ -3063,21 +3105,77 @@ impl Tool for AddKnowledgeTool {
                 "confidence must be verified, inferred, or uncertain".to_owned(),
             ));
         }
+        let kind = optional_string(&arguments, "kind").unwrap_or_else(|| "note".to_owned());
+        if !matches!(
+            kind.as_str(),
+            "note"
+                | "decision"
+                | "reference"
+                | "gotcha"
+                | "procedure"
+                | "glossary"
+                | "finding"
+                | "question"
+        ) {
+            return Err(ToolError::InvalidArgument(
+                "kind must be note, decision, reference, gotcha, procedure, glossary, finding, or question"
+                    .to_owned(),
+            ));
+        }
+        let review_status =
+            optional_string(&arguments, "review_status").unwrap_or_else(|| "proposed".to_owned());
+        if !matches!(review_status.as_str(), "proposed" | "accepted" | "rejected") {
+            return Err(ToolError::InvalidArgument(
+                "review_status must be proposed, accepted, or rejected".to_owned(),
+            ));
+        }
+        let supersedes = optional_string(&arguments, "supersedes");
+        if supersedes.is_none() {
+            let existing = project.list_knowledge().map_err(ToolError::Failed)?;
+            let mut conflicts = Vec::new();
+            for existing in existing.iter().take(20) {
+                let Ok(Some(document)) = project.get_knowledge(&existing.id) else {
+                    continue;
+                };
+                if likely_memory_conflict(&content, &document.content) {
+                    conflicts.push(format!("{}: {}", document.id, document.title));
+                }
+            }
+            if !conflicts.is_empty() {
+                return Err(ToolError::Failed(format!(
+                    "possible contradiction with existing knowledge; pass supersedes=<id> to replace it explicitly:\n{}",
+                    conflicts.join("\n")
+                )));
+            }
+        }
         let entry = project
-            .add_knowledge(&title, &content, source.as_deref(), tags, &confidence)
+            .add_knowledge_detailed(
+                &title,
+                &content,
+                &kind,
+                source.as_deref(),
+                tags,
+                &confidence,
+                supersedes.as_deref(),
+                &review_status,
+            )
             .map_err(ToolError::Failed)?;
         Ok(ToolResult::ok(format!(
-            "Added knowledge \"{}\" ({} chars, {} chunks, confidence {}, id {}).",
+            "Added {} knowledge \"{}\" ({} chars, {} chunks, confidence {}, {}, id {}).",
+            entry.kind,
             entry.title,
             content.chars().count(),
             entry.chunks,
             entry.confidence,
+            entry.review_status,
             entry.id
         ))
         .with_metadata(json!({
             "id": entry.id,
             "title": entry.title,
-            "chunks": entry.chunks
+            "chunks": entry.chunks,
+            "kind": entry.kind,
+            "review_status": entry.review_status
         })))
     }
 }
@@ -3206,7 +3304,7 @@ impl Tool for UpdateKnowledgeTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "update_knowledge",
-            "Correct a project knowledge document's title, content, source, or tags. Omitted fields stay unchanged; content changes rebuild chunks.",
+            "Correct a project knowledge document's title, content, kind, source, tags, confidence, supersession, or review status. Omitted fields stay unchanged; content changes rebuild chunks.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -3217,7 +3315,10 @@ impl Tool for UpdateKnowledgeTool {
                 "content": {"type": "string"},
                 "source": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "confidence": {"type": "string", "enum": ["verified", "inferred", "uncertain"]}
+                "confidence": {"type": "string", "enum": ["verified", "inferred", "uncertain"]},
+                "kind": {"type": "string", "enum": ["note", "decision", "reference", "gotcha", "procedure", "glossary", "finding", "question"]},
+                "supersedes": {"type": "string"},
+                "review_status": {"type": "string", "enum": ["proposed", "accepted", "rejected", "superseded"]}
             },
             "required": ["id"],
             "additionalProperties": false
@@ -3251,36 +3352,324 @@ impl Tool for UpdateKnowledgeTool {
                 ));
             }
         }
+        let kind = optional_string(&arguments, "kind");
+        if let Some(kind) = kind.as_deref() {
+            if !matches!(
+                kind,
+                "note"
+                    | "decision"
+                    | "reference"
+                    | "gotcha"
+                    | "procedure"
+                    | "glossary"
+                    | "finding"
+                    | "question"
+            ) {
+                return Err(ToolError::InvalidArgument(
+                    "kind must be note, decision, reference, gotcha, procedure, glossary, finding, or question"
+                        .to_owned(),
+                ));
+            }
+        }
+        let review_status = optional_string(&arguments, "review_status");
+        if let Some(review_status) = review_status.as_deref() {
+            if !matches!(
+                review_status,
+                "proposed" | "accepted" | "rejected" | "superseded"
+            ) {
+                return Err(ToolError::InvalidArgument(
+                    "review_status must be proposed, accepted, rejected, or superseded".to_owned(),
+                ));
+            }
+        }
+        let supersedes = optional_string(&arguments, "supersedes");
         if title.is_none()
             && content.is_none()
             && source.is_none()
             && tags.is_none()
             && confidence.is_none()
+            && kind.is_none()
+            && review_status.is_none()
+            && supersedes.is_none()
         {
             return Err(ToolError::InvalidArgument(
-                "at least one of title, content, source, tags, or confidence is required"
-                    .to_owned(),
+                "at least one field is required".to_owned(),
             ));
         }
         let document = project
-            .update_knowledge(
+            .update_knowledge_detailed(
                 &id,
                 title.as_deref(),
                 content.as_deref(),
+                kind.as_deref(),
                 source.as_deref(),
                 tags,
                 confidence.as_deref(),
+                supersedes.as_deref(),
+                review_status.as_deref(),
             )
             .map_err(ToolError::Failed)?;
         Ok(ToolResult::ok(format!(
-            "Updated knowledge \"{}\" ({} chunks, confidence {}, id {}).",
-            document.title, document.chunks, document.confidence, document.id
+            "Updated {} knowledge \"{}\" ({} chunks, {}, confidence {}, id {}).",
+            document.kind,
+            document.title,
+            document.chunks,
+            document.review_status,
+            document.confidence,
+            document.id
         ))
         .with_metadata(json!({
             "id": document.id,
             "chunks": document.chunks,
-            "confidence": document.confidence
+            "confidence": document.confidence,
+            "review_status": document.review_status
         })))
+    }
+}
+
+struct ExportKnowledgeTool;
+
+#[async_trait]
+impl Tool for ExportKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "export_knowledge",
+            "Export project knowledge to git-friendly Markdown files under knowledge/ with frontmatter.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "directory": {"type": "string", "description": "Default knowledge"},
+                "include_all": {"type": "boolean", "description": "Include proposed/rejected/superseded documents"}
+            }
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("export_knowledge".to_owned()));
+        }
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let directory = context.workspace.resolve(Path::new(
+            &optional_string(&arguments, "directory").unwrap_or_else(|| "knowledge".to_owned()),
+        ))?;
+        std::fs::create_dir_all(&directory)?;
+        let include_all = optional_bool(&arguments, "include_all").unwrap_or(false);
+        let entries = project.list_knowledge().map_err(ToolError::Failed)?;
+        let mut exported = Vec::new();
+        for entry in entries {
+            if !include_all && matches!(entry.review_status.as_str(), "rejected" | "superseded") {
+                continue;
+            }
+            let Some(document) = project
+                .get_knowledge(&entry.id)
+                .map_err(ToolError::Failed)?
+            else {
+                continue;
+            };
+            let frontmatter = json!({
+                "title": document.title,
+                "kind": document.kind,
+                "tags": document.tags,
+                "confidence": document.confidence,
+                "review_status": document.review_status,
+                "source": document.source,
+                "supersedes": document.supersedes
+            });
+            let slug = document
+                .title
+                .to_ascii_lowercase()
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+                .split('-')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            let name = format!("{}-{}.md", slug, &document.id[..document.id.len().min(8)]);
+            let body = format!(
+                "---\n{}\n---\n\n{}\n",
+                serde_json::to_string_pretty(&frontmatter)
+                    .map_err(|error| ToolError::Failed(error.to_string()))?,
+                document.content
+            );
+            std::fs::write(directory.join(&name), body)?;
+            exported.push(name);
+        }
+        Ok(ToolResult::ok(format!(
+            "exported {} knowledge documents to {}",
+            exported.len(),
+            directory.display()
+        ))
+        .with_metadata(json!({"exported": exported})))
+    }
+}
+
+struct ImportKnowledgeTool;
+
+#[async_trait]
+impl Tool for ImportKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "import_knowledge",
+            "Import Markdown files from knowledge/ (or a given directory) into the project knowledge library. Frontmatter fields are honored.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "directory": {"type": "string", "description": "Default knowledge"}
+            }
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("import_knowledge".to_owned()));
+        }
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let directory = context.workspace.resolve(Path::new(
+            &optional_string(&arguments, "directory").unwrap_or_else(|| "knowledge".to_owned()),
+        ))?;
+        if !directory.is_dir() {
+            return Ok(ToolResult::ok("knowledge directory does not exist"));
+        }
+        let mut imported = Vec::new();
+        let mut files = std::fs::read_dir(&directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("md"))
+            .collect::<Vec<_>>();
+        files.sort();
+        for path in files {
+            let raw = std::fs::read_to_string(&path)?;
+            let (frontmatter, content) = split_markdown_frontmatter(&raw);
+            let metadata: Value = frontmatter
+                .and_then(|frontmatter| {
+                    serde_json::from_str(&frontmatter)
+                        .ok()
+                        .or_else(|| serde_yaml::from_str(&frontmatter).ok())
+                })
+                .unwrap_or_else(|| json!({}));
+            let title = metadata["title"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("Imported note")
+                        .to_owned()
+                });
+            let kind = metadata["kind"].as_str().unwrap_or("note");
+            let confidence = metadata["confidence"].as_str().unwrap_or("inferred");
+            let review_status = metadata["review_status"].as_str().unwrap_or("proposed");
+            let source = metadata["source"].as_str();
+            let supersedes = metadata["supersedes"].as_str();
+            let tags = metadata["tags"]
+                .as_array()
+                .map(|tags| {
+                    tags.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let entry = project
+                .add_knowledge_detailed(
+                    &title,
+                    content.trim(),
+                    kind,
+                    source,
+                    tags,
+                    confidence,
+                    supersedes,
+                    review_status,
+                )
+                .map_err(ToolError::Failed)?;
+            imported.push(entry.id);
+        }
+        Ok(
+            ToolResult::ok(format!("imported {} knowledge documents", imported.len()))
+                .with_metadata(json!({"imported": imported})),
+        )
+    }
+}
+
+fn split_markdown_frontmatter(raw: &str) -> (Option<String>, String) {
+    let trimmed = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"));
+    let Some(rest) = trimmed else {
+        return (None, raw.to_owned());
+    };
+    if let Some((frontmatter, body)) = rest.split_once("\n---") {
+        let body = body.strip_prefix('\n').unwrap_or(body);
+        return (Some(frontmatter.to_owned()), body.to_owned());
+    }
+    (None, raw.to_owned())
+}
+
+struct ReviewKnowledgeTool;
+
+#[async_trait]
+impl Tool for ReviewKnowledgeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "review_knowledge",
+            "Accept, reject, propose, or supersede a knowledge document. Rejected and superseded documents leave retrieval.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "status": {"type": "string", "enum": ["proposed", "accepted", "rejected", "superseded"]}
+            },
+            "required": ["id", "status"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let project = context
+            .project
+            .as_ref()
+            .ok_or_else(|| ToolError::Failed("project knowledge is not available".to_owned()))?;
+        let id = string_arg(&arguments, "id")?;
+        let status = string_arg(&arguments, "status")?;
+        let document = project
+            .review_knowledge(&id, &status)
+            .map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(format!(
+            "knowledge {} is now {}",
+            document.id, document.review_status
+        ))
+        .with_metadata(json!({"id": document.id, "review_status": document.review_status})))
     }
 }
 
@@ -7236,6 +7625,90 @@ validators:
     }
 
     #[tokio::test]
+    async fn typed_knowledge_review_supersede_and_markdown_round_trip() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.project = Some(Arc::new(FakeProject {
+            repos: Vec::new(),
+            knowledge: Mutex::new(Vec::new()),
+            contents: Mutex::new(HashMap::new()),
+        }));
+
+        let added = AddKnowledgeTool
+            .execute(
+                json!({
+                    "title": "Indent with tabs",
+                    "content": "Use tabs for indentation in this project.",
+                    "kind": "decision",
+                    "confidence": "verified"
+                }),
+                &context,
+            )
+            .await
+            .expect("typed add");
+        assert!(added.content.contains("decision"));
+        assert_eq!(added.metadata["review_status"], "proposed");
+
+        let reviewed = ReviewKnowledgeTool
+            .execute(json!({"id": "knowledge-1", "status": "accepted"}), &context)
+            .await
+            .expect("review");
+        assert!(reviewed.content.contains("accepted"));
+
+        let conflict = AddKnowledgeTool
+            .execute(
+                json!({
+                    "title": "Indent with spaces",
+                    "content": "Never use tabs for indentation in this project."
+                }),
+                &context,
+            )
+            .await
+            .expect_err("contradiction");
+        assert!(conflict.to_string().contains("supersedes"));
+
+        AddKnowledgeTool
+            .execute(
+                json!({
+                    "title": "Indent with spaces",
+                    "content": "Use spaces for indentation in this project.",
+                    "kind": "decision",
+                    "supersedes": "knowledge-1",
+                    "review_status": "accepted"
+                }),
+                &context,
+            )
+            .await
+            .expect("supersede");
+
+        let updated = UpdateKnowledgeTool
+            .execute(
+                json!({"id": "knowledge-1", "kind": "gotcha", "tags": ["style"]}),
+                &context,
+            )
+            .await
+            .expect("typed update");
+        assert!(updated.content.contains("gotcha"));
+
+        let exported = ExportKnowledgeTool
+            .execute(json!({}), &context)
+            .await
+            .expect("export");
+        assert!(exported.content.contains("exported"));
+        let files = fs::read_dir(directory.path().join("knowledge"))
+            .expect("knowledge dir")
+            .filter_map(Result::ok)
+            .count();
+        assert!(files > 0);
+        let imported = ImportKnowledgeTool
+            .execute(json!({}), &context)
+            .await
+            .expect("import");
+        assert!(imported.content.contains("imported"));
+    }
+
+    #[tokio::test]
     async fn canon_glossary_adr_yaml_and_invariants_work() {
         let directory = tempdir().expect("tempdir");
         fs::create_dir_all(directory.path().join("src")).expect("src");
@@ -8086,6 +8559,7 @@ invariants:
     struct FakeProject {
         repos: Vec<ProjectRepoRef>,
         knowledge: Mutex<Vec<KnowledgeEntryRef>>,
+        contents: Mutex<HashMap<String, String>>,
     }
 
     impl ProjectAreas for FakeProject {
@@ -8113,9 +8587,67 @@ invariants:
                 chunks: (content.chars().count() / 1_400 + 1) as u64,
                 confidence: confidence.to_owned(),
                 stale: false,
+                supersedes: None,
+                review_status: "accepted".to_owned(),
             };
             self.knowledge.lock().expect("lock").push(entry.clone());
+            self.contents
+                .lock()
+                .expect("contents")
+                .insert(entry.id.clone(), content.to_owned());
             Ok(entry)
+        }
+
+        fn add_knowledge_detailed(
+            &self,
+            title: &str,
+            content: &str,
+            kind: &str,
+            source: Option<&str>,
+            _tags: Vec<String>,
+            confidence: &str,
+            supersedes: Option<&str>,
+            review_status: &str,
+        ) -> Result<KnowledgeEntryRef, String> {
+            let entry = KnowledgeEntryRef {
+                id: "knowledge-1".to_owned(),
+                title: title.to_owned(),
+                kind: kind.to_owned(),
+                source: source.map(str::to_owned),
+                chunks: (content.chars().count() / 1_400 + 1) as u64,
+                confidence: confidence.to_owned(),
+                stale: false,
+                supersedes: supersedes.map(str::to_owned),
+                review_status: review_status.to_owned(),
+            };
+            self.knowledge.lock().expect("lock").push(entry.clone());
+            self.contents
+                .lock()
+                .expect("contents")
+                .insert(entry.id.clone(), content.to_owned());
+            Ok(entry)
+        }
+
+        fn review_knowledge(&self, id: &str, status: &str) -> Result<KnowledgeDocumentRef, String> {
+            let mut entries = self.knowledge.lock().expect("lock");
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| format!("unknown knowledge document: {id}"))?;
+            entry.review_status = status.to_owned();
+            Ok(KnowledgeDocumentRef {
+                id: entry.id.clone(),
+                title: entry.title.clone(),
+                kind: entry.kind.clone(),
+                source: entry.source.clone(),
+                tags: vec!["stored".to_owned()],
+                content: "stored knowledge content".to_owned(),
+                chunks: entry.chunks,
+                confidence: entry.confidence.clone(),
+                stale: false,
+                supersedes: entry.supersedes.clone(),
+                review_status: entry.review_status.clone(),
+            })
         }
 
         fn get_knowledge(&self, id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
@@ -8131,10 +8663,18 @@ invariants:
                     kind: entry.kind.clone(),
                     source: entry.source.clone(),
                     tags: vec!["stored".to_owned()],
-                    content: "stored knowledge content".to_owned(),
+                    content: self
+                        .contents
+                        .lock()
+                        .expect("contents")
+                        .get(&entry.id)
+                        .cloned()
+                        .unwrap_or_else(|| "stored knowledge content".to_owned()),
                     chunks: entry.chunks,
                     confidence: entry.confidence.clone(),
                     stale: false,
+                    supersedes: entry.supersedes.clone(),
+                    review_status: entry.review_status.clone(),
                 }))
         }
 
@@ -8158,6 +8698,12 @@ invariants:
             if let Some(confidence) = confidence {
                 entry.confidence = confidence.to_owned();
             }
+            if let Some(content) = content {
+                self.contents
+                    .lock()
+                    .expect("contents")
+                    .insert(entry.id.clone(), content.to_owned());
+            }
             Ok(KnowledgeDocumentRef {
                 id: entry.id.clone(),
                 title: entry.title.clone(),
@@ -8168,6 +8714,65 @@ invariants:
                 chunks: entry.chunks,
                 confidence: entry.confidence.clone(),
                 stale: false,
+                supersedes: entry.supersedes.clone(),
+                review_status: entry.review_status.clone(),
+            })
+        }
+
+        fn update_knowledge_detailed(
+            &self,
+            id: &str,
+            title: Option<&str>,
+            content: Option<&str>,
+            kind: Option<&str>,
+            source: Option<&str>,
+            tags: Option<Vec<String>>,
+            confidence: Option<&str>,
+            supersedes: Option<&str>,
+            review_status: Option<&str>,
+        ) -> Result<KnowledgeDocumentRef, String> {
+            let mut entries = self.knowledge.lock().expect("lock");
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| format!("unknown knowledge document: {id}"))?;
+            if let Some(title) = title {
+                entry.title = title.to_owned();
+            }
+            if let Some(kind) = kind {
+                entry.kind = kind.to_owned();
+            }
+            if let Some(source) = source {
+                entry.source = Some(source.to_owned());
+            }
+            if let Some(confidence) = confidence {
+                entry.confidence = confidence.to_owned();
+            }
+            if let Some(supersedes) = supersedes {
+                entry.supersedes = Some(supersedes.to_owned());
+            }
+            if let Some(review_status) = review_status {
+                entry.review_status = review_status.to_owned();
+            }
+            if let Some(content) = content {
+                self.contents
+                    .lock()
+                    .expect("contents")
+                    .insert(entry.id.clone(), content.to_owned());
+            }
+            let _ = tags;
+            Ok(KnowledgeDocumentRef {
+                id: entry.id.clone(),
+                title: entry.title.clone(),
+                kind: entry.kind.clone(),
+                source: entry.source.clone(),
+                tags: vec!["stored".to_owned()],
+                content: content.unwrap_or("stored knowledge content").to_owned(),
+                chunks: entry.chunks,
+                confidence: entry.confidence.clone(),
+                stale: false,
+                supersedes: entry.supersedes.clone(),
+                review_status: entry.review_status.clone(),
             })
         }
 
@@ -8208,6 +8813,7 @@ invariants:
                 read_only: true,
             }],
             knowledge: Mutex::new(Vec::new()),
+            contents: Mutex::new(HashMap::new()),
         }));
 
         let hits = SearchProjectTool
@@ -8239,7 +8845,7 @@ invariants:
             .execute(json!({"id": "knowledge-1"}), &context)
             .await
             .expect("get knowledge");
-        assert!(fetched.content.contains("stored knowledge content"));
+        assert!(fetched.content.contains("Use the local index."));
 
         let updated = UpdateKnowledgeTool
             .execute(
