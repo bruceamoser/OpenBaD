@@ -200,6 +200,15 @@ enum WriteCommand {
         update: SubagentUpdate,
         reply: SyncSender<Result<SubagentRecord, StoreError>>,
     },
+    DeleteFinishedSubagent {
+        id: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    PruneFinishedSubagents {
+        workspace_id: WorkspaceId,
+        older_than: i64,
+        reply: SyncSender<Result<u64, StoreError>>,
+    },
     Shutdown,
 }
 
@@ -241,8 +250,16 @@ impl Store {
         Ok(Self::start(writer, reader, None))
     }
 
-    /// Open the application database under the platform data directory.
+    /// Open the application database, honoring `OPENBAD_DB_PATH` for isolated
+    /// automation runs.
     pub fn open_default() -> Result<Self, StoreError> {
+        if let Some(path) = std::env::var_os("OPENBAD_DB_PATH") {
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            return Self::open(path);
+        }
         let directories = directories::ProjectDirs::from("com", "OpenBaD", "OpenBaD Desktop")
             .ok_or(StoreError::NoDataDirectory)?;
         std::fs::create_dir_all(directories.data_dir())?;
@@ -1714,6 +1731,25 @@ impl Store {
         })
     }
 
+    pub fn delete_finished_subagent(&self, id: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::DeleteFinishedSubagent {
+            id: id.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn prune_finished_subagents(
+        &self,
+        workspace_id: WorkspaceId,
+        older_than: i64,
+    ) -> Result<u64, StoreError> {
+        self.write(|reply| WriteCommand::PruneFinishedSubagents {
+            workspace_id,
+            older_than,
+            reply,
+        })
+    }
+
     pub fn get_subagent(&self, id: &str) -> Result<Option<SubagentRecord>, StoreError> {
         let connection = self.reader()?;
         connection
@@ -2998,6 +3034,35 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 let result = update_subagent(&connection, &id, update);
                 let _ = reply.send(result);
             }
+            WriteCommand::DeleteFinishedSubagent { id, reply } => {
+                let result = (|| -> Result<(), StoreError> {
+                    connection.execute(
+                        "DELETE FROM subagents
+                         WHERE id = ?1
+                           AND status IN ('completed', 'failed', 'cancelled')",
+                        [&id],
+                    )?;
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
+            WriteCommand::PruneFinishedSubagents {
+                workspace_id,
+                older_than,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "DELETE FROM subagents
+                         WHERE workspace_id = ?1
+                           AND status IN ('completed', 'failed', 'cancelled')
+                           AND updated_at < ?2",
+                        params![workspace_id.to_string(), older_than],
+                    )
+                    .map(|count| count as u64)
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown => break,
         }
     }
@@ -3296,6 +3361,12 @@ mod tests {
                 .status,
             "completed"
         );
+
+        let pruned = store
+            .prune_finished_subagents(workspace, now_millis() + 1_000)
+            .expect("prune");
+        assert_eq!(pruned, 1);
+        assert!(store.get_subagent("agent-1").expect("get").is_none());
     }
 
     #[test]

@@ -69,3 +69,11 @@ session knows what moved without re-reading every document.
   `timeout_seconds` (default 120, max 600), so the main agent collects a worker's
   result instead of duplicating its work. The prompt now prefers `wait` over a
   single `status` poll.
+- **Native Tauri automation.** `apps/desktop/native-e2e/` drives the real
+  desktop binary with `tauri-driver` and `WebKitWebDriver` against an isolated
+  database and a mock DeepSeek SSE server. CI runs it under `xvfb-run` and
+  covers project counts, the Agents area, chat, and top/bottom/user copy
+  controls. See `08-desktop-application.md`.
+- **Finished-agent cleanup.** Terminal subagent records are pruned after 60
+  seconds (`OPENBAD_SUBAGENT_RETENTION_SECONDS` override), and the Agents panel
+  keeps polling after completion so removed workers disappear without a click.

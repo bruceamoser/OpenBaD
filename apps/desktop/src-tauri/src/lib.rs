@@ -35,6 +35,23 @@ use uuid::Uuid;
 
 const API_KEY_REFERENCE: &str = "openbad/deepseek/api_key";
 const USER_ID_SETTING: &str = "install_user_id";
+const DEFAULT_SUBAGENT_RETENTION_SECONDS: i64 = 60;
+
+pub fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+fn subagent_retention_ms() -> i64 {
+    std::env::var("OPENBAD_SUBAGENT_RETENTION_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|seconds| *seconds >= 0)
+        .unwrap_or(DEFAULT_SUBAGENT_RETENTION_SECONDS)
+        * 1_000
+}
 
 pub struct AppState {
     store: Arc<Mutex<Store>>,
@@ -464,10 +481,7 @@ fn subagent_info(record: SubagentRecord) -> SubagentInfo {
 impl SubagentRuntime for SubagentRunner {
     fn spawn(&self, spec: SubagentSpec) -> Result<SubagentInfo, String> {
         let id = Uuid::now_v7().to_string();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as i64)
-            .unwrap_or_default();
+        let now = now_millis();
         let record = SubagentRecord {
             id: id.clone(),
             workspace_id: self.settings.workspace_id,
@@ -493,6 +507,10 @@ impl SubagentRuntime for SubagentRunner {
                 .store
                 .lock()
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
+            let _ = store.prune_finished_subagents(
+                self.settings.workspace_id,
+                now_millis() - subagent_retention_ms(),
+            );
             store
                 .create_subagent(record.clone())
                 .map_err(|error| error.to_string())?;
@@ -519,6 +537,10 @@ impl SubagentRuntime for SubagentRunner {
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let _ = store.prune_finished_subagents(
+            self.settings.workspace_id,
+            now_millis() - subagent_retention_ms(),
+        );
         store
             .list_subagents(self.settings.workspace_id, limit as u32)
             .map(|records| records.into_iter().map(subagent_info).collect())
@@ -1049,6 +1071,7 @@ fn project_area_counts_payload(
         return Err(format!("workspace is not a directory: {workspace_path}"));
     }
     let workspace = project_workspace(store, workspace_path)?;
+    let _ = store.prune_finished_subagents(workspace, now_millis() - subagent_retention_ms());
     let overview = store
         .project_overview(workspace)
         .map_err(|error| error.to_string())?;
@@ -1142,6 +1165,7 @@ fn project_agents(
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let workspace = project_workspace(&store, &workspace_path)?;
+    let _ = store.prune_finished_subagents(workspace, now_millis() - subagent_retention_ms());
     store
         .list_subagents(workspace, limit.unwrap_or(50))
         .map_err(|error| error.to_string())
@@ -2557,11 +2581,7 @@ async fn chat(
 }
 
 fn resolve_api_key(state: &AppState) -> Result<String, String> {
-    if let Some(secret) = state
-        .secrets
-        .get(API_KEY_REFERENCE)
-        .map_err(|error| error.to_string())?
-    {
+    if let Ok(Some(secret)) = state.secrets.get(API_KEY_REFERENCE) {
         return Ok(secret.expose().to_owned());
     }
     std::env::var("DEEPSEEK_API_KEY").map_err(|_| {
@@ -2886,10 +2906,7 @@ mod tests {
         let workspace = store
             .ensure_workspace("demo", &root.path().to_string_lossy())
             .expect("workspace");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as i64)
-            .unwrap_or_default();
+        let now = now_millis();
         store
             .create_subagent(SubagentRecord {
                 id: "agent-1".to_owned(),
@@ -2909,8 +2926,28 @@ mod tests {
             })
             .expect("subagent");
 
+        store
+            .create_subagent(SubagentRecord {
+                id: "old-agent".to_owned(),
+                workspace_id: workspace,
+                parent_session_id: None,
+                title: "Finished worker".to_owned(),
+                task: "Done".to_owned(),
+                model: "deepseek-flash".to_owned(),
+                status: "completed".to_owned(),
+                log: String::new(),
+                result: "done".to_owned(),
+                error: None,
+                steps: 2,
+                created_at: now - 120_000,
+                updated_at: now - 120_000,
+                finished_at: Some(now - 120_000),
+            })
+            .expect("finished subagent");
+
         let counts =
             project_area_counts_payload(&store, &root.path().to_string_lossy()).expect("counts");
+        assert!(store.get_subagent("old-agent").expect("old").is_none());
         assert_eq!(counts.agents, 1);
         assert_eq!(counts.running_agents, 1);
         assert_eq!(counts.todos_total, 2);
