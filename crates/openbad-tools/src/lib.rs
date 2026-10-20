@@ -397,6 +397,15 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(ReadFileTool);
+        registry.register(StatFileTool);
+        registry.register(StatRepoFileTool);
+        registry.register(ReadFilesTool);
+        registry.register(ReadRepoFilesTool);
+        registry.register(OutlineTool);
+        registry.register(DeleteFileTool);
+        registry.register(MoveFileTool);
+        registry.register(ListTrashTool);
+        registry.register(RestoreTrashTool);
         registry.register(ListDirTool);
         registry.register(GrepTool);
         registry.register(SearchCodeTool);
@@ -490,6 +499,131 @@ fn optional_usize(arguments: &Value, name: &str) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandClass {
+    ReadOnly,
+    WriteWorkspace,
+    Network,
+    Destructive,
+    Privileged,
+}
+
+impl CommandClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WriteWorkspace => "write-workspace",
+            Self::Network => "network",
+            Self::Destructive => "destructive",
+            Self::Privileged => "privileged",
+        }
+    }
+}
+
+fn classify_command(command: &str) -> CommandClass {
+    let lower = command.to_ascii_lowercase();
+    let padded = format!(" {lower} ");
+    if [" sudo ", " doas ", " su -", " pkexec "]
+        .iter()
+        .any(|needle| padded.contains(needle))
+    {
+        return CommandClass::Privileged;
+    }
+    let destructive = [
+        " rm -rf",
+        " rm -fr",
+        " rm -r",
+        " git reset --hard",
+        " git clean -fd",
+        " git clean -df",
+        " mkfs",
+        " dd if=",
+        " truncate ",
+        " shutdown ",
+        " reboot ",
+        " chmod -r 777",
+        " chown -r",
+    ];
+    if destructive.iter().any(|needle| padded.contains(needle)) || lower.contains(":(){") {
+        return CommandClass::Destructive;
+    }
+    let network = [
+        "curl ",
+        "wget ",
+        "ssh ",
+        "scp ",
+        " gh ",
+        "git clone",
+        "git fetch",
+        "git pull",
+        "git push",
+        "npm install",
+        "npm ci",
+        "pnpm add",
+        "pnpm install",
+        "yarn add",
+        "cargo install",
+        "pip install",
+        "uv pip install",
+    ];
+    if network.iter().any(|needle| padded.contains(needle)) {
+        return CommandClass::Network;
+    }
+    if padded.contains(" > ") || padded.contains(" >> ") || lower.starts_with("tee ") {
+        return CommandClass::WriteWorkspace;
+    }
+    let first = lower
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let read_only = matches!(
+        first,
+        "ls" | "cat"
+            | "head"
+            | "tail"
+            | "wc"
+            | "grep"
+            | "rg"
+            | "find"
+            | "fd"
+            | "pwd"
+            | "which"
+            | "stat"
+            | "file"
+            | "tree"
+            | "jq"
+            | "echo"
+            | "true"
+            | "false"
+            | "date"
+            | "whoami"
+            | "uname"
+    ) || (first == "git"
+        && [
+            "status",
+            "diff",
+            "log",
+            "show",
+            "rev-parse",
+            "branch",
+            "ls-files",
+        ]
+        .iter()
+        .any(|subcommand| lower.contains(&format!("git {subcommand}"))))
+        || (first == "cargo"
+            && ["metadata", "tree", "locate-project"]
+                .iter()
+                .any(|subcommand| lower.contains(&format!("cargo {subcommand}"))));
+    if read_only {
+        CommandClass::ReadOnly
+    } else {
+        CommandClass::WriteWorkspace
+    }
+}
+
 fn optional_bool(arguments: &Value, name: &str) -> Option<bool> {
     arguments.get(name).and_then(Value::as_bool)
 }
@@ -503,6 +637,147 @@ fn truncate(content: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}\n[truncated at {max_bytes} bytes]", &content[..end])
+}
+
+fn string_array_arg(arguments: &Value, name: &str, max: usize) -> Result<Vec<String>, ToolError> {
+    let values = arguments
+        .get(name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolError::InvalidArgument(format!("missing array argument: {name}")))?;
+    if values.is_empty() {
+        return Err(ToolError::InvalidArgument(format!(
+            "{name} must contain at least one path"
+        )));
+    }
+    if values.len() > max {
+        return Err(ToolError::InvalidArgument(format!(
+            "{name} accepts at most {max} paths"
+        )));
+    }
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ToolError::InvalidArgument(format!("{name} entries must be strings"))
+            })
+        })
+        .collect()
+}
+
+fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+fn file_metadata(path: &Path) -> Result<Value, ToolError> {
+    let metadata = std::fs::metadata(path)?;
+    let bytes = std::fs::read(path)?;
+    let lines = bytes.iter().filter(|byte| **byte == b'\n').count()
+        + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
+    Ok(json!({
+        "path": path,
+        "bytes": metadata.len(),
+        "lines": lines,
+        "modified_ms": modified_ms(&metadata),
+        "hash": blake3::hash(&bytes).to_hex().to_string(),
+        "is_file": metadata.is_file()
+    }))
+}
+
+fn repo_root(
+    context: &ToolContext,
+    reference: &str,
+) -> Result<(ProjectRepoRef, PathBuf), ToolError> {
+    let project = context
+        .project
+        .as_ref()
+        .ok_or_else(|| ToolError::Failed("project repositories are not available".to_owned()))?;
+    let repos = project.list_repos().map_err(ToolError::Failed)?;
+    let repo = repos
+        .into_iter()
+        .find(|repo| repo.id == reference || repo.name == reference)
+        .ok_or_else(|| ToolError::InvalidArgument(format!("unknown repository: {reference}")))?;
+    let root = std::fs::canonicalize(&repo.path)?;
+    Ok((repo, root))
+}
+
+fn resolve_repo_path(root: &Path, relative: &str) -> Result<PathBuf, ToolError> {
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| ToolError::InvalidArgument(format!("repository path: {error}")))?;
+    if !path.starts_with(root) {
+        return Err(ToolError::OutsideRoot(path.display().to_string()));
+    }
+    Ok(path)
+}
+
+fn trash_directory(context: &ToolContext) -> Result<PathBuf, ToolError> {
+    Ok(context.workspace.root().join(".openbad/trash"))
+}
+
+fn trash_name(context: &ToolContext, path: &Path) -> String {
+    let root = context
+        .workspace
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+    let relative = path
+        .strip_prefix(&root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(['/', '\\'], "__");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!("{now}-{relative}")
+}
+
+fn outline_entries(path: &Path, content: &str, max_entries: usize) -> Vec<String> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut patterns = Vec::new();
+    match extension.as_str() {
+        "md" | "markdown" | "mdx" => {
+            patterns.push(r"^(#{1,6})\s+(.+)$".to_owned());
+        }
+        "adoc" | "asciidoc" | "asciidoctor" => {
+            patterns.push(r"^(=+)\s+(.+)$".to_owned());
+        }
+        "yaml" | "yml" => {
+            patterns.push(r"^([A-Za-z0-9_.-]+):\s*(.*)$".to_owned());
+            patterns.push(r"^\s+-\s+(_id|id|name|type|title|key):\s*(.*)$".to_owned());
+        }
+        _ => {
+            patterns.push(
+                r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|struct|enum|trait|impl|class|def|interface|type|const|static|mod|package)\s+([A-Za-z0-9_<>,]+)".to_owned(),
+            );
+        }
+    }
+    let patterns = patterns
+        .iter()
+        .filter_map(|pattern| regex::Regex::new(pattern).ok())
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if entries.len() >= max_entries {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+        if patterns.iter().any(|pattern| pattern.is_match(trimmed)) {
+            entries.push(format!("{}: {}", index + 1, trimmed.trim()));
+        }
+    }
+    entries
 }
 
 fn scope_warning(context: &ToolContext, path: &Path) -> Option<String> {
@@ -644,6 +919,520 @@ impl Tool for ReadFileTool {
                 "has_more": end < total_lines,
                 "next_start_line": if end < total_lines { Some(end + 1) } else { None },
             })),
+        )
+    }
+}
+
+struct StatFileTool;
+
+#[async_trait]
+impl Tool for StatFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "stat_file",
+            "Report a workspace file's size, line count, modification time, and BLAKE3 hash without reading its contents into context.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Workspace-relative path"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let metadata = file_metadata(&path)?;
+        Ok(ToolResult::ok(format!(
+            "{}: {} bytes, {} lines, modified {}, blake3 {}",
+            path.display(),
+            metadata["bytes"],
+            metadata["lines"],
+            metadata["modified_ms"],
+            metadata["hash"].as_str().unwrap_or_default()
+        ))
+        .with_metadata(metadata))
+    }
+}
+
+struct StatRepoFileTool;
+
+#[async_trait]
+impl Tool for StatRepoFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "stat_repo_file",
+            "Report a reference-folder file's size, line count, modification time, and BLAKE3 hash.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Linked repository id or name"},
+                "path": {"type": "string", "description": "Repository-relative path"}
+            },
+            "required": ["repo", "path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let root = repo_root(context, &string_arg(&arguments, "repo")?)?.1;
+        let path = resolve_repo_path(&root, &string_arg(&arguments, "path")?)?;
+        let metadata = file_metadata(&path)?;
+        Ok(ToolResult::ok(format!(
+            "{}: {} bytes, {} lines, modified {}, blake3 {}",
+            path.display(),
+            metadata["bytes"],
+            metadata["lines"],
+            metadata["modified_ms"],
+            metadata["hash"].as_str().unwrap_or_default()
+        ))
+        .with_metadata(metadata))
+    }
+}
+
+struct ReadFilesTool;
+
+#[async_trait]
+impl Tool for ReadFilesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "read_files",
+            "Read several workspace files in one call. Each file is capped independently; failures are reported per path.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 20
+                }
+            },
+            "required": ["paths"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let paths = string_array_arg(&arguments, "paths", 20)?;
+        let cap = (context.max_output_bytes / paths.len()).max(1_024);
+        let mut sections = Vec::new();
+        let mut files = Vec::new();
+        for raw in paths {
+            match context.workspace.resolve(Path::new(&raw)) {
+                Ok(path) => match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        context.mark_read(&path);
+                        files.push(json!({
+                            "path": raw,
+                            "bytes": content.len(),
+                            "lines": content.lines().count()
+                        }));
+                        sections.push(format!("--- {raw} ---\n{}", truncate(&content, cap)));
+                    }
+                    Err(error) => {
+                        files.push(json!({"path": raw, "error": error.to_string()}));
+                        sections.push(format!("--- {raw} ---\nERROR: {error}"));
+                    }
+                },
+                Err(error) => {
+                    files.push(json!({"path": raw, "error": error.to_string()}));
+                    sections.push(format!("--- {raw} ---\nERROR: {error}"));
+                }
+            }
+        }
+        Ok(
+            ToolResult::ok(truncate(&sections.join("\n\n"), context.max_output_bytes))
+                .with_metadata(json!({"files": files})),
+        )
+    }
+}
+
+struct ReadRepoFilesTool;
+
+#[async_trait]
+impl Tool for ReadRepoFilesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "read_repo_files",
+            "Read several files from one reference folder in a single call, with per-file error isolation.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Linked repository id or name"},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 20
+                }
+            },
+            "required": ["repo", "paths"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let (repo, root) = repo_root(context, &string_arg(&arguments, "repo")?)?;
+        let paths = string_array_arg(&arguments, "paths", 20)?;
+        let cap = (context.max_output_bytes / paths.len()).max(1_024);
+        let mut sections = Vec::new();
+        let mut files = Vec::new();
+        for raw in paths {
+            match resolve_repo_path(&root, &raw).and_then(|path| {
+                std::fs::read_to_string(&path)
+                    .map(|content| (path, content))
+                    .map_err(ToolError::from)
+            }) {
+                Ok((path, content)) => {
+                    files.push(json!({
+                        "path": path,
+                        "bytes": content.len(),
+                        "lines": content.lines().count()
+                    }));
+                    sections.push(format!("--- {raw} ---\n{}", truncate(&content, cap)));
+                }
+                Err(error) => {
+                    files.push(json!({"path": raw, "error": error.to_string()}));
+                    sections.push(format!("--- {raw} ---\nERROR: {error}"));
+                }
+            }
+        }
+        Ok(
+            ToolResult::ok(truncate(&sections.join("\n\n"), context.max_output_bytes))
+                .with_metadata(json!({"repo": repo.name, "files": files})),
+        )
+    }
+}
+
+struct OutlineTool;
+
+#[async_trait]
+impl Tool for OutlineTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "outline",
+            "Extract headings, YAML identifiers, or code declarations with line numbers. Use it to navigate long files before reading.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "repo": {"type": "string", "description": "Optional reference folder id or name"},
+                "max_entries": {"type": "integer", "minimum": 1, "maximum": 500}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let raw = string_arg(&arguments, "path")?;
+        let path = match optional_string(&arguments, "repo") {
+            Some(reference) => {
+                let root = repo_root(context, &reference)?.1;
+                resolve_repo_path(&root, &raw)?
+            }
+            None => context.workspace.resolve(Path::new(&raw))?,
+        };
+        let content = std::fs::read_to_string(&path)?;
+        context.mark_read(&path);
+        let cap = optional_usize(&arguments, "max_entries")
+            .unwrap_or(200)
+            .clamp(1, 500);
+        let entries = outline_entries(&path, &content, cap);
+        if entries.is_empty() {
+            return Ok(
+                ToolResult::ok("no outline entries found").with_metadata(json!({
+                    "path": path,
+                    "entries": 0
+                })),
+            );
+        }
+        Ok(
+            ToolResult::ok(truncate(&entries.join("\n"), context.max_output_bytes))
+                .with_metadata(json!({"path": path, "entries": entries.len()})),
+        )
+    }
+}
+
+struct DeleteFileTool;
+
+#[async_trait]
+impl Tool for DeleteFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "delete_file",
+            "Delete a workspace file. By default it moves to .openbad/trash so it can be restored; hard deletes require hard=true.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "hard": {"type": "boolean", "description": "Permanently remove instead of using the trash"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("delete_file".to_owned()));
+        }
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        if !path.is_file() {
+            return Err(ToolError::InvalidArgument(format!(
+                "not a file: {}",
+                path.display()
+            )));
+        }
+        let checkpoint = checkpoint_before_write(context, &path)?;
+        if optional_bool(&arguments, "hard").unwrap_or(false) {
+            std::fs::remove_file(&path)?;
+            return Ok(
+                ToolResult::ok(format!("permanently deleted {}", path.display()))
+                    .with_metadata(json!({"path": path, "hard": true, "checkpoint": checkpoint})),
+            );
+        }
+        let trash = trash_directory(context)?;
+        std::fs::create_dir_all(&trash)?;
+        let name = trash_name(context, &path);
+        std::fs::rename(&path, trash.join(&name))?;
+        Ok(
+            ToolResult::ok(format!("moved {} to trash as {name}", path.display())).with_metadata(
+                json!({
+                    "path": path,
+                    "hard": false,
+                    "trash_name": name,
+                    "checkpoint": checkpoint
+                }),
+            ),
+        )
+    }
+}
+
+struct MoveFileTool;
+
+#[async_trait]
+impl Tool for MoveFileTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "move_file",
+            "Move or rename a workspace file. The destination must stay inside the workspace.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"},
+                "to": {"type": "string"}
+            },
+            "required": ["from", "to"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("move_file".to_owned()));
+        }
+        let from = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "from")?))?;
+        let to = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "to")?))?;
+        if !from.is_file() {
+            return Err(ToolError::InvalidArgument(format!(
+                "not a file: {}",
+                from.display()
+            )));
+        }
+        if to.exists() && !context.was_read(&to) {
+            return Err(ToolError::Failed(format!(
+                "read the destination before overwriting it: {}",
+                to.display()
+            )));
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let checkpoint = checkpoint_before_write(context, &from)?;
+        if std::fs::rename(&from, &to).is_err() {
+            std::fs::copy(&from, &to)?;
+            std::fs::remove_file(&from)?;
+        }
+        Ok(
+            ToolResult::ok(format!("moved {} to {}", from.display(), to.display()))
+                .with_metadata(json!({"from": from, "to": to, "checkpoint": checkpoint})),
+        )
+    }
+}
+
+struct ListTrashTool;
+
+#[async_trait]
+impl Tool for ListTrashTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_trash",
+            "List soft-deleted workspace files available for restore.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let trash = trash_directory(context)?;
+        if !trash.is_dir() {
+            return Ok(ToolResult::ok("trash is empty").with_metadata(json!({"entries": 0})));
+        }
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&trash)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let metadata = entry.metadata()?;
+            entries.push(json!({
+                "name": name,
+                "bytes": metadata.len(),
+                "modified_ms": modified_ms(&metadata)
+            }));
+        }
+        entries.sort_by(|left, right| {
+            left["name"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["name"].as_str().unwrap_or_default())
+        });
+        if entries.is_empty() {
+            return Ok(ToolResult::ok("trash is empty").with_metadata(json!({"entries": 0})));
+        }
+        let content = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "- {} ({} bytes)",
+                    entry["name"].as_str().unwrap_or_default(),
+                    entry["bytes"]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({"entries": entries})))
+    }
+}
+
+struct RestoreTrashTool;
+
+#[async_trait]
+impl Tool for RestoreTrashTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "restore_trash",
+            "Restore a soft-deleted file from .openbad/trash to its original path or an explicit destination.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Trash entry name from list_trash"},
+                "to": {"type": "string", "description": "Optional workspace-relative destination"}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("restore_trash".to_owned()));
+        }
+        let name = string_arg(&arguments, "name")?;
+        if name.contains('/') || name.contains('\\') {
+            return Err(ToolError::InvalidArgument(
+                "trash name must not contain path separators".to_owned(),
+            ));
+        }
+        let source = trash_directory(context)?.join(&name);
+        if !source.is_file() {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown trash entry: {name}"
+            )));
+        }
+        let relative = match optional_string(&arguments, "to") {
+            Some(to) => to,
+            None => name
+                .split_once('-')
+                .map(|(_, path)| path.replace("__", "/"))
+                .unwrap_or_else(|| name.clone()),
+        };
+        let destination = context.workspace.resolve(Path::new(&relative))?;
+        if destination.exists() {
+            return Err(ToolError::Failed(format!(
+                "destination already exists: {}",
+                destination.display()
+            )));
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&source, &destination)?;
+        Ok(
+            ToolResult::ok(format!("restored {name} to {}", destination.display()))
+                .with_metadata(json!({"name": name, "path": destination})),
         )
     }
 }
@@ -1250,7 +2039,7 @@ impl Tool for RunCommandTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "run_command",
-            "Run a shell command in the workspace. Requires command approval.",
+            "Run a shell command in the workspace. Requires Full access. Commands are classified as read-only, write-workspace, network, destructive, or privileged; destructive commands need confirm_destructive=true.",
             RiskLevel::Execute,
         )
         .with_timeout(30)
@@ -1259,7 +2048,8 @@ impl Tool for RunCommandTool {
             "properties": {
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "description": "Workspace-relative directory"},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"}
             },
             "required": ["command"],
             "additionalProperties": false
@@ -1278,6 +2068,15 @@ impl Tool for RunCommandTool {
             ));
         }
         let command = string_arg(&arguments, "command")?;
+        let class = classify_command(&command);
+        if class == CommandClass::Destructive
+            && !optional_bool(&arguments, "confirm_destructive").unwrap_or(false)
+        {
+            return Err(ToolError::ApprovalRequired(
+                "run_command (destructive command; set confirm_destructive=true after verifying the blast radius)"
+                    .to_owned(),
+            ));
+        }
         let cwd = match optional_string(&arguments, "cwd") {
             Some(cwd) => context.workspace.resolve(Path::new(&cwd))?,
             None => context.workspace.root().to_path_buf(),
@@ -1345,6 +2144,7 @@ impl Tool for RunCommandTool {
         Ok(ToolResult::ok(content).with_metadata(json!({
             "exit_code": status.code(),
             "success": status.success(),
+            "command_class": class.label(),
         })))
     }
 }
@@ -3278,6 +4078,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_batch_reads_outlines_and_trash_round_trip() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join("docs")).expect("docs");
+        fs::create_dir_all(directory.path().join("src")).expect("src");
+        fs::write(
+            directory.path().join("docs/design.md"),
+            "# Title\n\nbody\n## Section\n",
+        )
+        .expect("markdown");
+        fs::write(
+            directory.path().join("config.yaml"),
+            "name: openbad\nitems:\n  - _id: one\n    type: card\n",
+        )
+        .expect("yaml");
+        fs::write(
+            directory.path().join("src/lib.rs"),
+            "pub fn alpha() {}\nstruct Beta;\n",
+        )
+        .expect("rust");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        let stat = StatFileTool
+            .execute(json!({"path": "docs/design.md"}), &context)
+            .await
+            .expect("stat");
+        assert_eq!(stat.metadata["lines"], 4);
+        assert_eq!(stat.metadata["hash"].as_str().expect("hash").len(), 64);
+
+        let batch = ReadFilesTool
+            .execute(json!({"paths": ["docs/design.md", "missing.md"]}), &context)
+            .await
+            .expect("batch");
+        assert!(batch.content.contains("# Title"));
+        assert!(batch.content.contains("ERROR:"));
+        assert_eq!(batch.metadata["files"].as_array().expect("files").len(), 2);
+
+        let markdown = OutlineTool
+            .execute(json!({"path": "docs/design.md"}), &context)
+            .await
+            .expect("markdown outline");
+        assert!(markdown.content.contains("1: # Title"));
+        assert!(markdown.content.contains("4: ## Section"));
+
+        let yaml = OutlineTool
+            .execute(json!({"path": "config.yaml"}), &context)
+            .await
+            .expect("yaml outline");
+        assert!(yaml.content.contains("1: name: openbad"));
+        assert!(yaml.content.contains("_id: one"));
+
+        let rust = OutlineTool
+            .execute(json!({"path": "src/lib.rs"}), &context)
+            .await
+            .expect("code outline");
+        assert!(rust.content.contains("pub fn alpha"));
+        assert!(rust.content.contains("struct Beta"));
+
+        let deleted = DeleteFileTool
+            .execute(json!({"path": "docs/design.md"}), &context)
+            .await
+            .expect("delete");
+        assert!(!directory.path().join("docs/design.md").exists());
+        let name = deleted.metadata["trash_name"]
+            .as_str()
+            .expect("trash name")
+            .to_owned();
+        assert!(
+            ListTrashTool
+                .execute(json!({}), &context)
+                .await
+                .expect("trash")
+                .content
+                .contains(&name)
+        );
+        RestoreTrashTool
+            .execute(json!({"name": name}), &context)
+            .await
+            .expect("restore");
+        assert!(directory.path().join("docs/design.md").exists());
+
+        MoveFileTool
+            .execute(
+                json!({"from": "docs/design.md", "to": "docs/design-v2.md"}),
+                &context,
+            )
+            .await
+            .expect("move");
+        assert!(directory.path().join("docs/design-v2.md").exists());
+        assert_eq!(classify_command("ls -la"), CommandClass::ReadOnly);
+        assert_eq!(
+            classify_command("git reset --hard HEAD~1"),
+            CommandClass::Destructive
+        );
+        assert_eq!(
+            classify_command("curl https://example.com"),
+            CommandClass::Network
+        );
+        assert_eq!(
+            classify_command("sudo systemctl restart x"),
+            CommandClass::Privileged
+        );
+
+        context.allow_commands = true;
+        let denied = RunCommandTool
+            .execute(json!({"command": "rm -rf target"}), &context)
+            .await
+            .expect_err("destructive command");
+        assert!(denied.to_string().contains("confirm_destructive"));
+    }
+
+    #[tokio::test]
     async fn write_requires_approval_and_a_prior_read() {
         let directory = tempdir().expect("tempdir");
         fs::write(directory.path().join("file.txt"), "old").expect("file");
@@ -3879,6 +4791,34 @@ mod tests {
                 .content
                 .contains("no knowledge documents")
         );
+
+        let repo_stat = StatRepoFileTool
+            .execute(
+                json!({"repo": "reference", "path": "docs/design.md"}),
+                &context,
+            )
+            .await
+            .expect("repo stat");
+        assert_eq!(repo_stat.metadata["lines"], 3);
+
+        let repo_batch = ReadRepoFilesTool
+            .execute(
+                json!({"repo": "reference", "paths": ["docs/design.md", "missing.md"]}),
+                &context,
+            )
+            .await
+            .expect("repo batch");
+        assert!(repo_batch.content.contains("one"));
+        assert!(repo_batch.content.contains("ERROR:"));
+
+        let repo_outline = OutlineTool
+            .execute(
+                json!({"repo": "reference", "path": "docs/design.md"}),
+                &context,
+            )
+            .await
+            .expect("repo outline");
+        assert!(repo_outline.content.contains("no outline entries"));
 
         let sources = ListProjectSourcesTool
             .execute(json!({}), &context)
