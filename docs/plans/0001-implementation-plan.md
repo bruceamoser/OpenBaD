@@ -258,7 +258,9 @@ commands with approvals.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
 - Tool execution is currently gated by session-wide write/command toggles.
-  Per-call approval cards and true token streaming remain follow-up work.
+  Tool output is redacted against the active provider key before it reaches the
+  model, observer, or session trace. Per-call approval cards remain follow-up
+  work.
 
 ## 8. Phase 4 — Workspace intelligence
 

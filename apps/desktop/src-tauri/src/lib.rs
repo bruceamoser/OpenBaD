@@ -430,6 +430,7 @@ async fn chat(
     }
 
     let api_key = resolve_api_key(&state)?;
+    let redactions = vec![api_key.clone()];
     state.cancel.store(false, Ordering::SeqCst);
 
     let (session, workspace_id, history, turn, indexed) = {
@@ -527,6 +528,7 @@ async fn chat(
             ..AgentConfig::default()
         },
     );
+    agent = agent.with_redactions(redactions);
     if indexed {
         if let Ok(workspace_id) = workspace_id.parse::<WorkspaceId>() {
             agent = agent.with_search(Arc::new(StoreSearch {
