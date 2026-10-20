@@ -33,9 +33,10 @@ later phase.
 > foundation is complete, and the Phase 3 coding MVP is working: built-in
 > workspace tools, the DeepSeek agent loop, SQLite message persistence, keychain
 > API-key storage, and a Tauri chat UI with streamed reasoning and cancellation.
-> Phase 4 has started with the SQLite workspace index and indexed search tools.
-> Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind, and the
-> Phase 5–8 systems remain.
+> Phase 4 has started with the SQLite workspace index, indexed search tools,
+> file checkpoints, and diff/restore. Phase 5 has started with durable,
+> workspace-scoped memory. Per-call approvals, the evidence gate, LSP/PTY,
+> whole-turn rewind, and the remaining Phase 5–8 systems are still open.
 
 | Milestone | Phases | Outcome | Target |
 | --- | --- | --- | --- |
@@ -115,6 +116,7 @@ secrets.
 - `openbad-store::Store` owns a dedicated writer thread and a separate reader
   connection. Every mutation goes through `WriteCommand`; event append and
   projection update share one transaction.
+- `0005_project_memory.sql` adds workspace-scoped durable memories.
 - `0004_file_checkpoints.sql` adds file snapshots for restore-on-demand.
 - `0003_workspace_index.sql` adds workspace file hashes, symbols, and FTS5 search.
 - `0002_phase1_schema.sql` adds providers, model routes, session projections,
@@ -367,6 +369,20 @@ commands with approvals.
 - Extraction schema and dedupe tests.
 - Ingestion format fixtures.
 - Citation accuracy tests.
+
+### Phase 5 implementation notes
+
+- `memories` stores workspace-scoped decisions with tags, pinning, timestamps,
+  access counts, and soft deletion. Repeating identical content updates the
+  existing memory instead of creating duplicates.
+- The agent has `remember` and `recall` tools. `recall` searches content and
+  tags, surfaces pinned entries first, and is read-only; `remember` is internal
+  state and does not require the file-write toggle.
+- The sidebar lists recent memories and can forget them. Memory is scoped to
+  the current workspace, so a different folder starts a separate memory set.
+- Still open for Phase 5: ACT-R activation/decay, associations, hybrid
+  retrieval/RRF, extraction and consolidation, knowledge collections and
+  ingestion, embeddings, citations, and the full memory/knowledge UI.
 
 ## 10. Phase 6 — Autonomy
 

@@ -5,7 +5,9 @@ import {
   cancelChat,
   chat as sendChat,
   checkpointDiff as fetchCheckpointDiff,
+  forgetMemory as forgetStoredMemory,
   loadCheckpoints as fetchCheckpoints,
+  loadMemories as fetchMemories,
   clearApiKey as clearStoredApiKey,
   loadFoundation as fetchFoundation,
   loadSession as fetchSession,
@@ -21,6 +23,7 @@ import type {
   ChatEntry,
   FileCheckpointSummary,
   FoundationState,
+  MemoryRecord,
   SessionSummary,
   WorkspaceIndexSummary,
 } from "./types";
@@ -90,6 +93,8 @@ export default function App() {
   const [checkpointDiffText, setCheckpointDiffText] = useState("");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [memoryList, setMemoryList] = useState<MemoryRecord[]>([]);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +117,18 @@ export default function App() {
       setSessions([]);
     }
   }, []);
+  const loadMemories = useCallback(async () => {
+    if (workspacePath.length === 0) {
+      return;
+    }
+    try {
+      setMemoryList(await fetchMemories(workspacePath));
+      setMemoryError(null);
+    } catch (cause) {
+      setMemoryError(describeError(cause));
+    }
+  }, [workspacePath]);
+
   useEffect(() => {
     const query = sessionQuery.trim();
     if (query.length === 0) {
@@ -180,6 +197,10 @@ export default function App() {
       active = false;
     };
   }, [refreshWorkspaceIndex, workspacePath]);
+
+  useEffect(() => {
+    void loadMemories();
+  }, [loadMemories]);
 
   useEffect(() => {
     if (sessionId === null) {
@@ -274,6 +295,19 @@ export default function App() {
       setCheckpointError(describeError(cause));
     }
   }, [checkpointDiffId]);
+
+  const forgetMemory = useCallback(
+    async (memoryId: string) => {
+      setMemoryError(null);
+      try {
+        await forgetStoredMemory(memoryId);
+        setMemoryList((items) => items.filter((item) => item.id !== memoryId));
+      } catch (cause) {
+        setMemoryError(describeError(cause));
+      }
+    },
+    [],
+  );
 
   const restoreCheckpoint = useCallback(
     async (checkpointId: string) => {
@@ -398,6 +432,7 @@ export default function App() {
       );
       void loadFoundation();
       void loadSessions();
+      void loadMemories();
     } catch (cause) {
       const message = describeError(cause);
       setError(message);
@@ -421,6 +456,7 @@ export default function App() {
     allowWrites,
     busy,
     loadFoundation,
+    loadMemories,
     maxSteps,
     message,
     model,
@@ -792,6 +828,40 @@ export default function App() {
               )}
               {checkpointError !== null && (
                 <p className="mt-2 text-xs text-amber-300">{checkpointError}</p>
+              )}
+            </Panel>
+
+            <Panel title="Memory">
+              {memoryList.length === 0 && (
+                <p className="text-xs text-slate-500">No saved memories yet.</p>
+              )}
+              <div className="space-y-1">
+                {memoryList.map((memory) => (
+                  <div
+                    key={memory.id}
+                    className="rounded-md border border-white/5 bg-black/20 px-2 py-2"
+                  >
+                    <p className="text-[11px] leading-4 text-slate-300">
+                      {memory.pinned ? "★ " : ""}
+                      {memory.content}
+                    </p>
+                    <div className="mt-1 flex items-center justify-between gap-2">
+                      <span className="truncate font-mono text-[10px] text-slate-600">
+                        {memory.tags.length > 0 ? memory.tags.join(", ") : "untagged"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void forgetMemory(memory.id)}
+                        className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-300 hover:bg-white/10"
+                      >
+                        Forget
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {memoryError !== null && (
+                <p className="mt-2 text-xs text-amber-300">{memoryError}</p>
               )}
             </Panel>
 

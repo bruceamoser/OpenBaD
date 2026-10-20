@@ -264,3 +264,14 @@ pub struct FileCheckpoint {
     pub content: Option<Vec<u8>>,
     pub created_at: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRecord {
+    pub id: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub pinned: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub access_count: u32,
+}

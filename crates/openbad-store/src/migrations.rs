@@ -20,6 +20,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0004_file_checkpoints",
         include_str!("../migrations/0004_file_checkpoints.sql"),
     ),
+    (
+        "0005_project_memory",
+        include_str!("../migrations/0005_project_memory.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

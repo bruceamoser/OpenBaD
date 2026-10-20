@@ -95,3 +95,11 @@ test("lists and restores a file checkpoint", async ({ page }) => {
   await expect(page.getByText(/Restored /)).toBeVisible();
   await expect(page.getByText("No checkpoints yet.")).toBeVisible();
 });
+
+test("lists and forgets workspace memories", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.getByText("Keep the model-visible prompt prefix immutable.")).toBeVisible();
+  await page.getByRole("button", { name: "Forget" }).click();
+  await expect(page.getByText("No saved memories yet.")).toBeVisible();
+});

@@ -77,6 +77,16 @@ export type IndexReport = {
   summary: WorkspaceIndexSummary;
 };
 
+export type MemoryRecord = {
+  id: string;
+  content: string;
+  tags: string[];
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+  access_count: number;
+};
+
 export type FileCheckpointSummary = {
   id: string;
   path: string;
