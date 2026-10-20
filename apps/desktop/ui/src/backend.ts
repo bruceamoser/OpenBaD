@@ -220,7 +220,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0011_memory_fts",
+    schema_version: "0012_subagents",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
