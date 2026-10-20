@@ -577,6 +577,7 @@ impl ToolRegistry {
         registry.register(GithubIssueTool);
         registry.register(GithubPrTool);
         registry.register(GithubCiTool);
+        registry.register(CanonBanTool);
         registry.register(CanonAddTool);
         registry.register(CanonQueryTool);
         registry.register(CanonLintTool);
@@ -605,6 +606,7 @@ impl ToolRegistry {
         registry.register(TodoWriteTool);
         registry.register(TodoReadTool);
         registry.register(WriteHandoffTool);
+        registry.register(WriteSkillTool);
         registry.register(ListSkillsTool);
         registry.register(ReadSkillTool);
         registry
@@ -2665,6 +2667,7 @@ impl Tool for RunCommandTool {
                 "cwd": {"type": "string", "description": "Workspace-relative directory"},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
                 "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"},
+                "allow_external_cwd": {"type": "boolean", "description": "Allow an absolute cwd outside the workspace"},
                 "parse": {"type": "string", "enum": ["auto", "rust", "pytest", "eslint", "typescript"], "description": "Extract structured diagnostics from output"}
             },
             "required": ["command"],
@@ -2695,7 +2698,25 @@ impl Tool for RunCommandTool {
         }
         check_command_policy(context, class, &command)?;
         let cwd = match optional_string(&arguments, "cwd") {
-            Some(cwd) => context.workspace.resolve(Path::new(&cwd))?,
+            Some(cwd) => {
+                let candidate = Path::new(&cwd);
+                if candidate.is_absolute() {
+                    if !optional_bool(&arguments, "allow_external_cwd").unwrap_or(false) {
+                        return Err(ToolError::OutsideRoot(cwd));
+                    }
+                    let canonical = candidate
+                        .canonicalize()
+                        .map_err(|error| ToolError::InvalidArgument(format!("cwd: {error}")))?;
+                    if !canonical.is_dir() {
+                        return Err(ToolError::InvalidArgument(format!(
+                            "cwd is not a directory: {cwd}"
+                        )));
+                    }
+                    canonical
+                } else {
+                    context.workspace.resolve(candidate)?
+                }
+            }
             None => context.workspace.root().to_path_buf(),
         };
         let timeout = optional_usize(&arguments, "timeout_seconds")
@@ -4400,7 +4421,9 @@ impl Tool for WebFetchTool {
                 "format": {"type": "string", "enum": ["text", "html"], "description": "Return readable text (default) or raw HTML"},
                 "prefer_cache": {"type": "boolean", "description": "Reuse a cached fetch when younger than max_age_hours (default true)"},
                 "max_age_hours": {"type": "integer", "minimum": 1, "maximum": 720},
-                "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}
+                "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+                "max_tokens": {"type": "integer", "minimum": 256, "description": "Approximate output budget (4 bytes per token)"},
+                "budget_tokens": {"type": "integer", "minimum": 256}
             },
             "required": ["url"],
             "additionalProperties": false
@@ -4440,6 +4463,11 @@ impl Tool for WebFetchTool {
             .unwrap_or(24)
             .clamp(1, 720);
         let max_bytes = optional_usize(&arguments, "max_bytes")
+            .or_else(|| {
+                optional_usize(&arguments, "max_tokens")
+                    .or_else(|| optional_usize(&arguments, "budget_tokens"))
+                    .map(|tokens| tokens * 4)
+            })
             .unwrap_or(250_000)
             .clamp(1_024, 1_048_576);
         let cache = load_web_cache(context);
@@ -4466,7 +4494,9 @@ impl Tool for WebFetchTool {
                             "content_type": entry.content_type,
                             "hash": entry.hash,
                             "fetched_at": entry.fetched_at,
-                            "cached": true
+                            "cached": true,
+                            "max_bytes": max_bytes,
+                            "max_tokens": max_bytes / 4
                         })));
                     }
                 }
@@ -4545,7 +4575,9 @@ impl Tool for WebFetchTool {
             "content_type": content_type,
             "hash": hash,
             "fetched_at": fetched_at,
-            "cached": false
+            "cached": false,
+            "max_bytes": max_bytes,
+            "max_tokens": max_bytes / 4
         })))
     }
 }
@@ -5047,7 +5079,10 @@ impl Tool for InstructionsForTool {
         )
         .with_schema(json!({
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string"},
+                "repo": {"type": "string", "description": "Optional reference folder id or name"}
+            },
             "required": ["path"],
             "additionalProperties": false
         }))
@@ -5059,12 +5094,41 @@ impl Tool for InstructionsForTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let raw = string_arg(&arguments, "path")?;
-        let path = context.workspace.resolve(Path::new(&raw))?;
-        let root = context
-            .workspace
-            .root()
-            .canonicalize()
-            .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+        let (path, root) = match optional_string(&arguments, "repo") {
+            Some(reference) => {
+                let root = repo_root(context, &reference)?.1;
+                (resolve_repo_path(&root, &raw)?, root)
+            }
+            None => {
+                let own_root = context
+                    .workspace
+                    .root()
+                    .canonicalize()
+                    .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+                match context.workspace.resolve(Path::new(&raw)) {
+                    Ok(path) => (path, own_root),
+                    Err(error) => {
+                        let mut resolved = None;
+                        if let Some(project) = &context.project {
+                            if let Ok(repos) = project.list_repos() {
+                                for repo in repos {
+                                    let prefix = format!("{}/", repo.name);
+                                    if let Some(remainder) = raw.strip_prefix(&prefix) {
+                                        if let Ok(root) = std::fs::canonicalize(&repo.path) {
+                                            if let Ok(path) = resolve_repo_path(&root, remainder) {
+                                                resolved = Some((path, root));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        resolved.ok_or(error)?
+                    }
+                }
+            }
+        };
         let start = if path.is_dir() {
             path.clone()
         } else {
@@ -5760,12 +5824,18 @@ impl Tool for PlanVerifyTool {
             .ok_or_else(|| ToolError::InvalidArgument(format!("step {id} has no verify_with")))?;
         let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
             .map_err(|error| ToolError::Failed(error.to_string()))?;
-        let command = manifest
+        let recipe = manifest
             .as_ref()
-            .and_then(|manifest| manifest.recipe(&check))
-            .map(|recipe| recipe.command)
-            .unwrap_or_else(|| check.clone());
-        let result = run_tool_shell(context, command).await?;
+            .and_then(|manifest| manifest.recipe(&check));
+        let mut command = json!({
+            "command": recipe.as_ref().map(|recipe| recipe.command.clone()).unwrap_or_else(|| check.clone()),
+            "timeout_seconds": 300
+        });
+        if let Some(cwd) = recipe.as_ref().and_then(|recipe| recipe.cwd.clone()) {
+            command["cwd"] = json!(cwd);
+            command["allow_external_cwd"] = json!(true);
+        }
+        let result = RunCommandTool.execute(command, context).await?;
         let success = result.metadata["success"].as_bool().unwrap_or(false);
         let evidence = format!("{}: {}", check, if success { "passed" } else { "failed" });
         let plan = openbad_workspace::update_step(
@@ -7543,6 +7613,77 @@ impl Tool for GithubCiTool {
     }
 }
 
+struct CanonBanTool;
+
+#[async_trait]
+impl Tool for CanonBanTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "canon_ban",
+            "Add or remove a banned phrase in .openbad/canon.yaml with its canonical replacement and citation.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "phrase": {"type": "string"},
+                "replacement": {"type": "string"},
+                "citation": {"type": "string"},
+                "remove": {"type": "boolean"}
+            },
+            "required": ["phrase"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("canon_ban".to_owned()));
+        }
+        let phrase = string_arg(&arguments, "phrase")?;
+        let mut canon = openbad_workspace::load_canon(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        if optional_bool(&arguments, "remove").unwrap_or(false) {
+            let before = canon.banned_phrases.len();
+            canon
+                .banned_phrases
+                .retain(|banned| !banned.phrase.eq_ignore_ascii_case(&phrase));
+            if canon.banned_phrases.len() == before {
+                return Err(ToolError::InvalidArgument(format!(
+                    "banned phrase not found: {phrase}"
+                )));
+            }
+        } else {
+            let replacement = string_arg(&arguments, "replacement")?;
+            let entry = openbad_workspace::BannedPhrase {
+                phrase: phrase.clone(),
+                replacement,
+                citation: optional_string(&arguments, "citation"),
+            };
+            if let Some(existing) = canon
+                .banned_phrases
+                .iter_mut()
+                .find(|banned| banned.phrase.eq_ignore_ascii_case(&phrase))
+            {
+                *existing = entry;
+            } else {
+                canon.banned_phrases.push(entry);
+            }
+        }
+        openbad_workspace::save_canon(context.workspace.root(), &canon)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "canon banned phrases: {}",
+            canon.banned_phrases.len()
+        ))
+        .with_metadata(json!({"banned_phrases": canon.banned_phrases.len()})))
+    }
+}
+
 struct CanonAddTool;
 
 #[async_trait]
@@ -7774,7 +7915,32 @@ impl Tool for CanonLintTool {
                 continue;
             };
             let relative = relative_to_root(context, &path);
+            if canon.paths_ignore.iter().any(|pattern| {
+                globset::Glob::new(pattern)
+                    .ok()
+                    .is_some_and(|glob| glob.compile_matcher().is_match(&relative))
+            }) {
+                continue;
+            }
+            let mut fenced = false;
+            let mut disabled = false;
             for (index, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if trimmed == "<!-- canon-lint: off -->" {
+                    disabled = true;
+                    continue;
+                }
+                if trimmed == "<!-- canon-lint: on -->" {
+                    disabled = false;
+                    continue;
+                }
+                if fenced || disabled {
+                    continue;
+                }
                 for (phrase, replacement, citation) in openbad_workspace::lint_text(&canon, line) {
                     hits.push(json!({
                         "path": relative,
@@ -8101,6 +8267,57 @@ impl Tool for AdrReadTool {
     }
 }
 
+fn yaml_scalar(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(value) => value.clone(),
+        serde_yaml::Value::Null => "null".to_owned(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+    }
+}
+
+fn resolve_yaml_path<'a>(
+    value: &'a serde_yaml::Value,
+    path: &str,
+) -> Option<&'a serde_yaml::Value> {
+    let mut current = value;
+    for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+        current = match current {
+            serde_yaml::Value::Mapping(mapping) => {
+                mapping.get(serde_yaml::Value::String(segment.to_owned()))?
+            }
+            serde_yaml::Value::Sequence(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn flatten_yaml(value: &serde_yaml::Value, prefix: &str, output: &mut Vec<String>) {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                let key = yaml_scalar(key);
+                let path = if prefix.is_empty() {
+                    key
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_yaml(value, &path, output);
+            }
+        }
+        serde_yaml::Value::Sequence(items) => {
+            for (index, value) in items.iter().enumerate() {
+                let path = format!("{prefix}.{index}");
+                flatten_yaml(value, &path, output);
+            }
+        }
+        _ => output.push(format!("{prefix}={}", yaml_scalar(value))),
+    }
+}
+
 struct YamlQueryTool;
 
 #[async_trait]
@@ -8145,8 +8362,7 @@ impl Tool for YamlQueryTool {
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| vec!["_id".to_owned(), "name".to_owned(), "type".to_owned()]);
+            });
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(100)
             .clamp(1, 500);
@@ -8178,48 +8394,62 @@ impl Tool for YamlQueryTool {
             let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&part) else {
                 continue;
             };
-            if let Some(filter) = &filter {
-                let (field, expected) = filter
-                    .split_once('=')
-                    .or_else(|| filter.split_once(':'))
-                    .unwrap_or((filter.as_str(), ""));
-                let actual = value
-                    .get(field.trim())
-                    .map(|value| match value {
-                        serde_yaml::Value::String(value) => value.clone(),
-                        other => serde_yaml::to_string(other)
-                            .unwrap_or_default()
-                            .trim()
-                            .to_owned(),
-                    })
-                    .unwrap_or_default();
-                if actual != expected.trim() {
-                    continue;
-                }
-            }
             let line = part
                 .lines()
                 .position(|line| line.trim_start().starts_with("_id:"))
                 .map_or(offset + 1, |line| offset + line + 1);
-            let fields = fields
-                .iter()
-                .filter_map(|field| {
-                    value.get(field).map(|value| {
-                        let value = match value {
-                            serde_yaml::Value::String(value) => value.clone(),
-                            other => serde_yaml::to_string(other)
-                                .unwrap_or_default()
-                                .trim()
-                                .to_owned(),
-                        };
-                        format!("{field}={value}")
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            documents.push(format!("{line}: {fields}"));
-            if documents.len() >= max_results {
-                break;
+            let values = match value {
+                serde_yaml::Value::Sequence(items) => items,
+                other => vec![other],
+            };
+            for item in values {
+                if let Some(filter) = &filter {
+                    let (path, expected) = filter
+                        .split_once('=')
+                        .or_else(|| filter.split_once(':'))
+                        .unwrap_or((filter.as_str(), ""));
+                    let actual = resolve_yaml_path(&item, path.trim());
+                    let matches = actual.is_some_and(|actual| {
+                        let actual = yaml_scalar(actual);
+                        actual == expected.trim() || actual.contains(expected.trim())
+                    });
+                    if !matches {
+                        continue;
+                    }
+                }
+                let field_text = match &fields {
+                    Some(fields) => fields
+                        .iter()
+                        .filter_map(|field| {
+                            resolve_yaml_path(&item, field)
+                                .map(|value| format!("{field}={}", yaml_scalar(value)))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    None => match &item {
+                        serde_yaml::Value::Mapping(_) => {
+                            let mut leaves = Vec::new();
+                            flatten_yaml(&item, "", &mut leaves);
+                            if leaves.is_empty() {
+                                yaml_scalar(&item)
+                            } else {
+                                leaves.into_iter().take(40).collect::<Vec<_>>().join(" · ")
+                            }
+                        }
+                        _ => ["_id", "name", "type"]
+                            .iter()
+                            .filter_map(|field| {
+                                resolve_yaml_path(&item, field)
+                                    .map(|value| format!("{field}={}", yaml_scalar(value)))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    },
+                };
+                documents.push(format!("{line}: {field_text}"));
+                if documents.len() >= max_results {
+                    break;
+                }
             }
         }
         if documents.is_empty() {
@@ -8271,13 +8501,29 @@ impl Tool for CheckInvariantsTool {
                 }));
                 continue;
             };
-            let command = manifest
-                .recipe(check)
-                .map(|recipe| recipe.command)
-                .unwrap_or_else(|| check.to_owned());
-            let result = RunCommandTool
-                .execute(json!({"command": command}), context)
-                .await?;
+            if check.trim().is_empty()
+                || matches!(check.trim(), "manual" | "~" | "attested" | "none")
+            {
+                checks.push(json!({
+                    "id": invariant.id,
+                    "statement": invariant.statement,
+                    "severity": invariant.severity,
+                    "check": check,
+                    "status": "attested",
+                    "reason": "manual check; not executed"
+                }));
+                continue;
+            }
+            let recipe = manifest.recipe(check);
+            let mut command = json!({
+                "command": recipe.as_ref().map(|recipe| recipe.command.clone()).unwrap_or_else(|| check.to_owned()),
+                "timeout_seconds": 300
+            });
+            if let Some(cwd) = recipe.as_ref().and_then(|recipe| recipe.cwd.clone()) {
+                command["cwd"] = json!(cwd);
+                command["allow_external_cwd"] = json!(true);
+            }
+            let result = RunCommandTool.execute(command, context).await?;
             checks.push(json!({
                 "id": invariant.id,
                 "statement": invariant.statement,
@@ -8851,6 +9097,7 @@ impl Tool for RunTaskTool {
         });
         if let Some(cwd) = task.cwd {
             command["cwd"] = json!(cwd);
+            command["allow_external_cwd"] = json!(true);
         }
         let result = RunCommandTool.execute(command, context).await?;
         let mut content = format!("task {name}: {}", result.content);
@@ -8977,6 +9224,7 @@ impl Tool for RunGateTool {
                     json!({
                         "command": recipe.command,
                         "cwd": recipe.cwd,
+                        "allow_external_cwd": true,
                         "timeout_seconds": recipe.timeout_seconds.unwrap_or(300)
                     }),
                     context,
@@ -9143,6 +9391,7 @@ impl Tool for RunRecipeTool {
         });
         if let Some(cwd) = recipe.cwd {
             command["cwd"] = json!(cwd);
+            command["allow_external_cwd"] = json!(true);
         }
         let result = RunCommandTool.execute(command, context).await?;
         let success = result.metadata["success"].as_bool().unwrap_or(false);
@@ -9418,6 +9667,106 @@ impl Tool for WriteHandoffTool {
         checkpoint_before_write(context, &path)?;
         atomic_write(&path, &content)?;
         Ok(ToolResult::ok("Wrote .openbad/handoff.md").with_metadata(json!({"path": path})))
+    }
+}
+
+struct WriteSkillTool;
+
+#[async_trait]
+impl Tool for WriteSkillTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "write_skill",
+            "Write a durable procedure to .openbad/skills/<name>.md with frontmatter and steps, verification, and rollback.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "when_to_use": {"type": "string"},
+                "preconditions": {"type": "array", "items": {"type": "string"}},
+                "steps": {"type": "array", "items": {"type": "string"}},
+                "verification": {"type": "array", "items": {"type": "string"}},
+                "rollback": {"type": "string"}
+            },
+            "required": ["name", "description"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("write_skill".to_owned()));
+        }
+        let name = string_arg(&arguments, "name")?;
+        let slug = name
+            .to_ascii_lowercase()
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        if slug.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "name must contain letters or digits".to_owned(),
+            ));
+        }
+        let description = string_arg(&arguments, "description")?;
+        let mut body = format!(
+            "---\nname: {name}\ndescription: {}\n---\n\n# {name}\n\n",
+            description.replace('\n', " ")
+        );
+        if let Some(when) = optional_string(&arguments, "when_to_use") {
+            body.push_str(&format!("## When to use\n\n{when}\n\n"));
+        }
+        let list = |title: &str, name: &str| {
+            let items = arguments
+                .get(name)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|item| format!("- {item}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            if items.is_empty() {
+                String::new()
+            } else {
+                format!("## {title}\n\n{items}\n\n")
+            }
+        };
+        body.push_str(&list("Preconditions", "preconditions"));
+        body.push_str(&list("Steps", "steps"));
+        body.push_str(&list("Verification", "verification"));
+        if let Some(rollback) = optional_string(&arguments, "rollback") {
+            body.push_str(&format!("## Rollback\n\n{rollback}\n"));
+        }
+        let directory = context.workspace.root().join(".openbad/skills");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{slug}.md"));
+        check_write_policy(context, &path)?;
+        std::fs::write(&path, body)?;
+        Ok(
+            ToolResult::ok(format!("skill {name} written to {}", path.display()))
+                .with_metadata(json!({"name": name, "path": path})),
+        )
     }
 }
 
@@ -10019,6 +10368,137 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn external_cwd_manual_invariants_canon_exclusions_yaml_and_skills() {
+        let directory = tempdir().expect("tempdir");
+        let external = tempdir().expect("external");
+        fs::write(external.path().join("marker.txt"), "ok\n").expect("marker");
+        fs::create_dir_all(directory.path().join(".openbad")).expect("openbad");
+        fs::write(
+            directory.path().join(".openbad/project.yaml"),
+            format!(
+                r#"
+name: Demo
+recipes:
+  external:
+    command: test -f marker.txt
+    cwd: {}
+invariants:
+  - id: INV-1
+    statement: External recipe works
+    check: external
+  - id: INV-2
+    statement: Human attests this
+    check: manual
+"#,
+                external.path().display()
+            ),
+        )
+        .expect("manifest");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+
+        let recipe = RunRecipeTool
+            .execute(json!({"name": "external"}), &context)
+            .await
+            .expect("external recipe");
+        assert!(recipe.content.contains("passed"));
+        let denied = RunCommandTool
+            .execute(
+                json!({"command": "pwd", "cwd": external.path().to_string_lossy()}),
+                &context,
+            )
+            .await
+            .expect_err("external cwd requires flag");
+        assert!(denied.to_string().contains("outside the workspace"));
+
+        let invariants = CheckInvariantsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("invariants");
+        assert!(invariants.content.contains("passed"));
+        assert!(invariants.content.contains("attested"));
+
+        CanonBanTool
+            .execute(
+                json!({"phrase": "two phials", "replacement": "one phial", "citation": "rewrite#3"}),
+                &context,
+            )
+            .await
+            .expect("canon ban");
+        fs::write(
+            directory.path().join("clean.md"),
+            "This mentions two phials in prose.\n```\ntwo phials\n```\n",
+        )
+        .expect("clean");
+        fs::write(directory.path().join("ignored.md"), "two phials\n").expect("ignored");
+        let mut canon = openbad_workspace::load_canon(directory.path()).expect("canon");
+        canon.paths_ignore.push("ignored.md".to_owned());
+        openbad_workspace::save_canon(directory.path(), &canon).expect("save canon");
+        let lint = CanonLintTool
+            .execute(json!({}), &context)
+            .await
+            .expect("lint");
+        assert!(lint.content.contains("clean.md"));
+        assert!(!lint.content.contains("ignored.md"));
+
+        fs::write(
+            directory.path().join("config.yaml"),
+            "name: Demo\nscope:\n  authoritative:\n    - src/**\n",
+        )
+        .expect("config");
+        let yaml = YamlQueryTool
+            .execute(
+                json!({"path": "config.yaml", "filter": "name=Demo"}),
+                &context,
+            )
+            .await
+            .expect("yaml");
+        assert!(yaml.content.contains("scope.authoritative.0=src/**"));
+
+        let repo_dir = tempdir().expect("repo");
+        fs::create_dir_all(repo_dir.path().join("docs")).expect("docs");
+        fs::write(repo_dir.path().join("docs/file.md"), "body\n").expect("doc");
+        fs::write(repo_dir.path().join("AGENTS.md"), "repo rule\n").expect("agent");
+        context.project = Some(Arc::new(FakeProject {
+            repos: vec![ProjectRepoRef {
+                id: "repo-1".to_owned(),
+                name: "reference".to_owned(),
+                path: repo_dir.path().to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            knowledge: Mutex::new(Vec::new()),
+            contents: Mutex::new(HashMap::new()),
+        }));
+        let instructions = InstructionsForTool
+            .execute(
+                json!({"repo": "reference", "path": "docs/file.md"}),
+                &context,
+            )
+            .await
+            .expect("instructions");
+        assert!(instructions.content.contains("repo rule"));
+
+        WriteSkillTool
+            .execute(
+                json!({
+                    "name": "Release",
+                    "description": "Cut a release safely",
+                    "steps": ["Run gate", "Tag"],
+                    "verification": ["run_gate release"]
+                }),
+                &context,
+            )
+            .await
+            .expect("skill");
+        assert!(
+            discover_skills(directory.path())
+                .iter()
+                .any(|skill| skill.name == "Release")
+        );
     }
 
     #[tokio::test]

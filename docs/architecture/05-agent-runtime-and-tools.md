@@ -329,7 +329,8 @@ Implemented:
 | `list_context_rules` / `context_map` | read | Audit pinned/excluded rules and files loaded this turn |
 | `record_dead_end` / `list_dead_ends` | write/read | Negative knowledge in `.openbad/dead-ends.json` |
 | `ask_question` / `list_questions` | write/read | Queue structured human decisions in `.openbad/questions.json` |
-| `canon_add` / `canon_query` / `canon_lint` | write/read | Canon ledger and banned-phrase lint |
+| `canon_add` / `canon_ban` / `canon_query` / `canon_lint` | write/read | Canon ledger, banned-phrase authoring, and lint |
+| `write_skill` | write | Durable procedure with preconditions, steps, verification, and rollback |
 | `glossary_add` / `glossary_lookup` | write/read | Glossary terms, expansions, and aliases |
 | `adr_write` / `adr_list` / `adr_read` | write/read | Architecture decision records |
 | `yaml_query` | read | Query YAML documents by field and return line numbers (D7) |
@@ -452,7 +453,9 @@ workspace root down to the target path.
 
 `scaffold_project` creates a reviewable starter layout. `session_checkpoint`
 captures plan, todos, handoff, claims, unknowns, and recent audit entries for
-`session_resume`. `references_to` provides a blast-radius preview and
+`session_resume`. `instructions_for` also accepts a reference-folder id and
+searches that repo's ancestors for `AGENTS.md`. `references_to` provides a
+blast-radius preview and
 `golden_compare`/`golden_accept` manage committed baselines.
 
 `plan_write` stores a draft in `.openbad/plan.json`; the prompt says not to
@@ -468,10 +471,19 @@ previews, error state, and duration. `run_command` tees its full output to
 `.openbad/logs/command-<timestamp>.log` and returns head/tail plus the log path,
 so large builds do not flood context.
 
+Recipes and invariant checks may declare an absolute `cwd`; named tools pass
+`allow_external_cwd` for declared recipes, while raw `run_command` refuses
+absolute cwd unless explicitly allowed. `check: manual` (or `~`/`attested`)
+records an attested, non-executed invariant. `canon_lint` skips fenced code,
+`<!-- canon-lint: off -->` regions, and `paths_ignore` globs. `yaml_query`
+flattens nested mappings and supports dotted paths/default fields.
+
 `archive_list`/`archive_read` inspect zip archives in place. `diff_files`
 compares workspace or reference files; `file_citation` emits
 `path@blake3:Lstart-Lend` locators. `git_changes_since` summarizes drift, and
 `registry_lookup` verifies package versions against crates.io, npm, or PyPI.
+
+`web_fetch` accepts `max_tokens`/`budget_tokens` in addition to `max_bytes`.
 
 `web_fetch` requires Full access, enforces the `network_hosts` allowlist
 (including redirects), strips scripts/styles from HTML, and stores each body

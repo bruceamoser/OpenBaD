@@ -71,6 +71,10 @@ A sibling `.openbad/permissions.yaml` can restrict writes and command classes.
 It is reviewable policy, not prompt discipline: tools check it before mutating
 files or spawning commands and return the specific rule that blocked the action.
 
+Recipes may target reference folders with an absolute `cwd`; named runners
+allow that explicitly. Invariant `check: manual` is attested, not executed.
+Canon lint supports fenced-code skipping, off markers, and `paths_ignore`.
+
 Verification `gates:` group those recipes into named checklists. `run_gate`
 records evidence under `.openbad/gates/`; `prove_it: true` turns unverified
 claims into explicit labels.
