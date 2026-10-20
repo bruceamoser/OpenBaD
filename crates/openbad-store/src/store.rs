@@ -16,8 +16,9 @@ use crate::now_millis;
 use crate::projections;
 use crate::types::{
     AuditRecord, AuditReport, DoctorReport, FileCheckpoint, FileCheckpointSummary, IndexHit,
-    IndexSummary, IndexedFile, MemoryRecord, ModelRouteRecord, NewModelRoute, NewProvider,
-    NewSession, NewWorkspace, ProviderRecord, SessionMessage, SessionSummary, SessionTurn,
+    IndexSummary, IndexedFile, KnowledgeDocument, KnowledgeDocumentSummary, MemoryRecord,
+    ModelRouteRecord, NewModelRoute, NewProvider, NewSession, NewWorkspace, ProjectHit,
+    ProjectOverview, ProjectRepo, ProviderRecord, SessionMessage, SessionSummary, SessionTurn,
     SymbolHit, WorkspaceSummary,
 };
 
@@ -113,6 +114,29 @@ enum WriteCommand {
     },
     ForgetMemory {
         memory_id: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    AddProjectRepo {
+        workspace_id: WorkspaceId,
+        name: String,
+        path: String,
+        reply: SyncSender<Result<ProjectRepo, StoreError>>,
+    },
+    RemoveProjectRepo {
+        repo_id: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    AddKnowledgeDocument {
+        workspace_id: WorkspaceId,
+        title: String,
+        kind: String,
+        source: Option<String>,
+        tags: Vec<String>,
+        content: String,
+        reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
+    },
+    DeleteKnowledgeDocument {
+        document_id: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
     Shutdown,
@@ -322,6 +346,254 @@ impl Store {
             workspace_id,
             reply,
         })
+    }
+
+    pub fn list_project_repos(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<ProjectRepo>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT id, workspace_id, name, path, read_only, created_at
+             FROM project_repos WHERE workspace_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = statement.query_map([workspace_id.to_string()], |row| {
+            let workspace: String = row.get(1)?;
+            Ok(ProjectRepo {
+                id: row.get(0)?,
+                workspace_id: WorkspaceId::from(
+                    Uuid::parse_str(&workspace).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                ),
+                name: row.get(2)?,
+                path: row.get(3)?,
+                read_only: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn add_project_repo(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+        path: &str,
+    ) -> Result<ProjectRepo, StoreError> {
+        self.write(|reply| WriteCommand::AddProjectRepo {
+            workspace_id,
+            name: name.to_owned(),
+            path: path.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn remove_project_repo(&self, repo_id: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::RemoveProjectRepo {
+            repo_id: repo_id.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn list_knowledge_documents(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<KnowledgeDocumentSummary>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
+                    length(d.content),
+                    (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
+                    d.created_at, d.updated_at
+             FROM knowledge_documents d
+             WHERE d.workspace_id = ?1
+             ORDER BY d.updated_at DESC",
+        )?;
+        let rows = statement.query_map([workspace_id.to_string()], knowledge_summary_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn knowledge_document(
+        &self,
+        document_id: &str,
+    ) -> Result<Option<KnowledgeDocument>, StoreError> {
+        let connection = self.reader()?;
+        let document = connection
+            .query_row(
+                "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
+                        length(d.content),
+                        (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
+                        d.created_at, d.updated_at, d.content
+                 FROM knowledge_documents d WHERE d.id = ?1",
+                [document_id],
+                |row| {
+                    let summary = knowledge_summary_from_row(row)?;
+                    Ok(KnowledgeDocument {
+                        summary,
+                        content: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(document)
+    }
+
+    pub fn add_knowledge_document(
+        &self,
+        workspace_id: WorkspaceId,
+        title: &str,
+        kind: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+        content: &str,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.write(|reply| WriteCommand::AddKnowledgeDocument {
+            workspace_id,
+            title: title.to_owned(),
+            kind: kind.to_owned(),
+            source: source.map(str::to_owned),
+            tags,
+            content: content.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn delete_knowledge_document(&self, document_id: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::DeleteKnowledgeDocument {
+            document_id: document_id.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn project_overview(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<ProjectOverview, StoreError> {
+        let index = self.workspace_index_summary(workspace_id)?;
+        let connection = self.reader()?;
+        let (repos, documents, characters, memories) = connection.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM project_repos WHERE workspace_id = ?1),
+                (SELECT COUNT(*) FROM knowledge_documents WHERE workspace_id = ?1),
+                (SELECT COALESCE(SUM(length(content)), 0) FROM knowledge_documents WHERE workspace_id = ?1),
+                (SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND forgotten_at IS NULL)",
+            [workspace_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                ))
+            },
+        )?;
+        Ok(ProjectOverview {
+            repos,
+            knowledge_documents: documents,
+            knowledge_characters: characters,
+            memories,
+            index,
+        })
+    }
+
+    /// Search the project's knowledge, indexed code, and durable memories.
+    /// Scores use reciprocal rank fusion so sources stay comparable.
+    pub fn retrieve_project(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<ProjectHit>, StoreError> {
+        let terms = fts_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.reader()?;
+        let per_source = i64::from(limit.max(1));
+        let mut hits = Vec::new();
+
+        let mut knowledge = connection.prepare(
+            "SELECT f.title, f.document_id, f.seq,
+                    snippet(knowledge_fts, 4, '<<', '>>', '…', 24)
+             FROM knowledge_fts f
+             WHERE f.workspace_id = ?1 AND knowledge_fts MATCH ?2
+             ORDER BY rank LIMIT ?3",
+        )?;
+        let rows = knowledge.query_map(
+            params![workspace_id.to_string(), terms, per_source],
+            |row| {
+                let title: String = row.get(0)?;
+                let document_id: String = row.get(1)?;
+                let seq: i64 = row.get(2)?;
+                Ok((title, document_id, seq, row.get::<_, String>(3)?))
+            },
+        )?;
+        for (rank, row) in rows.enumerate() {
+            let (title, document_id, seq, snippet) = row?;
+            hits.push(ProjectHit {
+                source: "knowledge".to_owned(),
+                title,
+                snippet,
+                locator: format!("{document_id}#{seq}"),
+                score: reciprocal_rank(rank),
+            });
+        }
+
+        let mut code = connection.prepare(
+            "SELECT path, snippet(workspace_fts, 2, '<<', '>>', '…', 18)
+             FROM workspace_fts
+             WHERE workspace_id = ?1 AND workspace_fts MATCH ?2
+             ORDER BY rank LIMIT ?3",
+        )?;
+        let rows = code.query_map(
+            params![workspace_id.to_string(), terms, per_source],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        for (rank, row) in rows.enumerate() {
+            let (path, snippet) = row?;
+            hits.push(ProjectHit {
+                source: "code".to_owned(),
+                title: path.clone(),
+                snippet,
+                locator: path,
+                score: reciprocal_rank(rank),
+            });
+        }
+
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let mut memories = connection.prepare(
+            "SELECT id, content FROM memories
+             WHERE workspace_id = ?1 AND forgotten_at IS NULL
+               AND content LIKE ?2 ESCAPE '\\'
+             ORDER BY pinned DESC, updated_at DESC LIMIT 4",
+        )?;
+        let rows = memories.query_map(params![workspace_id.to_string(), pattern], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for (rank, row) in rows.enumerate() {
+            let (id, content) = row?;
+            hits.push(ProjectHit {
+                source: "memory".to_owned(),
+                title: "Durable memory".to_owned(),
+                snippet: content,
+                locator: id,
+                score: reciprocal_rank(rank) + 0.01,
+            });
+        }
+
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit as usize);
+        Ok(hits)
     }
 
     pub fn create_session(
@@ -970,6 +1242,25 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn list_workspace_files(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT path FROM workspace_files
+             WHERE workspace_id = ?1
+             ORDER BY path
+             LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![workspace_id.to_string(), i64::from(limit)], |row| {
+                row.get::<_, String>(0)
+            })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn workspace_index_summary(
         &self,
         workspace_id: WorkspaceId,
@@ -1143,6 +1434,233 @@ fn clear_workspace_index(
         [&workspace],
     )?;
     Ok(())
+}
+
+fn reciprocal_rank(rank: usize) -> f64 {
+    1.0 / (60.0 + rank as f64)
+}
+
+fn knowledge_summary_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<KnowledgeDocumentSummary> {
+    let workspace: String = row.get(1)?;
+    let tags: String = row.get(5)?;
+    Ok(KnowledgeDocumentSummary {
+        id: row.get(0)?,
+        workspace_id: WorkspaceId::from(
+            Uuid::parse_str(&workspace).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        ),
+        title: row.get(2)?,
+        kind: row.get(3)?,
+        source: row.get(4)?,
+        tags: serde_json::from_str(&tags).unwrap_or_default(),
+        characters: row.get::<_, i64>(6)? as u64,
+        chunks: row.get::<_, i64>(7)? as u64,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn add_project_repo(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    name: &str,
+    path: &str,
+) -> Result<ProjectRepo, StoreError> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| StoreError::InvalidData(format!("repository path: {error}")))?;
+    if !canonical.is_dir() {
+        return Err(StoreError::InvalidData(
+            "repository path is not a directory".to_owned(),
+        ));
+    }
+    let path = canonical.to_string_lossy().into_owned();
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_repos WHERE workspace_id = ?1 AND path = ?2)",
+        params![workspace_id.to_string(), path],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Err(StoreError::Conflict(
+            "repository is already linked to this project".to_owned(),
+        ));
+    }
+    let name = if name.trim().is_empty() {
+        canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository")
+            .to_owned()
+    } else {
+        name.trim().to_owned()
+    };
+    let repo = ProjectRepo {
+        id: Uuid::now_v7().to_string(),
+        workspace_id,
+        name,
+        path: path.clone(),
+        read_only: true,
+        created_at: now_millis(),
+    };
+    connection.execute(
+        "INSERT INTO project_repos (id, workspace_id, name, path, read_only, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            repo.id,
+            workspace_id.to_string(),
+            repo.name,
+            repo.path,
+            repo.read_only,
+            repo.created_at
+        ],
+    )?;
+    Ok(repo)
+}
+
+fn add_knowledge_document(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    title: &str,
+    kind: &str,
+    source: Option<&str>,
+    tags: Vec<String>,
+    content: &str,
+) -> Result<KnowledgeDocumentSummary, StoreError> {
+    if content.trim().is_empty() {
+        return Err(StoreError::InvalidData(
+            "knowledge content cannot be empty".to_owned(),
+        ));
+    }
+    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT id FROM knowledge_documents WHERE workspace_id = ?1 AND content_hash = ?2",
+            params![workspace_id.to_string(), hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return connection
+            .query_row(
+                "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
+                        length(d.content),
+                        (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
+                        d.created_at, d.updated_at
+                 FROM knowledge_documents d WHERE d.id = ?1",
+                [id],
+                knowledge_summary_from_row,
+            )
+            .map_err(StoreError::from);
+    }
+
+    let document_id = Uuid::now_v7().to_string();
+    let now = now_millis();
+    let title = if title.trim().is_empty() {
+        source
+            .and_then(|source| source.rsplit('/').next())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Project note")
+            .to_owned()
+    } else {
+        title.trim().to_owned()
+    };
+    let tags_json = serde_json::to_string(&tags)?;
+    let chunks = split_knowledge_chunks(content);
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "INSERT INTO knowledge_documents
+            (id, workspace_id, title, kind, source, tags_json, content, content_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+        params![
+            document_id,
+            workspace_id.to_string(),
+            title,
+            kind,
+            source,
+            tags_json,
+            content,
+            hash,
+            now
+        ],
+    )?;
+    for (seq, chunk) in chunks.iter().enumerate() {
+        let chunk_id = Uuid::now_v7().to_string();
+        transaction.execute(
+            "INSERT INTO knowledge_chunks (id, document_id, workspace_id, seq, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                chunk_id,
+                document_id,
+                workspace_id.to_string(),
+                seq as i64,
+                chunk
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO knowledge_fts (workspace_id, document_id, title, seq, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                workspace_id.to_string(),
+                document_id,
+                title,
+                seq as i64,
+                chunk
+            ],
+        )?;
+    }
+    transaction.commit()?;
+
+    connection
+        .query_row(
+            "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
+                length(d.content),
+                (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
+                d.created_at, d.updated_at
+         FROM knowledge_documents d WHERE d.id = ?1",
+            [&document_id],
+            knowledge_summary_from_row,
+        )
+        .map_err(StoreError::from)
+}
+
+fn split_knowledge_chunks(content: &str) -> Vec<String> {
+    const MAX: usize = 1_400;
+    const OVERLAP: usize = 160;
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < content.len() {
+        while start > 0 && !content.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = (start + MAX).min(content.len());
+        while end < content.len() && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < content.len() {
+            let window = &content[start..end];
+            if let Some(boundary) = window
+                .char_indices()
+                .rev()
+                .find(|(_, character)| *character == '\n')
+                .map(|(index, _)| start + index)
+                .filter(|boundary| *boundary > start + MAX / 3)
+            {
+                end = boundary;
+            }
+        }
+        let chunk = content[start..end].trim();
+        if !chunk.is_empty() {
+            chunks.push(chunk.to_owned());
+        }
+        if end >= content.len() {
+            break;
+        }
+        start = end.saturating_sub(OVERLAP);
+        if start == 0 {
+            start = end;
+        }
+    }
+    chunks
 }
 
 fn fts_terms(query: &str) -> String {
@@ -1424,6 +1942,54 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     .map_err(StoreError::from);
                 let _ = reply.send(result);
             }
+            WriteCommand::AddProjectRepo {
+                workspace_id,
+                name,
+                path,
+                reply,
+            } => {
+                let _ = reply.send(add_project_repo(&connection, workspace_id, &name, &path));
+            }
+            WriteCommand::RemoveProjectRepo { repo_id, reply } => {
+                let result = connection
+                    .execute("DELETE FROM project_repos WHERE id = ?1", [&repo_id])
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
+            }
+            WriteCommand::AddKnowledgeDocument {
+                workspace_id,
+                title,
+                kind,
+                source,
+                tags,
+                content,
+                reply,
+            } => {
+                let _ = reply.send(add_knowledge_document(
+                    &connection,
+                    workspace_id,
+                    &title,
+                    &kind,
+                    source.as_deref(),
+                    tags,
+                    &content,
+                ));
+            }
+            WriteCommand::DeleteKnowledgeDocument { document_id, reply } => {
+                let result = (|| -> Result<(), StoreError> {
+                    connection.execute(
+                        "DELETE FROM knowledge_fts WHERE document_id = ?1",
+                        [&document_id],
+                    )?;
+                    connection.execute(
+                        "DELETE FROM knowledge_documents WHERE id = ?1",
+                        [&document_id],
+                    )?;
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown => break,
         }
     }
@@ -1642,7 +2208,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0005_project_memory"
+            "0006_project_areas"
         );
     }
 
@@ -2129,6 +2695,93 @@ mod tests {
                 .expect("search after removal")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn project_areas_are_scoped_and_searchable() {
+        let store = Store::open_in_memory().expect("store");
+        let first = store
+            .ensure_workspace("First", "/tmp/first")
+            .expect("first workspace");
+        let second = store
+            .ensure_workspace("Second", "/tmp/second")
+            .expect("second workspace");
+        store
+            .remember_memory(first, "Keep the parser incremental cache.", vec![], false)
+            .expect("memory");
+        let document = store
+            .add_knowledge_document(
+                first,
+                "Parser architecture",
+                "note",
+                Some("design.md"),
+                vec!["parser".to_owned()],
+                "The parser keeps an incremental cache so edits stay cheap.\n\n\
+                 Cache invalidation uses content hashes. The assistant should read\
+                 the design note before changing syntax nodes.",
+            )
+            .expect("knowledge");
+        assert_eq!(document.workspace_id, first);
+        assert_eq!(document.chunks, 1);
+        assert_eq!(document.tags, vec!["parser".to_owned()]);
+
+        let duplicate = store
+            .add_knowledge_document(
+                first,
+                "Duplicate",
+                "note",
+                None,
+                vec![],
+                "The parser keeps an incremental cache so edits stay cheap.\n\n\
+                 Cache invalidation uses content hashes. The assistant should read\
+                 the design note before changing syntax nodes.",
+            )
+            .expect("idempotent knowledge");
+        assert_eq!(duplicate.id, document.id);
+
+        let hits = store
+            .retrieve_project(first, "incremental cache", 10)
+            .expect("retrieval");
+        assert!(
+            hits.iter()
+                .any(|hit| hit.source == "knowledge" && hit.title == "Parser architecture")
+        );
+        assert!(hits.iter().any(|hit| hit.source == "memory"));
+        assert!(
+            store
+                .retrieve_project(second, "incremental cache", 10)
+                .expect("scoped retrieval")
+                .is_empty()
+        );
+
+        let overview = store.project_overview(first).expect("overview");
+        assert_eq!(overview.knowledge_documents, 1);
+        assert_eq!(overview.memories, 1);
+
+        let full = store
+            .knowledge_document(&document.id)
+            .expect("document")
+            .expect("present");
+        assert!(full.content.contains("content hashes"));
+
+        store
+            .delete_knowledge_document(&document.id)
+            .expect("delete knowledge");
+        assert!(
+            store
+                .retrieve_project(first, "incremental cache", 10)
+                .expect("retrieval after delete")
+                .iter()
+                .all(|hit| hit.source != "knowledge")
+        );
+    }
+
+    #[test]
+    fn splits_long_knowledge_into_overlapping_chunks() {
+        let content = "paragraph one ".repeat(200);
+        let chunks = split_knowledge_chunks(&content);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 1_400));
     }
 
     #[test]

@@ -57,7 +57,8 @@ scroll, and streaming tests without rebuilding the native app.
 
 `pnpm --dir ui test:e2e` runs the Playwright smoke tests against that mock
 backend. They cover streamed reasoning and tool cards, auto-scroll,
-cancellation, projects and sessions, checkpoints, memory, and the command menu.
+cancellation, projects and sessions, checkpoints, memory, project knowledge and
+retrieval, repository linking, assistant artifacts, and the command menu.
 
 ## Interface
 
@@ -66,13 +67,19 @@ marker (`.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`,
 `Makefile`, `AGENTS.md`, or `.openbad`) and its sessions are grouped beneath it.
 Sessions can be renamed from the sidebar.
 
+Each project exposes Overview, Workspace, Repos, Knowledge, Retrieval, and
+Memory beneath its name. These open in a resizable split panel beside the chat.
+Additional repositories are read-only references. Knowledge notes and imported
+UTF-8 files are chunked and searchable through the same retrieval surface as
+indexed code and durable memory. Assistant-presented artifacts (web pages,
+images, Markdown, diffs, and files) open in the same panel.
+
 The composer carries the access mode: **Read only** (default each launch),
-**Can edit**, and **Full access**. The Context drawer exposes the workspace
-index, memory, checkpoints, and diagnostics without taking permanent space.
-Settings holds model, access, secrets, project, and about tabs. Press
-`Ctrl/Cmd+K` for the command menu, `Ctrl/Cmd+N` for a new session, and
-`Ctrl/Cmd+,` for settings. Agent turns have no fixed step budget; use Stop to
-end a run.
+**Can edit**, and **Full access**. Edits and diagnostics remain available from
+the project panel without permanent chrome. Settings holds model, access,
+secrets, project, and about tabs. Press `Ctrl/Cmd+K` for the command menu,
+`Ctrl/Cmd+N` for a new session, and `Ctrl/Cmd+,` for settings. Agent turns have
+no fixed step budget; use Stop to end a run.
 
 ## Commands
 
@@ -82,6 +89,11 @@ end a run.
 | `foundation` | Returns schema/integrity/event metrics, audit chain state, providers, and model routes |
 | `list_projects` / `add_project` / `rename_project` / `remove_project` | Manage workspace projects |
 | `rename_session` | Rename a session |
+| `project_overview` / `project_files` / `project_file` | Project counts, indexed files, previews |
+| `project_repos` / `add_project_repo` / `remove_project_repo` | Manage linked repositories |
+| `knowledge_documents` / `knowledge_document` / `add_knowledge_note` | Read and add project knowledge |
+| `import_knowledge_file` / `delete_knowledge_document` | Import or remove knowledge |
+| `search_project` | Fuse knowledge, code, and memory with locators |
 | `sessions` / `search_sessions` / `session_view` | List, search, and load sessions |
 | `save_api_key` / `clear_api_key` / `api_key_status` | Manage the DeepSeek key in the OS keychain |
 | `chat` | Runs the DeepSeek agent loop with workspace tools and persists the turn |

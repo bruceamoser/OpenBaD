@@ -285,3 +285,51 @@ pub struct MemoryRecord {
     pub updated_at: i64,
     pub access_count: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRepo {
+    pub id: String,
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub path: String,
+    pub read_only: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeDocumentSummary {
+    pub id: String,
+    pub workspace_id: WorkspaceId,
+    pub title: String,
+    pub kind: String,
+    pub source: Option<String>,
+    pub tags: Vec<String>,
+    pub characters: u64,
+    pub chunks: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeDocument {
+    pub summary: KnowledgeDocumentSummary,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectHit {
+    pub source: String,
+    pub title: String,
+    pub snippet: String,
+    pub locator: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectOverview {
+    pub repos: u64,
+    pub knowledge_documents: u64,
+    pub knowledge_characters: u64,
+    pub memories: u64,
+    pub index: IndexSummary,
+}

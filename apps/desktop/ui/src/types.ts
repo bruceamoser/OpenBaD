@@ -58,6 +58,7 @@ export type AgentEvent =
       name: string;
       content: string;
       is_error: boolean;
+      metadata: unknown;
     }
   | { type: "usage"; usage: Usage };
 
@@ -123,3 +124,62 @@ export type FoundationState =
   | { kind: "loading" }
   | { kind: "ready"; foundation: Foundation }
   | { kind: "error"; message: string };
+
+
+export type ProjectRepo = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  path: string;
+  read_only: boolean;
+  created_at: number;
+};
+
+export type KnowledgeDocumentSummary = {
+  id: string;
+  workspace_id: string;
+  title: string;
+  kind: string;
+  source: string | null;
+  tags: string[];
+  characters: number;
+  chunks: number;
+  created_at: number;
+  updated_at: number;
+};
+
+export type KnowledgeDocument = {
+  summary: KnowledgeDocumentSummary;
+  content: string;
+};
+
+export type ProjectHit = {
+  source: "knowledge" | "code" | "memory" | string;
+  title: string;
+  snippet: string;
+  locator: string;
+  score: number;
+};
+
+export type ProjectOverview = {
+  repos: number;
+  knowledge_documents: number;
+  knowledge_characters: number;
+  memories: number;
+  index: WorkspaceIndexSummary;
+};
+
+export type ProjectFileView = {
+  path: string;
+  kind: "text" | "image";
+  content: string | null;
+  data_url: string | null;
+};
+
+export type Artifact = {
+  kind: "web" | "image" | "markdown" | "diff" | "file";
+  title: string;
+  uri?: string;
+  content?: string;
+  language?: string;
+};

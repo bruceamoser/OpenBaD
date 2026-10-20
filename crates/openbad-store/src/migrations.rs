@@ -24,6 +24,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0005_project_memory",
         include_str!("../migrations/0005_project_memory.sql"),
     ),
+    (
+        "0006_project_areas",
+        include_str!("../migrations/0006_project_areas.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

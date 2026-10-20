@@ -439,6 +439,59 @@ background re-embed into a new table and an atomic alias swap.
 
 ## 6. Knowledge library
 
+### 6.0 Current project schema (`0006_project_areas`)
+
+The desktop build currently stores project-owned knowledge and linked
+repositories with this smaller schema:
+
+```sql
+CREATE TABLE project_repos (
+    id           TEXT PRIMARY KEY NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    read_only    INTEGER NOT NULL DEFAULT 1,
+    created_at   INTEGER NOT NULL,
+    UNIQUE(workspace_id, path)
+);
+
+CREATE TABLE knowledge_documents (
+    id           TEXT PRIMARY KEY NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    source       TEXT,
+    tags_json    TEXT NOT NULL DEFAULT '[]',
+    content      TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE knowledge_chunks (
+    id           TEXT PRIMARY KEY NOT NULL,
+    document_id  TEXT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    content      TEXT NOT NULL,
+    UNIQUE(document_id, seq)
+);
+
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+    workspace_id UNINDEXED,
+    document_id UNINDEXED,
+    title UNINDEXED,
+    seq UNINDEXED,
+    content,
+    tokenize = 'unicode61'
+);
+```
+
+`project_overview` combines these counts with the existing workspace index
+summary. `retrieve_project` fuses FTS5 ranks from `knowledge_fts`,
+`workspace_fts`, and matching `memories`. The collection/version/vector schema
+below remains the target design.
+
 ### 6.1 `knowledge_collections`
 
 ```sql

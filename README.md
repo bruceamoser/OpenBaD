@@ -67,9 +67,17 @@ See [Cache-First Harness](docs/architecture/04-cache-first-harness.md) and
 
 ### Assistant with memory and knowledge
 
-- Cognitive memory with ACT-R decay and Hebbian associations.
-- Hybrid retrieval over memory, workspace code, and the knowledge library.
-- Ingests documents and project knowledge with citations down to file and line.
+- **Projects are containers**, not just folders: each owns a workspace, linked
+  repositories, knowledge library, retrieval corpus, and durable memories.
+- Project-scoped FTS5 retrieval fuses knowledge chunks, indexed code, and
+  memory with citable locators.
+- Knowledge documents are chunked, deduplicated by content hash, and available
+  to the assistant through `search_project` and `add_knowledge`.
+- Linked repositories are readable by the agent but confined to their roots.
+- **Split workspace**: files, knowledge, retrieval hits, web pages, images, and
+  diffs open beside the conversation instead of replacing it.
+- Cognitive memory with ACT-R decay and Hebbian associations remains the
+  long-term design; the current build has durable pinned/recent memory.
 - Evidence gate: answers are grounded in file spans, command output, test
   results, LSP diagnostics, Git diffs, or cited web sources.
 
@@ -121,11 +129,14 @@ definitions, and FTS5 text in SQLite, refreshes after each turn, and powers
 `search_code`/`find_symbols`. File edits are checkpointed with sidebar diff and
 restore. Phase 5 memory provides `remember`/`recall` plus automatic recent-memory
 context, and Phase 6 workspace skills load on demand. Project conventions from
-`AGENTS.md`/`CLAUDE.md` are included in the system prompt. The desktop UI now
-has a project/session sidebar, inline session rename, a compact composer with
-access modes, and an on-demand Context drawer; long tasks have no fixed step
-cap. Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind,
-knowledge/RAG, subagents, workflows, and packaging remain.
+`AGENTS.md`/`CLAUDE.md` are included in the system prompt. Migration
+`0006_project_areas` adds project-scoped repositories, knowledge documents and
+chunks, retrieval, and overview counts. The desktop UI now has a project/session
+sidebar, inline session rename, project area navigation, a compact composer with
+access modes, a resizable split workspace for artifacts, and no fixed step cap.
+Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind,
+embedding-backed retrieval, richer document ingestion, subagents, workflows, and
+packaging remain.
 
 - [Vision and feature set](docs/architecture/00-vision-and-feature-set.md)
 - [System overview](docs/architecture/01-system-overview.md)

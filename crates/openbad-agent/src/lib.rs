@@ -13,7 +13,8 @@ use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
-    CheckpointSink, MemoryStore, ToolContext, ToolRegistry, WorkspaceSearch, discover_skills,
+    CheckpointSink, MemoryStore, ProjectAreas, ToolContext, ToolRegistry, WorkspaceSearch,
+    discover_skills,
 };
 use openbad_workspace::WorkspaceService;
 use serde_json::Value;
@@ -48,7 +49,15 @@ pub trait AgentObserver: Send + Sync {
     fn on_reasoning(&self, _step: u32, _text: &str) {}
     fn on_content(&self, _step: u32, _text: &str) {}
     fn on_tool_call(&self, _step: u32, _call: &ToolCall) {}
-    fn on_tool_result(&self, _step: u32, _name: &str, _content: &str, _is_error: bool) {}
+    fn on_tool_result(
+        &self,
+        _step: u32,
+        _name: &str,
+        _content: &str,
+        _is_error: bool,
+        _metadata: &Value,
+    ) {
+    }
     fn on_usage(&self, _usage: &UsageTotals) {}
     fn is_cancelled(&self) -> bool {
         false
@@ -89,6 +98,7 @@ pub struct Agent<T: HttpTransport> {
     search: Option<Arc<dyn WorkspaceSearch>>,
     checkpoints: Option<Arc<dyn CheckpointSink>>,
     memory: Option<Arc<dyn MemoryStore>>,
+    project: Option<Arc<dyn ProjectAreas>>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -108,6 +118,7 @@ impl<T: HttpTransport> Agent<T> {
             search: None,
             checkpoints: None,
             memory: None,
+            project: None,
             redactions: Vec::new(),
             config,
         }
@@ -128,6 +139,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    #[must_use]
+    pub fn with_project(mut self, project: Arc<dyn ProjectAreas>) -> Self {
+        self.project = Some(project);
         self
     }
 
@@ -171,6 +188,7 @@ impl<T: HttpTransport> Agent<T> {
             context.search = self.search.clone();
             context.checkpoints = self.checkpoints.clone();
             context.memory = self.memory.clone();
+            context.project = self.project.clone();
             context
         });
 
@@ -265,18 +283,36 @@ impl<T: HttpTransport> Agent<T> {
                                 &format!("error: {}", result.content),
                                 &self.redactions,
                             );
-                            observer.on_tool_result(step, &call.function.name, &content, true);
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &content,
+                                true,
+                                &result.metadata,
+                            );
                             content
                         }
                         Ok(result) => {
                             let content = redact_secrets(&result.content, &self.redactions);
-                            observer.on_tool_result(step, &call.function.name, &content, false);
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &content,
+                                false,
+                                &result.metadata,
+                            );
                             content
                         }
                         Err(error) => {
                             let content =
                                 redact_secrets(&format!("error: {error}"), &self.redactions);
-                            observer.on_tool_result(step, &call.function.name, &content, true);
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &content,
+                                true,
+                                &Value::Null,
+                            );
                             content
                         }
                     },
@@ -288,7 +324,13 @@ impl<T: HttpTransport> Agent<T> {
                             ),
                             &self.redactions,
                         );
-                        observer.on_tool_result(step, &call.function.name, &content, true);
+                        observer.on_tool_result(
+                            step,
+                            &call.function.name,
+                            &content,
+                            true,
+                            &Value::Null,
+                        );
                         content
                     }
                 };
@@ -416,6 +458,10 @@ impl<T: HttpTransport> Agent<T> {
 Use the provided tools to inspect and change files. Read a file before editing it.\n\
 Prefer small, surgical changes and run the relevant tests when useful.\n\
 Use recall and remember for durable project decisions when they matter.\n\
+Project knowledge is curated separately from code: call search_project before\n\
+answering questions that may rely on earlier decisions or imported references.\n\
+Use list_project_sources to orient yourself and present_artifact when showing a\n\
+web page, image, diff, or note is clearer than prose. Cite knowledge locators.\n\
 Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         );
@@ -544,6 +590,7 @@ mod tests {
 
     use async_trait::async_trait;
     use openbad_llm::transport::{ByteStream, HttpRequest, HttpResponse};
+    use serde_json::json;
     use tempfile::tempdir;
 
     use super::*;
@@ -644,6 +691,60 @@ mod tests {
             .await
             .expect_err("max steps");
         assert!(matches!(error, AgentError::MaxSteps(2)));
+    }
+
+    struct ArtifactObserver {
+        metadata: Mutex<Value>,
+    }
+
+    impl AgentObserver for ArtifactObserver {
+        fn on_tool_result(
+            &self,
+            _step: u32,
+            _name: &str,
+            _content: &str,
+            _is_error: bool,
+            metadata: &Value,
+        ) {
+            *self.metadata.lock().expect("metadata") = metadata.clone();
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_metadata_reaches_the_observer() {
+        let directory = tempdir().expect("tempdir");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"present_artifact","arguments":"{\"kind\":\"web\",\"title\":\"Docs\",\"uri\":\"https://example.com\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Opened the docs."},"finish_reason":"stop"}]}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let agent = default_agent(
+            DeepSeekClient::new(transport, "sk-test"),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let observer = ArtifactObserver {
+            metadata: Mutex::new(Value::Null),
+        };
+        agent
+            .run_with_observer(vec![ChatMessage::user("show docs")], &observer)
+            .await
+            .expect("run");
+        let metadata = observer.metadata.lock().expect("metadata");
+        assert_eq!(metadata["openbad_artifact"]["kind"], json!("web"));
+        assert_eq!(
+            metadata["openbad_artifact"]["uri"],
+            json!("https://example.com")
+        );
     }
 
     struct CancelObserver;
