@@ -392,6 +392,40 @@ Report what changed and any remaining risk. Never claim a file changed unless a 
     }
 }
 
+fn load_project_instructions(root: &std::path::Path) -> Option<String> {
+    const FILES: &[&str] = &[
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".github/copilot-instructions.md",
+        ".openbad/instructions.md",
+        ".cursorrules",
+    ];
+    const MAX_TOTAL_CHARS: usize = 32 * 1024;
+    let mut sections = Vec::new();
+    let mut total = 0;
+    for relative in FILES {
+        let path = root.join(relative);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let remaining = MAX_TOTAL_CHARS.saturating_sub(total);
+        if remaining == 0 {
+            break;
+        }
+        let content: String = content.chars().take(remaining).collect();
+        total += content.len();
+        sections.push(format!("From {relative}:\n{}", content.trim_end()));
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
+    }
+}
+
 fn redact_secrets(content: &str, secrets: &[String]) -> String {
     let mut redacted = content.to_owned();
     for secret in secrets {
@@ -639,6 +673,22 @@ mod tests {
         assert_eq!(run.text, "It says hello over http.");
         assert_eq!(run.steps, 2);
         server.join().expect("server");
+    }
+
+    #[test]
+    fn loads_root_project_instructions() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            directory.path().join("AGENTS.md"),
+            "# Conventions\nRun cargo test.\n",
+        )
+        .expect("instructions");
+        let instructions = load_project_instructions(directory.path()).expect("loaded");
+        assert!(instructions.contains("From AGENTS.md"));
+        assert!(instructions.contains("Run cargo test."));
+
+        let empty = tempfile::tempdir().expect("empty");
+        assert!(load_project_instructions(empty.path()).is_none());
     }
 
     #[test]
