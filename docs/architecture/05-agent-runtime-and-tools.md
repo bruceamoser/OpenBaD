@@ -379,6 +379,12 @@ the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
 (`command_classes`, `deny_command_patterns`, `allow_network`, `network_hosts`). Denials name the policy rule and
 apply to file operations, `run_command`, `run_task`, and `run_recipe`.
 
+Every tool call appends a bounded JSONL record to `.openbad/audit.jsonl`:
+timestamp, turn, tool, argument/result BLAKE3 digests and 500-character
+previews, error state, and duration. `run_command` tees its full output to
+`.openbad/logs/command-<timestamp>.log` and returns head/tail plus the log path,
+so large builds do not flood context.
+
 `web_fetch` requires Full access, enforces the `network_hosts` allowlist
 (including redirects), strips scripts/styles from HTML, and stores each body
 under `.openbad/web-cache` by BLAKE3 hash with URL, title, content type, and

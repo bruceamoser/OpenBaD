@@ -439,6 +439,11 @@ background re-embed into a new table and an atomic alias swap.
 
 ## 6. Knowledge library
 
+Runtime sidecars live under `.openbad/`: `audit.jsonl` (tool call records),
+`logs/` (full command output), `web-cache/` (fetched documents and index),
+`context.yaml`, `permissions.yaml`, `dead-ends.json`, `project.yaml`,
+`todos.json`, and `handoff.md`.
+
 ### 6.0 Current project schema (`0006_project_areas` + `0007_knowledge_confidence`)
 
 The desktop build currently stores project-owned knowledge and linked

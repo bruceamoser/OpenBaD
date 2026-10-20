@@ -273,6 +273,7 @@ impl<T: HttpTransport> Agent<T> {
                     return Err(AgentError::Cancelled);
                 }
                 observer.on_tool_call(step, &call);
+                let started = std::time::Instant::now();
                 let content = match serde_json::from_str::<Value>(&call.function.arguments) {
                     Ok(arguments) => match self
                         .tools
@@ -336,6 +337,14 @@ impl<T: HttpTransport> Agent<T> {
                     }
                 };
                 let content = redact_secrets(&content, &self.redactions);
+                append_tool_audit(
+                    self.workspace.root(),
+                    step,
+                    &call.function.name,
+                    &redact_secrets(&call.function.arguments, &self.redactions),
+                    &content,
+                    started.elapsed().as_millis() as u64,
+                );
                 if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
                     eprintln!(
                         "[agent]   result {}: {}",
@@ -556,6 +565,45 @@ fn load_project_instructions(root: &std::path::Path) -> Option<String> {
     }
 }
 
+fn append_tool_audit(
+    root: &std::path::Path,
+    turn: u32,
+    tool: &str,
+    arguments: &str,
+    content: &str,
+    duration_ms: u64,
+) {
+    let directory = root.join(".openbad");
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as i64);
+    let record = serde_json::json!({
+        "ts": timestamp,
+        "turn": turn,
+        "tool": tool,
+        "args_hash": hash_bytes(arguments.as_bytes()),
+        "args_preview": arguments.chars().take(500).collect::<String>(),
+        "result_hash": hash_bytes(content.as_bytes()),
+        "result_preview": content.chars().take(500).collect::<String>(),
+        "is_error": content.starts_with("error:"),
+        "duration_ms": duration_ms,
+    });
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("audit.jsonl"))
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn redact_secrets(content: &str, secrets: &[String]) -> String {
     let mut redacted = content.to_owned();
     for secret in secrets {
@@ -697,6 +745,11 @@ mod tests {
                 && message.content.as_deref() == Some("hello from disk")
         }));
         assert!(run.usage.output_tokens > 0);
+        let audit =
+            fs::read_to_string(directory.path().join(".openbad/audit.jsonl")).expect("audit log");
+        assert!(audit.contains(r#""tool":"read_file""#));
+        assert!(audit.contains(r#""turn":1"#));
+        assert!(audit.contains(r#""is_error":false"#));
     }
 
     #[tokio::test]
