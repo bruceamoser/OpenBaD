@@ -12658,19 +12658,20 @@ impl Tool for SubagentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "subagent",
-            "Spawn and manage focused background subagents. Action 'spawn' starts a directed worker and returns immediately; use 'status' to collect its result, 'list' to see all workers for the project, and 'cancel' to stop one. Subagents inherit this session's access mode and cannot spawn further subagents.",
+            "Spawn and manage focused background subagents. Action 'spawn' starts a directed worker and returns immediately; use 'wait' to collect its result, 'status' for a one-shot check, 'list' to see all workers for the project, and 'cancel' to stop one. Subagents inherit this session's access mode and cannot spawn further subagents.",
             RiskLevel::Write,
         )
         .with_schema(json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["spawn", "list", "status", "cancel"]},
+                "action": {"type": "string", "enum": ["spawn", "list", "status", "wait", "cancel"]},
                 "task": {"type": "string", "description": "Complete, self-contained instructions for a spawned subagent."},
                 "title": {"type": "string", "description": "Short label shown in the project Agents panel."},
                 "model": {"type": "string", "description": "Optional model override for the subagent."},
                 "write": {"type": "boolean", "description": "Allow writes and commands in the subagent. Defaults to true and can never exceed the parent session's access mode."},
-                "id": {"type": "string", "description": "Subagent id for status or cancel."},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+                "id": {"type": "string", "description": "Subagent id for status, wait, or cancel."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "How long action \"wait\" should wait for a terminal status. Defaults to 120."}
             },
             "required": ["action"],
             "additionalProperties": false
@@ -12740,6 +12741,35 @@ impl Tool for SubagentTool {
                     .map_err(ToolError::Failed)?
                     .ok_or_else(|| ToolError::InvalidArgument(format!("unknown subagent: {id}")))?;
                 Ok(ToolResult::ok(subagent_report(&info)).with_metadata(json!({"subagent": info})))
+            }
+            "wait" => {
+                let id = required_string(&arguments, "id")?;
+                let timeout = optional_u64(&arguments, "timeout_seconds")
+                    .unwrap_or(120)
+                    .clamp(1, 600);
+                let deadline = Instant::now() + Duration::from_secs(timeout);
+                loop {
+                    let info = runtime
+                        .get(&id)
+                        .map_err(ToolError::Failed)?
+                        .ok_or_else(|| {
+                            ToolError::InvalidArgument(format!("unknown subagent: {id}"))
+                        })?;
+                    if info.status != "running" {
+                        return Ok(ToolResult::ok(subagent_report(&info))
+                            .with_metadata(json!({"subagent": info})));
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(ToolResult::ok(format!(
+                            "Subagent {} is still running after {}s.\n\n{}",
+                            info.id,
+                            timeout,
+                            subagent_report(&info)
+                        ))
+                        .with_metadata(json!({"subagent": info, "timed_out": true})));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
             "cancel" => {
                 let id = required_string(&arguments, "id")?;
@@ -15210,6 +15240,37 @@ invariants:
             .await
             .expect("cancel");
         assert!(cancelled.content.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn subagent_wait_returns_the_completed_result() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let runtime = Arc::new(MockSubagents::default());
+        context.subagents = Some(runtime.clone());
+        SubagentTool
+            .execute(json!({"action": "spawn", "task": "Inspect"}), &context)
+            .await
+            .expect("spawn");
+
+        let completer = runtime.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let mut infos = completer.infos.lock().unwrap();
+            infos[0].status = "completed".to_owned();
+            infos[0].result = "inspection complete".to_owned();
+        });
+
+        let waited = SubagentTool
+            .execute(
+                json!({"action": "wait", "id": "agent-1", "timeout_seconds": 5}),
+                &context,
+            )
+            .await
+            .expect("wait");
+        assert!(waited.content.contains("inspection complete"));
+        assert_eq!(waited.metadata["subagent"]["status"], "completed");
     }
 
     #[tokio::test]

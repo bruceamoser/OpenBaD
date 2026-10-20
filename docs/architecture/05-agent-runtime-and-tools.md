@@ -390,7 +390,7 @@ Implemented:
 | `git_worktree` | command | Add, list, and remove worktrees |
 | `repo_health` / `git_commit_context` | read | Ahead/behind, dirty state, and commit-message context |
 | `github` | command | Full GitHub surface through `gh`: status, repositories, branches and protection, issues, labels, milestones, pull requests, reviews and merges, Actions, releases, Pages, search, and generic `gh api`; destructive actions require `confirm=true` |
-| `subagent` | execute | Spawn, list, inspect, or cancel a focused background worker. `spawn` returns immediately; `status` returns the result and recent activity. Workers inherit the session access mode and cannot spawn further workers |
+| `subagent` | execute | Spawn, list, wait for, inspect, or cancel a focused background worker. `spawn` returns immediately; `wait` blocks until a terminal status or timeout, and `status` returns the result and recent activity. Workers inherit the session access mode and cannot spawn further workers |
 | `plugin_list` / `plugin_describe` | read | Discover installed and bundled plugins and their actions |
 | `plugin_call` / `plugin_test` | command | Run a plugin action or its declared test command with JSON stdin/stdout and evidence |
 | `write_plugin` / `plugin_install_builtin` | write | Scaffold a plugin or install the bundled AsciiDoc plugin |
@@ -651,9 +651,12 @@ Rules:
 
 - `action: "spawn"` starts the worker in the Tauri async runtime and returns an
   id immediately. The parent turn keeps going.
-- `action: "status"` returns status, steps, the final result, and recent
-  activity; `action: "list"` shows workers for the project; `action: "cancel"`
-  sets the worker's cancellation flag.
+- `action: "wait"` polls until the worker reaches a terminal status or the
+  timeout expires, then returns the result and recent activity. Use it instead
+  of duplicating the worker's investigation.
+- `action: "status"` returns a one-shot snapshot; `action: "list"` shows
+  workers for the project; `action: "cancel"` sets the worker's cancellation
+  flag.
 - Workers inherit the parent session's access mode. `write: false` can narrow a
   worker to read-only, but a read-only parent cannot grant writes.
 - Workers share the parent workspace, outside-access grants, memory, project

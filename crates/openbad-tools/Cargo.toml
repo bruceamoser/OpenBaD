@@ -23,10 +23,8 @@ similar = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 thiserror = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 wait-timeout = "0.2"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
