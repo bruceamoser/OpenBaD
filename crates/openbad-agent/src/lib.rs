@@ -1,12 +1,16 @@
 //! The turn/step agent loop that connects DeepSeek to workspace tools.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use openbad_harness::{ApiFormat, ReasoningEffort, RequestEnvelope, canonical_json, hash_bytes};
 use openbad_llm::DeepSeekClient;
-use openbad_llm::chat::ChatMessage;
+use openbad_llm::chat::{
+    ChatMessage, ChatRole, FunctionCall, StreamEvent, ToolCall, ToolCallDelta,
+};
 use openbad_llm::pricing::{UsageTotals, deepseek_pricing};
-use openbad_llm::provider::ProviderError;
+use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{ToolContext, ToolRegistry};
 use openbad_workspace::WorkspaceService;
@@ -19,20 +23,36 @@ pub struct AgentConfig {
     pub max_output_tokens: u32,
     pub allow_writes: bool,
     pub allow_commands: bool,
+    pub stream: bool,
     pub system_prompt: Option<String>,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_steps: 8,
+            max_steps: 64,
             max_output_tokens: 16_384,
             allow_writes: false,
             allow_commands: false,
+            stream: true,
             system_prompt: None,
         }
     }
 }
+
+/// Receives live progress from the agent. Implementations must not block.
+pub trait AgentObserver: Send + Sync {
+    fn on_step(&self, _step: u32) {}
+    fn on_reasoning(&self, _step: u32, _text: &str) {}
+    fn on_content(&self, _step: u32, _text: &str) {}
+    fn on_tool_call(&self, _step: u32, _call: &ToolCall) {}
+    fn on_tool_result(&self, _step: u32, _name: &str, _content: &str, _is_error: bool) {}
+    fn on_usage(&self, _usage: &UsageTotals) {}
+}
+
+struct NoopObserver;
+
+impl AgentObserver for NoopObserver {}
 
 #[derive(Debug, Clone)]
 pub struct AgentRun {
@@ -79,11 +99,19 @@ impl<T: HttpTransport> Agent<T> {
     }
 
     pub async fn run(&self, history: Vec<ChatMessage>) -> Result<AgentRun, AgentError> {
+        self.run_with_observer(history, &NoopObserver).await
+    }
+
+    pub async fn run_with_observer(
+        &self,
+        history: Vec<ChatMessage>,
+        observer: &dyn AgentObserver,
+    ) -> Result<AgentRun, AgentError> {
         let system_prompt = self.system_prompt();
         let mut messages = history;
         if !matches!(
             messages.first().map(|message| &message.role),
-            Some(openbad_llm::chat::ChatRole::System)
+            Some(ChatRole::System)
         ) {
             messages.insert(0, ChatMessage::system(system_prompt.clone()));
         }
@@ -93,7 +121,7 @@ impl<T: HttpTransport> Agent<T> {
         let tools_hash = hash_bytes(canonical_json(&Value::Array(tool_schemas.clone())).as_bytes());
         let system_hash = hash_bytes(system_prompt.as_bytes());
         let series_id = Uuid::now_v7();
-        let mut usage = UsageTotals::default();
+        let mut usage_totals = UsageTotals::default();
 
         let context = Arc::new({
             let mut context = ToolContext::new(self.workspace.clone());
@@ -103,11 +131,12 @@ impl<T: HttpTransport> Agent<T> {
         });
 
         for step in 1..=self.config.max_steps {
+            observer.on_step(step);
             let request = self.client.build_request(
                 messages.clone(),
                 Some(tool_schemas.clone()),
                 Some(self.config.max_output_tokens),
-                false,
+                self.config.stream,
             );
             let envelope = RequestEnvelope {
                 series_id,
@@ -124,47 +153,91 @@ impl<T: HttpTransport> Agent<T> {
                 max_output_tokens: self.config.max_output_tokens,
             };
             let frozen = request.freeze(envelope)?;
-            let response = self.client.complete(frozen).await?;
 
-            if let Some(pricing) =
-                deepseek_pricing(&response.model).or_else(|| deepseek_pricing(self.client.model()))
-            {
-                usage.record(&response.usage, &pricing.cost(&response.usage, false));
+            let (assistant, finish_reason, response_usage) = if self.config.stream {
+                self.stream_step(frozen, observer, step).await?
             } else {
-                usage.record(&response.usage, &Default::default());
-            }
+                let response = self.client.complete(frozen).await?;
+                emit_full_message(observer, step, &response.message);
+                (response.message, response.finish_reason, response.usage)
+            };
 
-            let assistant = response.message;
+            if let Some(pricing) = deepseek_pricing(self.client.model()) {
+                usage_totals.record(&response_usage, &pricing.cost(&response_usage, false));
+            } else {
+                usage_totals.record(&response_usage, &Default::default());
+            }
+            observer.on_usage(&usage_totals);
+
             let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
             let text = assistant.content.clone().unwrap_or_default();
+            if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                eprintln!(
+                    "[agent] step {step} finish={finish_reason:?} content={text:?} tool_calls={}",
+                    tool_calls.len()
+                );
+                for call in &tool_calls {
+                    eprintln!(
+                        "[agent]   call {} {}",
+                        call.function.name, call.function.arguments
+                    );
+                }
+            }
             messages.push(assistant);
 
             if tool_calls.is_empty() {
                 return Ok(AgentRun {
                     new_messages: messages[start_len..].to_vec(),
                     text,
-                    usage,
+                    usage: usage_totals,
                     steps: step,
                 });
             }
 
             for call in tool_calls {
-                let arguments: Value =
-                    serde_json::from_str(&call.function.arguments).map_err(|error| {
-                        AgentError::InvalidToolArguments {
-                            tool: call.function.name.clone(),
-                            message: error.to_string(),
+                observer.on_tool_call(step, &call);
+                let content = match serde_json::from_str::<Value>(&call.function.arguments) {
+                    Ok(arguments) => match self
+                        .tools
+                        .execute(&call.function.name, arguments, &context)
+                        .await
+                    {
+                        Ok(result) if result.is_error => {
+                            let content = format!("error: {}", result.content);
+                            observer.on_tool_result(step, &call.function.name, &content, true);
+                            content
                         }
-                    })?;
-                let content = match self
-                    .tools
-                    .execute(&call.function.name, arguments, &context)
-                    .await
-                {
-                    Ok(result) if result.is_error => format!("error: {}", result.content),
-                    Ok(result) => result.content,
-                    Err(error) => format!("error: {error}"),
+                        Ok(result) => {
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &result.content,
+                                false,
+                            );
+                            result.content
+                        }
+                        Err(error) => {
+                            let content = format!("error: {error}");
+                            observer.on_tool_result(step, &call.function.name, &content, true);
+                            content
+                        }
+                    },
+                    Err(error) => {
+                        let content = format!(
+                            "error: invalid arguments for {}: {error}",
+                            call.function.name
+                        );
+                        observer.on_tool_result(step, &call.function.name, &content, true);
+                        content
+                    }
                 };
+                if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                    eprintln!(
+                        "[agent]   result {}: {}",
+                        call.function.name,
+                        content.chars().take(500).collect::<String>()
+                    );
+                }
                 messages.push(ChatMessage::tool(call.id, content));
             }
 
@@ -174,6 +247,76 @@ impl<T: HttpTransport> Agent<T> {
         }
 
         Err(AgentError::MaxSteps(self.config.max_steps))
+    }
+
+    async fn stream_step(
+        &self,
+        frozen: openbad_llm::provider::FrozenRequest,
+        observer: &dyn AgentObserver,
+        step: u32,
+    ) -> Result<(ChatMessage, Option<String>, Usage), AgentError> {
+        let mut stream = self.client.stream(frozen).await?;
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls = BTreeMap::new();
+        let mut usage = Usage::default();
+        let mut finish_reason = None;
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                StreamEvent::Delta {
+                    content: content_delta,
+                    reasoning_content: reasoning_delta,
+                    tool_calls,
+                } => {
+                    if let Some(delta) = reasoning_delta {
+                        observer.on_reasoning(step, &delta);
+                        reasoning.push_str(&delta);
+                    }
+                    if let Some(delta) = content_delta {
+                        observer.on_content(step, &delta);
+                        content.push_str(&delta);
+                    }
+                    for delta in tool_calls {
+                        merge_tool_delta(&mut calls, delta);
+                    }
+                }
+                StreamEvent::Usage(value) => usage = value,
+                StreamEvent::Finished {
+                    finish_reason: reason,
+                } => {
+                    if reason.is_some() {
+                        finish_reason = reason;
+                    }
+                }
+            }
+        }
+
+        let tool_calls = if calls.is_empty() {
+            None
+        } else {
+            Some(calls.into_values().collect())
+        };
+        Ok((
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
+                reasoning_content: if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                },
+                tool_calls,
+                tool_call_id: None,
+                prefix: None,
+            },
+            finish_reason,
+            usage,
+        ))
     }
 
     fn system_prompt(&self) -> String {
@@ -187,6 +330,37 @@ Prefer small, surgical changes and run the relevant tests when useful.\n\
 Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         )
+    }
+}
+
+fn emit_full_message(observer: &dyn AgentObserver, step: u32, message: &ChatMessage) {
+    if let Some(reasoning) = &message.reasoning_content {
+        observer.on_reasoning(step, reasoning);
+    }
+    if let Some(content) = &message.content {
+        observer.on_content(step, content);
+    }
+}
+
+fn merge_tool_delta(calls: &mut BTreeMap<u32, ToolCall>, delta: ToolCallDelta) {
+    let entry = calls.entry(delta.index).or_insert_with(|| ToolCall {
+        id: String::new(),
+        kind: "function".to_owned(),
+        function: FunctionCall {
+            name: String::new(),
+            arguments: String::new(),
+        },
+    });
+    if let Some(id) = delta.id {
+        entry.id = id;
+    }
+    if let Some(function) = delta.function {
+        if let Some(name) = function.name {
+            entry.function.name.push_str(&name);
+        }
+        if let Some(arguments) = function.arguments {
+            entry.function.arguments.push_str(&arguments);
+        }
     }
 }
 
@@ -272,7 +446,10 @@ mod tests {
         let agent = default_agent(
             client,
             Arc::new(WorkspaceService::new(directory.path())),
-            AgentConfig::default(),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
         );
 
         let run = agent
@@ -308,6 +485,7 @@ mod tests {
             Arc::new(WorkspaceService::new(directory.path())),
             AgentConfig {
                 max_steps: 2,
+                stream: false,
                 ..AgentConfig::default()
             },
         );
@@ -349,7 +527,10 @@ mod tests {
         let agent = default_agent(
             client,
             Arc::new(WorkspaceService::new(directory.path())),
-            AgentConfig::default(),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
         );
         let run = agent
             .run(vec![ChatMessage::user("what is in hello.txt?")])

@@ -48,6 +48,13 @@ pnpm --dir ui build
 The current scaffold uses `icons/icon.png` from the project logo. Add platform
 icons and signing before shipping installers.
 
+## UI development without Tauri
+
+`pnpm --dir ui dev` serves the React UI at `http://localhost:5173`. When the page
+is opened in a normal browser, `ui/src/backend.ts` switches to a mock backend that
+streams reasoning, content, tool calls, and usage. This is useful for layout,
+scroll, and streaming tests without rebuilding the native app.
+
 ## Commands
 
 | Command | Purpose |
