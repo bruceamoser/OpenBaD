@@ -2777,6 +2777,7 @@ dependencies = [
  "async-trait",
  "globset",
  "ignore",
+ "libc",
  "openbad-core",
  "openbad-governance",
  "openbad-workspace",

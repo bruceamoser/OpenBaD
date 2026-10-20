@@ -1028,24 +1028,42 @@ impl Tool for RunCommandTool {
             .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
         let mut child = process.spawn()?;
+        let stdout_reader = child.stdout.take().map(|mut stream| {
+            std::thread::spawn(move || {
+                let mut output = String::new();
+                let _ = stream.read_to_string(&mut output);
+                output
+            })
+        });
+        let stderr_reader = child.stderr.take().map(|mut stream| {
+            std::thread::spawn(move || {
+                let mut output = String::new();
+                let _ = stream.read_to_string(&mut output);
+                output
+            })
+        });
 
-        let status = match child.wait_timeout(Duration::from_secs(timeout))? {
+        let status = child.wait_timeout(Duration::from_secs(timeout))?;
+        kill_process_tree(&mut child);
+        let status = match status {
             Some(status) => status,
             None => {
-                let _ = child.kill();
                 let _ = child.wait();
                 return Err(ToolError::Timeout(timeout));
             }
         };
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        if let Some(mut stream) = child.stdout.take() {
-            let _ = stream.read_to_string(&mut stdout);
-        }
-        if let Some(mut stream) = child.stderr.take() {
-            let _ = stream.read_to_string(&mut stderr);
-        }
+        let stdout = stdout_reader
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_reader
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default();
 
         let content = format!(
             "exit: {}\nstdout:\n{}\nstderr:\n{}",
@@ -1058,6 +1076,27 @@ impl Tool for RunCommandTool {
             "success": status.success(),
         })))
     }
+}
+
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        // The child was spawned in its own process group, so this also kills
+        // helpers it left behind.
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }
 
 struct GitStatusTool;
@@ -1321,6 +1360,33 @@ mod tests {
             .expect("run");
         assert!(result.content.contains("hi"));
         assert!(result.content.contains("exit: 0"));
+    }
+
+    #[tokio::test]
+    async fn run_command_drains_output_and_enforces_timeout() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+
+        let large = RunCommandTool
+            .execute(
+                json!({"command": "yes x | head -c 200000", "timeout_seconds": 10}),
+                &context,
+            )
+            .await
+            .expect("large output");
+        assert!(large.content.contains("exit: 0"));
+        assert!(large.content.len() > 100_000);
+
+        let started = std::time::Instant::now();
+        let timed_out = RunCommandTool
+            .execute(
+                json!({"command": "sleep 5", "timeout_seconds": 1}),
+                &context,
+            )
+            .await;
+        assert!(matches!(timed_out, Err(ToolError::Timeout(1))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
     }
 
     #[tokio::test]
