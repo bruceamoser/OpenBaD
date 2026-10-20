@@ -530,6 +530,8 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(UndoLastTool);
+        registry.register(InstructionsForTool);
         registry.register(ScaffoldProjectTool);
         registry.register(WorkspaceGcTool);
         registry.register(SessionCheckpointTool);
@@ -2509,6 +2511,7 @@ impl Tool for WriteFileTool {
             None
         };
         let checkpoint = checkpoint_before_write(context, &path)?;
+        let _undo = record_undo(context, &path)?;
         atomic_write(&path, &content)?;
         let validation = match run_validators(context, &path).await {
             Ok(validation) => validation,
@@ -2612,6 +2615,7 @@ impl Tool for EditFileTool {
         }
         let previous = Some(content);
         let checkpoint = checkpoint_before_write(context, &path)?;
+        let _undo = record_undo(context, &path)?;
         atomic_write(&path, &updated)?;
         let validation = match run_validators(context, &path).await {
             Ok(validation) => validation,
@@ -4967,6 +4971,169 @@ fn job_alive(pid: u32) -> bool {
         return false;
     };
     stat.split_whitespace().nth(2) != Some("Z")
+}
+
+struct UndoLastTool;
+
+#[async_trait]
+impl Tool for UndoLastTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "undo_last",
+            "Restore the most recent write/edit undo record from .openbad/undo. Requires writes.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("undo_last".to_owned()));
+        }
+        let directory = undo_directory(context);
+        let mut records = if directory.is_dir() {
+            std::fs::read_dir(&directory)?
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        == Some("json")
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        records.sort_by_key(|entry| entry.file_name());
+        let Some(record) = records.pop() else {
+            return Ok(ToolResult::ok("undo stack is empty"));
+        };
+        let content = std::fs::read_to_string(record.path())?;
+        let value: Value =
+            serde_json::from_str(&content).map_err(|error| ToolError::Failed(error.to_string()))?;
+        let path = context
+            .workspace
+            .resolve(Path::new(value["path"].as_str().unwrap_or_default()))?;
+        check_write_policy(context, &path)?;
+        let existed = value["existed"].as_bool().unwrap_or(false);
+        if existed {
+            atomic_write(&path, value["content"].as_str().unwrap_or_default())?;
+        } else if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        let done = record.path().with_extension("done");
+        std::fs::rename(record.path(), done)?;
+        Ok(
+            ToolResult::ok(format!("undid last write to {}", path.display()))
+                .with_metadata(json!({"path": path, "existed": existed})),
+        )
+    }
+}
+
+struct InstructionsForTool;
+
+#[async_trait]
+impl Tool for InstructionsForTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "instructions_for",
+            "Discover scoped instruction files (AGENTS.md, CLAUDE.md, .openbad/instructions.md) from a path's ancestors, root-first.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let raw = string_arg(&arguments, "path")?;
+        let path = context.workspace.resolve(Path::new(&raw))?;
+        let root = context
+            .workspace
+            .root()
+            .canonicalize()
+            .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+        let start = if path.is_dir() {
+            path.clone()
+        } else {
+            path.parent().unwrap_or(&path).to_path_buf()
+        };
+        let mut directories = start
+            .ancestors()
+            .take_while(|directory| directory.starts_with(&root))
+            .collect::<Vec<_>>();
+        directories.reverse();
+        let mut sections = Vec::new();
+        for directory in directories {
+            for name in ["AGENTS.md", "CLAUDE.md", ".openbad/instructions.md"] {
+                let candidate = directory.join(name);
+                if !candidate.is_file() {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&candidate) {
+                    sections.push(format!(
+                        "--- {} ---\n{}",
+                        relative_to_root(context, &candidate),
+                        content
+                    ));
+                }
+            }
+        }
+        if sections.is_empty() {
+            return Ok(ToolResult::ok("no scoped instructions"));
+        }
+        Ok(
+            ToolResult::ok(truncate(&sections.join("\n\n"), context.max_output_bytes))
+                .with_metadata(json!({"files": sections.len()})),
+        )
+    }
+}
+
+fn undo_directory(context: &ToolContext) -> std::path::PathBuf {
+    context.workspace.root().join(".openbad").join("undo")
+}
+
+fn record_undo(
+    context: &ToolContext,
+    path: &Path,
+) -> Result<Option<std::path::PathBuf>, ToolError> {
+    let existed = path.exists();
+    let content = if existed {
+        Some(std::fs::read_to_string(path)?)
+    } else {
+        None
+    };
+    let directory = undo_directory(context);
+    std::fs::create_dir_all(&directory)?;
+    let name = format!(
+        "{}-{}.json",
+        now_millis(),
+        relative_to_root(context, path).replace('/', "__")
+    );
+    let record = directory.join(name);
+    std::fs::write(
+        &record,
+        serde_json::to_string_pretty(&json!({
+            "path": relative_to_root(context, path),
+            "existed": existed,
+            "content": content,
+            "created_at": now_millis()
+        }))
+        .map_err(|error| ToolError::Failed(error.to_string()))?,
+    )?;
+    Ok(Some(record))
 }
 
 struct ScaffoldProjectTool;
@@ -9852,6 +10019,46 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn undo_restores_previous_write_and_instructions_are_scoped() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join("docs")).expect("docs");
+        fs::write(directory.path().join("file.txt"), "old\n").expect("file");
+        fs::write(directory.path().join("AGENTS.md"), "root rule\n").expect("root");
+        fs::write(directory.path().join("docs/AGENTS.md"), "docs rule\n").expect("docs");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        ReadFileTool
+            .execute(json!({"path": "file.txt"}), &context)
+            .await
+            .expect("read");
+        WriteFileTool
+            .execute(json!({"path": "file.txt", "content": "new\n"}), &context)
+            .await
+            .expect("write");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("file.txt")).expect("new"),
+            "new\n"
+        );
+        UndoLastTool
+            .execute(json!({}), &context)
+            .await
+            .expect("undo");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("file.txt")).expect("old"),
+            "old\n"
+        );
+
+        let scoped = InstructionsForTool
+            .execute(json!({"path": "docs/file.txt"}), &context)
+            .await
+            .expect("instructions");
+        let root_index = scoped.content.find("root rule").expect("root present");
+        let docs_index = scoped.content.find("docs rule").expect("docs present");
+        assert!(root_index < docs_index);
     }
 
     #[tokio::test]

@@ -343,6 +343,8 @@ Implemented:
 | `diff_files` / `file_citation` | read | Cross-path diffs and stable `path@hash:line` citations |
 | `git_changes_since` | read | Commits and changed paths since a revision |
 | `registry_lookup` | read | crates.io/npm/PyPI version checks with network policy |
+| `undo_last` | write | Restore the most recent write/edit from `.openbad/undo` |
+| `instructions_for` | read | Load scoped AGENTS.md/CLAUDE.md/.openbad instructions root-first |
 | `scaffold_project` | write | Create a starter manifest, README, docs, knowledge, scratch, artifacts |
 | `workspace_gc` | write | Report or remove large generated files with confirmation |
 | `session_checkpoint` / `session_resume` | write/read | Capture or restore plan/todos/handoff/claims/audit summaries |
@@ -443,6 +445,10 @@ the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
 `deny_paths`, `allow_writes: false`) and commands by class or substring
 (`command_classes`, `deny_command_patterns`, `allow_network`, `network_hosts`). Denials name the policy rule and
 apply to file operations, `run_command`, `run_task`, and `run_recipe`.
+
+Every write/edit records a bounded undo entry under `.openbad/undo`; `undo_last`
+restores it. `instructions_for` discovers nested instruction files from the
+workspace root down to the target path.
 
 `scaffold_project` creates a reviewable starter layout. `session_checkpoint`
 captures plan, todos, handoff, claims, unknowns, and recent audit entries for
