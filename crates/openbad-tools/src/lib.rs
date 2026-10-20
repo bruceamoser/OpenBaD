@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -530,6 +530,11 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(PreviewWriteTool);
+        registry.register(SnapshotCreateTool);
+        registry.register(SnapshotListTool);
+        registry.register(SnapshotRestoreTool);
+        registry.register(AssertProjectTool);
         registry.register(GitCommitTool);
         registry.register(GitBranchTool);
         registry.register(GitCheckoutTool);
@@ -1023,6 +1028,28 @@ fn update_context_rule(
         "pinned": policy.pinned.len(),
         "excluded": policy.excluded.len()
     })))
+}
+
+static SECRET_PATTERNS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
+    [
+        (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "private key"),
+        (r"sk-[A-Za-z0-9]{20,}", "API key"),
+        (r"ghp_[A-Za-z0-9]{20,}", "GitHub token"),
+        (r"github_pat_[A-Za-z0-9_]{20,}", "GitHub token"),
+        (r"AKIA[0-9A-Z]{16}", "AWS access key"),
+        (r"xox[baprs]-[A-Za-z0-9-]{20,}", "Slack token"),
+        (r"AIza[0-9A-Za-z\-_]{35}", "Google API key"),
+    ]
+    .into_iter()
+    .filter_map(|(pattern, label)| regex::Regex::new(pattern).ok().map(|regex| (regex, label)))
+    .collect()
+});
+
+fn detect_secret(content: &str) -> Option<&'static str> {
+    SECRET_PATTERNS
+        .iter()
+        .find(|(regex, _)| regex.is_match(content))
+        .map(|(_, label)| *label)
 }
 
 fn now_millis() -> i64 {
@@ -2371,6 +2398,11 @@ impl Tool for WriteFileTool {
             )));
         }
         let content = string_arg(&arguments, "content")?;
+        if let Some(kind) = detect_secret(&content) {
+            return Err(ToolError::Failed(format!(
+                "write blocked: content looks like a {kind}; remove or replace the secret before writing"
+            )));
+        }
         let previous = if path.exists() {
             Some(std::fs::read_to_string(&path)?)
         } else {
@@ -2473,6 +2505,11 @@ impl Tool for EditFileTool {
         } else {
             content.replacen(&old, &new, 1)
         };
+        if let Some(kind) = detect_secret(&updated) {
+            return Err(ToolError::Failed(format!(
+                "edit blocked: result looks like a {kind}; remove or replace the secret before writing"
+            )));
+        }
         let previous = Some(content);
         let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &updated)?;
@@ -4458,6 +4495,423 @@ async fn run_tool_shell(context: &ToolContext, command: String) -> Result<ToolRe
     RunCommandTool
         .execute(json!({"command": command, "timeout_seconds": 300}), context)
         .await
+}
+
+struct PreviewWriteTool;
+
+#[async_trait]
+impl Tool for PreviewWriteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "preview_write",
+            "Return a unified diff for a proposed write without changing the file.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"}
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        ensure_not_excluded(context, &path)?;
+        let old = if path.exists() {
+            std::fs::read_to_string(&path)?
+        } else {
+            String::new()
+        };
+        let new = string_arg(&arguments, "content")?;
+        let diff = similar::TextDiff::from_lines(&old, &new)
+            .unified_diff()
+            .context_radius(3)
+            .header(
+                &format!("a/{}", relative_to_root(context, &path)),
+                &format!("b/{}", relative_to_root(context, &path)),
+            )
+            .to_string();
+        Ok(
+            ToolResult::ok(truncate(&diff, context.max_output_bytes)).with_metadata(json!({
+                "path": path,
+                "changed": old != new,
+                "added_lines": new.lines().count().saturating_sub(old.lines().count()),
+                "removed_lines": old.lines().count().saturating_sub(new.lines().count())
+            })),
+        )
+    }
+}
+
+struct SnapshotCreateTool;
+
+#[async_trait]
+impl Tool for SnapshotCreateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "snapshot_create",
+            "Copy the workspace (excluding .git, target, node_modules, dist, and .openbad) into .openbad/snapshots/<label>.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"},
+                "replace": {"type": "boolean"}
+            },
+            "required": ["label"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("snapshot_create".to_owned()));
+        }
+        let label = safe_label(&string_arg(&arguments, "label")?)?;
+        let directory = snapshot_root(context).join(&label);
+        if directory.exists() && !optional_bool(&arguments, "replace").unwrap_or(false) {
+            return Err(ToolError::InvalidArgument(format!(
+                "snapshot already exists: {label}"
+            )));
+        }
+        if directory.exists() {
+            std::fs::remove_dir_all(&directory)?;
+        }
+        let summary = copy_tree(context.workspace.root(), &directory, context)?;
+        Ok(ToolResult::ok(format!(
+            "created snapshot {label} ({} files, {} bytes)",
+            summary.files, summary.bytes
+        ))
+        .with_metadata(json!({"label": label, "files": summary.files, "bytes": summary.bytes})))
+    }
+}
+
+struct SnapshotListTool;
+
+#[async_trait]
+impl Tool for SnapshotListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "snapshot_list",
+            "List workspace snapshots.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let root = snapshot_root(context);
+        if !root.is_dir() {
+            return Ok(ToolResult::ok("no snapshots"));
+        }
+        let mut names = std::fs::read_dir(root)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        if names.is_empty() {
+            return Ok(ToolResult::ok("no snapshots"));
+        }
+        Ok(ToolResult::ok(names.join("\n")).with_metadata(json!({"snapshots": names})))
+    }
+}
+
+struct SnapshotRestoreTool;
+
+#[async_trait]
+impl Tool for SnapshotRestoreTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "snapshot_restore",
+            "Restore files from a snapshot. Requires confirm=true; extra files are not deleted.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"},
+                "confirm": {"type": "boolean"}
+            },
+            "required": ["label"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("snapshot_restore".to_owned()));
+        }
+        if !optional_bool(&arguments, "confirm").unwrap_or(false) {
+            return Err(ToolError::ApprovalRequired(
+                "snapshot_restore requires confirm=true".to_owned(),
+            ));
+        }
+        let label = safe_label(&string_arg(&arguments, "label")?)?;
+        let directory = snapshot_root(context).join(&label);
+        if !directory.is_dir() {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown snapshot: {label}"
+            )));
+        }
+        let summary = copy_tree(&directory, context.workspace.root(), context)?;
+        Ok(ToolResult::ok(format!(
+            "restored snapshot {label} ({} files, {} bytes)",
+            summary.files, summary.bytes
+        ))
+        .with_metadata(json!({"label": label, "files": summary.files})))
+    }
+}
+
+struct AssertProjectTool;
+
+#[async_trait]
+impl Tool for AssertProjectTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "assert_project",
+            "Structural assertions: count files by glob, validate JSON/YAML schema fields, or check local Markdown links.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["count", "schema", "links"]},
+                "pattern": {"type": "string", "description": "Glob for count"},
+                "expected": {"type": "integer", "description": "Expected file count"},
+                "min": {"type": "integer"},
+                "max": {"type": "integer"},
+                "path": {"type": "string"},
+                "required": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = string_arg(&arguments, "action")?;
+        match action.as_str() {
+            "count" => {
+                let pattern = string_arg(&arguments, "pattern")?;
+                let matcher = Glob::new(&pattern)
+                    .map_err(|error| ToolError::InvalidArgument(format!("invalid glob: {error}")))?
+                    .compile_matcher();
+                let mut count = 0;
+                for entry in WalkBuilder::new(context.workspace.root())
+                    .max_depth(Some(12))
+                    .build()
+                    .filter_map(Result::ok)
+                {
+                    if !entry.file_type().is_some_and(|kind| kind.is_file())
+                        || path_is_excluded(context, entry.path())
+                    {
+                        continue;
+                    }
+                    let relative = relative_to_root(context, entry.path());
+                    if matcher.is_match(&relative) || matcher.is_match(entry.file_name()) {
+                        count += 1;
+                    }
+                }
+                let expected = optional_usize(&arguments, "expected");
+                let min = optional_usize(&arguments, "min").unwrap_or(0);
+                let max = optional_usize(&arguments, "max").unwrap_or(usize::MAX);
+                let success = expected.is_none_or(|expected| count == expected)
+                    && count >= min
+                    && count <= max;
+                Ok(ToolResult::ok(format!(
+                    "count {pattern}: {count} ({} )",
+                    if success { "pass" } else { "fail" }
+                ))
+                .with_metadata(json!({"action": "count", "count": count, "success": success})))
+            }
+            "schema" => {
+                let path = context
+                    .workspace
+                    .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+                ensure_not_excluded(context, &path)?;
+                let content = std::fs::read_to_string(&path)?;
+                let value: serde_json::Value = serde_json::from_str(&content)
+                    .or_else(|_| {
+                        serde_yaml::from_str::<serde_yaml::Value>(&content)
+                            .map(|value| serde_json::to_value(value).unwrap_or_default())
+                            .map_err(|_| serde_json::Error::io(std::io::Error::other("schema")))
+                    })
+                    .map_err(|error| ToolError::Failed(format!("parse {path:?}: {error}")))?;
+                let required = string_array_arg_or_empty(&arguments, "required")?;
+                let missing = required
+                    .iter()
+                    .filter(|field| value.get(field.as_str()).is_none())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Ok(ToolResult::ok(format!(
+                    "schema {}: {}",
+                    path.display(),
+                    if missing.is_empty() {
+                        "pass".to_owned()
+                    } else {
+                        format!("missing fields: {}", missing.join(", "))
+                    }
+                ))
+                .with_metadata(
+                    json!({"action": "schema", "missing": missing, "success": missing.is_empty()}),
+                ))
+            }
+            "links" => {
+                let mut broken = Vec::new();
+                let root = context.workspace.root();
+                let link = regex::Regex::new(r"\[[^\]]*\]\(([^)]+)\)").expect("link regex");
+                for entry in WalkBuilder::new(root)
+                    .max_depth(Some(8))
+                    .build()
+                    .filter_map(Result::ok)
+                {
+                    if !entry.file_type().is_some_and(|kind| kind.is_file())
+                        || path_is_excluded(context, entry.path())
+                        || entry
+                            .path()
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            != Some("md")
+                    {
+                        continue;
+                    }
+                    let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                        continue;
+                    };
+                    let directory = entry.path().parent().unwrap_or(root);
+                    for capture in link.captures_iter(&content) {
+                        let target = capture[1].split('#').next().unwrap_or_default();
+                        if target.is_empty()
+                            || target.starts_with("http://")
+                            || target.starts_with("https://")
+                            || target.starts_with("mailto:")
+                            || target.starts_with('/')
+                        {
+                            continue;
+                        }
+                        let resolved = directory.join(target);
+                        if !resolved.exists() {
+                            broken.push(format!(
+                                "{}: {}",
+                                relative_to_root(context, entry.path()),
+                                target
+                            ));
+                        }
+                    }
+                }
+                Ok(ToolResult::ok(if broken.is_empty() {
+                    "links: pass".to_owned()
+                } else {
+                    broken.join("\n")
+                })
+                .with_metadata(
+                    json!({"action": "links", "broken": broken, "success": broken.is_empty()}),
+                ))
+            }
+            other => Err(ToolError::InvalidArgument(format!(
+                "unknown assertion action: {other}"
+            ))),
+        }
+    }
+}
+
+fn safe_label(label: &str) -> Result<String, ToolError> {
+    let label = label.trim();
+    if label.is_empty()
+        || !label.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(ToolError::InvalidArgument(
+            "label must contain only letters, digits, dashes, underscores, or dots".to_owned(),
+        ));
+    }
+    Ok(label.to_owned())
+}
+
+fn snapshot_root(context: &ToolContext) -> std::path::PathBuf {
+    context.workspace.root().join(".openbad").join("snapshots")
+}
+
+struct CopySummary {
+    files: usize,
+    bytes: u64,
+}
+
+fn copy_tree(
+    source: &Path,
+    destination: &Path,
+    context: &ToolContext,
+) -> Result<CopySummary, ToolError> {
+    const MAX_FILES: usize = 10_000;
+    const MAX_BYTES: u64 = 256 * 1024 * 1024;
+    let mut files = 0;
+    let mut bytes = 0_u64;
+    for entry in WalkBuilder::new(source)
+        .max_depth(Some(20))
+        .hidden(false)
+        .build()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        let relative = path.strip_prefix(source).unwrap_or(path);
+        if relative.as_os_str().is_empty()
+            || relative.components().any(|component| {
+                matches!(
+                    component.as_os_str().to_str(),
+                    Some(".git" | "target" | "node_modules" | "dist" | ".openbad")
+                )
+            })
+        {
+            continue;
+        }
+        let target = destination.join(relative);
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        if files >= MAX_FILES || bytes > MAX_BYTES {
+            break;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(path, &target)?;
+        bytes += entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        files += 1;
+    }
+    let _ = context;
+    Ok(CopySummary { files, bytes })
 }
 
 struct GitCommitTool;
@@ -7562,6 +8016,87 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn previews_snapshots_secret_screening_and_assertions_work() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("a.txt"), "one\n").expect("a");
+        fs::create_dir_all(directory.path().join("docs")).expect("docs");
+        fs::write(
+            directory.path().join("docs/guide.md"),
+            "[missing](missing.md)\n",
+        )
+        .expect("guide");
+        fs::write(
+            directory.path().join("schema.json"),
+            r#"{"name":"x","items":[]}"#,
+        )
+        .expect("schema");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        let preview = PreviewWriteTool
+            .execute(json!({"path": "a.txt", "content": "one\ntwo\n"}), &context)
+            .await
+            .expect("preview");
+        assert!(preview.content.contains("+two"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).expect("untouched"),
+            "one\n"
+        );
+
+        let blocked = WriteFileTool
+            .execute(
+                json!({"path": "secret.txt", "content": "sk-123456789012345678901234"}),
+                &context,
+            )
+            .await
+            .expect_err("secret");
+        assert!(blocked.to_string().contains("API key"));
+        assert!(!directory.path().join("secret.txt").exists());
+
+        SnapshotCreateTool
+            .execute(json!({"label": "before"}), &context)
+            .await
+            .expect("snapshot");
+        fs::write(directory.path().join("a.txt"), "changed\n").expect("change");
+        let listed = SnapshotListTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("before"));
+        SnapshotRestoreTool
+            .execute(json!({"label": "before", "confirm": true}), &context)
+            .await
+            .expect("restore");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).expect("restored"),
+            "one\n"
+        );
+
+        let count = AssertProjectTool
+            .execute(
+                json!({"action": "count", "pattern": "*.txt", "expected": 1}),
+                &context,
+            )
+            .await
+            .expect("count");
+        assert_eq!(count.metadata["success"], true);
+        let schema = AssertProjectTool
+            .execute(
+                json!({"action": "schema", "path": "schema.json", "required": ["name", "items"]}),
+                &context,
+            )
+            .await
+            .expect("schema");
+        assert_eq!(schema.metadata["success"], true);
+        let links = AssertProjectTool
+            .execute(json!({"action": "links"}), &context)
+            .await
+            .expect("links");
+        assert_eq!(links.metadata["success"], false);
+        assert!(links.content.contains("missing.md"));
     }
 
     #[tokio::test]

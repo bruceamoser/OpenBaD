@@ -2795,6 +2795,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "similar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

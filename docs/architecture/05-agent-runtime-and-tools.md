@@ -338,6 +338,9 @@ Implemented:
 | `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
 | `delete_file` | write | Soft delete to `.openbad/trash`; hard delete requires `hard=true` |
+| `preview_write` | read | Unified diff for a proposed write without touching disk |
+| `snapshot_create` / `snapshot_list` / `snapshot_restore` | write/read | Bounded workspace snapshots with explicit restore confirmation |
+| `assert_project` | read | Count/schema/local-link structural assertions |
 | `move_file` | write | Rename or move a file inside the workspace |
 | `list_trash` / `restore_trash` | read/write | Inspect and restore soft-deleted files |
 | `add_knowledge` | write | Add a curated project note with `verified`, `inferred`, or `uncertain` confidence |
@@ -394,6 +397,12 @@ Manifest `gates:` group recipes into named pre-flight checks. `run_gate`
 executes them in order and writes a JSON evidence file under `.openbad/gates/`.
 When `prove_it: true`, the prompt requires every factual claim to cite an
 executed check or be labelled UNVERIFIED.
+
+`write_file` and `edit_file` screen content for obvious secrets (private keys,
+cloud/API/GitHub/Slack tokens) before writing. `preview_write` lets the model
+show a diff first. `snapshot_create` copies the workspace (excluding `.git`,
+`target`, `node_modules`, `dist`, `.openbad`) under `.openbad/snapshots/`, and
+`assert_project` provides count, schema, and local-link checks for gates.
 
 `write_file` and `edit_file` run every manifest validator whose glob matches
 the written path. Validators execute only in Full access; a failing validator
