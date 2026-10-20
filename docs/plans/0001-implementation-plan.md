@@ -35,8 +35,9 @@ later phase.
 > API-key storage, and a Tauri chat UI with streamed reasoning and cancellation.
 > Phase 4 has started with the SQLite workspace index, indexed search tools,
 > file checkpoints, and diff/restore. Phase 5 has started with durable,
-> workspace-scoped memory. Per-call approvals, the evidence gate, LSP/PTY,
-> whole-turn rewind, and the remaining Phase 5–8 systems are still open.
+> workspace-scoped memory, and Phase 6 has started with workspace skills.
+> Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind, and the
+> remaining Phase 5–8 systems are still open.
 
 | Milestone | Phases | Outcome | Target |
 | --- | --- | --- | --- |
@@ -235,9 +236,10 @@ commands with approvals.
 ### Phase 3 implementation notes
 
 - `openbad-tools` now has a `Tool` trait, a `ToolRegistry`, OpenAI-style tool
-  schemas, and thirteen built-in tools: `read_file`, `list_dir`, `grep`,
+  schemas, and seventeen built-in tools: `read_file`, `list_dir`, `grep`,
   `search_code`, `glob`, `find_symbols`, `write_file`, `edit_file`,
-  `run_command`, `run_tests`, `git_status`, `git_diff`, and `repo_map`.
+  `run_command`, `run_tests`, `git_status`, `git_diff`, `repo_map`, `remember`,
+  `recall`, `list_skills`, and `read_skill`.
 - All filesystem tools resolve through `WorkspaceService`, which canonicalizes
   paths and rejects parent or symlink escapes. Existing files must be read before
   they can be overwritten or edited. Writes use a temporary file plus rename.
@@ -427,6 +429,16 @@ schedules.
 - Workflow validation and failure tests.
 - MCP lifecycle tests.
 - Schedule and off-peak tests.
+
+### Phase 6 implementation notes
+
+- Workspace skills are discovered from `.openbad/skills` and `.claude/skills`
+  (`.openbad` wins on duplicate names). Both flat `.md` files and
+  `<name>/SKILL.md` directories are supported.
+- Skill frontmatter provides `name` and `description`. Only the index is added
+  to the stable system prompt; `read_skill` loads the body on demand.
+- Still open for Phase 6: subagents, plan/goal loops, workflows, schedules,
+  off-peak execution, and skill scripts/tool allowlists.
 
 ## 11. Phase 7 — Security hardening
 

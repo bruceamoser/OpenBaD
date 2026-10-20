@@ -167,6 +167,77 @@ pub trait MemoryStore: Send + Sync {
     fn recall(&self, query: Option<&str>, limit: usize) -> Result<Vec<MemoryEntry>, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub path: PathBuf,
+}
+
+/// Discover workspace skills from `.openbad/skills` and `.claude/skills`.
+/// `.openbad` wins when both define the same name.
+#[must_use]
+pub fn discover_skills(root: &Path) -> Vec<Skill> {
+    let mut skills = BTreeMap::new();
+    for relative in [".claude/skills", ".openbad/skills"] {
+        let directory = root.join(relative);
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let candidate = if path.is_dir() {
+                path.join("SKILL.md")
+            } else if path.extension().is_some_and(|extension| extension == "md") {
+                path
+            } else {
+                continue;
+            };
+            if !candidate.is_file() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            let fallback = candidate
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or("skill");
+            let (name, description) = parse_skill_frontmatter(&content, fallback);
+            skills.insert(
+                name.clone(),
+                Skill {
+                    name,
+                    description,
+                    path: candidate,
+                },
+            );
+        }
+    }
+    skills.into_values().collect()
+}
+
+fn parse_skill_frontmatter(content: &str, fallback: &str) -> (String, String) {
+    let mut name = fallback.to_owned();
+    let mut description = String::new();
+    let mut lines = content.lines();
+    if lines.next().is_some_and(|line| line.trim() == "---") {
+        for line in lines {
+            let line = line.trim();
+            if line == "---" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("name:") {
+                name = value.trim().trim_matches('"').to_owned();
+            } else if let Some(value) = line.strip_prefix("description:") {
+                description = value.trim().trim_matches('"').to_owned();
+            }
+        }
+    }
+    (name, description)
+}
+
 pub trait CheckpointSink: Send + Sync {
     fn save(&self, path: &str, existed: bool, content: Option<&[u8]>) -> Result<String, String>;
 }
@@ -250,6 +321,8 @@ impl ToolRegistry {
         registry.register(RepoMapTool);
         registry.register(RememberTool);
         registry.register(RecallTool);
+        registry.register(ListSkillsTool);
+        registry.register(ReadSkillTool);
         registry
     }
 
@@ -1250,6 +1323,83 @@ impl Tool for RecallTool {
     }
 }
 
+struct ListSkillsTool;
+
+#[async_trait]
+impl Tool for ListSkillsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_skills",
+            "List workspace skills with their descriptions.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let skills = discover_skills(context.workspace.root());
+        if skills.is_empty() {
+            return Ok(ToolResult::ok("no workspace skills found"));
+        }
+        let content = skills
+            .iter()
+            .map(|skill| {
+                if skill.description.is_empty() {
+                    format!("- {}", skill.name)
+                } else {
+                    format!("- {}: {}", skill.name, skill.description)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({"skills": skills.len()})))
+    }
+}
+
+struct ReadSkillTool;
+
+#[async_trait]
+impl Tool for ReadSkillTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "read_skill",
+            "Load the full instructions for a workspace skill by name.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let name = string_arg(&arguments, "name")?;
+        let skill = discover_skills(context.workspace.root())
+            .into_iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| ToolError::Failed(format!("skill not found: {name}")))?;
+        let content = std::fs::read_to_string(&skill.path)?;
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"name": skill.name, "path": skill.path})))
+    }
+}
+
 struct RunTestsTool;
 
 #[async_trait]
@@ -1909,6 +2059,36 @@ mod tests {
         assert!(recalled.content.contains("[cache]"));
     }
 
+    #[tokio::test]
+    async fn discovers_and_reads_workspace_skills() {
+        let directory = tempdir().expect("tempdir");
+        let skill_dir = directory.path().join(".openbad/skills/rust-review");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: rust-review\ndescription: Review Rust changes\n---\n# Checklist\n- Run tests\n",
+        )
+        .expect("skill");
+        let context = context(directory.path());
+
+        let skills = discover_skills(directory.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "rust-review");
+        assert_eq!(skills[0].description, "Review Rust changes");
+
+        let listed = ListSkillsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("rust-review: Review Rust changes"));
+
+        let read = ReadSkillTool
+            .execute(json!({"name": "rust-review"}), &context)
+            .await
+            .expect("read");
+        assert!(read.content.contains("# Checklist"));
+    }
+
     #[test]
     fn detects_test_commands_and_failure_lines() {
         let cargo = tempdir().expect("cargo");
@@ -1949,7 +2129,7 @@ mod tests {
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
-        assert!(definitions.len() >= 15);
+        assert!(definitions.len() >= 17);
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
     }
