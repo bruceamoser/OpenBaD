@@ -782,6 +782,49 @@ fn outline_entries(path: &Path, content: &str, max_entries: usize) -> Vec<String
     entries
 }
 
+fn relative_to_root(context: &ToolContext, path: &Path) -> String {
+    let root = context
+        .workspace
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+    path.strip_prefix(&root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn load_policy(
+    context: &ToolContext,
+) -> Result<Option<openbad_workspace::ProjectPolicy>, ToolError> {
+    openbad_workspace::load_project_policy(context.workspace.root())
+        .map_err(|error| ToolError::Failed(error.to_string()))
+}
+
+fn check_write_policy(context: &ToolContext, path: &Path) -> Result<(), ToolError> {
+    let Some(policy) = load_policy(context)? else {
+        return Ok(());
+    };
+    if let Some(reason) = policy.write_denied(&relative_to_root(context, path)) {
+        return Err(ToolError::ApprovalRequired(reason));
+    }
+    Ok(())
+}
+
+fn check_command_policy(
+    context: &ToolContext,
+    class: CommandClass,
+    command: &str,
+) -> Result<(), ToolError> {
+    let Some(policy) = load_policy(context)? else {
+        return Ok(());
+    };
+    if let Some(reason) = policy.command_denied(class.label(), command) {
+        return Err(ToolError::ApprovalRequired(reason));
+    }
+    Ok(())
+}
+
 async fn run_validators(context: &ToolContext, path: &Path) -> Result<Option<String>, ToolError> {
     let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
         .map_err(|error| ToolError::Failed(error.to_string()))?;
@@ -1278,6 +1321,7 @@ impl Tool for DeleteFileTool {
         let path = context
             .workspace
             .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        check_write_policy(context, &path)?;
         if !path.is_file() {
             return Err(ToolError::InvalidArgument(format!(
                 "not a file: {}",
@@ -1344,6 +1388,8 @@ impl Tool for MoveFileTool {
         let to = context
             .workspace
             .resolve(Path::new(&string_arg(&arguments, "to")?))?;
+        check_write_policy(context, &from)?;
+        check_write_policy(context, &to)?;
         if !from.is_file() {
             return Err(ToolError::InvalidArgument(format!(
                 "not a file: {}",
@@ -1480,6 +1526,7 @@ impl Tool for RestoreTrashTool {
                 .unwrap_or_else(|| name.clone()),
         };
         let destination = context.workspace.resolve(Path::new(&relative))?;
+        check_write_policy(context, &destination)?;
         if destination.exists() {
             return Err(ToolError::Failed(format!(
                 "destination already exists: {}",
@@ -1981,6 +2028,7 @@ impl Tool for WriteFileTool {
         let path = context
             .workspace
             .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        check_write_policy(context, &path)?;
         if path.exists() && !context.was_read(&path) {
             return Err(ToolError::Failed(format!(
                 "read the file before overwriting it: {}",
@@ -2060,6 +2108,7 @@ impl Tool for EditFileTool {
         let path = context
             .workspace
             .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        check_write_policy(context, &path)?;
         if !context.was_read(&path) {
             return Err(ToolError::Failed(format!(
                 "read the file before editing it: {}",
@@ -2167,6 +2216,7 @@ impl Tool for RunCommandTool {
                     .to_owned(),
             ));
         }
+        check_command_policy(context, class, &command)?;
         let cwd = match optional_string(&arguments, "cwd") {
             Some(cwd) => context.workspace.resolve(Path::new(&cwd))?,
             None => context.workspace.root().to_path_buf(),
@@ -4287,6 +4337,64 @@ mod tests {
             .expect("partial read");
         assert_eq!(partial.metadata["has_more"], true);
         assert_eq!(partial.metadata["next_start_line"], 3);
+    }
+
+    #[tokio::test]
+    async fn project_policy_limits_writes_and_command_classes() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join(".openbad")).expect("openbad");
+        fs::create_dir_all(directory.path().join("src/generated")).expect("src");
+        fs::create_dir_all(directory.path().join("docs")).expect("docs");
+        fs::write(
+            directory.path().join(".openbad/permissions.yaml"),
+            r#"
+allow_writes: true
+allow_paths: ["src/**"]
+deny_paths: ["src/generated/**"]
+command_classes: ["read-only"]
+"#,
+        )
+        .expect("policy");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+
+        WriteFileTool
+            .execute(
+                json!({"path": "src/allowed.rs", "content": "pub fn ok() {}\n"}),
+                &context,
+            )
+            .await
+            .expect("allowed write");
+
+        let blocked = WriteFileTool
+            .execute(
+                json!({"path": "docs/blocked.md", "content": "no\n"}),
+                &context,
+            )
+            .await
+            .expect_err("allowlist blocks docs");
+        assert!(blocked.to_string().contains("allow_paths"));
+
+        let generated = WriteFileTool
+            .execute(
+                json!({"path": "src/generated/blocked.rs", "content": "no\n"}),
+                &context,
+            )
+            .await
+            .expect_err("denylist blocks generated");
+        assert!(generated.to_string().contains("deny_paths"));
+
+        let denied_command = RunCommandTool
+            .execute(json!({"command": "touch src/new-file"}), &context)
+            .await
+            .expect_err("write-workspace command denied");
+        assert!(denied_command.to_string().contains("write-workspace"));
+
+        RunCommandTool
+            .execute(json!({"command": "ls src"}), &context)
+            .await
+            .expect("read-only command");
     }
 
     #[tokio::test]

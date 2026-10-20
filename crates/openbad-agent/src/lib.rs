@@ -477,7 +477,7 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
             prompt.push_str("\n\nProject manifest (.openbad/project.yaml):\n");
             prompt.push_str(&manifest.summary());
             prompt.push_str("\nClassify paths before editing when scope matters; historical and generated paths need care. Use run_task for named manifest tasks, todo_write/todo_read for durable work state, and write_handoff before ending a long session.\n");
-            prompt.push_str("Prefer run_recipe/list_recipes for declared verification and note that write_file/edit_file run matching manifest validators. Use stat_file/stat_repo_file before guessing line counts, read_files for small related files, and outline to navigate long files. Prefer delete_file (soft delete) and move_file over shell commands. Destructive shell commands require confirm_destructive after checking the blast radius.\n");
+            prompt.push_str("Prefer run_recipe/list_recipes for declared verification and note that write_file/edit_file run matching manifest validators. Use stat_file/stat_repo_file before guessing line counts, read_files for small related files, and outline to navigate long files. Prefer delete_file (soft delete) and move_file over shell commands. Destructive shell commands require confirm_destructive after checking the blast radius. If .openbad/permissions.yaml denies a path or command class, treat the denial as a project rule and ask the human to change the policy rather than working around it.\n");
         }
         let skills = discover_skills(self.workspace.root());
         if !skills.is_empty() {

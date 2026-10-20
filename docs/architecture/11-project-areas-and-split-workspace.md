@@ -50,6 +50,10 @@ Migration `0006_project_areas` adds the project areas; migration
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
 
+A sibling `.openbad/permissions.yaml` can restrict writes and command classes.
+It is reviewable policy, not prompt discipline: tools check it before mutating
+files or spawning commands and return the specific rule that blocked the action.
+
 Project manifests also declare a `recipes:` registry for verification
 (lint/test/build/schema commands) and `validators:` glob/command pairs. Writes
 matching a validator run it before the result is accepted; failures roll the

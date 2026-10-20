@@ -363,6 +363,11 @@ the written path. Validators execute only in Full access; a failing validator
 restores the previous file content and returns its output. Writes and edits that target
 generated or historical scope return a manifest-derived warning.
 
+`.openbad/permissions.yaml` can restrict writes by glob (`allow_paths`,
+`deny_paths`, `allow_writes: false`) and commands by class or substring
+(`command_classes`, `deny_command_patterns`). Denials name the policy rule and
+apply to file operations, `run_command`, `run_task`, and `run_recipe`.
+
 `run_command` classifies each command as `read-only`, `write-workspace`,
 `network`, `destructive`, or `privileged`, reports the class in metadata, and
 requires `confirm_destructive=true` before running destructive commands such as

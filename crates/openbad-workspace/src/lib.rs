@@ -1,13 +1,15 @@
 //! Workspace root, manifest, and path-containment primitives.
 
 pub mod manifest;
+pub mod policy;
 
 use std::path::{Component, Path, PathBuf};
 
 pub use manifest::{
     CommandDefinition, CommandSpec, Invariant, ManifestError, ProjectManifest, ScopeClass,
-    ScopeMap, load_project_manifest, manifest_path,
+    ScopeMap, ValidatorDefinition, load_project_manifest, manifest_path,
 };
+pub use policy::{PolicyError, ProjectPolicy, load_project_policy, policy_path};
 
 fn normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
