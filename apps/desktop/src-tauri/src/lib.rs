@@ -705,18 +705,33 @@ fn delete_knowledge_document(
 }
 
 #[tauri::command]
-fn project_files(
-    state: State<'_, AppState>,
-    workspace_path: String,
-) -> Result<Vec<String>, String> {
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let workspace = project_workspace(&store, &workspace_path)?;
-    store
-        .list_workspace_files(workspace, 400)
-        .map_err(|error| error.to_string())
+fn project_files(workspace_path: String) -> Result<Vec<String>, String> {
+    let root =
+        std::fs::canonicalize(&workspace_path).map_err(|error| format!("workspace: {error}"))?;
+    if !root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let mut files = Vec::new();
+    for entry in ignore::WalkBuilder::new(&root)
+        .build()
+        .filter_map(Result::ok)
+    {
+        if files.len() >= 400 {
+            break;
+        }
+        if entry.file_type().is_some_and(|kind| kind.is_file()) {
+            files.push(
+                entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 #[tauri::command]

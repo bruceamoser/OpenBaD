@@ -307,13 +307,13 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             <SearchField
               value={fileQuery}
               onChange={setFileQuery}
-              placeholder="Filter indexed files"
+              placeholder="Filter workspace files"
               label="Filter files"
             />
             <div className="flex items-center justify-between px-1">
               <p className="text-[10px] text-slate-600">
-                {visibleFiles.length} indexed file{visibleFiles.length === 1 ? "" : "s"} ·
-                click to open
+                {visibleFiles.length} file{visibleFiles.length === 1 ? "" : "s"} · click
+                to open
               </p>
               <button
                 type="button"
@@ -342,7 +342,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             ))}
             {visibleFiles.length === 0 && (
               <p className="px-1 py-3 text-[11px] text-slate-600">
-                No indexed files yet. Refresh the code index.
+                No files yet. Add or create a file in this workspace.
               </p>
             )}
             {(indexError !== null || indexSummary === null) && (
