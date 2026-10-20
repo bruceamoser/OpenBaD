@@ -314,3 +314,15 @@ test("answers a structured project question", async ({ page }) => {
   await expect(page.getByText("Yes, git-backed")).toBeVisible();
   await expect(page.getByText("answered")).toBeVisible();
 });
+
+test("approves a draft project plan", async ({ page }) => {
+  await page.goto("/");
+  await clickMenu(page, "View", "Plan");
+
+  await expect(
+    page.getByText("Ship the project intelligence tranche"),
+  ).toBeVisible();
+  await expect(page.getByText("1/3 steps complete")).toBeVisible();
+  await page.getByRole("button", { name: "Approve plan" }).click();
+  await expect(page.getByText("approved")).toBeVisible();
+});

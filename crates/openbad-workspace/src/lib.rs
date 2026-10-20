@@ -4,6 +4,7 @@ pub mod canon;
 pub mod context;
 pub mod learning;
 pub mod manifest;
+pub mod plan;
 pub mod policy;
 pub mod questions;
 
@@ -25,6 +26,10 @@ pub use learning::{
 pub use manifest::{
     CommandDefinition, CommandSpec, Invariant, ManifestError, ProjectManifest, ScopeClass,
     ScopeMap, ValidatorDefinition, load_project_manifest, manifest_path,
+};
+pub use plan::{
+    Plan, PlanError, PlanStep, approve_plan, load_plan, plan_path, plan_summary, save_plan,
+    update_step,
 };
 pub use policy::{PolicyError, ProjectPolicy, load_project_policy, policy_path};
 pub use questions::{

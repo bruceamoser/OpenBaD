@@ -969,6 +969,12 @@ export default function App() {
           onSelect: () => openPanel("questions"),
         },
         {
+          label: "Plan",
+          checked: panelOpen && panelTab === "plan",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("plan"),
+        },
+        {
           label: "Checkpoints",
           checked: panelOpen && panelTab === "checkpoints",
           onSelect: () => openPanel("checkpoints"),
@@ -1161,6 +1167,12 @@ export default function App() {
                           label="Questions"
                           active={panelOpen && panelTab === "questions"}
                           onClick={() => openPanel("questions")}
+                        />
+                        <ProjectAreaButton
+                          icon={<ListTodo size={12} />}
+                          label="Plan"
+                          active={panelOpen && panelTab === "plan"}
+                          onClick={() => openPanel("plan")}
                         />
                       </div>
                       <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-700">
@@ -2113,6 +2125,7 @@ function CommandPalette({
     { label: "Project: Memory", hint: "", run: () => onContext("memory") },
     { label: "Project: Todos", hint: "", run: () => onContext("todos") },
     { label: "Project: Questions", hint: "", run: () => onContext("questions") },
+    { label: "Project: Plan", hint: "", run: () => onContext("plan") },
     { label: "Project: Checkpoints", hint: "", run: () => onContext("checkpoints") },
     { label: "Project: Diagnostics", hint: "", run: () => onContext("diagnostics") },
   ];

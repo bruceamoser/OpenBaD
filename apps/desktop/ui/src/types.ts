@@ -230,6 +230,23 @@ export type ProjectManifest = {
   }[];
 };
 
+export type ProjectPlanStep = {
+  id: string;
+  text: string;
+  status: string;
+  verify_with: string | null;
+  evidence: string | null;
+};
+
+export type ProjectPlan = {
+  goal: string;
+  status: string;
+  steps: ProjectPlanStep[];
+  created_at: number;
+  updated_at: number;
+  approved_at: number | null;
+};
+
 export type ProjectQuestion = {
   id: string;
   question: string;

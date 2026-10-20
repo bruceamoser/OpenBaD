@@ -343,6 +343,7 @@ Implemented:
 | `diff_files` / `file_citation` | read | Cross-path diffs and stable `path@hash:line` citations |
 | `git_changes_since` | read | Commits and changed paths since a revision |
 | `registry_lookup` | read | crates.io/npm/PyPI version checks with network policy |
+| `plan_write` / `plan_read` / `plan_update_step` / `plan_verify` | write/read/command | Draft plan, human approval, and executable step verification |
 | `context_report` | read | Estimate loaded files/knowledge/memory tokens and rules |
 | `record_claim` / `list_claims` | write/read | Provenance-tagged claims with evidence |
 | `record_unknown` / `list_unknowns` | write/read | Known-unknown register |
@@ -438,7 +439,9 @@ the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
 (`command_classes`, `deny_command_patterns`, `allow_network`, `network_hosts`). Denials name the policy rule and
 apply to file operations, `run_command`, `run_task`, and `run_recipe`.
 
-`ask_question` queues a decision with optional choices in
+`plan_write` stores a draft in `.openbad/plan.json`; the prompt says not to
+execute it until a human approves it in Project → Plan. `plan_verify` runs a
+step's recipe/command and records pass/fail evidence. `ask_question` queues a decision with optional choices in
 `.openbad/questions.json` instead of guessing or stalling. The Project →
 Questions panel polls and writes the answer; the next system prompt includes
 pending and recently answered questions.

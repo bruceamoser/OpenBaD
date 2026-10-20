@@ -530,6 +530,10 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(PlanWriteTool);
+        registry.register(PlanReadTool);
+        registry.register(PlanUpdateStepTool);
+        registry.register(PlanVerifyTool);
         registry.register(DiffFilesTool);
         registry.register(FileCitationTool);
         registry.register(ArchiveListTool);
@@ -4958,6 +4962,233 @@ fn job_alive(pid: u32) -> bool {
     stat.split_whitespace().nth(2) != Some("Z")
 }
 
+struct PlanWriteTool;
+
+#[async_trait]
+impl Tool for PlanWriteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plan_write",
+            "Write a draft plan to .openbad/plan.json. A human must approve it in Project → Plan before execution.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string"},
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "text": {"type": "string"},
+                            "verify_with": {"type": "string", "description": "Recipe or command that proves the step"}
+                        },
+                        "required": ["text"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["goal", "steps"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("plan_write".to_owned()));
+        }
+        let goal = string_arg(&arguments, "goal")?;
+        let raw_steps = arguments
+            .get("steps")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if raw_steps.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "plan must contain at least one step".to_owned(),
+            ));
+        }
+        let existing = openbad_workspace::load_plan(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let steps = raw_steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| openbad_workspace::PlanStep {
+                id: step["id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{}", index + 1)),
+                text: step["text"].as_str().unwrap_or_default().to_owned(),
+                status: "todo".to_owned(),
+                verify_with: step["verify_with"].as_str().map(str::to_owned),
+                evidence: None,
+            })
+            .collect::<Vec<_>>();
+        let now = now_millis();
+        let plan = openbad_workspace::Plan {
+            goal,
+            status: "draft".to_owned(),
+            steps,
+            created_at: existing.as_ref().map_or(now, |plan| plan.created_at),
+            updated_at: now,
+            approved_at: None,
+        };
+        openbad_workspace::save_plan(context.workspace.root(), &plan)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "draft plan saved with {} steps; ask the human to approve it in Project → Plan",
+            plan.steps.len()
+        ))
+        .with_metadata(json!({
+            "goal": plan.goal,
+            "steps": plan.steps.len(),
+            "status": plan.status
+        })))
+    }
+}
+
+struct PlanReadTool;
+
+#[async_trait]
+impl Tool for PlanReadTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plan_read",
+            "Read the current plan and step state.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        match openbad_workspace::load_plan(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+        {
+            Some(plan) => Ok(ToolResult::ok(openbad_workspace::plan_summary(&plan))
+                .with_metadata(json!({"status": plan.status, "steps": plan.steps.len()}))),
+            None => Ok(ToolResult::ok("no plan")),
+        }
+    }
+}
+
+struct PlanUpdateStepTool;
+
+#[async_trait]
+impl Tool for PlanUpdateStepTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plan_update_step",
+            "Update a plan step status and optional evidence.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "status": {"type": "string", "enum": ["todo", "doing", "done", "blocked", "dropped"]},
+                "evidence": {"type": "string"}
+            },
+            "required": ["id", "status"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("plan_update_step".to_owned()));
+        }
+        let plan = openbad_workspace::update_step(
+            context.workspace.root(),
+            &string_arg(&arguments, "id")?,
+            &string_arg(&arguments, "status")?,
+            optional_string(&arguments, "evidence").as_deref(),
+        )
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(openbad_workspace::plan_summary(&plan)))
+    }
+}
+
+struct PlanVerifyTool;
+
+#[async_trait]
+impl Tool for PlanVerifyTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plan_verify",
+            "Run a plan step's verify_with recipe or command and record pass/fail evidence.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(600)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let id = string_arg(&arguments, "id")?;
+        let plan = openbad_workspace::load_plan(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(|| ToolError::Failed("no plan".to_owned()))?;
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| step.id == id)
+            .ok_or_else(|| ToolError::InvalidArgument(format!("unknown plan step: {id}")))?;
+        let check = step
+            .verify_with
+            .clone()
+            .ok_or_else(|| ToolError::InvalidArgument(format!("step {id} has no verify_with")))?;
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let command = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.recipe(&check))
+            .map(|recipe| recipe.command)
+            .unwrap_or_else(|| check.clone());
+        let result = run_tool_shell(context, command).await?;
+        let success = result.metadata["success"].as_bool().unwrap_or(false);
+        let evidence = format!("{}: {}", check, if success { "passed" } else { "failed" });
+        let plan = openbad_workspace::update_step(
+            context.workspace.root(),
+            &id,
+            if success { "done" } else { "blocked" },
+            Some(&evidence),
+        )
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "step {id}: {}\n{}",
+            if success { "passed" } else { "failed" },
+            result.content
+        ))
+        .with_metadata(json!({
+            "id": id,
+            "success": success,
+            "plan_status": plan.status
+        })))
+    }
+}
+
 struct JobStartTool;
 
 #[async_trait]
@@ -9189,6 +9420,54 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn plan_tools_draft_update_verify_and_approve() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+        let written = PlanWriteTool
+            .execute(
+                json!({
+                    "goal": "Ship the feature",
+                    "steps": [
+                        {"id": "1", "text": "Implement it", "verify_with": "true"},
+                        {"id": "2", "text": "Review it"}
+                    ]
+                }),
+                &context,
+            )
+            .await
+            .expect("plan");
+        assert!(written.content.contains("draft"));
+        let read = PlanReadTool
+            .execute(json!({}), &context)
+            .await
+            .expect("read");
+        assert!(read.content.contains("Implement it"));
+        assert!(read.content.contains("do not execute"));
+        let verified = PlanVerifyTool
+            .execute(json!({"id": "1"}), &context)
+            .await
+            .expect("verify");
+        assert_eq!(verified.metadata["success"], true);
+        let updated = PlanUpdateStepTool
+            .execute(
+                json!({"id": "2", "status": "doing", "evidence": "review started"}),
+                &context,
+            )
+            .await
+            .expect("update");
+        assert!(updated.content.contains("doing") || updated.content.contains("[doing]"));
+        openbad_workspace::approve_plan(directory.path()).expect("approve");
+        let approved = PlanReadTool
+            .execute(json!({}), &context)
+            .await
+            .expect("approved");
+        assert!(approved.content.contains("approved"));
+        assert!(!approved.content.contains("do not execute"));
     }
 
     #[tokio::test]
