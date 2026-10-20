@@ -693,6 +693,26 @@ fn optional_bool(arguments: &Value, name: &str) -> Option<bool> {
     arguments.get(name).and_then(Value::as_bool)
 }
 
+fn head_tail(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    let mut head_end = max_bytes / 2;
+    while !content.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = content.len() - (max_bytes / 2);
+    while !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}\n… [{} bytes omitted] …\n{}",
+        &content[..head_end],
+        tail_start - head_end,
+        &content[tail_start..]
+    )
+}
+
 fn truncate(content: &str, max_bytes: usize) -> String {
     if content.len() <= max_bytes {
         return content.to_owned();
@@ -2503,16 +2523,32 @@ impl Tool for RunCommandTool {
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
 
-        let content = format!(
-            "exit: {}\nstdout:\n{}\nstderr:\n{}",
-            status.code().unwrap_or(-1),
-            truncate(&stdout, context.max_output_bytes),
-            truncate(&stderr, context.max_output_bytes)
+        let full = format!(
+            "$ {command}\nexit: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code().unwrap_or(-1)
         );
+        let log_directory = context.workspace.root().join(".openbad").join("logs");
+        let log_path = log_directory.join(format!("command-{}.log", now_millis()));
+        std::fs::create_dir_all(&log_directory)?;
+        std::fs::write(&log_path, &full)?;
+        let preview_cap = (context.max_output_bytes / 2).max(2_048);
+        let content = if full.len() <= preview_cap {
+            full.clone()
+        } else {
+            format!(
+                "{}\n… [full output: {} bytes at {}] …\n{}",
+                head_tail(&full, preview_cap / 2),
+                full.len(),
+                log_path.display(),
+                head_tail(&full, preview_cap / 2)
+            )
+        };
         Ok(ToolResult::ok(content).with_metadata(json!({
             "exit_code": status.code(),
             "success": status.success(),
             "command_class": class.label(),
+            "output_bytes": full.len(),
+            "log_path": log_path
         })))
     }
 }
@@ -5696,7 +5732,11 @@ validators:
             .await
             .expect("large output");
         assert!(large.content.contains("exit: 0"));
-        assert!(large.content.len() > 100_000);
+        assert!(large.content.contains("full output"));
+        assert!(large.content.len() < 200_000);
+        let log_path = large.metadata["log_path"].as_str().expect("log path");
+        assert!(std::fs::metadata(log_path).expect("log").len() > 100_000);
+        assert_eq!(large.metadata["success"], true);
 
         let started = std::time::Instant::now();
         let timed_out = RunCommandTool
