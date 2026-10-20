@@ -335,9 +335,12 @@ export async function addProjectRepo(
   return repo;
 }
 
-export async function removeProjectRepo(repoId: string): Promise<void> {
+export async function removeProjectRepo(
+  workspacePath: string,
+  repoId: string,
+): Promise<void> {
   if (isTauri) {
-    await invoke("remove_project_repo", { repoId });
+    await invoke("remove_project_repo", { workspacePath, repoId });
     return;
   }
   mockRepos = mockRepos.filter((repo) => repo.id !== repoId);
@@ -352,10 +355,14 @@ export async function loadKnowledgeDocuments(
 }
 
 export async function loadKnowledgeDocument(
+  workspacePath: string,
   documentId: string,
 ): Promise<KnowledgeDocument> {
   if (isTauri) {
-    return invoke<KnowledgeDocument>("knowledge_document", { documentId });
+    return invoke<KnowledgeDocument>("knowledge_document", {
+      workspacePath,
+      documentId,
+    });
   }
   const summary = mockKnowledge.find((document) => document.id === documentId);
   if (!summary) {
@@ -416,9 +423,12 @@ export async function importKnowledgeFile(
   );
 }
 
-export async function deleteKnowledgeDocument(documentId: string): Promise<void> {
+export async function deleteKnowledgeDocument(
+  workspacePath: string,
+  documentId: string,
+): Promise<void> {
   if (isTauri) {
-    await invoke("delete_knowledge_document", { documentId });
+    await invoke("delete_knowledge_document", { workspacePath, documentId });
     return;
   }
   mockKnowledge = mockKnowledge.filter((document) => document.id !== documentId);

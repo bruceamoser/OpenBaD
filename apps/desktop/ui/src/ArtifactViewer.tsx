@@ -34,6 +34,7 @@ export default function ArtifactViewer({
       try {
         if (uri.startsWith("knowledge:")) {
           const document = await loadKnowledgeDocument(
+            workspacePath,
             uri.slice("knowledge:".length),
           );
           if (request.current === sequence) {

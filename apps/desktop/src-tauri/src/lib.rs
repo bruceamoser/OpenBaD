@@ -496,11 +496,24 @@ fn add_project_repo(
 }
 
 #[tauri::command]
-fn remove_project_repo(state: State<'_, AppState>, repo_id: String) -> Result<(), String> {
+fn remove_project_repo(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_id: String,
+) -> Result<(), String> {
     let store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    let belongs = store
+        .list_project_repos(workspace)
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|repo| repo.id == repo_id);
+    if !belongs {
+        return Err(format!("repository not found in project: {repo_id}"));
+    }
     store
         .remove_project_repo(&repo_id)
         .map_err(|error| error.to_string())
@@ -524,16 +537,22 @@ fn knowledge_documents(
 #[tauri::command]
 fn knowledge_document(
     state: State<'_, AppState>,
+    workspace_path: String,
     document_id: String,
 ) -> Result<KnowledgeDocument, String> {
     let store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    store
+    let workspace = project_workspace(&store, &workspace_path)?;
+    let document = store
         .knowledge_document(&document_id)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("knowledge document not found: {document_id}"))
+        .ok_or_else(|| format!("knowledge document not found: {document_id}"))?;
+    if document.summary.workspace_id != workspace {
+        return Err(format!("knowledge document not found: {document_id}"));
+    }
+    Ok(document)
 }
 
 #[tauri::command]

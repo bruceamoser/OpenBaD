@@ -426,7 +426,7 @@ function ReposPanel({
 
   const remove = async (repo: ProjectRepo) => {
     try {
-      await removeProjectRepo(repo.id);
+      await removeProjectRepo(workspacePath, repo.id);
       onRepos(repos.filter((item) => item.id !== repo.id));
     } catch (cause) {
       onError(describeError(cause));

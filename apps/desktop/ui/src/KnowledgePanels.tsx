@@ -112,7 +112,7 @@ export function KnowledgePanel({
 
   const remove = async (document: KnowledgeDocumentSummary) => {
     try {
-      await deleteKnowledgeDocument(document.id);
+      await deleteKnowledgeDocument(workspacePath, document.id);
       setKnowledge((items) => items.filter((item) => item.id !== document.id));
       setNotice(`Deleted ${document.title}`);
     } catch (cause) {
