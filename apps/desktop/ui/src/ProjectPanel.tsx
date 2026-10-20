@@ -21,8 +21,10 @@ import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import {
   addProjectRepo,
   listProjectFiles,
+  loadProjectManifest,
   loadProjectOverview,
   loadProjectRepos,
+  loadProjectTodos,
   pickDirectory,
   removeProjectRepo,
 } from "./backend";
@@ -31,8 +33,10 @@ import type {
   FileCheckpointSummary,
   FoundationState,
   MemoryRecord,
+  ProjectManifest,
   ProjectOverview,
   ProjectRepo,
+  ProjectTodo,
   WorkspaceIndexSummary,
   WorkspaceSummary,
 } from "./types";
@@ -44,6 +48,7 @@ export type PanelTab =
   | "knowledge"
   | "retrieval"
   | "memory"
+  | "todos"
   | "checkpoints"
   | "diagnostics"
   | "artifact";
@@ -55,6 +60,7 @@ const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "knowledge", label: "Knowledge" },
   { id: "retrieval", label: "Retrieval" },
   { id: "memory", label: "Memory" },
+  { id: "todos", label: "Todos" },
   { id: "checkpoints", label: "Edits" },
   { id: "diagnostics", label: "Diag" },
 ];
@@ -126,6 +132,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   const [files, setFiles] = useState<string[]>([]);
   const [fileQuery, setFileQuery] = useState("");
   const [repos, setRepos] = useState<ProjectRepo[]>([]);
+  const [manifest, setManifest] = useState<ProjectManifest | null>(null);
+  const [todos, setTodos] = useState<ProjectTodo[]>([]);
   const [dataError, setDataError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -133,14 +141,19 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       return;
     }
     try {
-      const [nextOverview, nextRepos, nextFiles] = await Promise.all([
-        loadProjectOverview(workspacePath),
-        loadProjectRepos(workspacePath),
-        listProjectFiles(workspacePath),
-      ]);
+      const [nextOverview, nextRepos, nextFiles, nextManifest, nextTodos] =
+        await Promise.all([
+          loadProjectOverview(workspacePath),
+          loadProjectRepos(workspacePath),
+          listProjectFiles(workspacePath),
+          loadProjectManifest(workspacePath),
+          loadProjectTodos(workspacePath),
+        ]);
       setOverview(nextOverview);
       setRepos(nextRepos);
       setFiles(nextFiles);
+      setManifest(nextManifest);
+      setTodos(nextTodos);
       setDataError(null);
     } catch (cause) {
       setDataError(describeError(cause));
@@ -151,13 +164,21 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     setOverview(null);
     setRepos([]);
     setFiles([]);
+    setManifest(null);
+    setTodos([]);
     setFileQuery("");
     setDataError(null);
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
-    if (tab === "overview" || tab === "repos" || tab === "knowledge" || tab === "workspace") {
+    if (
+      tab === "overview" ||
+      tab === "repos" ||
+      tab === "knowledge" ||
+      tab === "workspace" ||
+      tab === "todos"
+    ) {
       void refresh();
     }
   }, [refresh, revision, tab]);
@@ -278,6 +299,30 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             </div>
             <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
               <div className="flex items-center gap-2 text-[11px] text-slate-300">
+                <BookOpen size={13} className="text-sky-300" /> Project manifest
+              </div>
+              {manifest === null ? (
+                <p className="mt-2 text-[10px] leading-4 text-slate-600">
+                  Add <code className="text-slate-400">.openbad/project.yaml</code> to
+                  declare named tasks, scope, and invariants.
+                </p>
+              ) : (
+                <div className="mt-2 space-y-1 text-[10px] leading-4 text-slate-500">
+                  <p className="text-[11px] text-slate-300">
+                    {manifest.name ?? "Unnamed project"}
+                  </p>
+                  {manifest.description !== null &&
+                    manifest.description !== undefined && <p>{manifest.description}</p>}
+                  <p>
+                    {Object.keys(manifest.commands ?? {}).length} tasks ·{" "}
+                    {(manifest.invariants ?? []).length} invariants ·{" "}
+                    {manifest.scope?.historical?.length ?? 0} historical paths
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
+              <div className="flex items-center gap-2 text-[11px] text-slate-300">
                 <Gauge size={13} className="text-emerald-300" /> Project context
               </div>
               <p className="mt-2 text-[11px] leading-5 text-slate-500">
@@ -391,6 +436,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             onForgetMemory={onForgetMemory}
           />
         )}
+
+        {tab === "todos" && <TodoPanel todos={todos} />}
 
         {tab === "checkpoints" && (
           <CheckpointsPanel
@@ -553,6 +600,62 @@ function MemoryPanel({
         </div>
       ))}
       {memoryError !== null && <p className="text-[10px] text-amber-300">{memoryError}</p>}
+    </div>
+  );
+}
+
+function TodoPanel({ todos }: { todos: ProjectTodo[] }) {
+  if (todos.length === 0) {
+    return (
+      <div className="space-y-2 px-1 py-3">
+        <p className="text-[11px] text-slate-500">No project todos yet.</p>
+        <p className="text-[10px] leading-4 text-slate-600">
+          The assistant writes durable work state with{" "}
+          <code className="text-slate-400">todo_write</code>; it persists in{" "}
+          <code className="text-slate-400">.openbad/todos.json</code>.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {todos.map((todo) => (
+        <div
+          key={todo.id}
+          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"
+        >
+          <div className="flex items-start gap-2">
+            <span
+              className={`mt-0.5 rounded px-1 py-0.5 text-[8px] uppercase tracking-wide ${
+                todo.state === "done"
+                  ? "bg-emerald-400/10 text-emerald-300"
+                  : todo.state === "doing"
+                    ? "bg-sky-400/10 text-sky-300"
+                    : todo.state === "blocked"
+                      ? "bg-amber-400/10 text-amber-300"
+                      : todo.state === "dropped"
+                        ? "bg-slate-400/10 text-slate-500"
+                        : "bg-white/[0.06] text-slate-400"
+              }`}
+            >
+              {todo.state}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] leading-5 text-slate-300">{todo.text}</p>
+              {todo.done_when !== null && (
+                <p className="mt-0.5 text-[9px] leading-4 text-slate-600">
+                  Done when: {todo.done_when}
+                </p>
+              )}
+              {todo.blocked_by.length > 0 && (
+                <p className="mt-0.5 text-[9px] leading-4 text-amber-300/70">
+                  Blocked by: {todo.blocked_by.join(", ")}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

@@ -144,6 +144,8 @@ export type KnowledgeDocumentSummary = {
   tags: string[];
   characters: number;
   chunks: number;
+  confidence: string;
+  source_hash: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -182,4 +184,41 @@ export type Artifact = {
   uri?: string;
   content?: string;
   language?: string;
+};
+
+
+export type ProjectCommand = {
+  command: string;
+  description?: string | null;
+  cwd?: string | null;
+  timeout_seconds?: number | null;
+};
+
+export type ProjectManifest = {
+  name?: string | null;
+  description?: string | null;
+  scope?: {
+    authoritative?: string[];
+    historical?: string[];
+    generated?: string[];
+    vendored?: string[];
+    scratch?: string[];
+  };
+  commands?: Record<string, string | ProjectCommand>;
+  invariants?: {
+    id: string;
+    statement: string;
+    check?: string | null;
+    severity?: string | null;
+    rationale?: string | null;
+  }[];
+};
+
+export type ProjectTodo = {
+  id: string;
+  text: string;
+  state: "todo" | "doing" | "blocked" | "done" | "dropped";
+  blocked_by: string[];
+  done_when: string | null;
+  updated_at: number;
 };

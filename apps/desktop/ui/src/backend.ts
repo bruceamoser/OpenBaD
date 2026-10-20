@@ -15,8 +15,10 @@ import type {
   KnowledgeDocumentSummary,
   ProjectFileView,
   ProjectHit,
+  ProjectManifest,
   ProjectOverview,
   ProjectRepo,
+  ProjectTodo,
   Usage,
   WorkspaceIndexSummary,
   WorkspaceSummary,
@@ -60,6 +62,8 @@ let mockKnowledge: KnowledgeDocumentSummary[] = [
     tags: ["desktop", "focus"],
     characters: 184,
     chunks: 1,
+    confidence: "verified",
+    source_hash: null,
     created_at: Date.now() - 7_200_000,
     updated_at: Date.now() - 7_200_000,
   },
@@ -77,6 +81,42 @@ let mockFiles = [
   "crates/openbad-agent/src/lib.rs",
   "crates/openbad-store/src/store.rs",
   "docs/architecture/00-vision-and-feature-set.md",
+];
+const mockManifest: ProjectManifest = {
+  name: "OpenBaD",
+  description: "Desktop coding harness with project-scoped context.",
+  scope: {
+    authoritative: ["crates/**", "apps/**", "docs/**"],
+    generated: ["target/**", "apps/desktop/ui/dist/**"],
+  },
+  commands: {
+    verify: "cargo test --workspace",
+    web: "pnpm --dir apps/desktop/ui test:e2e",
+  },
+  invariants: [
+    {
+      id: "INV-1",
+      statement: "The model-visible prompt prefix stays immutable.",
+    },
+  ],
+};
+let mockTodos: ProjectTodo[] = [
+  {
+    id: "t1",
+    text: "Verify the project panel refresh behavior",
+    state: "doing",
+    blocked_by: [],
+    done_when: "A file added by the assistant appears without switching tabs",
+    updated_at: Date.now(),
+  },
+  {
+    id: "t2",
+    text: "Add manifest-aware scope warnings",
+    state: "done",
+    blocked_by: [],
+    done_when: "Historical writes carry a warning",
+    updated_at: Date.now(),
+  },
 ];
 let mockIndex: WorkspaceIndexSummary = {
   files: 42,
@@ -110,7 +150,7 @@ const mockUsage: Usage = {
 const mockFoundation: Foundation = {
   app_version: "0.1.0-mock",
   doctor: {
-    schema_version: "0006_project_areas",
+    schema_version: "0007_knowledge_confidence",
     integrity: "ok",
     database_bytes: 131_072,
     event_count: 42,
@@ -345,6 +385,22 @@ export async function refreshWorkspaceIndex(
   };
 }
 
+export async function loadProjectManifest(
+  workspacePath: string,
+): Promise<ProjectManifest | null> {
+  return isTauri
+    ? invoke<ProjectManifest | null>("project_manifest", { workspacePath })
+    : mockManifest;
+}
+
+export async function loadProjectTodos(
+  workspacePath: string,
+): Promise<ProjectTodo[]> {
+  return isTauri
+    ? invoke<ProjectTodo[]>("project_todos", { workspacePath })
+    : [...mockTodos];
+}
+
 export async function loadProjectOverview(
   workspacePath: string,
 ): Promise<ProjectOverview> {
@@ -405,6 +461,14 @@ export async function loadKnowledgeDocuments(
     : [...mockKnowledge];
 }
 
+export async function loadKnowledgeStaleDocuments(
+  workspacePath: string,
+): Promise<string[]> {
+  return isTauri
+    ? invoke<string[]>("knowledge_stale_documents", { workspacePath })
+    : [];
+}
+
 export async function loadKnowledgeDocument(
   workspacePath: string,
   documentId: string,
@@ -427,6 +491,7 @@ export async function addKnowledgeNote(
   title: string,
   content: string,
   tags: string[],
+  confidence = "inferred",
 ): Promise<KnowledgeDocumentSummary> {
   if (isTauri) {
     return invoke<KnowledgeDocumentSummary>("add_knowledge_note", {
@@ -434,6 +499,7 @@ export async function addKnowledgeNote(
       title,
       content,
       tags,
+      confidence,
     });
   }
   const summary: KnowledgeDocumentSummary = {
@@ -445,6 +511,8 @@ export async function addKnowledgeNote(
     tags,
     characters: content.length,
     chunks: Math.max(1, Math.ceil(content.length / 1400)),
+    confidence,
+    source_hash: null,
     created_at: Date.now(),
     updated_at: Date.now(),
   };

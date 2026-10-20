@@ -13,6 +13,7 @@ import {
   FolderOpen,
   Gauge,
   KeyRound,
+  ListTodo,
   Loader2,
   MessageSquare,
   PanelLeftClose,
@@ -928,6 +929,12 @@ export default function App() {
           onSelect: () => openPanel("memory"),
         },
         {
+          label: "Todos",
+          checked: panelOpen && panelTab === "todos",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("todos"),
+        },
+        {
           label: "Checkpoints",
           checked: panelOpen && panelTab === "checkpoints",
           onSelect: () => openPanel("checkpoints"),
@@ -1108,6 +1115,12 @@ export default function App() {
                           label="Memory"
                           active={panelOpen && panelTab === "memory"}
                           onClick={() => openPanel("memory")}
+                        />
+                        <ProjectAreaButton
+                          icon={<ListTodo size={12} />}
+                          label="Todos"
+                          active={panelOpen && panelTab === "todos"}
+                          onClick={() => openPanel("todos")}
                         />
                       </div>
                       <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-700">
@@ -2043,6 +2056,7 @@ function CommandPalette({
     { label: "Project: Knowledge", hint: "", run: () => onContext("knowledge") },
     { label: "Project: Retrieval", hint: "", run: () => onContext("retrieval") },
     { label: "Project: Memory", hint: "", run: () => onContext("memory") },
+    { label: "Project: Todos", hint: "", run: () => onContext("todos") },
     { label: "Project: Checkpoints", hint: "", run: () => onContext("checkpoints") },
     { label: "Project: Diagnostics", hint: "", run: () => onContext("diagnostics") },
   ];

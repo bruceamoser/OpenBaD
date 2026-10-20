@@ -172,6 +172,8 @@ pub struct KnowledgeEntryRef {
     pub kind: String,
     pub source: Option<String>,
     pub chunks: u64,
+    pub confidence: String,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +185,8 @@ pub struct KnowledgeDocumentRef {
     pub tags: Vec<String>,
     pub content: String,
     pub chunks: u64,
+    pub confidence: String,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,6 +208,7 @@ pub trait ProjectAreas: Send + Sync {
         content: &str,
         source: Option<&str>,
         tags: Vec<String>,
+        confidence: &str,
     ) -> Result<KnowledgeEntryRef, String>;
     fn get_knowledge(&self, _id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
         Err("knowledge document lookup is not available".to_owned())
@@ -215,6 +220,7 @@ pub trait ProjectAreas: Send + Sync {
         _content: Option<&str>,
         _source: Option<&str>,
         _tags: Option<Vec<String>>,
+        _confidence: Option<&str>,
     ) -> Result<KnowledgeDocumentRef, String> {
         Err("knowledge updates are not available".to_owned())
     }
@@ -419,6 +425,12 @@ impl ToolRegistry {
         registry.register(GlobRepoTool);
         registry.register(GrepRepoTool);
         registry.register(PresentArtifactTool);
+        registry.register(ReadProjectManifestTool);
+        registry.register(ClassifyPathTool);
+        registry.register(RunTaskTool);
+        registry.register(TodoWriteTool);
+        registry.register(TodoReadTool);
+        registry.register(WriteHandoffTool);
         registry.register(ListSkillsTool);
         registry.register(ReadSkillTool);
         registry
@@ -491,6 +503,27 @@ fn truncate(content: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}\n[truncated at {max_bytes} bytes]", &content[..end])
+}
+
+fn scope_warning(context: &ToolContext, path: &Path) -> Option<String> {
+    let manifest = openbad_workspace::load_project_manifest(context.workspace.root()).ok()??;
+    let root = context
+        .workspace
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| context.workspace.root().to_path_buf());
+    let relative = path
+        .strip_prefix(&root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let class = manifest.classify(&relative);
+    class.needs_care().then(|| {
+        format!(
+            "warning: {relative} is classified as {} in .openbad/project.yaml; confirm it is the intended source of truth",
+            class.label()
+        )
+    })
 }
 
 fn checkpoint_before_write(
@@ -1108,12 +1141,22 @@ impl Tool for WriteFileTool {
         let content = string_arg(&arguments, "content")?;
         let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &content)?;
+        let warning = scope_warning(context, &path);
         Ok(ToolResult::ok(format!(
-            "wrote {} bytes to {}",
+            "wrote {} bytes to {}{}",
             content.len(),
-            path.display()
+            path.display(),
+            warning
+                .as_deref()
+                .map(|warning| format!("\n{warning}"))
+                .unwrap_or_default()
         ))
-        .with_metadata(json!({"path": path, "bytes": content.len(), "checkpoint": checkpoint})))
+        .with_metadata(json!({
+            "path": path,
+            "bytes": content.len(),
+            "checkpoint": checkpoint,
+            "scope_warning": warning
+        })))
     }
 }
 
@@ -1182,13 +1225,21 @@ impl Tool for EditFileTool {
         };
         let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &updated)?;
-        Ok(
-            ToolResult::ok(format!("updated {}", path.display())).with_metadata(json!({
-                "path": path,
-                "replacements": count,
-                "checkpoint": checkpoint
-            })),
-        )
+        let warning = scope_warning(context, &path);
+        Ok(ToolResult::ok(format!(
+            "updated {}{}",
+            path.display(),
+            warning
+                .as_deref()
+                .map(|warning| format!("\n{warning}"))
+                .unwrap_or_default()
+        ))
+        .with_metadata(json!({
+            "path": path,
+            "replacements": count,
+            "checkpoint": checkpoint,
+            "scope_warning": warning
+        })))
     }
 }
 
@@ -1623,7 +1674,8 @@ impl Tool for AddKnowledgeTool {
                 "title": {"type": "string"},
                 "content": {"type": "string"},
                 "source": {"type": "string", "description": "Optional URL or path"},
-                "tags": {"type": "array", "items": {"type": "string"}}
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "string", "enum": ["verified", "inferred", "uncertain"], "description": "How firmly the content is established; verified means checked against primary sources or code."}
             },
             "required": ["title", "content"],
             "additionalProperties": false
@@ -1657,14 +1709,22 @@ impl Tool for AddKnowledgeTool {
                     .collect()
             })
             .unwrap_or_default();
+        let confidence =
+            optional_string(&arguments, "confidence").unwrap_or_else(|| "inferred".to_owned());
+        if !matches!(confidence.as_str(), "verified" | "inferred" | "uncertain") {
+            return Err(ToolError::InvalidArgument(
+                "confidence must be verified, inferred, or uncertain".to_owned(),
+            ));
+        }
         let entry = project
-            .add_knowledge(&title, &content, source.as_deref(), tags)
+            .add_knowledge(&title, &content, source.as_deref(), tags, &confidence)
             .map_err(ToolError::Failed)?;
         Ok(ToolResult::ok(format!(
-            "Added knowledge \"{}\" ({} chars, {} chunks, id {}).",
+            "Added knowledge \"{}\" ({} chars, {} chunks, confidence {}, id {}).",
             entry.title,
             content.chars().count(),
             entry.chunks,
+            entry.confidence,
             entry.id
         ))
         .with_metadata(json!({
@@ -1709,8 +1769,14 @@ impl Tool for ListKnowledgeTool {
                     .as_deref()
                     .map_or_else(String::new, |source| format!(" · {source}"));
                 format!(
-                    "- {} [{}]{} · {} chunks · {}",
-                    entry.title, entry.kind, source, entry.chunks, entry.id
+                    "- {} [{}]{} · {} chunks · confidence {}{} · {}",
+                    entry.title,
+                    entry.kind,
+                    source,
+                    entry.chunks,
+                    entry.confidence,
+                    if entry.stale { " · STALE" } else { "" },
+                    entry.id
                 )
             })
             .collect::<Vec<_>>()
@@ -1759,9 +1825,22 @@ impl Tool for GetKnowledgeTool {
         } else {
             format!(" [{}]", document.tags.join(", "))
         };
+        let stale = if document.stale {
+            "\n\nWarning: the source file changed after this document was captured; update the note before relying on it."
+        } else {
+            ""
+        };
         let content = format!(
-            "{} [{}]{} · {} chunks · {}\n\n{}",
-            document.title, document.kind, tags, document.chunks, document.id, document.content
+            "{} [{}]{} · {} chunks · confidence {}{} · {}\n\n{}{}",
+            document.title,
+            document.kind,
+            tags,
+            document.chunks,
+            document.confidence,
+            if document.stale { " · STALE" } else { "" },
+            document.id,
+            document.content,
+            stale
         );
         Ok(
             ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(json!({
@@ -1790,7 +1869,8 @@ impl Tool for UpdateKnowledgeTool {
                 "title": {"type": "string"},
                 "content": {"type": "string"},
                 "source": {"type": "string"},
-                "tags": {"type": "array", "items": {"type": "string"}}
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "string", "enum": ["verified", "inferred", "uncertain"]}
             },
             "required": ["id"],
             "additionalProperties": false
@@ -1816,9 +1896,23 @@ impl Tool for UpdateKnowledgeTool {
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         });
-        if title.is_none() && content.is_none() && source.is_none() && tags.is_none() {
+        let confidence = optional_string(&arguments, "confidence");
+        if let Some(confidence) = confidence.as_deref() {
+            if !matches!(confidence, "verified" | "inferred" | "uncertain") {
+                return Err(ToolError::InvalidArgument(
+                    "confidence must be verified, inferred, or uncertain".to_owned(),
+                ));
+            }
+        }
+        if title.is_none()
+            && content.is_none()
+            && source.is_none()
+            && tags.is_none()
+            && confidence.is_none()
+        {
             return Err(ToolError::InvalidArgument(
-                "at least one of title, content, source, or tags is required".to_owned(),
+                "at least one of title, content, source, tags, or confidence is required"
+                    .to_owned(),
             ));
         }
         let document = project
@@ -1828,13 +1922,18 @@ impl Tool for UpdateKnowledgeTool {
                 content.as_deref(),
                 source.as_deref(),
                 tags,
+                confidence.as_deref(),
             )
             .map_err(ToolError::Failed)?;
         Ok(ToolResult::ok(format!(
-            "Updated knowledge \"{}\" ({} chunks, id {}).",
-            document.title, document.chunks, document.id
+            "Updated knowledge \"{}\" ({} chunks, confidence {}, id {}).",
+            document.title, document.chunks, document.confidence, document.id
         ))
-        .with_metadata(json!({"id": document.id, "chunks": document.chunks})))
+        .with_metadata(json!({
+            "id": document.id,
+            "chunks": document.chunks,
+            "confidence": document.confidence
+        })))
     }
 }
 
@@ -2369,6 +2468,415 @@ impl Tool for PresentArtifactTool {
             "Presented {kind} artifact \"{title}\" beside the chat."
         ))
         .with_metadata(json!({"openbad_artifact": artifact})))
+    }
+}
+
+struct ReadProjectManifestTool;
+
+#[async_trait]
+impl Tool for ReadProjectManifestTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "read_project_manifest",
+            "Read the project's .openbad/project.yaml summary, including named tasks, scope map, and invariants.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(|| {
+                ToolError::Failed("no .openbad/project.yaml in this workspace".to_owned())
+            })?;
+        Ok(ToolResult::ok(truncate(
+            &manifest.summary(),
+            context.max_output_bytes,
+        )))
+    }
+}
+
+struct ClassifyPathTool;
+
+#[async_trait]
+impl Tool for ClassifyPathTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "classify_path",
+            "Classify a workspace path using the project manifest scope map (authoritative, historical, generated, vendored, scratch, or unclassified).",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Workspace-relative path"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = string_arg(&arguments, "path")?;
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let class = manifest
+            .as_ref()
+            .map_or(openbad_workspace::ScopeClass::Unclassified, |manifest| {
+                manifest.classify(&path)
+            });
+        let warning = if class.needs_care() {
+            Some(format!(
+                "warning: {path} is classified as {}; confirm it is the intended source of truth",
+                class.label()
+            ))
+        } else {
+            None
+        };
+        Ok(ToolResult::ok(format!(
+            "{path}: {}{}",
+            class.label(),
+            warning
+                .as_deref()
+                .map(|warning| format!("\n{warning}"))
+                .unwrap_or_default()
+        ))
+        .with_metadata(json!({"scope": class.label(), "warning": warning})))
+    }
+}
+
+struct RunTaskTool;
+
+#[async_trait]
+impl Tool for RunTaskTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "run_task",
+            "Run a named task declared in .openbad/project.yaml. Requires Full access, like run_command.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(600)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Task name from the project manifest"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let name = string_arg(&arguments, "name")?;
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(|| {
+                ToolError::Failed("no .openbad/project.yaml in this workspace".to_owned())
+            })?;
+        let task = manifest.command(&name).ok_or_else(|| {
+            ToolError::InvalidArgument(format!(
+                "unknown project task: {name}; available tasks: {}",
+                manifest
+                    .commands
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        let timeout = optional_usize(&arguments, "timeout_seconds")
+            .map(|value| value as u64)
+            .or(task.timeout_seconds)
+            .unwrap_or(300);
+        let mut command = json!({
+            "command": task.command,
+            "timeout_seconds": timeout,
+        });
+        if let Some(cwd) = task.cwd {
+            command["cwd"] = json!(cwd);
+        }
+        let result = RunCommandTool.execute(command, context).await?;
+        let mut content = format!("task {name}: {}", result.content);
+        content.push_str("\nexit metadata: ");
+        content.push_str(&result.metadata.to_string());
+        Ok(
+            ToolResult::ok(truncate(&content, context.max_output_bytes)).with_metadata(
+                json!({"task": name, "command": task.command, "result": result.metadata}),
+            ),
+        )
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TodoRecord {
+    id: String,
+    text: String,
+    #[serde(default = "todo_state")]
+    state: String,
+    #[serde(default)]
+    blocked_by: Vec<String>,
+    #[serde(default)]
+    done_when: Option<String>,
+    #[serde(default)]
+    updated_at: i64,
+}
+
+fn todo_state() -> String {
+    "todo".to_owned()
+}
+
+fn todo_path(context: &ToolContext) -> std::path::PathBuf {
+    context.workspace.root().join(".openbad").join("todos.json")
+}
+
+struct TodoWriteTool;
+
+#[async_trait]
+impl Tool for TodoWriteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "todo_write",
+            "Replace the project's durable todo list in .openbad/todos.json. States: todo, doing, blocked, done, dropped.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "text": {"type": "string"},
+                            "state": {"type": "string", "enum": ["todo", "doing", "blocked", "done", "dropped"]},
+                            "blocked_by": {"type": "array", "items": {"type": "string"}},
+                            "done_when": {"type": "string"}
+                        },
+                        "required": ["id", "text"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired(
+                "todo_write (switch the composer access mode to Can edit or Full access)"
+                    .to_owned(),
+            ));
+        }
+        let items = arguments
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ToolError::InvalidArgument("items must be an array".to_owned()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let mut todos = Vec::new();
+        for item in items {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolError::InvalidArgument("todo id is required".to_owned()))?;
+            let text = item
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolError::InvalidArgument("todo text is required".to_owned()))?;
+            let state = item
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("todo")
+                .to_owned();
+            if !matches!(
+                state.as_str(),
+                "todo" | "doing" | "blocked" | "done" | "dropped"
+            ) {
+                return Err(ToolError::InvalidArgument(format!(
+                    "invalid todo state: {state}"
+                )));
+            }
+            todos.push(TodoRecord {
+                id: id.to_owned(),
+                text: text.to_owned(),
+                state,
+                blocked_by: item
+                    .get("blocked_by")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                done_when: item
+                    .get("done_when")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                updated_at: now,
+            });
+        }
+        let path = todo_path(context);
+        checkpoint_before_write(context, &path)?;
+        let content = serde_json::to_string_pretty(&todos)
+            .map_err(|error| ToolError::Failed(format!("could not serialize todos: {error}")))?;
+        atomic_write(&path, &content)?;
+        Ok(ToolResult::ok(format!(
+            "Wrote {} todos to .openbad/todos.json",
+            todos.len()
+        ))
+        .with_metadata(json!({"todos": todos.len(), "path": path})))
+    }
+}
+
+struct TodoReadTool;
+
+#[async_trait]
+impl Tool for TodoReadTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "todo_read",
+            "Read the project's durable todo list from .openbad/todos.json.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = todo_path(context);
+        if !path.is_file() {
+            return Ok(ToolResult::ok("no project todos"));
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let todos: Vec<TodoRecord> = serde_json::from_str(&content)
+            .map_err(|error| ToolError::Failed(format!("invalid todos.json: {error}")))?;
+        if todos.is_empty() {
+            return Ok(ToolResult::ok("no project todos"));
+        }
+        let rendered = todos
+            .iter()
+            .map(|todo| {
+                let blocked = if todo.blocked_by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (blocked by: {})", todo.blocked_by.join(", "))
+                };
+                format!(
+                    "- [{}] {}: {}{}{}",
+                    todo.state,
+                    todo.id,
+                    todo.text,
+                    blocked,
+                    todo.done_when
+                        .as_deref()
+                        .map(|done| format!(" — done when: {done}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(
+            ToolResult::ok(truncate(&rendered, context.max_output_bytes))
+                .with_metadata(json!({"todos": todos.len()})),
+        )
+    }
+}
+
+struct WriteHandoffTool;
+
+#[async_trait]
+impl Tool for WriteHandoffTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "write_handoff",
+            "Write the standard session handoff to .openbad/handoff.md: state, decisions, open questions, next actions, and unverified claims.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "state": {"type": "string"},
+                "decisions": {"type": "array", "items": {"type": "string"}},
+                "open_questions": {"type": "array", "items": {"type": "string"}},
+                "next_actions": {"type": "array", "items": {"type": "string"}},
+                "unverified_claims": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["state"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired(
+                "write_handoff (switch the composer access mode to Can edit or Full access)"
+                    .to_owned(),
+            ));
+        }
+        let state = string_arg(&arguments, "state")?;
+        let section = |title: &str, key: &str| {
+            let items = arguments
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|item| format!("- {item}\n"))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            format!(
+                "## {title}\n\n{}\n",
+                if items.is_empty() {
+                    "- None recorded\n"
+                } else {
+                    &items
+                }
+            )
+        };
+        let content = format!(
+            "# Session handoff\n\n## State\n\n{state}\n\n{}{}{}{}",
+            section("Decisions", "decisions"),
+            section("Open questions", "open_questions"),
+            section("Next actions", "next_actions"),
+            section("Unverified claims", "unverified_claims"),
+        );
+        let path = context.workspace.root().join(".openbad").join("handoff.md");
+        checkpoint_before_write(context, &path)?;
+        atomic_write(&path, &content)?;
+        Ok(ToolResult::ok("Wrote .openbad/handoff.md").with_metadata(json!({"path": path})))
     }
 }
 
@@ -3203,6 +3711,7 @@ mod tests {
             content: &str,
             source: Option<&str>,
             _tags: Vec<String>,
+            confidence: &str,
         ) -> Result<KnowledgeEntryRef, String> {
             let entry = KnowledgeEntryRef {
                 id: "knowledge-1".to_owned(),
@@ -3210,6 +3719,8 @@ mod tests {
                 kind: "note".to_owned(),
                 source: source.map(str::to_owned),
                 chunks: (content.chars().count() / 1_400 + 1) as u64,
+                confidence: confidence.to_owned(),
+                stale: false,
             };
             self.knowledge.lock().expect("lock").push(entry.clone());
             Ok(entry)
@@ -3230,6 +3741,8 @@ mod tests {
                     tags: vec!["stored".to_owned()],
                     content: "stored knowledge content".to_owned(),
                     chunks: entry.chunks,
+                    confidence: entry.confidence.clone(),
+                    stale: false,
                 }))
         }
 
@@ -3240,6 +3753,7 @@ mod tests {
             content: Option<&str>,
             _source: Option<&str>,
             _tags: Option<Vec<String>>,
+            confidence: Option<&str>,
         ) -> Result<KnowledgeDocumentRef, String> {
             let mut entries = self.knowledge.lock().expect("lock");
             let entry = entries
@@ -3249,6 +3763,9 @@ mod tests {
             if let Some(title) = title {
                 entry.title = title.to_owned();
             }
+            if let Some(confidence) = confidence {
+                entry.confidence = confidence.to_owned();
+            }
             Ok(KnowledgeDocumentRef {
                 id: entry.id.clone(),
                 title: entry.title.clone(),
@@ -3257,6 +3774,8 @@ mod tests {
                 tags: vec!["stored".to_owned()],
                 content: content.unwrap_or("stored knowledge content").to_owned(),
                 chunks: entry.chunks,
+                confidence: entry.confidence.clone(),
+                stale: false,
             })
         }
 
@@ -3308,12 +3827,13 @@ mod tests {
 
         let added = AddKnowledgeTool
             .execute(
-                json!({"title": "Decision", "content": "Use the local index."}),
+                json!({"title": "Decision", "content": "Use the local index.", "confidence": "verified"}),
                 &context,
             )
             .await
             .expect("add knowledge");
         assert!(added.content.contains("Decision"));
+        assert!(added.content.contains("confidence verified"));
         assert_eq!(added.metadata["chunks"], 1);
 
         let listed = ListKnowledgeTool
@@ -3321,6 +3841,7 @@ mod tests {
             .await
             .expect("list knowledge");
         assert!(listed.content.contains("Decision"));
+        assert!(listed.content.contains("confidence verified"));
 
         let fetched = GetKnowledgeTool
             .execute(json!({"id": "knowledge-1"}), &context)
@@ -3336,6 +3857,14 @@ mod tests {
             .await
             .expect("update knowledge");
         assert!(updated.content.contains("Decision v2"));
+        let recalibrated = UpdateKnowledgeTool
+            .execute(
+                json!({"id": "knowledge-1", "confidence": "uncertain"}),
+                &context,
+            )
+            .await
+            .expect("update confidence");
+        assert!(recalibrated.content.contains("uncertain"));
 
         let deleted = DeleteKnowledgeTool
             .execute(json!({"id": "knowledge-1"}), &context)
@@ -3409,6 +3938,81 @@ mod tests {
             .await
             .expect("artifact");
         assert_eq!(artifact.metadata["openbad_artifact"]["kind"], json!("web"));
+    }
+
+    #[tokio::test]
+    async fn manifest_tasks_scope_todos_and_handoff_work() {
+        let directory = tempdir().expect("tempdir");
+        fs::create_dir_all(directory.path().join(".openbad")).expect("openbad");
+        fs::create_dir_all(directory.path().join("archive")).expect("archive");
+        fs::write(directory.path().join("archive/old.md"), "old").expect("old");
+        fs::write(
+            directory.path().join(".openbad/project.yaml"),
+            "name: Demo\ncommands:\n  echo: \"printf hi\"\nscope:\n  historical: [\"archive/**\"]\n",
+        )
+        .expect("manifest");
+        let mut context = context(directory.path());
+
+        let manifest = ReadProjectManifestTool
+            .execute(json!({}), &context)
+            .await
+            .expect("manifest");
+        assert!(manifest.content.contains("echo"));
+
+        let scope = ClassifyPathTool
+            .execute(json!({"path": "archive/old.md"}), &context)
+            .await
+            .expect("scope");
+        assert!(scope.content.contains("historical"));
+
+        let denied = RunTaskTool.execute(json!({"name": "echo"}), &context).await;
+        assert!(denied.is_err());
+        context.allow_commands = true;
+        let task = RunTaskTool
+            .execute(json!({"name": "echo"}), &context)
+            .await
+            .expect("task");
+        assert!(task.content.contains("hi"));
+
+        context.allow_writes = true;
+        ReadFileTool
+            .execute(json!({"path": "archive/old.md"}), &context)
+            .await
+            .expect("read old");
+        let edited = EditFileTool
+            .execute(
+                json!({"path": "archive/old.md", "old": "old", "new": "new"}),
+                &context,
+            )
+            .await
+            .expect("edit old");
+        assert!(edited.content.contains("historical"));
+
+        TodoWriteTool
+            .execute(
+                json!({"items": [{"id": "t1", "text": "Verify feature", "state": "todo", "done_when": "tests pass"}]}),
+                &context,
+            )
+            .await
+            .expect("todos");
+        let todos = TodoReadTool
+            .execute(json!({}), &context)
+            .await
+            .expect("read todos");
+        assert!(todos.content.contains("Verify feature"));
+        assert!(todos.content.contains("done when: tests pass"));
+
+        WriteHandoffTool
+            .execute(
+                json!({"state": "halfway", "next_actions": ["run tests"]}),
+                &context,
+            )
+            .await
+            .expect("handoff");
+        let handoff =
+            fs::read_to_string(directory.path().join(".openbad/handoff.md")).expect("handoff file");
+        assert!(handoff.contains("halfway"));
+        assert!(handoff.contains("run tests"));
     }
 
     #[tokio::test]

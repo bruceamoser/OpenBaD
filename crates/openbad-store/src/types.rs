@@ -306,6 +306,8 @@ pub struct KnowledgeDocumentSummary {
     pub tags: Vec<String>,
     pub characters: u64,
     pub chunks: u64,
+    pub confidence: String,
+    pub source_hash: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

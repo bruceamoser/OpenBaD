@@ -28,6 +28,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0006_project_areas",
         include_str!("../migrations/0006_project_areas.sql"),
     ),
+    (
+        "0007_knowledge_confidence",
+        include_str!("../migrations/0007_knowledge_confidence.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

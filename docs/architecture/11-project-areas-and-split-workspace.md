@@ -37,19 +37,23 @@ flowchart LR
 
 ## 2. Storage model
 
-Migration `0006_project_areas` adds:
+Migration `0006_project_areas` adds the project areas; migration
+`0007_knowledge_confidence` extends knowledge documents with `confidence` and
+`source_hash`. Together they add:
 
 - `project_repos` — read-only reference folders,
   `(id, workspace_id, name, path, read_only, created_at)`, unique per
   `(workspace_id, path)`.
 - `knowledge_documents` — project-owned document metadata, full content, tags,
-  BLAKE3 content hash, timestamps.
+  BLAKE3 content hash, confidence label, optional source hash, timestamps.
 - `knowledge_chunks` — ordered chunk rows owned by a document.
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
 
 Knowledge writes are transactional: the document, its chunks, and its FTS rows
-are inserted together. Deleting a document removes its FTS rows before the
+are inserted together. Imported files record the source path and a BLAKE3
+source hash so later reads can flag stale notes; notes accept `verified`,
+`inferred`, or `uncertain` confidence. Deleting a document removes its FTS rows before the
 document cascade. Identical content in the same project is idempotent and
 returns the existing document.
 
@@ -109,7 +113,12 @@ stage without changing the project model, locator contract, or tools.
 | `glob_repo` | read | Find reference files by glob. |
 | `grep_repo` | read | Search reference text; case-insensitive by default. |
 | `read_repo_file` | read | Read a bounded region with total-line and continuation metadata. |
-| `add_knowledge` | write | Add a curated project note or reference to the library. |
+| `add_knowledge` | write | Add a curated note with a confidence label. |
+| `read_project_manifest` | read | Read purpose, scope map, commands, and invariants. |
+| `classify_path` | read | Classify a path against the project scope map. |
+| `run_task` | command | Run a named manifest command; Full access only. |
+| `todo_write` / `todo_read` | write/read | Maintain durable project todos. |
+| `write_handoff` | write | Write a session handoff beside project state. |
 | `present_artifact` | read | Open a web page, image, markdown note, diff, or file beside chat. |
 
 `ToolContext` carries an optional `ProjectAreas` implementation. The desktop

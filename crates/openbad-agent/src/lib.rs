@@ -16,7 +16,7 @@ use openbad_tools::{
     CheckpointSink, MemoryStore, ProjectAreas, ToolContext, ToolRegistry, WorkspaceSearch,
     discover_skills,
 };
-use openbad_workspace::WorkspaceService;
+use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -472,6 +472,11 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
         if let Some(instructions) = load_project_instructions(self.workspace.root()) {
             prompt.push_str("\n\nProject conventions (follow unless they conflict with safety or explicit user instructions):\n");
             prompt.push_str(&instructions);
+        }
+        if let Ok(Some(manifest)) = load_project_manifest(self.workspace.root()) {
+            prompt.push_str("\n\nProject manifest (.openbad/project.yaml):\n");
+            prompt.push_str(&manifest.summary());
+            prompt.push_str("\nClassify paths before editing when scope matters; historical and generated paths need care. Use run_task for named manifest tasks, todo_write/todo_read for durable work state, and write_handoff before ending a long session.\n");
         }
         let skills = discover_skills(self.workspace.root());
         if !skills.is_empty() {

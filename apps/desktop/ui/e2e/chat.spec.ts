@@ -198,6 +198,7 @@ test("keeps project knowledge and retrieval in the split workspace", async ({
   await page.goto("/");
   await page.getByRole("button", { name: "Knowledge" }).first().click();
 
+  await expect(page.getByText("verified", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Product thesis note/ }).click();
   await expect(
     page.getByText("OpenBaD is a desktop coding harness."),
@@ -281,4 +282,16 @@ test("refreshes open project areas without switching tabs", async ({ page }) => 
   await expect(
     page.getByRole("button", { name: "src/generated.rs" }),
   ).toBeVisible({ timeout: 8_000 });
+});
+
+test("shows durable project todos in the split panel", async ({ page }) => {
+  await page.goto("/");
+  await clickMenu(page, "View", "Todos");
+
+  await expect(
+    page.getByText("Verify the project panel refresh behavior"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Done when: A file added by the assistant appears without switching tabs"),
+  ).toBeVisible();
 });

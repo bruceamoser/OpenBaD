@@ -133,6 +133,8 @@ enum WriteCommand {
         source: Option<String>,
         tags: Vec<String>,
         content: String,
+        confidence: String,
+        source_hash: Option<String>,
         reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
     },
     UpdateKnowledgeDocument {
@@ -141,6 +143,8 @@ enum WriteCommand {
         content: Option<String>,
         source: Option<String>,
         tags: Option<Vec<String>>,
+        confidence: Option<String>,
+        source_hash: Option<String>,
         reply: SyncSender<Result<KnowledgeDocumentSummary, StoreError>>,
     },
     DeleteKnowledgeDocument {
@@ -411,7 +415,7 @@ impl Store {
             "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                     length(d.content),
                     (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                    d.created_at, d.updated_at
+                    d.created_at, d.updated_at, d.confidence, d.source_hash
              FROM knowledge_documents d
              WHERE d.workspace_id = ?1
              ORDER BY d.updated_at DESC",
@@ -430,14 +434,14 @@ impl Store {
                 "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                         length(d.content),
                         (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                        d.created_at, d.updated_at, d.content
+                        d.created_at, d.updated_at, d.confidence, d.source_hash, d.content
                  FROM knowledge_documents d WHERE d.id = ?1",
                 [document_id],
                 |row| {
                     let summary = knowledge_summary_from_row(row)?;
                     Ok(KnowledgeDocument {
                         summary,
-                        content: row.get(10)?,
+                        content: row.get(12)?,
                     })
                 },
             )
@@ -445,6 +449,7 @@ impl Store {
         Ok(document)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_knowledge_document(
         &self,
         workspace_id: WorkspaceId,
@@ -454,6 +459,30 @@ impl Store {
         tags: Vec<String>,
         content: &str,
     ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.add_knowledge_document_with_confidence(
+            workspace_id,
+            title,
+            kind,
+            source,
+            tags,
+            content,
+            "inferred",
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_knowledge_document_with_confidence(
+        &self,
+        workspace_id: WorkspaceId,
+        title: &str,
+        kind: &str,
+        source: Option<&str>,
+        tags: Vec<String>,
+        content: &str,
+        confidence: &str,
+        source_hash: Option<&str>,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
         self.write(|reply| WriteCommand::AddKnowledgeDocument {
             workspace_id,
             title: title.to_owned(),
@@ -461,10 +490,13 @@ impl Store {
             source: source.map(str::to_owned),
             tags,
             content: content.to_owned(),
+            confidence: confidence.to_owned(),
+            source_hash: source_hash.map(str::to_owned),
             reply,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_knowledge_document(
         &self,
         document_id: &str,
@@ -473,12 +505,36 @@ impl Store {
         source: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> Result<KnowledgeDocumentSummary, StoreError> {
+        self.update_knowledge_document_with_confidence(
+            document_id,
+            title,
+            content,
+            source,
+            tags,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_knowledge_document_with_confidence(
+        &self,
+        document_id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+        confidence: Option<&str>,
+        source_hash: Option<&str>,
+    ) -> Result<KnowledgeDocumentSummary, StoreError> {
         self.write(|reply| WriteCommand::UpdateKnowledgeDocument {
             document_id: document_id.to_owned(),
             title: title.map(str::to_owned),
             content: content.map(str::to_owned),
             source: source.map(str::to_owned),
             tags,
+            confidence: confidence.map(str::to_owned),
+            source_hash: source_hash.map(str::to_owned),
             reply,
         })
     }
@@ -1484,6 +1540,8 @@ fn knowledge_summary_from_row(
         chunks: row.get::<_, i64>(7)? as u64,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        confidence: row.get(10)?,
+        source_hash: row.get(11)?,
     })
 }
 
@@ -1543,6 +1601,7 @@ fn add_project_repo(
     Ok(repo)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_knowledge_document(
     connection: &Connection,
     workspace_id: WorkspaceId,
@@ -1551,6 +1610,8 @@ fn add_knowledge_document(
     source: Option<&str>,
     tags: Vec<String>,
     content: &str,
+    confidence: &str,
+    source_hash: Option<&str>,
 ) -> Result<KnowledgeDocumentSummary, StoreError> {
     if content.trim().is_empty() {
         return Err(StoreError::InvalidData(
@@ -1571,7 +1632,7 @@ fn add_knowledge_document(
                 "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                         length(d.content),
                         (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                        d.created_at, d.updated_at
+                        d.created_at, d.updated_at, d.confidence, d.source_hash
                  FROM knowledge_documents d WHERE d.id = ?1",
                 [id],
                 knowledge_summary_from_row,
@@ -1595,8 +1656,9 @@ fn add_knowledge_document(
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO knowledge_documents
-            (id, workspace_id, title, kind, source, tags_json, content, content_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            (id, workspace_id, title, kind, source, tags_json, content, content_hash,
+             confidence, source_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
         params![
             document_id,
             workspace_id.to_string(),
@@ -1606,6 +1668,8 @@ fn add_knowledge_document(
             tags_json,
             content,
             hash,
+            confidence,
+            source_hash,
             now
         ],
     )?;
@@ -1641,7 +1705,7 @@ fn add_knowledge_document(
             "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                 length(d.content),
                 (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                d.created_at, d.updated_at
+                d.created_at, d.updated_at, d.confidence, d.source_hash
          FROM knowledge_documents d WHERE d.id = ?1",
             [&document_id],
             knowledge_summary_from_row,
@@ -1649,6 +1713,7 @@ fn add_knowledge_document(
         .map_err(StoreError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_knowledge_document(
     connection: &Connection,
     document_id: &str,
@@ -1656,10 +1721,12 @@ fn update_knowledge_document(
     content: Option<&str>,
     source: Option<&str>,
     tags: Option<Vec<String>>,
+    confidence: Option<&str>,
+    source_hash: Option<&str>,
 ) -> Result<KnowledgeDocumentSummary, StoreError> {
     let existing = connection
         .query_row(
-            "SELECT workspace_id, title, kind, source, content, tags_json
+            "SELECT workspace_id, title, kind, source, content, tags_json, confidence, source_hash
              FROM knowledge_documents WHERE id = ?1",
             [document_id],
             |row| {
@@ -1670,12 +1737,23 @@ fn update_knowledge_document(
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )
         .optional()?
         .ok_or_else(|| StoreError::NotFound(document_id.to_owned()))?;
-    let (workspace, old_title, kind, old_source, old_content, old_tags) = existing;
+    let (
+        workspace,
+        old_title,
+        kind,
+        old_source,
+        old_content,
+        old_tags,
+        old_confidence,
+        old_source_hash,
+    ) = existing;
     let title = title.unwrap_or(&old_title).trim();
     if title.is_empty() {
         return Err(StoreError::InvalidData(
@@ -1691,6 +1769,8 @@ fn update_knowledge_document(
     let source = source.or(old_source.as_deref());
     let tags = tags.unwrap_or_else(|| serde_json::from_str(&old_tags).unwrap_or_default());
     let tags_json = serde_json::to_string(&tags)?;
+    let confidence = confidence.unwrap_or(&old_confidence);
+    let source_hash = source_hash.or(old_source_hash.as_deref());
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     let chunks = split_knowledge_chunks(content);
     let now = now_millis();
@@ -1707,8 +1787,8 @@ fn update_knowledge_document(
     transaction.execute(
         "UPDATE knowledge_documents
          SET title = ?1, kind = ?2, source = ?3, tags_json = ?4, content = ?5,
-             content_hash = ?6, updated_at = ?7
-         WHERE id = ?8",
+             content_hash = ?6, confidence = ?7, source_hash = ?8, updated_at = ?9
+         WHERE id = ?10",
         params![
             title,
             kind,
@@ -1716,6 +1796,8 @@ fn update_knowledge_document(
             tags_json,
             content,
             hash,
+            confidence,
+            source_hash,
             now,
             document_id
         ],
@@ -1740,7 +1822,7 @@ fn update_knowledge_document(
             "SELECT d.id, d.workspace_id, d.title, d.kind, d.source, d.tags_json,
                     length(d.content),
                     (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.document_id = d.id),
-                    d.created_at, d.updated_at
+                    d.created_at, d.updated_at, d.confidence, d.source_hash
              FROM knowledge_documents d WHERE d.id = ?1",
             [document_id],
             knowledge_summary_from_row,
@@ -2089,6 +2171,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 source,
                 tags,
                 content,
+                confidence,
+                source_hash,
                 reply,
             } => {
                 let _ = reply.send(add_knowledge_document(
@@ -2099,6 +2183,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     source.as_deref(),
                     tags,
                     &content,
+                    &confidence,
+                    source_hash.as_deref(),
                 ));
             }
             WriteCommand::UpdateKnowledgeDocument {
@@ -2107,6 +2193,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 content,
                 source,
                 tags,
+                confidence,
+                source_hash,
                 reply,
             } => {
                 let _ = reply.send(update_knowledge_document(
@@ -2116,6 +2204,8 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     content.as_deref(),
                     source.as_deref(),
                     tags,
+                    confidence.as_deref(),
+                    source_hash.as_deref(),
                 ));
             }
             WriteCommand::DeleteKnowledgeDocument { document_id, reply } => {
@@ -2350,7 +2440,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0006_project_areas"
+            "0007_knowledge_confidence"
         );
     }
 
@@ -2871,6 +2961,8 @@ mod tests {
         assert_eq!(document.workspace_id, first);
         assert_eq!(document.chunks, 1);
         assert_eq!(document.tags, vec!["parser".to_owned()]);
+        assert_eq!(document.confidence, "inferred");
+        assert!(document.source_hash.is_none());
 
         let duplicate = store
             .add_knowledge_document(
@@ -2897,6 +2989,19 @@ mod tests {
             .expect("update knowledge");
         assert_eq!(updated.title, "Parser architecture v2");
         assert_eq!(updated.tags.len(), 2);
+        let verified = store
+            .update_knowledge_document_with_confidence(
+                &document.id,
+                None,
+                None,
+                None,
+                None,
+                Some("verified"),
+                Some("source-hash"),
+            )
+            .expect("confidence update");
+        assert_eq!(verified.confidence, "verified");
+        assert_eq!(verified.source_hash.as_deref(), Some("source-hash"));
         let old_hits = store
             .retrieve_project(first, "content hashes", 10)
             .expect("old retrieval");
