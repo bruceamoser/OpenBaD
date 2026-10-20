@@ -302,3 +302,15 @@ test("shows durable project todos in the split panel", async ({ page }) => {
     page.getByText("Done when: A file added by the assistant appears without switching tabs"),
   ).toBeVisible();
 });
+
+test("answers a structured project question", async ({ page }) => {
+  await page.goto("/");
+  await clickMenu(page, "View", "Questions");
+
+  await expect(
+    page.getByText("Should project knowledge be exported to Markdown?"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Yes, git-backed" }).click();
+  await expect(page.getByText("Yes, git-backed")).toBeVisible();
+  await expect(page.getByText("answered")).toBeVisible();
+});

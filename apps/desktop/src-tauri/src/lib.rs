@@ -718,6 +718,47 @@ fn knowledge_documents(
 }
 
 #[tauri::command]
+fn project_questions(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<openbad_workspace::Question>, String> {
+    let path = PathBuf::from(&workspace_path);
+    if !path.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .ensure_workspace(workspace_name(&path), &workspace_path)
+        .map_err(|error| error.to_string())?;
+    openbad_workspace::load_questions(&path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn answer_project_question(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    question_id: String,
+    answer: String,
+) -> Result<openbad_workspace::Question, String> {
+    let path = PathBuf::from(&workspace_path);
+    if !path.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .ensure_workspace(workspace_name(&path), &workspace_path)
+        .map_err(|error| error.to_string())?;
+    openbad_workspace::answer_question(&path, &question_id, &answer)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn knowledge_stale_documents(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -1972,6 +2013,8 @@ pub fn run() {
             project_overview,
             project_manifest,
             project_todos,
+            project_questions,
+            answer_project_question,
             project_repos,
             add_project_repo,
             remove_project_repo,

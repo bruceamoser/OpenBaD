@@ -226,6 +226,17 @@ export type ProjectManifest = {
   }[];
 };
 
+export type ProjectQuestion = {
+  id: string;
+  question: string;
+  options: string[];
+  multi: boolean;
+  context: string | null;
+  created_at: number;
+  answer: string | null;
+  answered_at: number | null;
+};
+
 export type ProjectTodo = {
   id: string;
   text: string;

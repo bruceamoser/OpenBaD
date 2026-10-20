@@ -3,6 +3,7 @@
 pub mod context;
 pub mod manifest;
 pub mod policy;
+pub mod questions;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -15,6 +16,10 @@ pub use manifest::{
     ScopeMap, ValidatorDefinition, load_project_manifest, manifest_path,
 };
 pub use policy::{PolicyError, ProjectPolicy, load_project_policy, policy_path};
+pub use questions::{
+    Question, QuestionError, answer_question, load_questions, question_summary, questions_path,
+    save_questions,
+};
 
 fn normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();

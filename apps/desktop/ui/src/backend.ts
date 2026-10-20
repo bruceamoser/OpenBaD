@@ -17,6 +17,7 @@ import type {
   ProjectHit,
   ProjectManifest,
   ProjectOverview,
+  ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
   Usage,
@@ -88,6 +89,19 @@ let mockFiles = [
   "crates/openbad-store/src/store.rs",
   "docs/architecture/00-vision-and-feature-set.md",
 ];
+let mockQuestions: ProjectQuestion[] = [
+  {
+    id: "mock-question-1",
+    question: "Should project knowledge be exported to Markdown?",
+    options: ["Yes, git-backed", "No, database only"],
+    multi: false,
+    context: "Knowledge review workflow",
+    created_at: Date.now() - 3_600_000,
+    answer: null,
+    answered_at: null,
+  },
+];
+
 const mockManifest: ProjectManifest = {
   name: "OpenBaD",
   description: "Desktop coding harness with project-scoped context.",
@@ -405,6 +419,41 @@ export async function loadProjectManifest(
   return isTauri
     ? invoke<ProjectManifest | null>("project_manifest", { workspacePath })
     : mockManifest;
+}
+
+export async function loadProjectQuestions(
+  workspacePath: string,
+): Promise<ProjectQuestion[]> {
+  return isTauri
+    ? invoke<ProjectQuestion[]>("project_questions", { workspacePath })
+    : [...mockQuestions];
+}
+
+export async function answerProjectQuestion(
+  workspacePath: string,
+  questionId: string,
+  answer: string,
+): Promise<ProjectQuestion> {
+  if (isTauri) {
+    return invoke<ProjectQuestion>("answer_project_question", {
+      workspacePath,
+      questionId,
+      answer,
+    });
+  }
+  const question = mockQuestions.find((question) => question.id === questionId);
+  if (question === undefined) {
+    throw new Error(`unknown question: ${questionId}`);
+  }
+  const answered = {
+    ...question,
+    answer,
+    answered_at: Date.now(),
+  };
+  mockQuestions = mockQuestions.map((item) =>
+    item.id === questionId ? answered : item,
+  );
+  return answered;
 }
 
 export async function loadProjectTodos(

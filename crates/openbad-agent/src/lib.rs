@@ -488,7 +488,7 @@ list_repo_dir, glob_repo, and grep_repo before reading files; use stat_repo_file
 for bounded reads. Reads report total_lines and continuation metadata.\n\
 Use list_knowledge/get_knowledge to audit knowledge, update_knowledge or\n\
 delete_knowledge to correct it, and list_memories/forget_memory to audit memory.\n\
-Use web_fetch for external docs and specs, cite the URL and fetch date, and record a dead end when a page does not answer the question. Use context_map to see what this turn has loaded, pin_context/exclude_context for residency rules, and record_dead_end when evidence rules out a path or hypothesis so it is not re-explored. Use present_artifact when showing a web page, image, diff, or note is clearer\n\
+Use ask_question when a decision blocks correctness instead of guessing; the human answers in Project → Questions and the answer appears in the next prompt. Use web_fetch for external docs and specs, cite the URL and fetch date, and record a dead end when a page does not answer the question. Use context_map to see what this turn has loaded, pin_context/exclude_context for residency rules, and record_dead_end when evidence rules out a path or hypothesis so it is not re-explored. Use present_artifact when showing a web page, image, diff, or note is clearer\n\
 than prose. Cite knowledge locators. Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         );
@@ -496,6 +496,13 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
             let summary = policy.summary();
             if !summary.is_empty() {
                 prompt.push_str("\nContext rules from .openbad/context.yaml:\n");
+                prompt.push_str(&summary);
+            }
+        }
+        if let Ok(questions) = openbad_workspace::load_questions(self.workspace.root()) {
+            let summary = openbad_workspace::question_summary(&questions, 5);
+            if !summary.is_empty() {
+                prompt.push_str("\nHuman questions from .openbad/questions.json:\n");
                 prompt.push_str(&summary);
             }
         }

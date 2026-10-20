@@ -491,6 +491,8 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(AskQuestionTool);
+        registry.register(ListQuestionsTool);
         registry.register(PinContextTool);
         registry.register(ExcludeContextTool);
         registry.register(ListContextRulesTool);
@@ -4013,6 +4015,141 @@ impl Tool for PresentArtifactTool {
     }
 }
 
+struct AskQuestionTool;
+
+#[async_trait]
+impl Tool for AskQuestionTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "ask_question",
+            "Queue a structured question for the human in Project → Questions. Use this when a decision blocks correctness instead of guessing. Continue other work or end the turn; the answer appears in the next prompt.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 8,
+                    "description": "Optional suggested answers"
+                },
+                "multi": {"type": "boolean", "description": "Allow multiple options"},
+                "context": {"type": "string", "description": "Why the decision matters"}
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("ask_question".to_owned()));
+        }
+        let text = string_arg(&arguments, "question")?;
+        if text.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "question must not be empty".to_owned(),
+            ));
+        }
+        let options = arguments
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .take(8)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut questions = openbad_workspace::load_questions(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let question = openbad_workspace::Question {
+            id: format!("q-{}", now_millis()),
+            question: text.trim().to_owned(),
+            options: options.clone(),
+            multi: optional_bool(&arguments, "multi").unwrap_or(false),
+            context: optional_string(&arguments, "context"),
+            created_at: now_millis(),
+            answer: None,
+            answered_at: None,
+        };
+        questions.push(question.clone());
+        openbad_workspace::save_questions(context.workspace.root(), &questions)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(format!(
+            "queued question {} for the human: {}\nAsk them to answer in Project → Questions, then continue in the next turn.",
+            question.id, question.question
+        ))
+        .with_metadata(json!({"id": question.id, "options": options})))
+    }
+}
+
+struct ListQuestionsTool;
+
+#[async_trait]
+impl Tool for ListQuestionsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_questions",
+            "List structured questions and their human answers from .openbad/questions.json.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "include_answered": {"type": "boolean", "description": "Default true"}
+            }
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let include_answered = optional_bool(&arguments, "include_answered").unwrap_or(true);
+        let questions = openbad_workspace::load_questions(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let visible = questions
+            .iter()
+            .filter(|question| include_answered || question.answer.is_none())
+            .collect::<Vec<_>>();
+        if visible.is_empty() {
+            return Ok(ToolResult::ok("no questions").with_metadata(json!({"questions": 0})));
+        }
+        let content = visible
+            .iter()
+            .map(|question| {
+                let state = question.answer.as_deref().map_or_else(
+                    || "PENDING".to_owned(),
+                    |answer| format!("ANSWERED: {answer}"),
+                );
+                format!(
+                    "- [{}] {} ({}){}",
+                    question.id,
+                    question.question,
+                    state,
+                    if question.options.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · options: {}", question.options.join(", "))
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({"questions": visible.len()})))
+    }
+}
+
 struct PinContextTool;
 
 #[async_trait]
@@ -5390,6 +5527,38 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn structured_questions_queue_and_list() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let asked = AskQuestionTool
+            .execute(
+                json!({
+                    "question": "Which database should we use?",
+                    "options": ["SQLite", "Postgres"],
+                    "context": "storage choice"
+                }),
+                &context,
+            )
+            .await
+            .expect("ask");
+        assert!(asked.content.contains("queued question"));
+        let id = asked.metadata["id"].as_str().expect("id").to_owned();
+        let listed = ListQuestionsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("PENDING"));
+        assert!(listed.content.contains("SQLite"));
+        openbad_workspace::answer_question(directory.path(), &id, "SQLite").expect("answer");
+        let answered = ListQuestionsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("answered");
+        assert!(answered.content.contains("ANSWERED: SQLite"));
     }
 
     #[tokio::test]

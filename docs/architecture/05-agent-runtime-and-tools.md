@@ -328,6 +328,7 @@ Implemented:
 | `pin_context` / `exclude_context` | write | Maintain `.openbad/context.yaml` residency rules |
 | `list_context_rules` / `context_map` | read | Audit pinned/excluded rules and files loaded this turn |
 | `record_dead_end` / `list_dead_ends` | write/read | Negative knowledge in `.openbad/dead-ends.json` |
+| `ask_question` / `list_questions` | write/read | Queue structured human decisions in `.openbad/questions.json` |
 | `stat_file` / `stat_repo_file` | read | Size, line count, mtime, and BLAKE3 hash without loading content |
 | `read_files` / `read_repo_files` | read | Batch reads with per-file errors and independent byte caps |
 | `outline` | read | Markdown/AsciiDoc headings, YAML identifiers, or code declarations with line numbers |
@@ -378,6 +379,11 @@ the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
 `deny_paths`, `allow_writes: false`) and commands by class or substring
 (`command_classes`, `deny_command_patterns`, `allow_network`, `network_hosts`). Denials name the policy rule and
 apply to file operations, `run_command`, `run_task`, and `run_recipe`.
+
+`ask_question` queues a decision with optional choices in
+`.openbad/questions.json` instead of guessing or stalling. The Project →
+Questions panel polls and writes the answer; the next system prompt includes
+pending and recently answered questions.
 
 Every tool call appends a bounded JSONL record to `.openbad/audit.jsonl`:
 timestamp, turn, tool, argument/result BLAKE3 digests and 500-character
