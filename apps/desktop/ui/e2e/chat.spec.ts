@@ -125,11 +125,25 @@ test("copies the assistant response from the message header", async ({
   await sendPrompt(page);
 
   const copy = page.getByRole("button", { name: "Copy response" });
-  await expect(copy).toBeVisible();
-  await copy.click();
-  await expect(page.getByRole("button", { name: "Copied" })).toBeVisible();
+  await expect(copy).toHaveCount(2);
+  await expect(copy.first()).toBeVisible();
+  await expect(copy.last()).toBeVisible();
+  await copy.last().click();
+  await expect(page.getByRole("button", { name: "Copied" }).last()).toBeVisible();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toContain("I read");
+});
+
+test("copies a user message", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await sendPrompt(page);
+
+  const copy = page.getByRole("button", { name: "Copy message" });
+  await expect(copy).toBeVisible();
+  await copy.click();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toBe(prompt);
 });
 
 test("steers a running turn", async ({ page }) => {
@@ -468,6 +482,26 @@ test("approves a draft project plan", async ({ page }) => {
   await expect(page.getByText("1/3 steps complete")).toBeVisible();
   await page.getByRole("button", { name: "Approve plan" }).click();
   await expect(page.getByText("approved")).toBeVisible();
+});
+
+test("shows counts for project areas without opening them", async ({ page }) => {
+  await page.goto("/");
+
+  for (const label of ["Workspace", "Agents", "References", "Knowledge", "Memory", "Todos", "Questions", "Plan"]) {
+    await expect(
+      page.getByRole("button", { name: new RegExp(`^${label} \\(`) }),
+    ).toBeVisible();
+  }
+});
+
+test("shows a running agent count without opening the panel", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /^Agents \(0\)/ })).toBeVisible();
+
+  await sendPrompt(page, "Spawn a subagent to inspect the repository");
+
+  await expect(page.getByRole("button", { name: /^Agents \(1\)/ })).toBeVisible();
+  await expect(page.getByLabel("Background work running")).toBeVisible();
 });
 
 test("shows background agents in the project area", async ({ page }) => {

@@ -302,3 +302,18 @@ export type ProjectAgent = {
   updated_at: number;
   finished_at: number | null;
 };
+
+export type ProjectAreaCounts = {
+  workspace_files: number;
+  agents: number;
+  running_agents: number;
+  references: number;
+  knowledge: number;
+  memories: number;
+  todos_open: number;
+  todos_total: number;
+  questions_open: number;
+  questions_total: number;
+  plan_steps: number;
+  plan_open_steps: number;
+};

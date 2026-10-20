@@ -54,7 +54,9 @@ keeps a usable width.
   retrieval, memory, checkpoints, diagnostics, and the active artifact.
   Knowledge is for long-form documents; Memory is for short indexed snippets.
   Agents lists background workers spawned by the assistant, refreshes while a
-  worker is running, and opens completed results as Markdown artifacts.
+  worker is running, and opens completed results as Markdown artifacts. The
+  sidebar shows a live count for each project area; running subagents add a
+  pulse indicator, and counts refresh without opening the panel.
 - **Split artifacts** — assistant-presented web pages, images, Markdown, diffs,
   and workspace files open beside the conversation.
 - **Bottom panel** — terminal, problems, job output (planned).
@@ -66,8 +68,9 @@ keeps a usable width.
 - Streaming GitHub-flavored Markdown: headings, lists, task lists, tables,
   blockquotes, links, images, footnotes, strikethrough, and inline/display math
   through KaTeX.
-- Syntax-highlighted code blocks with a copy action, plus a copy-response
-  icon in each assistant message header that copies the raw Markdown.
+- Syntax-highlighted code blocks with a copy action, plus copy controls at the
+  top and bottom of every assistant response. User messages also have a copy
+  action. Copy actions use the raw Markdown text.
 - Project knowledge can be downloaded as Markdown or opened in a print/PDF view
   with light-document styling; the native print dialog provides Save as PDF.
 - Mermaid diagrams rendered from fenced `mermaid` blocks, with the source

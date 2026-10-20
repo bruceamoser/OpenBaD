@@ -60,3 +60,8 @@ session knows what moved without re-reading every document.
   aliases were removed so the sorted built-in surface stays at 128 tools, and
   the GitHub workflow skill now uses the real `git_branch`/`git_checkout`
   arguments.
+- **Live project counts and copy controls.** The project sidebar now shows a
+  live count beside Workspace, Agents, References, Knowledge, Retrieval,
+  Memory, Todos, Questions, and Plan; running subagents add a pulse. Assistant
+  responses can be copied from the header or footer, and user messages have a
+  copy action. See `08-desktop-application.md`.

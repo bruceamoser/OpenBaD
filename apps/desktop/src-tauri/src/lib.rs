@@ -986,6 +986,22 @@ pub struct ProjectTodo {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectAreaCounts {
+    pub workspace_files: u64,
+    pub agents: u64,
+    pub running_agents: u64,
+    pub references: u64,
+    pub knowledge: u64,
+    pub memories: u64,
+    pub todos_open: u64,
+    pub todos_total: u64,
+    pub questions_open: u64,
+    pub questions_total: u64,
+    pub plan_steps: u64,
+    pub plan_open_steps: u64,
+}
+
 #[tauri::command]
 fn project_manifest(
     workspace_path: String,
@@ -1022,6 +1038,82 @@ fn project_overview(
     store
         .project_overview(workspace)
         .map_err(|error| error.to_string())
+}
+
+fn project_area_counts_payload(
+    store: &Store,
+    workspace_path: &str,
+) -> Result<ProjectAreaCounts, String> {
+    let root = PathBuf::from(workspace_path);
+    if !root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let workspace = project_workspace(store, workspace_path)?;
+    let overview = store
+        .project_overview(workspace)
+        .map_err(|error| error.to_string())?;
+    let agents = store
+        .list_subagents(workspace, 200)
+        .map_err(|error| error.to_string())?;
+    let todos: Vec<ProjectTodo> = {
+        let path = root.join(".openbad").join("todos.json");
+        match std::fs::read_to_string(path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let questions = openbad_workspace::load_questions(&root).unwrap_or_default();
+    let plan = openbad_workspace::load_plan(&root).ok().flatten();
+    let todos_open = todos
+        .iter()
+        .filter(|todo| todo.state != "done" && todo.state != "dropped")
+        .count() as u64;
+    let questions_open = questions
+        .iter()
+        .filter(|question| question.answer.is_none())
+        .count() as u64;
+    let plan_steps = plan
+        .as_ref()
+        .map(|plan| plan.steps.len() as u64)
+        .unwrap_or_default();
+    let plan_open_steps = plan
+        .as_ref()
+        .map(|plan| {
+            plan.steps
+                .iter()
+                .filter(|step| step.status != "done")
+                .count() as u64
+        })
+        .unwrap_or_default();
+    Ok(ProjectAreaCounts {
+        workspace_files: overview.index.files,
+        agents: agents.len() as u64,
+        running_agents: agents
+            .iter()
+            .filter(|agent| agent.status == "running")
+            .count() as u64,
+        references: overview.repos,
+        knowledge: overview.knowledge_documents,
+        memories: overview.memories,
+        todos_open,
+        todos_total: todos.len() as u64,
+        questions_open,
+        questions_total: questions.len() as u64,
+        plan_steps,
+        plan_open_steps,
+    })
+}
+
+#[tauri::command]
+fn project_area_counts(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<ProjectAreaCounts, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    project_area_counts_payload(&store, &workspace_path)
 }
 
 #[tauri::command]
@@ -2675,6 +2767,7 @@ pub fn run() {
             search_sessions,
             memories,
             project_overview,
+            project_area_counts,
             project_manifest,
             project_todos,
             project_plan,
@@ -2766,6 +2859,66 @@ mod tests {
                 .iter()
                 .any(|route| route.model == "deepseek-v4-pro")
         );
+    }
+
+    #[test]
+    fn project_area_counts_include_sidecars_and_agents() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sidecars = root.path().join(".openbad");
+        std::fs::create_dir_all(&sidecars).expect("sidecars");
+        std::fs::write(
+            sidecars.join("todos.json"),
+            r#"[{"id":"t1","text":"open","state":"todo"},{"id":"t2","text":"done","state":"done"}]"#,
+        )
+        .expect("todos");
+        std::fs::write(
+            sidecars.join("questions.json"),
+            r#"[{"id":"q1","question":"pick","options":[],"multi":false,"created_at":1},{"id":"q2","question":"answered","options":[],"multi":false,"created_at":1,"answer":"a","answered_at":2}]"#,
+        )
+        .expect("questions");
+        std::fs::write(
+            sidecars.join("plan.json"),
+            r#"{"goal":"ship","steps":[{"id":"s1","text":"one","status":"done"},{"id":"s2","text":"two","status":"todo"}],"created_at":1,"updated_at":2}"#,
+        )
+        .expect("plan");
+
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .ensure_workspace("demo", &root.path().to_string_lossy())
+            .expect("workspace");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default();
+        store
+            .create_subagent(SubagentRecord {
+                id: "agent-1".to_owned(),
+                workspace_id: workspace,
+                parent_session_id: None,
+                title: "Worker".to_owned(),
+                task: "Inspect".to_owned(),
+                model: "deepseek-flash".to_owned(),
+                status: "running".to_owned(),
+                log: String::new(),
+                result: String::new(),
+                error: None,
+                steps: 1,
+                created_at: now,
+                updated_at: now,
+                finished_at: None,
+            })
+            .expect("subagent");
+
+        let counts =
+            project_area_counts_payload(&store, &root.path().to_string_lossy()).expect("counts");
+        assert_eq!(counts.agents, 1);
+        assert_eq!(counts.running_agents, 1);
+        assert_eq!(counts.todos_total, 2);
+        assert_eq!(counts.todos_open, 1);
+        assert_eq!(counts.questions_total, 2);
+        assert_eq!(counts.questions_open, 1);
+        assert_eq!(counts.plan_steps, 2);
+        assert_eq!(counts.plan_open_steps, 1);
     }
 
     #[test]
