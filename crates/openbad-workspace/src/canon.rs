@@ -39,6 +39,8 @@ pub struct CanonLedger {
     pub entries: Vec<CanonEntry>,
     #[serde(default)]
     pub banned_phrases: Vec<BannedPhrase>,
+    #[serde(default)]
+    pub paths_ignore: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
