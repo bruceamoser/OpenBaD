@@ -50,6 +50,10 @@ Migration `0006_project_areas` adds the project areas; migration
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
 
+`.openbad/context.yaml` pins files that should stay resident and excludes paths
+that must never load. `.openbad/dead-ends.json` records negative knowledge so a
+later session does not repeat a ruled-out search.
+
 A sibling `.openbad/permissions.yaml` can restrict writes and command classes.
 It is reviewable policy, not prompt discipline: tools check it before mutating
 files or spawning commands and return the specific rule that blocked the action.

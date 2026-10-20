@@ -1,10 +1,15 @@
 //! Workspace root, manifest, and path-containment primitives.
 
+pub mod context;
 pub mod manifest;
 pub mod policy;
 
 use std::path::{Component, Path, PathBuf};
 
+pub use context::{
+    ContextError, ContextPolicy, ContextRule, DeadEnd, context_path, dead_end_summary,
+    dead_ends_path, load_context_policy, load_dead_ends, save_context_policy, save_dead_ends,
+};
 pub use manifest::{
     CommandDefinition, CommandSpec, Invariant, ManifestError, ProjectManifest, ScopeClass,
     ScopeMap, ValidatorDefinition, load_project_manifest, manifest_path,
