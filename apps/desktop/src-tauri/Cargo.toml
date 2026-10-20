@@ -22,6 +22,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 directories = { workspace = true }
 ignore = "0.4"
+blake3 = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

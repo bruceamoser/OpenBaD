@@ -186,7 +186,8 @@ flowchart LR
 2. Run BM25 and vector search in parallel.
 
 > **Current implementation.** Project retrieval in migration
-> `0006_project_areas` uses deterministic FTS5 terms over knowledge chunks,
+> `0006_project_areas` (extended by `0007_knowledge_confidence`) uses
+> deterministic FTS5 terms over knowledge chunks,
 > indexed code, and durable memories, then fuses the ranked lists with RRF
 > (`k = 60`). Query expansion, vectors, reranking, MMR, and the explain panel are
 > designed here but not yet enabled. See
@@ -198,6 +199,20 @@ flowchart LR
 6. Diversify with MMR (lambda 0.7) to avoid near-duplicates.
 7. Fit within the retrieval budget (default 4k tokens).
 8. Return each result with a score breakdown.
+
+### 6.3 Knowledge confidence and staleness
+
+Knowledge documents store a confidence label:
+
+- `verified` — checked against primary sources or current code.
+- `inferred` — reasonable synthesis that has not been checked.
+- `uncertain` — conflicting or incomplete evidence; confirm before relying on it.
+
+Imported files also store a BLAKE3 hash of the bytes that produced the note.
+The desktop build compares that hash with the current file on every knowledge
+read and marks changed or missing sources as stale. The model sees
+`confidence …` and `STALE` in `list_knowledge`/`get_knowledge` output, and
+`update_knowledge` can recalibrate confidence without rewriting content.
 
 ### 6.4 Explainability
 

@@ -148,13 +148,23 @@ impl ProjectAreas for StoreProjectAreas {
         content: &str,
         source: Option<&str>,
         tags: Vec<String>,
+        confidence: &str,
     ) -> Result<KnowledgeEntryRef, String> {
         let store = self
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         store
-            .add_knowledge_document(self.workspace_id, title, "note", source, tags, content)
+            .add_knowledge_document_with_confidence(
+                self.workspace_id,
+                title,
+                "note",
+                source,
+                tags,
+                content,
+                confidence,
+                None,
+            )
             .map_err(|error| error.to_string())
             .map(knowledge_ref)
     }
@@ -177,13 +187,16 @@ impl ProjectAreas for StoreProjectAreas {
         content: Option<&str>,
         source: Option<&str>,
         tags: Option<Vec<String>>,
+        confidence: Option<&str>,
     ) -> Result<KnowledgeDocumentRef, String> {
         let store = self
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         store
-            .update_knowledge_document(id, title, content, source, tags)
+            .update_knowledge_document_with_confidence(
+                id, title, content, source, tags, confidence, None,
+            )
             .map_err(|error| error.to_string())?;
         store
             .knowledge_document(id)
@@ -232,17 +245,33 @@ impl ProjectAreas for StoreProjectAreas {
     }
 }
 
+fn source_is_stale(document: &KnowledgeDocumentSummary) -> bool {
+    let (Some(expected), Some(source)) =
+        (document.source_hash.as_deref(), document.source.as_deref())
+    else {
+        return false;
+    };
+    match std::fs::read(source) {
+        Ok(bytes) => blake3::hash(&bytes).to_hex().as_str() != expected,
+        Err(_) => true,
+    }
+}
+
 fn knowledge_ref(document: KnowledgeDocumentSummary) -> KnowledgeEntryRef {
+    let stale = source_is_stale(&document);
     KnowledgeEntryRef {
         id: document.id,
         title: document.title,
         kind: document.kind,
         source: document.source,
         chunks: document.chunks,
+        confidence: document.confidence,
+        stale,
     }
 }
 
 fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
+    let stale = source_is_stale(&document.summary);
     KnowledgeDocumentRef {
         id: document.summary.id,
         title: document.summary.title,
@@ -251,6 +280,8 @@ fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
         tags: document.summary.tags,
         content: document.content,
         chunks: document.summary.chunks,
+        confidence: document.summary.confidence,
+        stale,
     }
 }
 
@@ -516,6 +547,42 @@ fn project_workspace(store: &Store, workspace_path: &str) -> Result<WorkspaceId,
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectTodo {
+    pub id: String,
+    pub text: String,
+    pub state: String,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    #[serde(default)]
+    pub done_when: Option<String>,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+#[tauri::command]
+fn project_manifest(
+    workspace_path: String,
+) -> Result<Option<openbad_workspace::ProjectManifest>, String> {
+    let root = PathBuf::from(&workspace_path);
+    if !root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    openbad_workspace::load_project_manifest(&root).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_todos(workspace_path: String) -> Result<Vec<ProjectTodo>, String> {
+    let path = PathBuf::from(&workspace_path)
+        .join(".openbad")
+        .join("todos.json");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&content).map_err(|error| format!("invalid .openbad/todos.json: {error}"))
+}
+
 #[tauri::command]
 fn project_overview(
     state: State<'_, AppState>,
@@ -603,6 +670,26 @@ fn knowledge_documents(
 }
 
 #[tauri::command]
+fn knowledge_stale_documents(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<String>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    let documents = store
+        .list_knowledge_documents(workspace)
+        .map_err(|error| error.to_string())?;
+    Ok(documents
+        .into_iter()
+        .filter(source_is_stale)
+        .map(|document| document.id)
+        .collect())
+}
+
+#[tauri::command]
 fn knowledge_document(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -630,6 +717,7 @@ fn add_knowledge_note(
     title: String,
     content: String,
     tags: Vec<String>,
+    confidence: Option<String>,
 ) -> Result<KnowledgeDocumentSummary, String> {
     let store = state
         .store
@@ -637,7 +725,16 @@ fn add_knowledge_note(
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let workspace = project_workspace(&store, &workspace_path)?;
     store
-        .add_knowledge_document(workspace, &title, "note", None, tags, &content)
+        .add_knowledge_document_with_confidence(
+            workspace,
+            &title,
+            "note",
+            None,
+            tags,
+            &content,
+            confidence.as_deref().unwrap_or("inferred"),
+            None,
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -661,7 +758,9 @@ fn import_knowledge_file(
             metadata.len()
         ));
     }
-    let content = std::fs::read_to_string(&source)
+    let bytes = std::fs::read(&source).map_err(|error| error.to_string())?;
+    let source_hash = blake3::hash(&bytes).to_hex().to_string();
+    let content = String::from_utf8(bytes)
         .map_err(|error| format!("knowledge file must be UTF-8: {error}"))?;
     let title = source
         .file_stem()
@@ -679,13 +778,15 @@ fn import_knowledge_file(
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let workspace = project_workspace(&store, &workspace_path)?;
     store
-        .add_knowledge_document(
+        .add_knowledge_document_with_confidence(
             workspace,
             &title,
             &kind,
             Some(source.to_string_lossy().as_ref()),
             tags,
             &content,
+            "verified",
+            Some(&source_hash),
         )
         .map_err(|error| error.to_string())
 }
@@ -1821,10 +1922,13 @@ pub fn run() {
             search_sessions,
             memories,
             project_overview,
+            project_manifest,
+            project_todos,
             project_repos,
             add_project_repo,
             remove_project_repo,
             knowledge_documents,
+            knowledge_stale_documents,
             knowledge_document,
             add_knowledge_note,
             import_knowledge_file,
@@ -1883,7 +1987,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0006_project_areas");
+        assert_eq!(payload.doctor.schema_version, "0007_knowledge_confidence");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

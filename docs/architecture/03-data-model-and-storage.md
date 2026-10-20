@@ -439,7 +439,7 @@ background re-embed into a new table and an atomic alias swap.
 
 ## 6. Knowledge library
 
-### 6.0 Current project schema (`0006_project_areas`)
+### 6.0 Current project schema (`0006_project_areas` + `0007_knowledge_confidence`)
 
 The desktop build currently stores project-owned knowledge and linked
 repositories with this smaller schema:
@@ -465,6 +465,8 @@ CREATE TABLE knowledge_documents (
     tags_json    TEXT NOT NULL DEFAULT '[]',
     content      TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    confidence   TEXT NOT NULL DEFAULT 'inferred',
+    source_hash  TEXT,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
 );

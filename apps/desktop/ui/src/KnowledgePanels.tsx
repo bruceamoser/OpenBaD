@@ -13,6 +13,7 @@ import {
   deleteKnowledgeDocument,
   importKnowledgeFile,
   loadKnowledgeDocuments,
+  loadKnowledgeStaleDocuments,
   searchProject,
 } from "./backend";
 import type {
@@ -34,11 +35,13 @@ export function KnowledgePanel({
   onChanged: () => void;
 }) {
   const [knowledge, setKnowledge] = useState<KnowledgeDocumentSummary[]>([]);
+  const [stale, setStale] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [composing, setComposing] = useState(false);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState("");
+  const [confidence, setConfidence] = useState("inferred");
   const [importing, setImporting] = useState(false);
   const [importPath, setImportPath] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +54,12 @@ export function KnowledgePanel({
     }
     setLoading(true);
     try {
-      setKnowledge(await loadKnowledgeDocuments(workspacePath));
+      const [documents, staleDocuments] = await Promise.all([
+        loadKnowledgeDocuments(workspacePath),
+        loadKnowledgeStaleDocuments(workspacePath),
+      ]);
+      setKnowledge(documents);
+      setStale(new Set(staleDocuments));
       setError(null);
     } catch (cause) {
       setError(describeError(cause));
@@ -62,6 +70,7 @@ export function KnowledgePanel({
 
   useEffect(() => {
     setKnowledge([]);
+    setStale(new Set());
     setQuery("");
     setNotice(null);
   }, [workspacePath]);
@@ -103,11 +112,13 @@ export function KnowledgePanel({
           .split(",")
           .map((tag) => tag.trim())
           .filter(Boolean),
+        confidence,
       );
       setKnowledge((items) => [document, ...items]);
       setTitle("");
       setContent("");
       setTags("");
+      setConfidence("inferred");
       setComposing(false);
       setNotice(`Added ${document.title}`);
       setError(null);
@@ -166,6 +177,24 @@ export function KnowledgePanel({
             <p className="mt-0.5 truncate font-mono text-[9px] text-slate-600">
               {document.kind} · {document.chunks} chunk
               {document.chunks === 1 ? "" : "s"} · {formatBytes(document.characters)}
+            </p>
+            <p className="mt-1 flex items-center gap-1.5 text-[9px]">
+              <span
+                className={
+                  document.confidence === "verified"
+                    ? "rounded bg-emerald-400/15 px-1 py-0.5 text-emerald-300"
+                    : document.confidence === "uncertain"
+                      ? "rounded bg-amber-400/15 px-1 py-0.5 text-amber-300"
+                      : "rounded bg-white/[0.06] px-1 py-0.5 text-slate-400"
+                }
+              >
+                {document.confidence}
+              </span>
+              {stale.has(document.id) && (
+                <span className="rounded bg-amber-400/15 px-1 py-0.5 text-amber-300">
+                  source changed
+                </span>
+              )}
             </p>
             {document.tags.length > 0 && (
               <p className="mt-1 truncate text-[9px] text-emerald-300/70">
@@ -259,6 +288,16 @@ export function KnowledgePanel({
             placeholder="tags, comma separated"
             className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
           />
+          <select
+            value={confidence}
+            onChange={(event) => setConfidence(event.target.value)}
+            aria-label="Knowledge confidence"
+            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+          >
+            <option value="inferred">Inferred — reasonable, not verified</option>
+            <option value="verified">Verified — checked against source</option>
+            <option value="uncertain">Uncertain — needs confirmation</option>
+          </select>
           <button
             type="button"
             onClick={() => void save()}

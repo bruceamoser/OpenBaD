@@ -325,19 +325,31 @@ Implemented:
 | `glob_repo` | read | Find reference-folder files by glob |
 | `grep_repo` | read | Search reference-folder text; case-insensitive by default |
 | `read_repo_file` | read | UTF-8 file inside a read-only reference folder; reports total lines |
-| `add_knowledge` | write | Add a curated project note to the knowledge library |
+| `add_knowledge` | write | Add a curated project note with `verified`, `inferred`, or `uncertain` confidence |
 | `list_knowledge` | read | List knowledge documents with ids, tags, sources, and chunk counts |
 | `get_knowledge` | read | Read a whole knowledge document by id |
-| `update_knowledge` | write | Correct title, content, source, or tags; rebuilds chunks |
+| `update_knowledge` | write | Correct title, content, source, tags, or confidence; rebuilds chunks |
 | `delete_knowledge` | write | Delete a knowledge document and its retrieval chunks |
 | `list_memories` | read | Audit durable memories with ids and pinned state |
 | `forget_memory` | write | Forget a memory by id |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
+| `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |
+| `classify_path` | read | Classify a path as authoritative, generated, historical, or external |
+| `run_task` | command | Run a named manifest command; requires Full access |
+| `todo_write` | write | Replace the durable project todo list in `.openbad/todos.json` |
+| `todo_read` | read | Read the project todo list |
+| `write_handoff` | write | Write a handoff summary to `.openbad/handoff.md` |
 
 The desktop implementation backs project tools with `StoreProjectAreas`, which
 implements `ProjectAreas` against the active workspace id. `present_artifact`
 returns `metadata.openbad_artifact`; the event stream carries that metadata to
 the UI, which opens the split workspace.
+
+Knowledge documents carry a confidence level and, for imported files, a BLAKE3
+source hash. `list_knowledge` and `get_knowledge` flag a document as `STALE`
+when the source file's current hash differs from the captured hash, and a
+source that has disappeared is treated as stale. Writes and edits that target
+generated or historical scope return a manifest-derived warning.
 
 `read_file` and `read_repo_file` return `total_lines`, `start_line`, `end_line`,
 `has_more`, and `next_start_line` metadata. Reference discovery follows the
