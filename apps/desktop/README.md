@@ -55,6 +55,10 @@ is opened in a normal browser, `ui/src/backend.ts` switches to a mock backend th
 streams reasoning, content, tool calls, and usage. This is useful for layout,
 scroll, and streaming tests without rebuilding the native app.
 
+`pnpm --dir ui test:e2e` runs the Playwright smoke tests against that mock
+backend. They cover streamed reasoning and tool cards, auto-scroll,
+cancellation, and preference persistence.
+
 ## Commands
 
 | Command | Purpose |

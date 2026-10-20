@@ -64,3 +64,6 @@ lcov.info
 # Temporary
 tmp/
 .tmp/
+
+test-results/
+playwright-report/
