@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type {
   AgentEvent,
@@ -507,6 +508,12 @@ export async function previewProjectFile(
     content: `// ${path}\n// Mock preview for the browser harness.\n`,
     data_url: null,
   };
+}
+
+export async function quitApp(): Promise<void> {
+  if (isTauri) {
+    await getCurrentWindow().close();
+  }
 }
 
 export async function apiKeyStatus(): Promise<boolean> {
