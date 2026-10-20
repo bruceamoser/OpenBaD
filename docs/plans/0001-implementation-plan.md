@@ -269,6 +269,9 @@ commands with approvals.
 - `run_tests` detects Cargo, pnpm/npm/yarn, pytest, Go, and make projects,
   runs the suite through the gated command tool, and surfaces failure summary
   lines.
+- DeepSeek requests retry retryable HTTP statuses and transport errors with
+  exponential backoff, reusing the same frozen request bytes. Streaming
+  retries happen before the first chunk; a mid-stream failure is surfaced.
 - `run_command` drains stdout/stderr concurrently, runs the shell in its own
   process group, and kills the whole group on timeout or exit so background
   helpers do not survive the call.

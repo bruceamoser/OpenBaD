@@ -13,6 +13,7 @@ use crate::fim::{FimRequest, FimResponse};
 use crate::provider::{
     CacheMode, FrozenRequest, ModelProvider, ProviderCapabilities, ProviderError,
 };
+use crate::retry::RetryPolicy;
 use crate::transport::{HttpRequest, HttpTransport};
 
 pub const FLASH_MODEL: &str = "deepseek-flash";
@@ -106,6 +107,7 @@ pub struct DeepSeekClient<T: HttpTransport> {
     user_id: Option<String>,
     thinking: bool,
     reasoning_effort: Option<ReasoningEffort>,
+    retry: RetryPolicy,
 }
 
 impl<T: HttpTransport> DeepSeekClient<T> {
@@ -119,6 +121,7 @@ impl<T: HttpTransport> DeepSeekClient<T> {
             user_id: None,
             thinking: true,
             reasoning_effort: None,
+            retry: RetryPolicy::default(),
         }
     }
 
@@ -149,6 +152,12 @@ impl<T: HttpTransport> DeepSeekClient<T> {
     #[must_use]
     pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
+        self
+    }
+
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
         self
     }
 
@@ -201,15 +210,7 @@ impl<T: HttpTransport> DeepSeekClient<T> {
     }
 
     pub async fn complete(&self, frozen: FrozenRequest) -> Result<ModelResponse, ProviderError> {
-        let response = self.transport.post(self.http_request(&frozen)).await?;
-        if !(200..300).contains(&response.status) {
-            return Err(ProviderError::Request(format!(
-                "HTTP {}: {}",
-                response.status,
-                String::from_utf8_lossy(&response.body)
-            )));
-        }
-
+        let response = self.post_with_retry(&frozen).await?;
         let parsed: ChatResponse = serde_json::from_slice(&response.body)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
         let choice =
@@ -233,20 +234,12 @@ impl<T: HttpTransport> DeepSeekClient<T> {
         let body = serde_json::to_vec(&request)
             .map_err(|error| ProviderError::InvalidRequest(error.to_string()))?;
         let response = self
-            .transport
-            .post(HttpRequest {
+            .post_with_retry_request(HttpRequest {
                 url: format!("{}/beta/completions", self.base_url.trim_end_matches('/')),
                 headers: self.headers(),
                 body,
             })
             .await?;
-        if !(200..300).contains(&response.status) {
-            return Err(ProviderError::Request(format!(
-                "HTTP {}: {}",
-                response.status,
-                String::from_utf8_lossy(&response.body)
-            )));
-        }
         serde_json::from_slice(&response.body)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))
     }
@@ -255,10 +248,7 @@ impl<T: HttpTransport> DeepSeekClient<T> {
         &self,
         frozen: FrozenRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let bytes = self
-            .transport
-            .post_stream(self.http_request(&frozen))
-            .await?;
+        let bytes = self.stream_with_retry(&frozen).await?;
         let decoder = DeepSeekStreamDecoder::new();
         let pending: VecDeque<StreamEvent> = VecDeque::new();
 
@@ -294,6 +284,81 @@ impl<T: HttpTransport> DeepSeekClient<T> {
         Ok(Box::pin(stream))
     }
 
+    async fn post_with_retry(
+        &self,
+        frozen: &FrozenRequest,
+    ) -> Result<crate::transport::HttpResponse, ProviderError> {
+        self.post_with_retry_request(self.http_request(frozen))
+            .await
+    }
+
+    async fn post_with_retry_request(
+        &self,
+        request: HttpRequest,
+    ) -> Result<crate::transport::HttpResponse, ProviderError> {
+        let mut attempts = 0;
+        loop {
+            let body = request.body.clone();
+            match self
+                .transport
+                .post(HttpRequest {
+                    url: request.url.clone(),
+                    headers: request.headers.clone(),
+                    body,
+                })
+                .await
+            {
+                Ok(response) if (200..300).contains(&response.status) => return Ok(response),
+                Ok(response) => {
+                    let status = response.status;
+                    if let Some(delay) = self.retry.next_delay(attempts, Some(status), None) {
+                        tokio::time::sleep(delay).await;
+                        attempts += 1;
+                        continue;
+                    }
+                    return Err(ProviderError::Request(format!(
+                        "HTTP {status}: {}",
+                        String::from_utf8_lossy(&response.body)
+                    )));
+                }
+                Err(error) => {
+                    if let Some(delay) =
+                        self.retry
+                            .next_delay(attempts, provider_error_status(&error), None)
+                    {
+                        tokio::time::sleep(delay).await;
+                        attempts += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    async fn stream_with_retry(
+        &self,
+        frozen: &FrozenRequest,
+    ) -> Result<crate::transport::ByteStream, ProviderError> {
+        let mut attempts = 0;
+        loop {
+            match self.transport.post_stream(self.http_request(frozen)).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => {
+                    if let Some(delay) =
+                        self.retry
+                            .next_delay(attempts, provider_error_status(&error), None)
+                    {
+                        tokio::time::sleep(delay).await;
+                        attempts += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
     fn http_request(&self, frozen: &FrozenRequest) -> HttpRequest {
         HttpRequest {
             url: format!("{}/chat/completions", self.base_url.trim_end_matches('/')),
@@ -311,6 +376,19 @@ impl<T: HttpTransport> DeepSeekClient<T> {
             ("Content-Type".to_owned(), "application/json".to_owned()),
         ]
     }
+}
+
+fn provider_error_status(error: &ProviderError) -> Option<u16> {
+    let ProviderError::Request(message) = error else {
+        return None;
+    };
+    message
+        .strip_prefix("HTTP ")?
+        .split(':')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// DeepSeek reports cache hits and misses as disjoint prompt counts.
@@ -331,6 +409,7 @@ pub fn normalize_usage(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Mutex;
 
     use crate::transport::ByteStream;
@@ -368,6 +447,31 @@ mod tests {
             Ok(Box::pin(stream::iter(
                 chunks.into_iter().map(|chunk| Ok(Bytes::from(chunk))),
             )))
+        }
+    }
+
+    #[derive(Default)]
+    struct SequenceTransport {
+        responses: Mutex<VecDeque<crate::transport::HttpResponse>>,
+        requests: Mutex<Vec<HttpRequest>>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for SequenceTransport {
+        async fn post(
+            &self,
+            request: HttpRequest,
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            self.requests.lock().expect("requests").push(request);
+            self.responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Request("no mock response".to_owned()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Request("not implemented".to_owned()))
         }
     }
 
@@ -431,6 +535,53 @@ mod tests {
         );
         assert_eq!(response.usage.cache_read_tokens, 90);
         assert_eq!(response.usage.input_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn complete_retries_rate_limits_and_server_errors() {
+        let transport = SequenceTransport {
+            responses: Mutex::new(VecDeque::from([
+                crate::transport::HttpResponse {
+                    status: 429,
+                    body: b"slow down".to_vec(),
+                },
+                crate::transport::HttpResponse {
+                    status: 503,
+                    body: b"unavailable".to_vec(),
+                },
+                crate::transport::HttpResponse {
+                    status: 200,
+                    body: br#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#
+                        .to_vec(),
+                },
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client =
+            DeepSeekClient::new(transport, "sk-test").with_retry_policy(RetryPolicy::new(3, 1, 1));
+        let frozen = request().freeze(envelope(FLASH_MODEL)).expect("freeze");
+        let response = client.complete(frozen).await.expect("complete");
+
+        assert_eq!(response.message.content.as_deref(), Some("ok"));
+        assert_eq!(client.transport.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn complete_does_not_retry_client_errors() {
+        let transport = SequenceTransport {
+            responses: Mutex::new(VecDeque::from([crate::transport::HttpResponse {
+                status: 401,
+                body: b"bad key".to_vec(),
+            }])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client =
+            DeepSeekClient::new(transport, "sk-test").with_retry_policy(RetryPolicy::new(5, 1, 1));
+        let frozen = request().freeze(envelope(FLASH_MODEL)).expect("freeze");
+        let error = client.complete(frozen).await.expect_err("auth error");
+
+        assert!(error.to_string().contains("401"));
+        assert_eq!(client.transport.requests.lock().expect("requests").len(), 1);
     }
 
     #[tokio::test]
