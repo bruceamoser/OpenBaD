@@ -1,7 +1,8 @@
 //! The turn/step agent loop that connects DeepSeek to workspace tools.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use openbad_harness::{ApiFormat, ReasoningEffort, RequestEnvelope, canonical_json, hash_bytes};
@@ -19,6 +20,51 @@ use openbad_tools::{
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
 use uuid::Uuid;
+
+/// Messages the human injects into a running turn. They are delivered before
+/// the next provider request, so they can redirect the agent without starting a
+/// second turn.
+#[derive(Default)]
+pub struct SteeringInbox {
+    active: AtomicBool,
+    pending: Mutex<VecDeque<String>>,
+}
+
+impl SteeringInbox {
+    pub fn begin(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
+        self.active.store(true, Ordering::SeqCst);
+    }
+
+    pub fn end(&self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    pub fn push(&self, message: String) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        pending.push_back(message);
+        true
+    }
+
+    fn drain(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .map(|mut pending| pending.drain(..).collect())
+            .unwrap_or_default()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -100,6 +146,7 @@ pub struct Agent<T: HttpTransport> {
     memory: Option<Arc<dyn MemoryStore>>,
     project: Option<Arc<dyn ProjectAreas>>,
     outside_grants: Vec<OutsideGrant>,
+    steering: Option<Arc<SteeringInbox>>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -121,6 +168,7 @@ impl<T: HttpTransport> Agent<T> {
             memory: None,
             project: None,
             outside_grants: Vec::new(),
+            steering: None,
             redactions: Vec::new(),
             config,
         }
@@ -154,6 +202,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_outside_grants(mut self, grants: Vec<OutsideGrant>) -> Self {
         self.outside_grants = grants;
+        self
+    }
+
+    #[must_use]
+    pub fn with_steering(mut self, steering: Arc<SteeringInbox>) -> Self {
+        self.steering = Some(steering);
         self
     }
 
@@ -212,6 +266,11 @@ impl<T: HttpTransport> Agent<T> {
                 return Err(AgentError::Cancelled);
             }
             observer.on_step(step);
+            if let Some(steering) = &self.steering {
+                for message in steering.drain() {
+                    messages.push(ChatMessage::user(message));
+                }
+            }
             let request = self.client.build_request(
                 messages.clone(),
                 Some(tool_schemas.clone()),
@@ -269,6 +328,20 @@ impl<T: HttpTransport> Agent<T> {
             messages.push(assistant);
 
             if tool_calls.is_empty() {
+                let pending = self
+                    .steering
+                    .as_ref()
+                    .map(|steering| steering.drain())
+                    .unwrap_or_default();
+                if !pending.is_empty() {
+                    if step == step_budget {
+                        return Err(AgentError::MaxSteps(step_budget));
+                    }
+                    for message in pending {
+                        messages.push(ChatMessage::user(message));
+                    }
+                    continue;
+                }
                 return Ok(AgentRun {
                     new_messages: messages[start_len..].to_vec(),
                     text,
@@ -806,6 +879,78 @@ mod tests {
         assert!(audit.contains(r#""tool":"read_file""#));
         assert!(audit.contains(r#""turn":1"#));
         assert!(audit.contains(r#""is_error":false"#));
+    }
+
+    struct SteeringTransport {
+        responses: Mutex<VecDeque<HttpResponse>>,
+        requests: Mutex<Vec<HttpRequest>>,
+        steering: Arc<SteeringInbox>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for SteeringTransport {
+        async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            let is_first = {
+                let mut requests = self.requests.lock().expect("requests");
+                requests.push(request);
+                requests.len() == 1
+            };
+            if is_first {
+                assert!(
+                    self.steering
+                        .push("Please mention the second answer.".to_owned())
+                );
+            }
+            self.responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Request("no mock response".to_owned()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_redirects_a_running_turn() {
+        let directory = tempdir().expect("tempdir");
+        let steering = Arc::new(SteeringInbox::default());
+        steering.begin();
+        let transport = SteeringTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"First answer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Second answer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":7}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+            steering: Arc::clone(&steering),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        )
+        .with_steering(Arc::clone(&steering));
+        let run = agent
+            .run(vec![ChatMessage::user("start")])
+            .await
+            .expect("run");
+        steering.end();
+        assert_eq!(run.steps, 2);
+        assert_eq!(run.text, "Second answer.");
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == ChatRole::User
+                && message.content.as_deref() == Some("Please mention the second answer.")
+        }));
     }
 
     #[tokio::test]

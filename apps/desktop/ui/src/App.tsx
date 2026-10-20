@@ -13,6 +13,7 @@ import {
   FolderOpen,
   Gauge,
   KeyRound,
+  ListPlus,
   ListTodo,
   Loader2,
   MessageSquare,
@@ -56,6 +57,7 @@ import {
   quitApp,
   searchSessions as searchStoredSessions,
   setSessionAccessMode as persistSessionAccessMode,
+  steerChat as steerRunningTurn,
   workspaceDefault,
   workspacesDirectory as fetchWorkspacesDirectory,
   workspaceIndexStatus as fetchIndexStatus,
@@ -156,6 +158,7 @@ export default function App() {
   const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
+  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -433,6 +436,7 @@ export default function App() {
     setEntries([]);
     setPermissionMode("read");
     setAccessRequest(null);
+    setQueuedMessages([]);
     setError(null);
     followRef.current = true;
   }, []);
@@ -442,6 +446,7 @@ export default function App() {
     setEntries([]);
     setPermissionMode("read");
     setAccessRequest(null);
+    setQueuedMessages([]);
     setError(null);
     followRef.current = true;
     composerRef.current?.focus();
@@ -639,15 +644,17 @@ export default function App() {
     window.addEventListener("pointerup", stop);
   }, [panelWidth]);
 
-  const send = useCallback(async () => {
-    const text = message.trim();
+  const send = useCallback(async (override?: string) => {
+    const text = (override ?? message).trim();
     if (text.length === 0 || busy || workspacePath.length === 0) {
       return;
     }
     setBusy(true);
     setStopRequested(false);
     setError(null);
-    setMessage("");
+    if (override === undefined) {
+      setMessage("");
+    }
     followRef.current = true;
     const assistantId = nextId();
     setEntries((current) => [
@@ -796,6 +803,53 @@ export default function App() {
     workspacePath,
   ]);
 
+  const steer = useCallback(async () => {
+    const text = message.trim();
+    if (text.length === 0) {
+      return;
+    }
+    if (!busy) {
+      void send();
+      return;
+    }
+    try {
+      await steerRunningTurn(text);
+      setEntries((current) => [
+        ...current,
+        { id: nextId(), role: "user", text, steering: true },
+      ]);
+      setMessage("");
+      followRef.current = true;
+    } catch {
+      setQueuedMessages((current) => [...current, text]);
+      setMessage("");
+    }
+  }, [busy, message, send]);
+
+  const queue = useCallback(() => {
+    const text = message.trim();
+    if (text.length === 0) {
+      return;
+    }
+    setQueuedMessages((current) => [...current, text]);
+    setMessage("");
+  }, [message]);
+
+  useEffect(() => {
+    if (busy || queuedMessages.length === 0 || workspacePath.length === 0) {
+      return;
+    }
+    const [next, ...rest] = queuedMessages;
+    setQueuedMessages(rest);
+    void send(next);
+  }, [busy, queuedMessages, send, workspacePath]);
+
+  const removeQueued = useCallback((index: number) => {
+    setQueuedMessages((current) =>
+      current.filter((_, itemIndex) => itemIndex !== index),
+    );
+  }, []);
+
   const openSession = useCallback(
     async (session: SessionSummary) => {
       setError(null);
@@ -804,6 +858,7 @@ export default function App() {
         setSessionId(view.session_id);
         setPermissionMode(session.access_mode);
         setAccessRequest(null);
+        setQueuedMessages([]);
         if (session.workspace_id !== null) {
           const project = projects.find((item) => item.id === session.workspace_id);
           if (project !== undefined) {
@@ -892,6 +947,7 @@ export default function App() {
         setWorkspacePath("");
         setSessionId(null);
         setEntries([]);
+        setQueuedMessages([]);
       }
       setSettingsOpen(false);
     } catch (cause) {
@@ -1467,6 +1523,33 @@ export default function App() {
                   </button>
                 </div>
               )}
+              {queuedMessages.length > 0 && (
+                <div className="mb-2 rounded-md border border-white/[0.08] bg-white/[0.02] px-2.5 py-2">
+                  <p className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    <ListPlus size={11} /> Queued · {queuedMessages.length}
+                  </p>
+                  <div className="mt-1 space-y-1">
+                    {queuedMessages.map((queued, index) => (
+                      <div
+                        key={`queued-${index}-${queued.slice(0, 24)}`}
+                        className="flex items-start gap-2 rounded bg-black/20 px-2 py-1"
+                      >
+                        <span className="min-w-0 flex-1 whitespace-pre-wrap text-[10px] leading-4 text-slate-400">
+                          {queued}
+                        </span>
+                        <button
+                          type="button"
+                          aria-label={`Remove queued message ${index + 1}`}
+                          onClick={() => removeQueued(index)}
+                          className="rounded p-0.5 text-slate-600 hover:text-amber-300"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="rounded-xl border border-white/[0.09] bg-[#10151b] shadow-lg shadow-black/20">
                 <textarea
                   ref={composerRef}
@@ -1475,7 +1558,11 @@ export default function App() {
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
-                      void send();
+                      if (busy) {
+                        void steer();
+                      } else {
+                        void send();
+                      }
                     }
                   }}
                   rows={2}
@@ -1512,17 +1599,39 @@ export default function App() {
                     {thinking && <span className="text-emerald-400/70">thinking</span>}
                   </button>
                   <span className="ml-auto text-[10px] text-slate-700">
-                    Enter to send · Shift+Enter for a newline
+                    {busy
+                      ? "Enter to steer · Shift+Enter for a newline"
+                      : "Enter to send · Shift+Enter for a newline"}
                   </span>
                   {busy ? (
-                    <button
-                      type="button"
-                      onClick={() => void stop()}
-                      disabled={stopRequested}
-                      className="ml-1 flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-200 disabled:opacity-40"
-                    >
-                      <Square size={12} /> {stopRequested ? "Stopping…" : "Stop"}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        aria-label="Steer current turn"
+                        onClick={() => void steer()}
+                        disabled={message.trim().length === 0}
+                        className="ml-1 flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1.5 text-[11px] text-emerald-200 disabled:opacity-30"
+                      >
+                        <Send size={12} /> Steer
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Queue message"
+                        onClick={queue}
+                        disabled={message.trim().length === 0}
+                        className="flex items-center gap-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-300 disabled:opacity-30"
+                      >
+                        <ListPlus size={12} /> Queue
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void stop()}
+                        disabled={stopRequested}
+                        className="flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-200 disabled:opacity-40"
+                      >
+                        <Square size={12} /> {stopRequested ? "Stopping…" : "Stop"}
+                      </button>
+                    </>
                   ) : (
                     <button
                       type="button"
@@ -1845,6 +1954,11 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] rounded-xl border border-emerald-400/15 bg-emerald-400/[0.06] px-4 py-3 text-[13px] leading-6 text-slate-100">
+          {entry.steering && (
+            <p className="mb-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-emerald-300/80">
+              Steering
+            </p>
+          )}
           {entry.text}
         </div>
       </div>

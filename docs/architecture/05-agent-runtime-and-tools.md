@@ -42,6 +42,10 @@ Rules:
   assistant message.
 - Tool calls are paired with results; an interrupted step records missing
   results as errors.
+- A human steering message is appended before the next provider request, so it
+  redirects a running turn without creating a second turn. If the model has
+  already produced a final answer, pending steering keeps the turn alive for
+  one more step.
 - The loop never exceeds its step, tool, token, time, or cost budget.
 
 ## 3. Routing
