@@ -2759,10 +2759,12 @@ name = "openbad-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "globset",
  "ignore",
  "openbad-core",
  "openbad-governance",
  "openbad-workspace",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

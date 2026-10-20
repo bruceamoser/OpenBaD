@@ -32,8 +32,8 @@ later phase.
 > validated; macOS and Windows still need per-OS validation. Phase 2 provider
 > foundation is complete, and the Phase 3 coding MVP is working: built-in
 > workspace tools, the DeepSeek agent loop, SQLite message persistence, keychain
-> API-key storage, and a Tauri chat UI. Per-call approvals, true token streaming,
-> the evidence gate, and the Phase 4–8 systems remain.
+> API-key storage, and a Tauri chat UI with streamed reasoning and cancellation.
+> Per-call approvals, the evidence gate, and the Phase 4–8 systems remain.
 
 | Milestone | Phases | Outcome | Target |
 | --- | --- | --- | --- |
@@ -229,8 +229,9 @@ commands with approvals.
 ### Phase 3 implementation notes
 
 - `openbad-tools` now has a `Tool` trait, a `ToolRegistry`, OpenAI-style tool
-  schemas, and nine built-in tools: `read_file`, `list_dir`, `grep`, `write_file`,
-  `edit_file`, `run_command`, `git_status`, `git_diff`, and `repo_map`.
+  schemas, and eleven built-in tools: `read_file`, `list_dir`, `grep`, `glob`,
+  `find_symbols`, `write_file`, `edit_file`, `run_command`, `git_status`,
+  `git_diff`, and `repo_map`.
 - All filesystem tools resolve through `WorkspaceService`, which canonicalizes
   paths and rejects parent or symlink escapes. Existing files must be read before
   they can be overwritten or edited. Writes use a temporary file plus rename.
