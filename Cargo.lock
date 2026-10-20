@@ -2660,6 +2660,7 @@ dependencies = [
  "openbad-agent",
  "openbad-core",
  "openbad-governance",
+ "openbad-harness",
  "openbad-llm",
  "openbad-store",
  "openbad-tools",

@@ -10,6 +10,7 @@ use openbad_governance::secrets::KeychainSecretStore;
 #[cfg(not(feature = "keyring"))]
 use openbad_governance::secrets::MemorySecretStore;
 use openbad_governance::secrets::{Secret, SecretStore};
+use openbad_harness::ReasoningEffort;
 use openbad_llm::chat::{ChatMessage, ChatRole, ToolCall};
 use openbad_llm::{DeepSeekClient, FLASH_MODEL, ReqwestTransport, UsageTotals};
 use openbad_store::Store;
@@ -18,7 +19,7 @@ use openbad_store::types::{
     SessionMessage, SessionSummary,
 };
 use openbad_workspace::WorkspaceService;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::State;
 use tauri::ipc::Channel;
@@ -258,17 +259,37 @@ fn api_key_status(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(stored || std::env::var_os("DEEPSEEK_API_KEY").is_some())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatInput {
+    pub session_id: Option<String>,
+    pub workspace_path: String,
+    pub message: String,
+    pub allow_writes: bool,
+    pub allow_commands: bool,
+    pub max_steps: Option<u32>,
+    pub model: Option<String>,
+    pub thinking: Option<bool>,
+    pub reasoning_effort: Option<String>,
+}
+
 #[tauri::command]
 async fn chat(
     state: State<'_, AppState>,
-    session_id: Option<String>,
-    workspace_path: String,
-    message: String,
-    allow_writes: bool,
-    allow_commands: bool,
-    max_steps: Option<u32>,
+    request: ChatInput,
     on_event: Channel<AgentEvent>,
 ) -> Result<ChatReply, String> {
+    let ChatInput {
+        session_id,
+        workspace_path,
+        message,
+        allow_writes,
+        allow_commands,
+        max_steps,
+        model,
+        thinking,
+        reasoning_effort,
+    } = request;
     let message = message.trim().to_owned();
     if message.is_empty() {
         return Err("message must not be empty".to_owned());
@@ -349,10 +370,21 @@ async fn chat(
     let (history, user_id) = history;
     let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
-    let client = DeepSeekClient::new(ReqwestTransport::new(), api_key)
-        .with_model(FLASH_MODEL)
+    let mut client = DeepSeekClient::new(ReqwestTransport::new(), api_key)
+        .with_model(model.unwrap_or_else(|| FLASH_MODEL.to_owned()))
         .with_base_url(base_url)
         .with_user_id(user_id);
+    if let Some(thinking) = thinking {
+        client = client.with_thinking(thinking);
+    }
+    if let Some(effort) = reasoning_effort {
+        let effort = match effort.as_str() {
+            "low" => ReasoningEffort::Low,
+            "max" => ReasoningEffort::Max,
+            _ => ReasoningEffort::High,
+        };
+        client = client.with_reasoning_effort(effort);
+    }
     let agent = default_agent(
         client,
         Arc::new(WorkspaceService::new(workspace_path)),
@@ -705,6 +737,27 @@ mod tests {
         ensure_defaults(&store).expect("second");
         assert_eq!(store.list_providers().expect("providers").len(), 1);
         assert_eq!(store.list_model_routes().expect("routes").len(), 2);
+    }
+
+    #[test]
+    fn chat_input_accepts_camel_case_fields() {
+        let input: ChatInput = serde_json::from_value(json!({
+            "sessionId": null,
+            "workspacePath": "/tmp/work",
+            "message": "hello",
+            "allowWrites": true,
+            "allowCommands": false,
+            "maxSteps": 32,
+            "model": "deepseek-v4-pro",
+            "thinking": true,
+            "reasoningEffort": "max"
+        }))
+        .expect("input");
+        assert_eq!(input.workspace_path, "/tmp/work");
+        assert!(input.allow_writes);
+        assert_eq!(input.max_steps, Some(32));
+        assert_eq!(input.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(input.reasoning_effort.as_deref(), Some("max"));
     }
 
     #[test]

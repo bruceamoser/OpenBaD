@@ -101,6 +101,9 @@ export type ChatInput = {
   allowWrites: boolean;
   allowCommands: boolean;
   maxSteps: number;
+  model: string;
+  thinking: boolean;
+  reasoningEffort: string;
 };
 
 export async function chat(
@@ -111,12 +114,17 @@ export async function chat(
     const channel = new Channel<AgentEvent>();
     channel.onmessage = onEvent;
     return invoke<ChatReply>("chat", {
-      sessionId: input.sessionId,
-      workspacePath: input.workspacePath,
-      message: input.message,
-      allowWrites: input.allowWrites,
-      allowCommands: input.allowCommands,
-      maxSteps: input.maxSteps,
+      request: {
+        sessionId: input.sessionId,
+        workspacePath: input.workspacePath,
+        message: input.message,
+        allowWrites: input.allowWrites,
+        allowCommands: input.allowCommands,
+        maxSteps: input.maxSteps,
+        model: input.model,
+        thinking: input.thinking,
+        reasoningEffort: input.reasoningEffort,
+      },
       onEvent: channel,
     });
   }
