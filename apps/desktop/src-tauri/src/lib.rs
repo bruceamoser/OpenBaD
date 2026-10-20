@@ -19,7 +19,7 @@ use openbad_store::types::{
     AuditReport, DoctorReport, ModelRouteRecord, NewModelRoute, NewProvider, ProviderRecord,
     SessionMessage, SessionSummary,
 };
-use openbad_tools::WorkspaceSearch;
+use openbad_tools::{CheckpointSink, WorkspaceSearch};
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,6 +39,31 @@ pub struct AppState {
 struct StoreSearch {
     store: Arc<Mutex<Store>>,
     workspace_id: WorkspaceId,
+}
+
+struct SessionCheckpoints {
+    store: Arc<Mutex<Store>>,
+    session_id: SessionId,
+    turn: u32,
+}
+
+impl CheckpointSink for SessionCheckpoints {
+    fn save(&self, path: &str, existed: bool, content: Option<&[u8]>) -> Result<String, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .save_file_checkpoint(
+                self.session_id,
+                Some(self.turn),
+                path,
+                existed,
+                content.map(<[u8]>::to_vec),
+            )
+            .map(|checkpoint| checkpoint.id)
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl WorkspaceSearch for StoreSearch {
@@ -214,6 +239,71 @@ fn sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     store.list_sessions(50).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn checkpoints(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<openbad_store::types::FileCheckpointSummary>, String> {
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .list_file_checkpoints(session, 50)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn restore_checkpoint(state: State<'_, AppState>, checkpoint_id: String) -> Result<String, String> {
+    let checkpoint = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .load_file_checkpoint(&checkpoint_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("checkpoint not found: {checkpoint_id}"))?
+    };
+    let workspace_path = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .session_workspace_path(checkpoint.session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "session has no workspace".to_owned())?
+    };
+    let workspace = WorkspaceService::new(workspace_path);
+    let path = workspace
+        .resolve(Path::new(&checkpoint.path))
+        .map_err(|error| error.to_string())?;
+    if checkpoint.existed {
+        let content = checkpoint
+            .content
+            .ok_or_else(|| "checkpoint has no original content".to_owned())?;
+        let content = String::from_utf8(content)
+            .map_err(|error| format!("checkpoint is not UTF-8: {error}"))?;
+        openbad_tools::atomic_write(&path, &content).map_err(|error| error.to_string())?;
+    } else if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+    }
+    {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .delete_file_checkpoint(&checkpoint_id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(path.display().to_string())
 }
 
 #[tauri::command]
@@ -546,7 +636,13 @@ async fn chat(
             ..AgentConfig::default()
         },
     );
-    agent = agent.with_redactions(redactions);
+    agent = agent
+        .with_redactions(redactions)
+        .with_checkpoints(Arc::new(SessionCheckpoints {
+            store: Arc::clone(&state.store),
+            session_id: session,
+            turn,
+        }));
     if indexed {
         if let Ok(workspace_id) = workspace_id.parse::<WorkspaceId>() {
             agent = agent.with_search(Arc::new(StoreSearch {
@@ -856,6 +952,8 @@ pub fn run() {
             api_key_status,
             sessions,
             search_sessions,
+            checkpoints,
+            restore_checkpoint,
             session_view,
             chat
         ])
@@ -873,7 +971,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0003_workspace_index");
+        assert_eq!(payload.doctor.schema_version, "0004_file_checkpoints");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

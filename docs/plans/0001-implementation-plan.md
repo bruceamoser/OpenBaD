@@ -34,8 +34,8 @@ later phase.
 > workspace tools, the DeepSeek agent loop, SQLite message persistence, keychain
 > API-key storage, and a Tauri chat UI with streamed reasoning and cancellation.
 > Phase 4 has started with the SQLite workspace index and indexed search tools.
-> Per-call approvals, the evidence gate, LSP/PTY/checkpoints, and the Phase 5–8
-> systems remain.
+> Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind, and the
+> Phase 5–8 systems remain.
 
 | Milestone | Phases | Outcome | Target |
 | --- | --- | --- | --- |
@@ -115,6 +115,7 @@ secrets.
 - `openbad-store::Store` owns a dedicated writer thread and a separate reader
   connection. Every mutation goes through `WriteCommand`; event append and
   projection update share one transaction.
+- `0004_file_checkpoints.sql` adds file snapshots for restore-on-demand.
 - `0003_workspace_index.sql` adds workspace file hashes, symbols, and FTS5 search.
 - `0002_phase1_schema.sql` adds providers, model routes, session projections,
   approvals, audit, LLM calls, tool invocations, evidence, and request
@@ -316,8 +317,12 @@ commands with approvals.
 - Default indexing limits are 512 KiB per file and 64 directory levels. The
   extension allowlist covers common source, config, and documentation formats;
   binary files are skipped.
+- `write_file` and `edit_file` save the original file (or its absence) to
+  `file_checkpoints` before mutating. The sidebar lists recent checkpoints and
+  can restore them; restore resolves the path back inside the session workspace
+  and deletes the used checkpoint.
 - Still open for Phase 4: filesystem watching/debounce, LSP diagnostics, PTY and
-  job supervision, checkpoint/rewind, diff review, FIM completion, and the
+  job supervision, diff review, whole-turn rewind, FIM completion, and the
   workspace doctor report.
 
 ## 9. Phase 5 — Memory and knowledge

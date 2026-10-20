@@ -149,12 +149,17 @@ pub trait WorkspaceSearch: Send + Sync {
     ) -> Result<Vec<WorkspaceSymbolHit>, String>;
 }
 
+pub trait CheckpointSink: Send + Sync {
+    fn save(&self, path: &str, existed: bool, content: Option<&[u8]>) -> Result<String, String>;
+}
+
 pub struct ToolContext {
     pub workspace: Arc<WorkspaceService>,
     pub allow_writes: bool,
     pub allow_commands: bool,
     pub max_output_bytes: usize,
     pub search: Option<Arc<dyn WorkspaceSearch>>,
+    pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     read_paths: Mutex<HashSet<PathBuf>>,
 }
 
@@ -167,6 +172,7 @@ impl ToolContext {
             allow_commands: false,
             max_output_bytes: 256 * 1024,
             search: None,
+            checkpoints: None,
             read_paths: Mutex::new(HashSet::new()),
         }
     }
@@ -293,7 +299,26 @@ fn truncate(content: &str, max_bytes: usize) -> String {
     format!("{}\n[truncated at {max_bytes} bytes]", &content[..end])
 }
 
-fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
+fn checkpoint_before_write(
+    context: &ToolContext,
+    path: &Path,
+) -> Result<Option<String>, ToolError> {
+    let Some(checkpoints) = &context.checkpoints else {
+        return Ok(None);
+    };
+    let existed = path.exists();
+    let content = if existed {
+        Some(std::fs::read(path)?)
+    } else {
+        None
+    };
+    let checkpoint = checkpoints
+        .save(&path.to_string_lossy(), existed, content.as_deref())
+        .map_err(ToolError::Failed)?;
+    Ok(Some(checkpoint))
+}
+
+pub fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -864,13 +889,14 @@ impl Tool for WriteFileTool {
             )));
         }
         let content = string_arg(&arguments, "content")?;
+        let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &content)?;
         Ok(ToolResult::ok(format!(
             "wrote {} bytes to {}",
             content.len(),
             path.display()
         ))
-        .with_metadata(json!({"path": path, "bytes": content.len()})))
+        .with_metadata(json!({"path": path, "bytes": content.len(), "checkpoint": checkpoint})))
     }
 }
 
@@ -937,9 +963,15 @@ impl Tool for EditFileTool {
         } else {
             content.replacen(&old, &new, 1)
         };
+        let checkpoint = checkpoint_before_write(context, &path)?;
         atomic_write(&path, &updated)?;
-        Ok(ToolResult::ok(format!("updated {}", path.display()))
-            .with_metadata(json!({"path": path, "replacements": count})))
+        Ok(
+            ToolResult::ok(format!("updated {}", path.display())).with_metadata(json!({
+                "path": path,
+                "replacements": count,
+                "checkpoint": checkpoint
+            })),
+        )
     }
 }
 
@@ -1367,6 +1399,70 @@ mod tests {
                 signature: format!("fn {query}()"),
             }])
         }
+    }
+
+    type CheckpointSave = (String, bool, Option<Vec<u8>>);
+
+    struct FakeCheckpoints {
+        saves: Mutex<Vec<CheckpointSave>>,
+    }
+
+    impl CheckpointSink for FakeCheckpoints {
+        fn save(
+            &self,
+            path: &str,
+            existed: bool,
+            content: Option<&[u8]>,
+        ) -> Result<String, String> {
+            self.saves.lock().expect("lock").push((
+                path.to_owned(),
+                existed,
+                content.map(<[u8]>::to_vec),
+            ));
+            Ok(format!(
+                "checkpoint-{}",
+                self.saves.lock().expect("lock").len()
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_tools_checkpoint_before_mutating() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("file.txt"), "alpha").expect("file");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let checkpoints = Arc::new(FakeCheckpoints {
+            saves: Mutex::new(Vec::new()),
+        });
+        context.checkpoints = Some(checkpoints.clone());
+
+        ReadFileTool
+            .execute(json!({"path": "file.txt"}), &context)
+            .await
+            .expect("read");
+        EditFileTool
+            .execute(
+                json!({"path": "file.txt", "old": "alpha", "new": "beta"}),
+                &context,
+            )
+            .await
+            .expect("edit");
+        WriteFileTool
+            .execute(json!({"path": "new.txt", "content": "created"}), &context)
+            .await
+            .expect("write");
+
+        let saves = checkpoints.saves.lock().expect("lock");
+        assert_eq!(saves.len(), 2);
+        assert_eq!(
+            saves[0].0,
+            directory.path().join("file.txt").to_string_lossy()
+        );
+        assert!(saves[0].1);
+        assert_eq!(saves[0].2.as_deref(), Some(b"alpha".as_slice()));
+        assert!(!saves[1].1);
+        assert_eq!(saves[1].2, None);
     }
 
     #[tokio::test]

@@ -15,9 +15,9 @@ use crate::migrations;
 use crate::now_millis;
 use crate::projections;
 use crate::types::{
-    AuditRecord, AuditReport, DoctorReport, IndexHit, IndexSummary, IndexedFile, ModelRouteRecord,
-    NewModelRoute, NewProvider, NewSession, NewWorkspace, ProviderRecord, SessionMessage,
-    SessionSummary, SessionTurn, SymbolHit,
+    AuditRecord, AuditReport, DoctorReport, FileCheckpoint, FileCheckpointSummary, IndexHit,
+    IndexSummary, IndexedFile, ModelRouteRecord, NewModelRoute, NewProvider, NewSession,
+    NewWorkspace, ProviderRecord, SessionMessage, SessionSummary, SessionTurn, SymbolHit,
 };
 
 enum WriteCommand {
@@ -75,6 +75,18 @@ enum WriteCommand {
     },
     ClearWorkspaceIndex {
         workspace_id: WorkspaceId,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    SaveFileCheckpoint {
+        session_id: SessionId,
+        turn: Option<u32>,
+        path: String,
+        existed: bool,
+        content: Option<Vec<u8>>,
+        reply: SyncSender<Result<FileCheckpointSummary, StoreError>>,
+    },
+    DeleteFileCheckpoint {
+        checkpoint_id: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
     Shutdown,
@@ -316,6 +328,114 @@ impl Store {
             });
         }
         Ok(sessions)
+    }
+
+    pub fn save_file_checkpoint(
+        &self,
+        session_id: SessionId,
+        turn: Option<u32>,
+        path: &str,
+        existed: bool,
+        content: Option<Vec<u8>>,
+    ) -> Result<FileCheckpointSummary, StoreError> {
+        self.write(|reply| WriteCommand::SaveFileCheckpoint {
+            session_id,
+            turn,
+            path: path.to_owned(),
+            existed,
+            content,
+            reply,
+        })
+    }
+
+    pub fn list_file_checkpoints(
+        &self,
+        session_id: SessionId,
+        limit: u32,
+    ) -> Result<Vec<FileCheckpointSummary>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, existed, COALESCE(length(content), 0), created_at
+             FROM file_checkpoints
+             WHERE session_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            [session_id.to_string(), i64::from(limit).to_string()],
+            |row| {
+                Ok(FileCheckpointSummary {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    existed: row.get::<_, bool>(2)?,
+                    bytes: row.get::<_, i64>(3)? as u64,
+                    created_at: row.get(4)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_file_checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<FileCheckpoint>, StoreError> {
+        let connection = self.reader()?;
+        let checkpoint = connection
+            .query_row(
+                "SELECT id, session_id, path, existed, content, created_at
+                 FROM file_checkpoints WHERE id = ?1",
+                [checkpoint_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, Option<Vec<u8>>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, session_id, path, existed, content, created_at)) = checkpoint else {
+            return Ok(None);
+        };
+        Ok(Some(FileCheckpoint {
+            id,
+            session_id: SessionId::from(
+                Uuid::parse_str(&session_id)
+                    .map_err(|error| StoreError::InvalidData(error.to_string()))?,
+            ),
+            path,
+            existed,
+            content,
+            created_at,
+        }))
+    }
+
+    pub fn delete_file_checkpoint(&self, checkpoint_id: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::DeleteFileCheckpoint {
+            checkpoint_id: checkpoint_id.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn session_workspace_path(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.reader()?;
+        connection
+            .query_row(
+                "SELECT w.path FROM sessions s
+                 JOIN workspaces w ON w.id = s.workspace_id
+                 WHERE s.id = ?1",
+                [session_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn search_sessions(
@@ -871,6 +991,45 @@ fn fts_terms(query: &str) -> String {
     terms.join(" AND ")
 }
 
+fn save_file_checkpoint(
+    connection: &Connection,
+    session_id: SessionId,
+    turn: Option<u32>,
+    path: &str,
+    existed: bool,
+    content: Option<Vec<u8>>,
+) -> Result<FileCheckpointSummary, StoreError> {
+    let id = Uuid::now_v7().to_string();
+    let created_at = now_millis();
+    let bytes = content.as_ref().map_or(0, |content| content.len()) as u64;
+    let hash = content
+        .as_deref()
+        .map(blake3::hash)
+        .map(|hash| hash.as_bytes().to_vec());
+    connection.execute(
+        "INSERT INTO file_checkpoints
+            (id, session_id, turn, path, existed, content, content_hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            id,
+            session_id.to_string(),
+            turn.map(i64::from),
+            path,
+            existed,
+            content,
+            hash,
+            created_at
+        ],
+    )?;
+    Ok(FileCheckpointSummary {
+        id,
+        path: path.to_owned(),
+        existed,
+        bytes,
+        created_at,
+    })
+}
+
 fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
     while let Ok(command) = receiver.recv() {
         match command {
@@ -946,6 +1105,36 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 reply,
             } => {
                 let _ = reply.send(clear_workspace_index(&connection, workspace_id));
+            }
+            WriteCommand::SaveFileCheckpoint {
+                session_id,
+                turn,
+                path,
+                existed,
+                content,
+                reply,
+            } => {
+                let _ = reply.send(save_file_checkpoint(
+                    &connection,
+                    session_id,
+                    turn,
+                    &path,
+                    existed,
+                    content,
+                ));
+            }
+            WriteCommand::DeleteFileCheckpoint {
+                checkpoint_id,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "DELETE FROM file_checkpoints WHERE id = ?1",
+                        [&checkpoint_id],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from);
+                let _ = reply.send(result);
             }
             WriteCommand::Shutdown => break,
         }
@@ -1166,7 +1355,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0003_workspace_index"
+            "0004_file_checkpoints"
         );
     }
 
@@ -1371,6 +1560,50 @@ mod tests {
             store
                 .search_sessions("missing", 10)
                 .expect("empty search")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_checkpoints_round_trip_and_delete() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("demo", "/tmp/openbad-checkpoints")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("checkpoint"))
+            .expect("session");
+
+        let checkpoint = store
+            .save_file_checkpoint(
+                session,
+                Some(1),
+                "src/main.rs",
+                true,
+                Some(b"original".to_vec()),
+            )
+            .expect("save");
+        assert_eq!(checkpoint.path, "src/main.rs");
+        assert_eq!(checkpoint.bytes, 8);
+
+        let listed = store.list_file_checkpoints(session, 10).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, checkpoint.id);
+
+        let loaded = store
+            .load_file_checkpoint(&checkpoint.id)
+            .expect("load")
+            .expect("checkpoint");
+        assert_eq!(loaded.content.as_deref(), Some(b"original".as_slice()));
+        assert!(loaded.existed);
+
+        store
+            .delete_file_checkpoint(&checkpoint.id)
+            .expect("delete");
+        assert!(
+            store
+                .list_file_checkpoints(session, 10)
+                .expect("list after delete")
                 .is_empty()
         );
     }

@@ -117,8 +117,9 @@ keychain secret storage, DeepSeek chat/streaming client, usage and cost
 accounting, built-in coding tools, agent loop, and Tauri chat UI all build and
 pass tests. Streamed reasoning, cancellation, and persisted model preferences
 are working. The Phase 4 workspace index now persists file hashes, symbol
-definitions, and FTS5 text in SQLite. Per-call approvals, the evidence gate,
-LSP/PTY/checkpoints, and the Phase 5–8 systems remain.
+definitions, and FTS5 text in SQLite, and file edits are checkpointed for
+restore. Per-call approvals, the evidence gate, LSP/PTY, and the Phase 5–8
+systems remain.
 
 - [Vision and feature set](docs/architecture/00-vision-and-feature-set.md)
 - [System overview](docs/architecture/01-system-overview.md)

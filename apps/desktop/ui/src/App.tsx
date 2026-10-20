@@ -4,11 +4,13 @@ import {
   apiKeyStatus as fetchApiKeyStatus,
   cancelChat,
   chat as sendChat,
+  loadCheckpoints as fetchCheckpoints,
   clearApiKey as clearStoredApiKey,
   loadFoundation as fetchFoundation,
   loadSession as fetchSession,
   loadSessions as fetchSessions,
   refreshWorkspaceIndex as refreshIndex,
+  restoreCheckpoint as restoreStoredCheckpoint,
   saveApiKey as persistApiKey,
   searchSessions as searchStoredSessions,
   workspaceDefault,
@@ -16,6 +18,7 @@ import {
 } from "./backend";
 import type {
   ChatEntry,
+  FileCheckpointSummary,
   FoundationState,
   SessionSummary,
   WorkspaceIndexSummary,
@@ -80,6 +83,10 @@ export default function App() {
   const [indexSummary, setIndexSummary] = useState<WorkspaceIndexSummary | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [indexError, setIndexError] = useState<string | null>(null);
+  const [checkpointList, setCheckpointList] = useState<FileCheckpointSummary[]>([]);
+  const [restoringCheckpoint, setRestoringCheckpoint] = useState<string | null>(null);
+  const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -172,6 +179,28 @@ export default function App() {
   }, [refreshWorkspaceIndex, workspacePath]);
 
   useEffect(() => {
+    if (sessionId === null) {
+      setCheckpointList([]);
+      return;
+    }
+    let active = true;
+    void fetchCheckpoints(sessionId)
+      .then((items) => {
+        if (active) {
+          setCheckpointList(items);
+        }
+      })
+      .catch((cause) => {
+        if (active) {
+          setCheckpointError(describeError(cause));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
     const element = scrollRef.current;
     if (element !== null && followRef.current) {
       element.scrollTop = element.scrollHeight;
@@ -227,6 +256,25 @@ export default function App() {
       setError(describeError(cause));
     }
   }, []);
+
+  const restoreCheckpoint = useCallback(
+    async (checkpointId: string) => {
+      setRestoringCheckpoint(checkpointId);
+      setCheckpointError(null);
+      setCheckpointNotice(null);
+      try {
+        const path = await restoreStoredCheckpoint(checkpointId);
+        setCheckpointList((items) => items.filter((item) => item.id !== checkpointId));
+        setCheckpointNotice(`Restored ${path}`);
+        void refreshWorkspaceIndex();
+      } catch (cause) {
+        setCheckpointError(describeError(cause));
+      } finally {
+        setRestoringCheckpoint(null);
+      }
+    },
+    [refreshWorkspaceIndex],
+  );
 
   const send = useCallback(async () => {
     const text = message.trim();
@@ -671,6 +719,44 @@ export default function App() {
               </p>
               {indexError !== null && (
                 <p className="mt-2 text-xs text-amber-300">{indexError}</p>
+              )}
+            </Panel>
+
+            <Panel title="Checkpoints">
+              {checkpointList.length === 0 && (
+                <p className="text-xs text-slate-500">No checkpoints yet.</p>
+              )}
+              <div className="space-y-1">
+                {checkpointList.map((checkpoint) => (
+                  <div
+                    key={checkpoint.id}
+                    className="rounded-md border border-white/5 bg-black/20 px-2 py-2"
+                  >
+                    <p className="truncate font-mono text-[10px] text-slate-400">
+                      {checkpoint.path}
+                    </p>
+                    <div className="mt-1 flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-slate-600">
+                        {formatBytes(checkpoint.bytes)} ·{" "}
+                        {new Date(checkpoint.created_at).toLocaleTimeString()}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void restoreCheckpoint(checkpoint.id)}
+                        disabled={busy || restoringCheckpoint !== null}
+                        className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-300 hover:bg-white/10 disabled:opacity-40"
+                      >
+                        {restoringCheckpoint === checkpoint.id ? "Restoring…" : "Restore"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {checkpointNotice !== null && (
+                <p className="mt-2 text-xs text-emerald-300">{checkpointNotice}</p>
+              )}
+              {checkpointError !== null && (
+                <p className="mt-2 text-xs text-amber-300">{checkpointError}</p>
               )}
             </Panel>
 
