@@ -70,7 +70,7 @@ jobs:
 
       - name: Build native test binary
         working-directory: apps/desktop
-        run: ./ui/node_modules/.bin/tauri build --no-bundle --debug
+        run: ./ui/node_modules/.bin/tauri build --no-bundle --debug --config '{"build":{"beforeBuildCommand":""}}'
 
       - name: Native Tauri end-to-end tests
         working-directory: apps/desktop/native-e2e
