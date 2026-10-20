@@ -15,7 +15,7 @@ const isTauri =
 let mockKeyConfigured = false;
 let mockSessionCounter = 1;
 const mockSessions: SessionSummary[] = [];
-const mockMessages = new Map<string, { role: string; text: string }[]>();
+const mockMessages = new Map<string, { role: string; text: string; reasoning: string | null }[]>();
 
 const mockUsage: Usage = {
   input_tokens: 428,
@@ -181,8 +181,8 @@ async function mockChat(
       last_turn: 1,
     });
     mockMessages.set(sessionId, [
-      { role: "user", text: input.message },
-      { role: "assistant", text },
+      { role: "user", text: input.message, reasoning: null },
+      { role: "assistant", text, reasoning: "The user wants a workspace summary." },
     ]);
   }
 

@@ -143,6 +143,7 @@ pub struct ChatReply {
 pub struct UiMessage {
     pub role: String,
     pub text: String,
+    pub reasoning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +179,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                 ChatRole::User => Some(UiMessage {
                     role: "user".to_owned(),
                     text: message.content.clone().unwrap_or_default(),
+                    reasoning: None,
                 }),
                 ChatRole::Assistant => Some(UiMessage {
                     role: "assistant".to_owned(),
@@ -186,6 +188,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                         .clone()
                         .filter(|text| !text.is_empty())
                         .unwrap_or_else(|| "(tool activity)".to_owned()),
+                    reasoning: message.reasoning_content.clone(),
                 }),
                 _ => None,
             })

@@ -255,6 +255,7 @@ export default function App() {
           id: nextId(),
           role: message.role === "user" ? "user" : "assistant",
           text: message.text,
+          reasoning: message.reasoning ?? "",
         })),
       );
     } catch (cause) {

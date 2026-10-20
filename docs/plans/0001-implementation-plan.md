@@ -248,6 +248,9 @@ commands with approvals.
 - `ui/src/backend.ts` provides a browser mock backend when Tauri internals are
   absent, so streaming, scrolling, and layout can be tested in a normal browser
   without rebuilding the native app.
+- The chat settings expose `deepseek-flash` vs `deepseek-v4-pro`, thinking mode,
+  reasoning effort, and the step budget. A Stop button cancels the active turn.
+  Usage lines show cache-hit share, and resumed sessions restore reasoning.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
 - Tool execution is currently gated by session-wide write/command toggles.

@@ -73,7 +73,7 @@ export type SessionSummary = {
 
 export type SessionView = {
   session_id: string;
-  messages: { role: string; text: string }[];
+  messages: { role: string; text: string; reasoning: string | null }[];
 };
 
 export type FoundationState =
