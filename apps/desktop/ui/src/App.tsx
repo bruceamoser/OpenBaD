@@ -53,7 +53,7 @@ function loadPreferences(): Preferences {
 }
 
 export default function App() {
-  const preferences = useRef(loadPreferences()).current;
+  const [preferences] = useState(loadPreferences);
   const [foundation, setFoundation] = useState<FoundationState>({ kind: "loading" });
   const [workspacePath, setWorkspacePath] = useState("");
   const [message, setMessage] = useState("");
@@ -363,7 +363,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="grid min-h-0 flex-1 gap-6 md:grid-cols-[minmax(0,1fr)_340px]">
           <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/[0.02]">
             <div
               ref={scrollRef}
@@ -463,7 +463,7 @@ export default function App() {
                     void send();
                   }
                 }}
-                rows={3}
+                rows={2}
                 placeholder="Ask OpenBaD to inspect, explain, or change the workspace…"
                 className="w-full resize-none rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-emerald-400/40"
               />

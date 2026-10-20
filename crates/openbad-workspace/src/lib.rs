@@ -83,23 +83,21 @@ impl WorkspaceService {
                 Err(WorkspaceError::OutsideRoot(path.to_path_buf()))
             }
         } else {
-            let parent = candidate
-                .parent()
-                .ok_or_else(|| WorkspaceError::OutsideRoot(path.to_path_buf()))?;
-            let parent = parent.canonicalize().map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    WorkspaceError::NotFound(parent.to_path_buf())
-                } else {
-                    WorkspaceError::Io(error)
+            let mut ancestor = candidate.parent();
+            while let Some(parent) = ancestor {
+                if parent.exists() {
+                    let canonical = parent.canonicalize()?;
+                    if !canonical.starts_with(&root) {
+                        return Err(WorkspaceError::OutsideRoot(path.to_path_buf()));
+                    }
+                    let suffix = candidate
+                        .strip_prefix(parent)
+                        .map_err(|_| WorkspaceError::OutsideRoot(path.to_path_buf()))?;
+                    return Ok(canonical.join(suffix));
                 }
-            })?;
-            if !parent.starts_with(&root) {
-                return Err(WorkspaceError::OutsideRoot(path.to_path_buf()));
+                ancestor = parent.parent();
             }
-            let name = candidate
-                .file_name()
-                .ok_or_else(|| WorkspaceError::OutsideRoot(path.to_path_buf()))?;
-            Ok(parent.join(name))
+            Err(WorkspaceError::NotFound(candidate))
         }
     }
 }
@@ -132,6 +130,11 @@ mod tests {
 
         let new_file = workspace.resolve(Path::new("src/new.rs")).expect("new");
         assert!(new_file.starts_with(directory.path().canonicalize().expect("root")));
+
+        let nested = workspace
+            .resolve(Path::new("src/generated/new.rs"))
+            .expect("nested new");
+        assert!(nested.starts_with(directory.path().canonicalize().expect("root")));
     }
 
     #[test]
