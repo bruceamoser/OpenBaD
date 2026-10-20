@@ -60,3 +60,21 @@ test("remembers model preferences", async ({ page }) => {
   await expect(page.getByRole("combobox", { name: "Route" })).toHaveValue("deepseek-v4-pro");
   await expect(page.locator('input[type="number"]')).toHaveValue("32");
 });
+
+test("searches recent sessions by message text", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("textbox", { name: /Ask OpenBaD/ }).fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText(/cached \(/)).toBeVisible();
+
+  const sessionButton = page.locator("aside button").filter({ hasText: prompt });
+  await expect(sessionButton).toBeVisible();
+
+  await page.getByRole("searchbox", { name: "Search sessions" }).fill("Cargo.toml");
+  await expect(sessionButton).toBeVisible();
+
+  await page.getByRole("searchbox", { name: "Search sessions" }).fill("no such session");
+  await expect(sessionButton).toHaveCount(0);
+  await expect(page.getByText("No sessions yet.")).toBeVisible();
+});

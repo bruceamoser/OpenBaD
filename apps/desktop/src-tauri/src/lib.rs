@@ -217,6 +217,24 @@ fn sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
 }
 
 #[tauri::command]
+fn search_sessions(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<SessionSummary>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return sessions(state);
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .search_sessions(query, 50)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn session_view(state: State<'_, AppState>, session_id: String) -> Result<SessionView, String> {
     let session = SessionId::from(
         Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
@@ -837,6 +855,7 @@ pub fn run() {
             cancel_chat,
             api_key_status,
             sessions,
+            search_sessions,
             session_view,
             chat
         ])
