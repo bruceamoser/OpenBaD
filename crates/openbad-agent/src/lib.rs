@@ -85,6 +85,7 @@ pub struct Agent<T: HttpTransport> {
     tools: ToolRegistry,
     workspace: Arc<WorkspaceService>,
     search: Option<Arc<dyn WorkspaceSearch>>,
+    redactions: Vec<String>,
     config: AgentConfig,
 }
 
@@ -101,6 +102,7 @@ impl<T: HttpTransport> Agent<T> {
             tools,
             workspace,
             search: None,
+            redactions: Vec::new(),
             config,
         }
     }
@@ -108,6 +110,13 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_search(mut self, search: Arc<dyn WorkspaceSearch>) -> Self {
         self.search = Some(search);
+        self
+    }
+
+    /// Strings that must never reach the model, observer, or persisted trace.
+    #[must_use]
+    pub fn with_redactions(mut self, redactions: Vec<String>) -> Self {
+        self.redactions = redactions;
         self
     }
 
@@ -227,34 +236,38 @@ impl<T: HttpTransport> Agent<T> {
                         .await
                     {
                         Ok(result) if result.is_error => {
-                            let content = format!("error: {}", result.content);
+                            let content = redact_secrets(
+                                &format!("error: {}", result.content),
+                                &self.redactions,
+                            );
                             observer.on_tool_result(step, &call.function.name, &content, true);
                             content
                         }
                         Ok(result) => {
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &result.content,
-                                false,
-                            );
-                            result.content
+                            let content = redact_secrets(&result.content, &self.redactions);
+                            observer.on_tool_result(step, &call.function.name, &content, false);
+                            content
                         }
                         Err(error) => {
-                            let content = format!("error: {error}");
+                            let content =
+                                redact_secrets(&format!("error: {error}"), &self.redactions);
                             observer.on_tool_result(step, &call.function.name, &content, true);
                             content
                         }
                     },
                     Err(error) => {
-                        let content = format!(
-                            "error: invalid arguments for {}: {error}",
-                            call.function.name
+                        let content = redact_secrets(
+                            &format!(
+                                "error: invalid arguments for {}: {error}",
+                                call.function.name
+                            ),
+                            &self.redactions,
                         );
                         observer.on_tool_result(step, &call.function.name, &content, true);
                         content
                     }
                 };
+                let content = redact_secrets(&content, &self.redactions);
                 if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
                     eprintln!(
                         "[agent]   result {}: {}",
@@ -358,6 +371,16 @@ Report what changed and any remaining risk. Never claim a file changed unless a 
             self.workspace.root().display()
         )
     }
+}
+
+fn redact_secrets(content: &str, secrets: &[String]) -> String {
+    let mut redacted = content.to_owned();
+    for secret in secrets {
+        if secret.len() >= 8 {
+            redacted = redacted.replace(secret, "[redacted]");
+        }
+    }
+    redacted
 }
 
 fn emit_full_message(observer: &dyn AgentObserver, step: u32, message: &ChatMessage) {
@@ -597,5 +620,15 @@ mod tests {
         assert_eq!(run.text, "It says hello over http.");
         assert_eq!(run.steps, 2);
         server.join().expect("server");
+    }
+
+    #[test]
+    fn redacts_configured_secrets_from_tool_output() {
+        let content = "key=sk-live-12345678 and also sk-live-12345678";
+        assert_eq!(
+            redact_secrets(content, &["sk-live-12345678".to_owned()]),
+            "key=[redacted] and also [redacted]"
+        );
+        assert_eq!(redact_secrets(content, &["short".to_owned()]), content);
     }
 }
