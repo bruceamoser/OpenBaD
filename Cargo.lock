@@ -2624,6 +2624,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
+ "openbad-governance",
  "openbad-harness",
  "openbad-llm",
  "openbad-tools",
