@@ -52,6 +52,7 @@ import {
   saveApiKey as persistApiKey,
   quitApp,
   searchSessions as searchStoredSessions,
+  setSessionAccessMode as persistSessionAccessMode,
   workspaceDefault,
   workspacesDirectory as fetchWorkspacesDirectory,
   workspaceIndexStatus as fetchIndexStatus,
@@ -61,6 +62,7 @@ import type { AppMenu } from "./AppMenuBar";
 import ProjectPanel from "./ProjectPanel";
 import type { PanelTab } from "./ProjectPanel";
 import type {
+  AccessMode,
   Artifact,
   ChatEntry,
   FileCheckpointSummary,
@@ -78,7 +80,7 @@ type Preferences = {
   reasoningEffort: string;
 };
 
-type PermissionMode = "read" | "edit" | "full";
+type PermissionMode = AccessMode;
 type SettingsTab = "model" | "access" | "secrets" | "project" | "about";
 
 const defaultPreferences: Preferences = {
@@ -404,6 +406,7 @@ export default function App() {
     rememberProjectPath(project.path);
     setSessionId(null);
     setEntries([]);
+    setPermissionMode("read");
     setError(null);
     followRef.current = true;
   }, []);
@@ -411,10 +414,29 @@ export default function App() {
   const newSession = useCallback(() => {
     setSessionId(null);
     setEntries([]);
+    setPermissionMode("read");
     setError(null);
     followRef.current = true;
     composerRef.current?.focus();
   }, []);
+
+  const changePermissionMode = useCallback(
+    (mode: PermissionMode) => {
+      setPermissionMode(mode);
+      if (sessionId === null) {
+        return;
+      }
+      setSessions((items) =>
+        items.map((item) =>
+          item.id === sessionId ? { ...item, access_mode: mode } : item,
+        ),
+      );
+      void persistSessionAccessMode(sessionId, mode).catch((cause) => {
+        setError(describeError(cause));
+      });
+    },
+    [sessionId],
+  );
 
   const saveApiKey = useCallback(async () => {
     setError(null);
@@ -636,6 +658,13 @@ export default function App() {
         },
       );
       setSessionId(reply.session_id);
+      if (sessionId === null) {
+        try {
+          await persistSessionAccessMode(reply.session_id, permissionMode);
+        } catch (cause) {
+          setError(describeError(cause));
+        }
+      }
       setEntries((current) =>
         current.map((entry) =>
           entry.id === assistantId
@@ -687,6 +716,7 @@ export default function App() {
     message,
     model,
     openArtifact,
+    permissionMode,
     reasoningEffort,
     sessionId,
     thinking,
@@ -699,6 +729,7 @@ export default function App() {
       try {
         const view = await fetchSession(session.id);
         setSessionId(view.session_id);
+        setPermissionMode(session.access_mode);
         if (session.workspace_id !== null) {
           const project = projects.find((item) => item.id === session.workspace_id);
           if (project !== undefined) {
@@ -1374,7 +1405,7 @@ export default function App() {
                     <select
                       value={permissionMode}
                       onChange={(event) =>
-                        setPermissionMode(event.target.value as PermissionMode)
+                        changePermissionMode(event.target.value as PermissionMode)
                       }
                       aria-label="Access mode"
                       className="bg-transparent text-[11px] text-slate-400 outline-none"
@@ -1486,7 +1517,7 @@ export default function App() {
           reasoningEffort={reasoningEffort}
           onReasoningEffort={setReasoningEffort}
           permissionMode={permissionMode}
-          onPermissionMode={setPermissionMode}
+          onPermissionMode={changePermissionMode}
           apiKeyStatus={apiKeyStatus}
           apiKeyInput={apiKeyInput}
           onApiKeyInput={setApiKeyInput}
@@ -1993,8 +2024,8 @@ function SettingsDialog({
                 </button>
               ))}
               <p className="px-1 text-[11px] leading-5 text-slate-600">
-                The access mode is intentionally not persisted across launches. The composer
-                always starts in read-only mode.
+                Access mode is remembered per session, so returning to a session restores
+                the mode it last used. New sessions start read-only.
               </p>
             </div>
           )}

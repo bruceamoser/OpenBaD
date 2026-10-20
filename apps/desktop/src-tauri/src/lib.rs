@@ -1480,6 +1480,24 @@ fn rename_session(
 }
 
 #[tauri::command]
+fn set_session_access_mode(
+    state: State<'_, AppState>,
+    session_id: String,
+    access_mode: String,
+) -> Result<(), String> {
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .set_session_access_mode(session, &access_mode)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn workspace_index_status(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -1710,6 +1728,17 @@ async fn chat(
                 (session, workspace.to_string())
             }
         };
+
+        let access_mode = if allow_commands {
+            "full"
+        } else if allow_writes {
+            "edit"
+        } else {
+            "read"
+        };
+        store
+            .set_session_access_mode(session, access_mode)
+            .map_err(|error| error.to_string())?;
 
         let turn = store
             .load_turns(session)
@@ -2128,6 +2157,7 @@ pub fn run() {
             rename_project,
             remove_project,
             rename_session,
+            set_session_access_mode,
             workspace_index_status,
             refresh_workspace_index,
             workspace_default,
