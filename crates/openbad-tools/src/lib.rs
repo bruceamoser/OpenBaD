@@ -1,7 +1,6 @@
 //! Tool registry, schemas, and built-in coding tools.
 
-use std::collections::BTreeMap;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -490,6 +489,7 @@ impl ToolRegistry {
         registry.register(ListRepoDirTool);
         registry.register(GlobRepoTool);
         registry.register(GrepRepoTool);
+        registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
         registry.register(PinContextTool);
         registry.register(ExcludeContextTool);
@@ -3665,6 +3665,247 @@ impl Tool for GrepRepoTool {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WebCacheEntry {
+    hash: String,
+    fetched_at: i64,
+    title: Option<String>,
+    content_type: Option<String>,
+    final_url: String,
+}
+
+fn web_cache_dir(context: &ToolContext) -> std::path::PathBuf {
+    context.workspace.root().join(".openbad").join("web-cache")
+}
+
+fn load_web_cache(context: &ToolContext) -> HashMap<String, WebCacheEntry> {
+    let path = web_cache_dir(context).join("index.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_web_cache(
+    context: &ToolContext,
+    url: &str,
+    body: &str,
+    entry: &WebCacheEntry,
+) -> Result<(), ToolError> {
+    let directory = web_cache_dir(context);
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(directory.join(format!("{}.txt", entry.hash)), body)?;
+    let mut cache = load_web_cache(context);
+    cache.insert(url.to_owned(), entry.clone());
+    std::fs::write(
+        directory.join("index.json"),
+        serde_json::to_string_pretty(&cache)
+            .map_err(|error| ToolError::Failed(error.to_string()))?,
+    )?;
+    Ok(())
+}
+
+fn html_to_text(html: &str) -> String {
+    let scripts =
+        regex::Regex::new(r"(?is)<(?:script|style)[^>]*>.*?</(?:script|style)>").expect("regex");
+    let breaks =
+        regex::Regex::new(r"(?i)</?(p|div|br|li|tr|h[1-6]|section|article)[^>]*>").expect("regex");
+    let tags = regex::Regex::new(r"(?s)<[^>]+>").expect("regex");
+    let text = scripts.replace_all(html, " ");
+    let text = breaks.replace_all(&text, "\n");
+    let text = tags.replace_all(&text, " ");
+    let decoded = text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+    decoded
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn html_title(html: &str) -> Option<String> {
+    let title = regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok()?;
+    title
+        .captures(html)?
+        .get(1)
+        .map(|capture| html_to_text(capture.as_str()))
+        .filter(|title| !title.is_empty())
+}
+
+struct WebFetchTool;
+
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "web_fetch",
+            "Fetch an http(s) URL, extract readable text (HTML gets a title and stripped body), and cache it by hash under .openbad/web-cache. Requires Full access and respects network_hosts policy.",
+            RiskLevel::Read,
+        )
+        .with_timeout(30)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "format": {"type": "string", "enum": ["text", "html"], "description": "Return readable text (default) or raw HTML"},
+                "prefer_cache": {"type": "boolean", "description": "Reuse a cached fetch when younger than max_age_hours (default true)"},
+                "max_age_hours": {"type": "integer", "minimum": 1, "maximum": 720},
+                "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}
+            },
+            "required": ["url"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "web_fetch (network reads require Full access)".to_owned(),
+            ));
+        }
+        let raw = string_arg(&arguments, "url")?;
+        let url = reqwest::Url::parse(&raw)
+            .map_err(|error| ToolError::InvalidArgument(format!("invalid URL: {error}")))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(ToolError::InvalidArgument(
+                "web_fetch supports http and https only".to_owned(),
+            ));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| ToolError::InvalidArgument("URL has no host".to_owned()))?
+            .to_owned();
+        if let Some(policy) = load_policy(context)? {
+            if let Some(reason) = policy.network_denied(&host) {
+                return Err(ToolError::ApprovalRequired(reason));
+            }
+        }
+        let format = optional_string(&arguments, "format").unwrap_or_else(|| "text".to_owned());
+        let prefer_cache = optional_bool(&arguments, "prefer_cache").unwrap_or(true);
+        let max_age_hours = optional_usize(&arguments, "max_age_hours")
+            .unwrap_or(24)
+            .clamp(1, 720);
+        let max_bytes = optional_usize(&arguments, "max_bytes")
+            .unwrap_or(250_000)
+            .clamp(1_024, 1_048_576);
+        let cache = load_web_cache(context);
+        if prefer_cache {
+            if let Some(entry) = cache.get(&raw) {
+                let age = now_millis().saturating_sub(entry.fetched_at);
+                if age <= (max_age_hours as i64) * 3_600_000 {
+                    let path = web_cache_dir(context).join(format!("{}.txt", entry.hash));
+                    if let Ok(body) = std::fs::read_to_string(path) {
+                        let body = if format == "html" {
+                            body
+                        } else {
+                            html_to_text(&body)
+                        };
+                        let title = entry.title.clone().unwrap_or_else(|| raw.clone());
+                        return Ok(ToolResult::ok(truncate(
+                            &format!("{title}\n{}\n\n{body}", entry.final_url),
+                            max_bytes,
+                        ))
+                        .with_metadata(json!({
+                            "url": raw,
+                            "final_url": entry.final_url,
+                            "title": entry.title,
+                            "content_type": entry.content_type,
+                            "hash": entry.hash,
+                            "fetched_at": entry.fetched_at,
+                            "cached": true
+                        })));
+                    }
+                }
+            }
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .user_agent("OpenBaD/0.1 (+https://github.com/bruceamoser/OpenBaD)")
+            .build()
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| ToolError::Failed(format!("web_fetch: {error}")))?;
+        let status = response.status();
+        let final_url = response.url().to_string();
+        let final_host = response.url().host_str().unwrap_or_default().to_owned();
+        if let Some(policy) = load_policy(context)? {
+            if let Some(reason) = policy.network_denied(&final_host) {
+                return Err(ToolError::ApprovalRequired(format!(
+                    "redirect blocked: {reason}"
+                )));
+            }
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > 2_097_152)
+        {
+            return Err(ToolError::Failed(
+                "response is larger than 2 MiB".to_owned(),
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ToolError::Failed(format!("web_fetch body: {error}")))?;
+        let raw_body = String::from_utf8_lossy(&bytes).into_owned();
+        let title = html_title(&raw_body);
+        let text = if content_type
+            .as_deref()
+            .is_some_and(|content_type| content_type.contains("html"))
+            || raw_body.trim_start().starts_with('<')
+        {
+            html_to_text(&raw_body)
+        } else {
+            raw_body.clone()
+        };
+        let hash = blake3::hash(bytes.as_ref()).to_hex().to_string();
+        let fetched_at = now_millis();
+        let entry = WebCacheEntry {
+            hash: hash.clone(),
+            fetched_at,
+            title: title.clone(),
+            content_type: content_type.clone(),
+            final_url: final_url.clone(),
+        };
+        save_web_cache(context, &raw, &raw_body, &entry)?;
+        let body = if format == "html" { &raw_body } else { &text };
+        let heading = title.clone().unwrap_or_else(|| raw.clone());
+        Ok(ToolResult::ok(truncate(
+            &format!("{heading}\n{final_url}\n\n{body}"),
+            max_bytes,
+        ))
+        .with_metadata(json!({
+            "url": raw,
+            "final_url": final_url,
+            "status": status.as_u16(),
+            "title": title,
+            "content_type": content_type,
+            "hash": hash,
+            "fetched_at": fetched_at,
+            "cached": false
+        })))
+    }
+}
+
 struct PresentArtifactTool;
 
 #[async_trait]
@@ -5058,6 +5299,61 @@ validators:
             fs::read_to_string(directory.path().join("src/value.rs")).expect("rollback"),
             "GOOD\n"
         );
+    }
+
+    #[tokio::test]
+    async fn web_fetch_extracts_text_caches_and_respects_network_policy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buffer);
+                let body = "<html><head><title>Docs</title><style>x{}</style></head><body><h1>API</h1><p>Use the &amp; operator.</p><script>bad()</script></body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        let directory = tempdir().expect("tempdir");
+        let mut tool_context = context(directory.path());
+        tool_context.allow_commands = true;
+        let url = format!("http://{address}/docs");
+
+        let fetched = WebFetchTool
+            .execute(json!({"url": url}), &tool_context)
+            .await
+            .expect("fetch");
+        assert!(fetched.content.contains("Docs"));
+        assert!(fetched.content.contains("Use the & operator."));
+        assert!(!fetched.content.contains("bad()"));
+        assert_eq!(fetched.metadata["cached"], false);
+        assert!(fetched.metadata["hash"].as_str().expect("hash").len() == 64);
+
+        let cached = WebFetchTool
+            .execute(json!({"url": url, "prefer_cache": true}), &tool_context)
+            .await
+            .expect("cached fetch");
+        assert_eq!(cached.metadata["cached"], true);
+        assert!(cached.content.contains("Use the & operator."));
+
+        let denied_directory = tempdir().expect("denied");
+        fs::create_dir_all(denied_directory.path().join(".openbad")).expect("openbad");
+        fs::write(
+            denied_directory.path().join(".openbad/permissions.yaml"),
+            "network_hosts: [\"example.com\"]\n",
+        )
+        .expect("policy");
+        let mut denied_context = context(denied_directory.path());
+        denied_context.allow_commands = true;
+        let denied = WebFetchTool
+            .execute(json!({"url": url}), &denied_context)
+            .await
+            .expect_err("network policy");
+        assert!(denied.to_string().contains("network_hosts"));
     }
 
     #[tokio::test]
