@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import type {
+  AccessMode,
   AgentEvent,
   ChatReply,
   Foundation,
@@ -341,6 +342,20 @@ export async function renameSession(sessionId: string, title: string): Promise<v
 
 export async function loadSessions(): Promise<SessionSummary[]> {
   return isTauri ? invoke<SessionSummary[]>("sessions") : [...mockSessions];
+}
+
+export async function setSessionAccessMode(
+  sessionId: string,
+  accessMode: AccessMode,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("set_session_access_mode", { sessionId, accessMode });
+    return;
+  }
+  const session = mockSessions.find((item) => item.id === sessionId);
+  if (session) {
+    session.access_mode = accessMode;
+  }
 }
 
 export async function loadMemories(workspacePath: string): Promise<MemoryRecord[]> {
@@ -894,6 +909,7 @@ async function mockChat(
       status: "active",
       updated_at: Date.now(),
       last_turn: 1,
+      access_mode: "read",
     });
     mockMessages.set(sessionId, [
       { role: "user", text: input.message, reasoning: null },

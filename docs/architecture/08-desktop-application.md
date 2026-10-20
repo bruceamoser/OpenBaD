@@ -67,6 +67,9 @@ keeps a usable width.
 - Approvals: inline cards with exact command/diff and allow/deny actions.
 - Turn footer: input/output/cache tokens, cost, cache hit %, model, elapsed.
 - Cancel button always visible during a turn.
+- Access mode: Read only, Can edit, or Full access. The choice is stored in
+  the session metadata, restored when the session is reopened, and applied to
+  every tool call in the turn. New sessions start read-only.
 - "Continue", "Retry", "Fork", "Compact" actions.
 
 ### 3.2 Editor and inline completion

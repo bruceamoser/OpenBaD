@@ -97,6 +97,22 @@ test("remembers model preferences", async ({ page }) => {
   );
 });
 
+test("keeps access mode sticky per session", async ({ page }) => {
+  await page.goto("/");
+  const access = page.getByRole("combobox", { name: "Access mode" });
+  await expect(access).toHaveValue("read");
+
+  await sendPrompt(page);
+  await access.selectOption("full");
+  await expect(access).toHaveValue("full");
+
+  await page.getByRole("button", { name: "New session" }).click();
+  await expect(access).toHaveValue("read");
+
+  await page.locator("aside").getByText(prompt, { exact: true }).click();
+  await expect(access).toHaveValue("full");
+});
+
 test("searches recent sessions by message text", async ({ page }) => {
   await page.goto("/");
   await sendPrompt(page);

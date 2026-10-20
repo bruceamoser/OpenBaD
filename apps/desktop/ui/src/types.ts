@@ -111,6 +111,8 @@ export type WorkspaceSummary = {
   session_count: number;
 };
 
+export type AccessMode = "read" | "edit" | "full";
+
 export type SessionSummary = {
   id: string;
   workspace_id: string | null;
@@ -119,6 +121,7 @@ export type SessionSummary = {
   status: string;
   updated_at: number;
   last_turn: number;
+  access_mode: AccessMode;
 };
 
 export type SessionView = {

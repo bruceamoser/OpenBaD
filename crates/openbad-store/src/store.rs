@@ -50,6 +50,11 @@ enum WriteCommand {
         title: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
+    SetSessionAccessMode {
+        session_id: SessionId,
+        access_mode: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
     DeleteWorkspace {
         workspace_id: WorkspaceId,
         reply: SyncSender<Result<(), StoreError>>,
@@ -372,6 +377,38 @@ impl Store {
         self.write(|reply| WriteCommand::RenameSession {
             session_id,
             title: title.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn session_access_mode(&self, session_id: SessionId) -> Result<String, StoreError> {
+        let connection = self.reader()?;
+        let metadata: Option<String> = connection
+            .query_row(
+                "SELECT metadata_json FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(metadata
+            .as_deref()
+            .map(access_mode_from_metadata)
+            .unwrap_or_else(|| "read".to_owned()))
+    }
+
+    pub fn set_session_access_mode(
+        &self,
+        session_id: SessionId,
+        access_mode: &str,
+    ) -> Result<(), StoreError> {
+        if !matches!(access_mode, "read" | "edit" | "full") {
+            return Err(StoreError::InvalidData(format!(
+                "unknown access mode: {access_mode}"
+            )));
+        }
+        self.write(|reply| WriteCommand::SetSessionAccessMode {
+            session_id,
+            access_mode: access_mode.to_owned(),
             reply,
         })
     }
@@ -838,7 +875,8 @@ impl Store {
             "SELECT s.id, s.workspace_id, w.path, s.title, s.status, s.created_at,
                     s.updated_at,
                     COALESCE((SELECT MAX(t.turn) FROM session_turns t
-                              WHERE t.session_id = s.id), s.last_turn, 0)
+                              WHERE t.session_id = s.id), s.last_turn, 0),
+                    s.metadata_json
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.deleted_at IS NULL
@@ -855,6 +893,7 @@ impl Store {
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })?;
 
@@ -869,6 +908,7 @@ impl Store {
                 created_at,
                 updated_at,
                 last_turn,
+                metadata_json,
             ) = row?;
             sessions.push(SessionSummary {
                 id: SessionId::from(
@@ -888,6 +928,7 @@ impl Store {
                 created_at,
                 updated_at,
                 last_turn: last_turn as u32,
+                access_mode: access_mode_from_metadata(&metadata_json),
             });
         }
         Ok(sessions)
@@ -1136,7 +1177,8 @@ impl Store {
             "SELECT s.id, s.workspace_id, w.path, s.title, s.status, s.created_at,
                     s.updated_at,
                     COALESCE((SELECT MAX(t.turn) FROM session_turns t
-                              WHERE t.session_id = s.id), s.last_turn, 0)
+                              WHERE t.session_id = s.id), s.last_turn, 0),
+                    s.metadata_json
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.deleted_at IS NULL
@@ -1157,6 +1199,7 @@ impl Store {
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })?;
 
@@ -1171,6 +1214,7 @@ impl Store {
                 created_at,
                 updated_at,
                 last_turn,
+                metadata_json,
             ) = row?;
             sessions.push(SessionSummary {
                 id: SessionId::from(
@@ -1190,6 +1234,7 @@ impl Store {
                 created_at,
                 updated_at,
                 last_turn: last_turn as u32,
+                access_mode: access_mode_from_metadata(&metadata_json),
             });
         }
         Ok(sessions)
@@ -2351,6 +2396,35 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     .map_err(StoreError::from);
                 let _ = reply.send(result);
             }
+            WriteCommand::SetSessionAccessMode {
+                session_id,
+                access_mode,
+                reply,
+            } => {
+                let result = (|| {
+                    let metadata_json: Option<String> = connection
+                        .query_row(
+                            "SELECT metadata_json FROM sessions WHERE id = ?1",
+                            [session_id.to_string()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let mut metadata = metadata_json
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if let Some(object) = metadata.as_object_mut() {
+                        object.insert("access_mode".to_owned(), serde_json::json!(access_mode));
+                    }
+                    connection.execute(
+                        "UPDATE sessions SET metadata_json = ?1 WHERE id = ?2",
+                        params![serde_json::to_string(&metadata)?, session_id.to_string()],
+                    )?;
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
             WriteCommand::DeleteWorkspace {
                 workspace_id,
                 reply,
@@ -2641,6 +2715,19 @@ fn ensure_workspace(
     Uuid::parse_str(&id)
         .map(WorkspaceId::from)
         .map_err(|error| StoreError::InvalidData(error.to_string()))
+}
+
+fn access_mode_from_metadata(metadata_json: &str) -> String {
+    serde_json::from_str::<Value>(metadata_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("access_mode")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|mode| matches!(mode.as_str(), "read" | "edit" | "full"))
+        .unwrap_or_else(|| "read".to_owned())
 }
 
 fn create_session(connection: &Connection, session: NewSession) -> Result<SessionId, StoreError> {
@@ -3022,6 +3109,32 @@ mod tests {
     }
 
     #[test]
+    fn session_access_mode_is_sticky_and_validated() {
+        let store = Store::open_in_memory().expect("store");
+        let session = store.create_session(None, None).expect("session");
+        assert_eq!(store.session_access_mode(session).expect("mode"), "read");
+
+        store
+            .set_session_access_mode(session, "full")
+            .expect("set mode");
+        assert_eq!(store.session_access_mode(session).expect("mode"), "full");
+        let sessions = store.list_sessions(10).expect("sessions");
+        assert_eq!(sessions[0].access_mode, "full");
+
+        store
+            .set_session_access_mode(session, "edit")
+            .expect("set mode");
+        assert_eq!(
+            store.list_sessions(10).expect("sessions")[0].access_mode,
+            "edit"
+        );
+        assert!(matches!(
+            store.set_session_access_mode(session, "admin"),
+            Err(StoreError::InvalidData(_))
+        ));
+    }
+
+    #[test]
     fn sessions_list_reports_workspace_and_last_turn() {
         let store = Store::open_in_memory().expect("store");
         let workspace = store
@@ -3045,6 +3158,7 @@ mod tests {
         );
         assert_eq!(sessions[0].title.as_deref(), Some("listed"));
         assert_eq!(sessions[0].last_turn, 3);
+        assert_eq!(sessions[0].access_mode, "read");
 
         assert_eq!(
             store

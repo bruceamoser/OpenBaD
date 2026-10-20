@@ -182,6 +182,7 @@ pub struct SessionSummary {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_turn: u32,
+    pub access_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
