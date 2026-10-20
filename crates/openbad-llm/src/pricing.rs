@@ -126,6 +126,11 @@ impl PeakCalendar {
     pub fn is_off_peak(&self, at: DateTime<Utc>) -> bool {
         !self.is_peak(at)
     }
+
+    #[must_use]
+    pub fn is_peak_now(&self) -> bool {
+        self.is_peak(Utc::now())
+    }
 }
 
 /// Accumulated usage and cost for a session, turn, or route.

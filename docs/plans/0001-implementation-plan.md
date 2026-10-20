@@ -235,12 +235,19 @@ commands with approvals.
   paths and rejects parent or symlink escapes. Existing files must be read before
   they can be overwritten or edited. Writes use a temporary file plus rename.
 - `openbad-agent` runs the DeepSeek turn/step loop, accumulates usage and cost,
-  feeds tool errors back to the model as tool messages, and enforces a step
-  budget.
+  feeds tool errors back to the model as tool messages, and enforces a 64-step
+  default budget. It streams reasoning and content deltas through an
+  `AgentObserver` and emits tool call/result progress.
 - The Tauri `chat` command connects the agent to the SQLite store, persists
-  user/assistant/tool messages, records usage, and returns text, steps, usage,
-  and tool output previews. The React UI has a workspace chat, API-key settings,
-  write/command toggles, recent-session resume, and store diagnostics.
+  user/assistant/tool messages, records usage, and streams agent events over a
+  Tauri channel. The React UI shows live reasoning, response text, tool progress,
+  token/cache/cost, workspace chat, API-key settings, write/command toggles,
+  recent-session resume, and store diagnostics.
+- New sessions reuse the workspace row by path. The chat panel has bounded
+  height and follows new content unless the user scrolls up.
+- `ui/src/backend.ts` provides a browser mock backend when Tauri internals are
+  absent, so streaming, scrolling, and layout can be tested in a normal browser
+  without rebuilding the native app.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
 - Tool execution is currently gated by session-wide write/command toggles.

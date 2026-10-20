@@ -1,72 +1,17 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Doctor = {
-  schema_version: string;
-  integrity: string;
-  database_bytes: number;
-  event_count: number;
-};
-
-type Audit = {
-  valid: boolean;
-  records: number;
-  first_invalid: string | null;
-};
-
-type Foundation = {
-  app_version: string;
-  doctor: Doctor;
-  audit: Audit;
-  providers: { id: string; name: string; kind: string; enabled: boolean }[];
-  routes: { id: string; name: string; model: string; task_class: string }[];
-};
-
-type Usage = {
-  input_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
-  output_tokens: number;
-  reasoning_tokens: number;
-  cost_usd: number;
-};
-
-type ChatReply = {
-  session_id: string;
-  workspace_id: string;
-  text: string;
-  steps: number;
-  usage: Usage;
-  tool_trace: string[];
-};
-
-type ChatEntry = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  tools?: string[];
-  usage?: Usage;
-};
-
-type SessionSummary = {
-  id: string;
-  workspace_id: string | null;
-  workspace_path: string | null;
-  title: string | null;
-  status: string;
-  updated_at: number;
-  last_turn: number;
-};
-
-type SessionView = {
-  session_id: string;
-  messages: { role: string; text: string }[];
-};
-
-type FoundationState =
-  | { kind: "loading" }
-  | { kind: "ready"; foundation: Foundation }
-  | { kind: "error"; message: string };
+import {
+  apiKeyStatus as fetchApiKeyStatus,
+  cancelChat,
+  chat as sendChat,
+  clearApiKey as clearStoredApiKey,
+  loadFoundation as fetchFoundation,
+  loadSession as fetchSession,
+  loadSessions as fetchSessions,
+  saveApiKey as persistApiKey,
+  workspaceDefault,
+} from "./backend";
+import type { ChatEntry, FoundationState, SessionSummary } from "./types";
 
 export default function App() {
   const [foundation, setFoundation] = useState<FoundationState>({ kind: "loading" });
@@ -77,15 +22,18 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [allowWrites, setAllowWrites] = useState(false);
   const [allowCommands, setAllowCommands] = useState(false);
+  const [maxSteps, setMaxSteps] = useState(64);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const endRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followRef = useRef(true);
 
   const loadFoundation = useCallback(async () => {
     try {
-      const result = await invoke<Foundation>("foundation");
+      const result = await fetchFoundation();
       setFoundation({ kind: "ready", foundation: result });
     } catch (cause) {
       setFoundation({ kind: "error", message: describeError(cause) });
@@ -94,17 +42,17 @@ export default function App() {
 
   const loadSessions = useCallback(async () => {
     try {
-      setSessions(await invoke<SessionSummary[]>("sessions"));
+      setSessions(await fetchSessions());
     } catch {
       setSessions([]);
     }
   }, []);
 
   useEffect(() => {
-    void invoke<string>("workspace_default")
+    void workspaceDefault()
       .then(setWorkspacePath)
       .catch(() => setWorkspacePath("."));
-    void invoke<boolean>("api_key_status")
+    void fetchApiKeyStatus()
       .then(setApiKeyStatus)
       .catch(() => setApiKeyStatus(false));
     void loadFoundation();
@@ -112,13 +60,25 @@ export default function App() {
   }, [loadFoundation, loadSessions]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    const element = scrollRef.current;
+    if (element !== null && followRef.current) {
+      element.scrollTop = element.scrollHeight;
+    }
   }, [entries, busy]);
+
+  const handleChatScroll = useCallback(() => {
+    const element = scrollRef.current;
+    if (element === null) {
+      return;
+    }
+    followRef.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+  }, []);
 
   const saveApiKey = useCallback(async () => {
     setError(null);
     try {
-      await invoke("save_api_key", { key: apiKeyInput });
+      await persistApiKey(apiKeyInput);
       setApiKeyInput("");
       setApiKeyStatus(true);
     } catch (cause) {
@@ -126,10 +86,19 @@ export default function App() {
     }
   }, [apiKeyInput]);
 
+  const stop = useCallback(async () => {
+    setStopRequested(true);
+    try {
+      await cancelChat();
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  }, []);
+
   const clearApiKey = useCallback(async () => {
     setError(null);
     try {
-      await invoke("clear_api_key");
+      await clearStoredApiKey();
       setApiKeyStatus(false);
     } catch (cause) {
       setError(describeError(cause));
@@ -142,46 +111,124 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setStopRequested(false);
     setError(null);
     setMessage("");
+    followRef.current = true;
+    const assistantId = nextId();
     setEntries((current) => [
       ...current,
       { id: nextId(), role: "user", text },
+      {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        reasoning: "",
+        status: "Starting…",
+        tools: [],
+      },
     ]);
 
     try {
-      const reply = await invoke<ChatReply>("chat", {
-        sessionId,
-        workspacePath,
-        message: text,
-        allowWrites,
-        allowCommands,
-      });
-      setSessionId(reply.session_id);
-      setEntries((current) => [
-        ...current,
+      const reply = await sendChat(
         {
-          id: nextId(),
-          role: "assistant",
-          text: reply.text || "(no text returned)",
-          tools: reply.tool_trace,
-          usage: reply.usage,
+          sessionId,
+          workspacePath,
+          message: text,
+          allowWrites,
+          allowCommands,
+          maxSteps,
         },
-      ]);
+        (event) => {
+          setEntries((current) =>
+            current.map((entry) => {
+              if (entry.id !== assistantId) {
+                return entry;
+              }
+              switch (event.type) {
+                case "step":
+                  return { ...entry, status: `Step ${event.step}` };
+                case "reasoning":
+                  return {
+                    ...entry,
+                    reasoning: `${entry.reasoning ?? ""}${event.text}`,
+                  };
+                case "content":
+                  return {
+                    ...entry,
+                    text: `${entry.text}${event.text}`,
+                    status: "Writing…",
+                  };
+                case "tool_call":
+                  return {
+                    ...entry,
+                    status: `Calling ${event.name}…`,
+                    tools: [
+                      ...(entry.tools ?? []),
+                      `→ ${event.name}(${event.arguments})`,
+                    ],
+                  };
+                case "tool_result":
+                  return {
+                    ...entry,
+                    status: `${event.name} finished`,
+                    tools: [
+                      ...(entry.tools ?? []),
+                      `${event.is_error ? "✗" : "✓"} ${event.name}: ${event.content}`,
+                    ],
+                  };
+                case "usage":
+                  return { ...entry, usage: event.usage };
+              }
+            }),
+          );
+        },
+      );
+      setSessionId(reply.session_id);
+      setEntries((current) =>
+        current.map((entry) =>
+          entry.id === assistantId
+            ? {
+                ...entry,
+                text: reply.text || entry.text || "(no text returned)",
+                tools:
+                  entry.tools !== undefined && entry.tools.length > 0
+                    ? entry.tools
+                    : reply.tool_trace,
+                usage: reply.usage,
+                status: `Done · ${reply.steps} step${reply.steps === 1 ? "" : "s"}`,
+              }
+            : entry,
+        ),
+      );
       void loadFoundation();
       void loadSessions();
     } catch (cause) {
-      setError(describeError(cause));
+      const message = describeError(cause);
+      setError(message);
+      setEntries((current) =>
+        current.map((entry) =>
+          entry.id === assistantId
+            ? {
+                ...entry,
+                status: "Failed",
+                text: entry.text || "(request failed)",
+              }
+            : entry,
+        ),
+      );
     } finally {
       setBusy(false);
+      setStopRequested(false);
     }
-  }, [allowCommands, allowWrites, busy, loadFoundation, message, sessionId, workspacePath]);
+  }, [allowCommands, allowWrites, busy, loadFoundation, maxSteps, message, sessionId, workspacePath]);
 
   const openSession = useCallback(async (session: SessionSummary) => {
     setError(null);
     try {
-      const view = await invoke<SessionView>("session_view", { sessionId: session.id });
+      const view = await fetchSession(session.id);
       setSessionId(view.session_id);
+      followRef.current = true;
       if (session.workspace_path !== null && session.workspace_path.length > 0) {
         setWorkspacePath(session.workspace_path);
       }
@@ -201,6 +248,7 @@ export default function App() {
     setSessionId(null);
     setEntries([]);
     setError(null);
+    followRef.current = true;
   }, []);
 
   const changeWorkspace = useCallback((value: string) => {
@@ -211,7 +259,7 @@ export default function App() {
 
   return (
     <main className="min-h-full bg-[#0b0f14] text-slate-100">
-      <div className="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-6 py-6">
+      <div className="mx-auto flex h-screen max-w-7xl flex-col gap-6 overflow-hidden px-6 py-6">
         <header className="flex flex-wrap items-end justify-between gap-4 border-b border-white/10 pb-5">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.35em] text-emerald-400">
@@ -246,8 +294,12 @@ export default function App() {
         </header>
 
         <div className="grid min-h-0 flex-1 gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
-          <section className="flex min-h-[60vh] flex-col rounded-xl border border-white/10 bg-white/[0.02]">
-            <div className="flex-1 space-y-4 overflow-y-auto p-5">
+          <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/[0.02]">
+            <div
+              ref={scrollRef}
+              onScroll={handleChatScroll}
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5"
+            >
               {entries.length === 0 && (
                 <div className="mx-auto mt-12 max-w-lg text-center">
                   <p className="text-sm font-medium text-slate-200">
@@ -271,6 +323,21 @@ export default function App() {
                   <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                     {entry.role}
                   </p>
+                  {entry.status !== undefined && (
+                    <p className="mt-1 font-mono text-[10px] text-slate-500">
+                      {entry.status}
+                    </p>
+                  )}
+                  {entry.reasoning !== undefined && entry.reasoning.length > 0 && (
+                    <details open className="mt-3 rounded-md border border-white/5 bg-black/20 p-3">
+                      <summary className="cursor-pointer text-xs font-medium text-slate-400">
+                        Thinking
+                      </summary>
+                      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-slate-400">
+                        {entry.reasoning}
+                      </pre>
+                    </details>
+                  )}
                   <pre className="mt-2 whitespace-pre-wrap font-sans text-sm leading-6 text-slate-100">
                     {entry.text}
                   </pre>
@@ -307,7 +374,6 @@ export default function App() {
                   Working through the workspace…
                 </p>
               )}
-              <div ref={endRef} />
             </div>
 
             {error !== null && (
@@ -350,20 +416,45 @@ export default function App() {
                     />
                     Allow commands
                   </label>
+                  <label className="flex items-center gap-2">
+                    Max steps
+                    <input
+                      type="number"
+                      min={1}
+                      max={256}
+                      value={maxSteps}
+                      onChange={(event) =>
+                        setMaxSteps(Math.max(1, Math.min(256, Number(event.target.value) || 1)))
+                      }
+                      className="w-16 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200 outline-none focus:border-emerald-400/40"
+                    />
+                  </label>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void send()}
-                  disabled={busy || message.trim().length === 0}
-                  className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busy ? "Running…" : "Send"}
-                </button>
+                <div className="flex items-center gap-2">
+                  {busy && (
+                    <button
+                      type="button"
+                      onClick={() => void stop()}
+                      disabled={stopRequested}
+                      className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-300 transition hover:bg-amber-400/20 disabled:opacity-40"
+                    >
+                      {stopRequested ? "Stopping…" : "Stop"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void send()}
+                    disabled={busy || message.trim().length === 0}
+                    className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busy ? "Running…" : "Send"}
+                  </button>
+                </div>
               </div>
             </div>
           </section>
 
-          <aside className="space-y-4">
+          <aside className="min-h-0 space-y-4 overflow-y-auto">
             <Panel title="Recent sessions">
               <div className="space-y-1">
                 {sessions.length === 0 && (

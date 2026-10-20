@@ -29,6 +29,10 @@ enum WriteCommand {
         workspace: NewWorkspace,
         reply: SyncSender<Result<WorkspaceId, StoreError>>,
     },
+    EnsureWorkspace {
+        workspace: NewWorkspace,
+        reply: SyncSender<Result<WorkspaceId, StoreError>>,
+    },
     CreateSession {
         session: NewSession,
         reply: SyncSender<Result<SessionId, StoreError>>,
@@ -187,6 +191,14 @@ impl Store {
         workspace: NewWorkspace,
     ) -> Result<WorkspaceId, StoreError> {
         self.write(|reply| WriteCommand::CreateWorkspace { workspace, reply })
+    }
+
+    /// Return the existing workspace for a path, or create it.
+    pub fn ensure_workspace(&self, name: &str, path: &str) -> Result<WorkspaceId, StoreError> {
+        self.write(|reply| WriteCommand::EnsureWorkspace {
+            workspace: NewWorkspace::new(name, path),
+            reply,
+        })
     }
 
     pub fn create_session(
@@ -545,6 +557,9 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             WriteCommand::CreateWorkspace { workspace, reply } => {
                 let _ = reply.send(create_workspace(&connection, workspace));
             }
+            WriteCommand::EnsureWorkspace { workspace, reply } => {
+                let _ = reply.send(ensure_workspace(&connection, workspace));
+            }
             WriteCommand::CreateSession { session, reply } => {
                 let _ = reply.send(create_session(&connection, session));
             }
@@ -603,6 +618,30 @@ fn create_workspace(
         params![id.to_string(), workspace.name, workspace.path, now],
     )?;
     Ok(id)
+}
+
+fn ensure_workspace(
+    connection: &Connection,
+    workspace: NewWorkspace,
+) -> Result<WorkspaceId, StoreError> {
+    let id = WorkspaceId::new();
+    let now = now_millis();
+    connection.execute(
+        "INSERT INTO workspaces (id, name, path, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+             name = excluded.name,
+             updated_at = excluded.updated_at",
+        params![id.to_string(), workspace.name, workspace.path, now],
+    )?;
+    let id: String = connection.query_row(
+        "SELECT id FROM workspaces WHERE path = ?1",
+        [workspace.path],
+        |row| row.get(0),
+    )?;
+    Uuid::parse_str(&id)
+        .map(WorkspaceId::from)
+        .map_err(|error| StoreError::InvalidData(error.to_string()))
 }
 
 fn create_session(connection: &Connection, session: NewSession) -> Result<SessionId, StoreError> {
@@ -936,6 +975,18 @@ mod tests {
             Some(json!({"mode": "dark"}))
         );
         assert_eq!(store.get_setting("missing").expect("get"), None);
+    }
+
+    #[test]
+    fn ensure_workspace_reuses_the_same_path() {
+        let store = Store::open_in_memory().expect("store");
+        let first = store
+            .ensure_workspace("demo", "/tmp/openbad-ensure")
+            .expect("first");
+        let second = store
+            .ensure_workspace("renamed", "/tmp/openbad-ensure")
+            .expect("second");
+        assert_eq!(first, second);
     }
 
     #[test]
