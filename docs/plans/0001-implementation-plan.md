@@ -263,6 +263,9 @@ commands with approvals.
 - Recent sessions can be searched by title or message text from the sidebar.
   The store uses a literal `LIKE` search with escaped wildcards, and the UI
   debounces input before querying.
+- `openbad-agent` has a `live_chat` example for headless end-to-end checks
+  against the real DeepSeek endpoint; it uses the desktop keychain entry or
+  `DEEPSEEK_API_KEY`.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
 - The agent appends root project conventions from `AGENTS.md`, `CLAUDE.md`,

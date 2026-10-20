@@ -130,6 +130,17 @@ systems remain.
 
 ---
 
+## Headless live check
+
+Run one real DeepSeek turn with the workspace tools and streaming observer:
+
+```bash
+cargo run -p openbad-agent --example live_chat -- "Read Cargo.toml and summarize it"
+```
+
+It reads the key from the OpenBaD Desktop keychain entry, or falls back to
+`DEEPSEEK_API_KEY`.
+
 ## Repository layout
 
 ```text
