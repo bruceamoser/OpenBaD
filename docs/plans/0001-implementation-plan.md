@@ -261,6 +261,9 @@ commands with approvals.
   debounces input before querying.
 - The desktop build enables the `keyring` feature by default; `DEEPSEEK_API_KEY`
   and `OPENBAD_DEEPSEEK_BASE_URL` remain available for headless or mock runs.
+- `run_command` drains stdout/stderr concurrently, runs the shell in its own
+  process group, and kills the whole group on timeout or exit so background
+  helpers do not survive the call.
 - Tool execution is currently gated by session-wide write/command toggles.
   Tool output is redacted against the active provider key before it reaches the
   model, observer, or session trace. Per-call approval cards remain follow-up
