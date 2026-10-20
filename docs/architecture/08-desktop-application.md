@@ -27,8 +27,8 @@ than a command needs.
 │          │                                       │                  │
 │ Projects │ Messages                              │ Overview         │
 │ Overview │ Composer                              │ Workspace        │
-│ Workspace│                                       │ Repos            │
-│ Repos    │                                       │ Knowledge        │
+│ Workspace│                                       │ References       │
+│ References│                                      │ Knowledge        │
 │ Knowledge│                                       │ Retrieval        │
 │ Retrieval│                                       │ Memory / Edits   │
 │ Memory   │                                       │ Artifact         │
@@ -248,7 +248,7 @@ Targets:
 | Group | Examples |
 | --- | --- |
 | Session | `start_turn`, `cancel_turn`, `fork_session`, `compact`, `export` |
-| Workspace | `open_workspace`, `trust_workspace`, `index_status`, `search` |
+| Workspace | `workspaces_directory`, `create_project`, `open_workspace`, `trust_workspace`, `index_status`, `search` |
 | Files | `read_file`, `write_file`, `apply_patch`, `checkpoint_rewind` |
 | Git | `git_status`, `git_diff`, `git_commit`, `git_push` |
 | Memory | `search_memory`, `remember`, `forget`, `consolidate` |

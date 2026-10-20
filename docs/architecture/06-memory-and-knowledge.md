@@ -448,12 +448,13 @@ right. In the current build:
 - **Memory** — pinned and recent project memories with forget actions.
 - **Knowledge** — filter, open, add notes, import UTF-8 files, and delete.
 - **Workspace** — filter indexed files and open them as artifacts.
-- **Repos** — link read-only repositories and remove them.
+- **References** — add read-only folders with the native picker and remove
+  them.
 - **Retrieval** — query the fused corpus and inspect citations.
 - **Edits / Diag** — checkpoints and diagnostics without permanent chrome.
 
 Future refinements include retrieval score explanations, ingestion queues,
-chunk viewers, and repository file browsing.
+chunk viewers, and reference-folder browsing.
 
 ## 15. Evaluation
 

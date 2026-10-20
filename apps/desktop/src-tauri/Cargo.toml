@@ -19,6 +19,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+directories = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -33,3 +35,6 @@ openbad-index = { path = "../../../crates/openbad-index" }
 openbad-governance = { path = "../../../crates/openbad-governance" }
 similar = "2"
 base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

@@ -31,6 +31,7 @@ import {
 import {
   addProject as addStoredProject,
   apiKeyStatus as fetchApiKeyStatus,
+  createProject as createStoredProject,
   cancelChat,
   chat as sendChat,
   checkpointDiff as fetchCheckpointDiff,
@@ -51,6 +52,7 @@ import {
   quitApp,
   searchSessions as searchStoredSessions,
   workspaceDefault,
+  workspacesDirectory as fetchWorkspacesDirectory,
   workspaceIndexStatus as fetchIndexStatus,
 } from "./backend";
 import AppMenuBar from "./AppMenuBar";
@@ -146,7 +148,7 @@ export default function App() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
-  const [newProjectPath, setNewProjectPath] = useState("");
+  const [workspacesDir, setWorkspacesDir] = useState("");
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -174,6 +176,12 @@ export default function App() {
     } catch (cause) {
       setFoundation({ kind: "error", message: describeError(cause) });
     }
+  }, []);
+
+  useEffect(() => {
+    void fetchWorkspacesDirectory()
+      .then(setWorkspacesDir)
+      .catch(() => setWorkspacesDir(""));
   }, []);
 
   const loadProjects = useCallback(async () => {
@@ -743,12 +751,12 @@ export default function App() {
   }, [activeProject, projects, selectProject]);
 
   const createProject = useCallback(async () => {
-    const path = newProjectPath.trim();
-    if (path.length === 0) {
+    const name = newProjectName.trim();
+    if (name.length === 0) {
       return;
     }
     try {
-      const project = await addStoredProject(path, newProjectName.trim() || undefined);
+      const project = await createStoredProject(name);
       await loadProjects();
       setProjects((items) =>
         items.some((item) => item.id === project.id) ? items : [project, ...items],
@@ -756,11 +764,10 @@ export default function App() {
       selectProject(project);
       setProjectDialogOpen(false);
       setNewProjectName("");
-      setNewProjectPath("");
     } catch (cause) {
       setError(describeError(cause));
     }
-  }, [loadProjects, newProjectName, newProjectPath, selectProject]);
+  }, [loadProjects, newProjectName, selectProject]);
 
   const openSettings = useCallback((tab: SettingsTab) => {
     setSettingsTab(tab);
@@ -803,7 +810,7 @@ export default function App() {
       items: [
         { label: "New Session", shortcut: "Ctrl N", onSelect: newSession },
         {
-          label: "Add Project…",
+          label: "New Project…",
           onSelect: () => setProjectDialogOpen(true),
         },
         { label: "separator", separator: true },
@@ -882,7 +889,7 @@ export default function App() {
           onSelect: () => openPanel("workspace"),
         },
         {
-          label: "Repos",
+          label: "References",
           checked: panelOpen && panelTab === "repos",
           disabled: activeProject === null,
           onSelect: () => openPanel("repos"),
@@ -932,7 +939,7 @@ export default function App() {
         },
         { label: "separator", separator: true },
         {
-          label: "Add Repository…",
+          label: "Add Reference…",
           disabled: activeProject === null,
           onSelect: () => openPanel("repos"),
         },
@@ -1011,7 +1018,7 @@ export default function App() {
               </p>
               <button
                 type="button"
-                aria-label="Add project"
+                aria-label="New project"
                 onClick={() => setProjectDialogOpen(true)}
                 className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
               >
@@ -1065,7 +1072,7 @@ export default function App() {
                         />
                         <ProjectAreaButton
                           icon={<FolderGit2 size={12} />}
-                          label="Repos"
+                          label="References"
                           active={panelOpen && panelTab === "repos"}
                           onClick={() => openPanel("repos")}
                         />
@@ -1196,7 +1203,7 @@ export default function App() {
                         onClick={() => setProjectDialogOpen(true)}
                         className="flex items-center gap-1.5 rounded-md bg-emerald-400 px-3 py-2 text-[12px] font-medium text-emerald-950 hover:bg-emerald-300"
                       >
-                        <Plus size={14} /> Add project
+                        <Plus size={14} /> New project
                       </button>
                     </div>
                   ) : (
@@ -1393,10 +1400,7 @@ export default function App() {
           onProjectNameDraft={setProjectNameDraft}
           onSaveProjectName={() => void saveProjectName()}
           onRemoveProject={() => void removeProject()}
-          onAddProject={() => {
-            setProjectDialogOpen(true);
-            setNewProjectPath(workspacePath);
-          }}
+          onAddProject={() => setProjectDialogOpen(true)}
           foundation={foundation}
         />
       )}
@@ -1431,15 +1435,16 @@ export default function App() {
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="Add project"
+          aria-label="New project"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
         >
           <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-[14px] font-medium">Add project</h2>
+                <h2 className="text-[14px] font-medium">New project</h2>
                 <p className="mt-0.5 text-[11px] text-slate-500">
-                  A project is a directory the agent is confined to.
+                  A project owns one workspace. Name it and OpenBaD creates the
+                  folder for you.
                 </p>
               </div>
               <button
@@ -1452,31 +1457,31 @@ export default function App() {
               </button>
             </div>
             <label className="mt-4 block text-[10px] uppercase tracking-wider text-slate-600">
-              Directory
+              Project name
             </label>
             <input
               autoFocus
-              value={newProjectPath}
-              onChange={(event) => setNewProjectPath(event.target.value)}
+              value={newProjectName}
+              onChange={(event) => setNewProjectName(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   void createProject();
                 }
               }}
-              aria-label="Project directory"
-              placeholder="/home/you/projects/app"
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-[11px] text-slate-200 outline-none focus:border-emerald-400/40"
-            />
-            <label className="mt-3 block text-[10px] uppercase tracking-wider text-slate-600">
-              Name <span className="normal-case tracking-normal text-slate-700">(optional)</span>
-            </label>
-            <input
-              value={newProjectName}
-              onChange={(event) => setNewProjectName(event.target.value)}
               aria-label="Project name"
-              placeholder="Project name"
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[11px] text-slate-200 outline-none focus:border-emerald-400/40"
+              placeholder="My project"
+              className="mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-emerald-400/40"
             />
+            <div className="mt-3 rounded-md border border-white/[0.06] bg-black/20 px-2.5 py-2">
+              <p className="text-[9px] uppercase tracking-wider text-slate-600">
+                Workspace location
+              </p>
+              <p className="mt-1 break-all font-mono text-[10px] leading-4 text-slate-500">
+                {workspacesDir.length > 0
+                  ? `${workspacesDir}/${projectSlugPreview(newProjectName)}`
+                  : "Resolving the default workspaces directory…"}
+              </p>
+            </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
@@ -1488,10 +1493,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => void createProject()}
-                disabled={newProjectPath.trim().length === 0}
+                disabled={newProjectName.trim().length === 0}
                 className="rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-30"
               >
-                Add project
+                Create project
               </button>
             </div>
           </div>
@@ -1954,7 +1959,7 @@ function SettingsDialog({
                 onClick={onAddProject}
                 className="flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-[11px] text-slate-300 hover:bg-white/[0.06]"
               >
-                <Plus size={13} /> Add another project
+                <Plus size={13} /> Create another project
               </button>
               <button
                 type="button"
@@ -2009,7 +2014,7 @@ function CommandPalette({
   const [query, setQuery] = useState("");
   const actions = [
     { label: "New session", hint: "Ctrl N", run: onNewSession },
-    { label: "Add project", hint: "", run: onAddProject },
+    { label: "New project", hint: "", run: onAddProject },
     { label: "Toggle sidebar", hint: "", run: onToggleSidebar },
     { label: "Settings: Model", hint: "", run: () => onSettings("model") },
     { label: "Settings: Access", hint: "", run: () => onSettings("access") },
@@ -2017,7 +2022,7 @@ function CommandPalette({
     { label: "Settings: Project", hint: "", run: () => onSettings("project") },
     { label: "Project: Overview", hint: "", run: () => onContext("overview") },
     { label: "Project: Workspace", hint: "", run: () => onContext("workspace") },
-    { label: "Project: Repos", hint: "", run: () => onContext("repos") },
+    { label: "Project: References", hint: "", run: () => onContext("repos") },
     { label: "Project: Knowledge", hint: "", run: () => onContext("knowledge") },
     { label: "Project: Retrieval", hint: "", run: () => onContext("retrieval") },
     { label: "Project: Memory", hint: "", run: () => onContext("memory") },
@@ -2196,4 +2201,15 @@ function artifactFromMetadata(metadata: unknown): Artifact | null {
     content: typeof record.content === "string" ? record.content : undefined,
     language: typeof record.language === "string" ? record.language : undefined,
   };
+}
+
+
+function projectSlugPreview(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return slug.length > 0 ? slug : "project";
 }

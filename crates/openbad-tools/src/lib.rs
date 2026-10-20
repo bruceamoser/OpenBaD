@@ -1536,7 +1536,7 @@ impl Tool for ListProjectSourcesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "list_project_sources",
-            "List linked repositories and knowledge documents in this project. Use read_repo_file to inspect a linked repository.",
+            "List reference folders and knowledge documents in this project. Use read_repo_file to inspect a reference folder.",
             RiskLevel::Read,
         )
         .with_schema(json!({"type": "object", "properties": {}}))
@@ -1555,9 +1555,9 @@ impl Tool for ListProjectSourcesTool {
         let knowledge = project.list_knowledge().map_err(ToolError::Failed)?;
         let mut sections = Vec::new();
         if repos.is_empty() {
-            sections.push("Repositories: none linked.".to_owned());
+            sections.push("References: none linked.".to_owned());
         } else {
-            let mut repo_lines = vec!["Repositories:".to_owned()];
+            let mut repo_lines = vec!["References:".to_owned()];
             for repo in repos {
                 repo_lines.push(format!(
                     "- {} ({}){}",
@@ -1597,7 +1597,7 @@ impl Tool for ReadRepoFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "read_repo_file",
-            "Read a UTF-8 file from a linked project repository. The path is confined to that repository.",
+            "Read a UTF-8 file from a project reference folder. The path is confined to that reference.",
             RiskLevel::Read,
         )
         .with_schema(json!({

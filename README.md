@@ -130,11 +130,12 @@ definitions, and FTS5 text in SQLite, refreshes after each turn, and powers
 restore. Phase 5 memory provides `remember`/`recall` plus automatic recent-memory
 context, and Phase 6 workspace skills load on demand. Project conventions from
 `AGENTS.md`/`CLAUDE.md` are included in the system prompt. Migration
-`0006_project_areas` adds project-scoped repositories, knowledge documents and
-chunks, retrieval, and overview counts. The desktop UI now has a project/session
-sidebar, inline session rename, a Codex-style top menu and project area
-navigation, a compact composer with access modes, a resizable split workspace
-for artifacts, and no fixed step cap.
+`0006_project_areas` adds project-scoped reference folders, knowledge documents
+and chunks, retrieval, and overview counts. New projects ask only for a name and
+receive a managed workspace under the default workspaces directory. The desktop
+UI now has a project/session sidebar, inline session rename, a Codex-style top
+menu and project area navigation, a compact composer with access modes, a
+resizable split workspace for artifacts, and no fixed step cap.
 Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind,
 embedding-backed retrieval, richer document ingestion, subagents, workflows, and
 packaging remain.

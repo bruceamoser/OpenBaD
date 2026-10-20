@@ -122,14 +122,16 @@ test("renames a session inline", async ({ page }) => {
   await expect(page.locator("aside").getByText("Workspace summary", { exact: true })).toBeVisible();
 });
 
-test("adds a project", async ({ page }) => {
+test("creates a project workspace from a name", async ({ page }) => {
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Add project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Add project" });
-  await dialog.getByRole("textbox", { name: "Project directory" }).fill("/tmp/second-project");
+  await page.getByRole("button", { name: "New project" }).click();
+  const dialog = page.getByRole("dialog", { name: "New project" });
   await dialog.getByRole("textbox", { name: "Project name" }).fill("Second");
-  await dialog.getByRole("button", { name: "Add project" }).click();
+  await expect(
+    dialog.getByText("/home/you/OpenBaD/workspaces/second"),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "Create project" }).click();
 
   await expect(page.locator("aside").getByText("Second", { exact: true })).toBeVisible();
 });
@@ -223,14 +225,18 @@ test("opens assistant-presented artifacts beside the chat", async ({ page }) => 
   await expect(page.getByTitle("OpenBaD architecture")).toBeVisible();
 });
 
-test("links a project repository", async ({ page }) => {
+test("adds a reference folder with the picker", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Repos" }).first().click();
-  await page.getByLabel("Repository path").fill("/mnt/disk4/repos/clarity");
-  await page.getByLabel("Repository name").fill("clarity");
-  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByRole("button", { name: "References" }).first().click();
+  await page.getByRole("button", { name: "Add reference folder…" }).click();
 
-  await expect(page.getByText("clarity", { exact: true })).toBeVisible();
+  await expect(page.getByText("reference-library", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("/mnt/disk4/repos/reference-library"),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Remove reference-library" }).click();
+  await expect(page.getByText("reference-library", { exact: true })).toHaveCount(0);
 });
 
 test("opens workspace files in the split pane", async ({ page }) => {

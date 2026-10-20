@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import type {
   AgentEvent,
@@ -66,7 +67,7 @@ let mockKnowledge: KnowledgeDocumentSummary[] = [
 const mockKnowledgeContent = new Map<string, string>([
   [
     "mock-knowledge-1",
-    "OpenBaD is a desktop coding harness. Projects own their workspace, linked repositories, knowledge library, retrieval corpus, and durable memories. Keep the chat focused and open visual artifacts beside it.",
+    "OpenBaD is a desktop coding harness. Projects own one workspace plus reference folders, a knowledge library, retrieval corpus, and durable memories. Keep the chat focused and open visual artifacts beside it.",
   ],
 ]);
 
@@ -77,6 +78,7 @@ let mockIndex: WorkspaceIndexSummary = {
   indexed_at: Date.now() - 60_000,
 };
 const mockSessions: SessionSummary[] = [];
+const mockWorkspacesDirectory = "/home/you/OpenBaD/workspaces";
 let mockProjects: WorkspaceSummary[] = [
   {
     id: "mock-workspace",
@@ -128,6 +130,47 @@ export async function loadFoundation(): Promise<Foundation> {
 
 export async function listProjects(): Promise<WorkspaceSummary[]> {
   return isTauri ? invoke<WorkspaceSummary[]>("list_projects") : [...mockProjects];
+}
+
+export async function workspacesDirectory(): Promise<string> {
+  return isTauri
+    ? invoke<string>("workspaces_directory")
+    : mockWorkspacesDirectory;
+}
+
+export async function createProject(name: string): Promise<WorkspaceSummary> {
+  if (isTauri) {
+    return invoke<WorkspaceSummary>("create_project", { name });
+  }
+  const slug =
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "project";
+  const project: WorkspaceSummary = {
+    id: `mock-project-${mockProjects.length + 1}`,
+    name: name.trim(),
+    path: `${mockWorkspacesDirectory}/${slug}`,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+    session_count: 0,
+  };
+  mockProjects = [project, ...mockProjects];
+  return project;
+}
+
+export async function pickDirectory(title: string): Promise<string | null> {
+  if (isTauri) {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title,
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return "/mnt/disk4/repos/reference-library";
 }
 
 export async function addProject(

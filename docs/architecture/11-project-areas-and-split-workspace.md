@@ -10,8 +10,8 @@ container with six project-scoped areas:
 | Area | Purpose | Default access |
 | --- | --- | --- |
 | Chat | Conversation and agent turns | session-scoped |
-| Workspace | Primary directory the agent can edit | read/write by access mode |
-| Repos | Additional linked repositories | read-only |
+| Workspace | The project's single managed directory | read/write by access mode |
+| References | Additional folders selected by the user | read-only |
 | Knowledge | Curated notes and imported references | read/write in project |
 | Retrieval | Inspect the fused project corpus | read-only |
 | Memory | Durable decisions and preferences | read/write in project |
@@ -39,8 +39,9 @@ flowchart LR
 
 Migration `0006_project_areas` adds:
 
-- `project_repos` — `(id, workspace_id, name, path, read_only, created_at)`,
-  unique per `(workspace_id, path)`.
+- `project_repos` — read-only reference folders,
+  `(id, workspace_id, name, path, read_only, created_at)`, unique per
+  `(workspace_id, path)`.
 - `knowledge_documents` — project-owned document metadata, full content, tags,
   BLAKE3 content hash, timestamps.
 - `knowledge_chunks` — ordered chunk rows owned by a document.
@@ -59,12 +60,21 @@ preferring newline boundaries after the first third of the window. Chunk
 identity is `(document_id, seq)`, which becomes the citation locator
 `document_id#seq`.
 
-### Repository trust
+### Managed workspace
 
-A linked repository is canonicalized when added. The agent's `read_repo_file`
-tool canonicalizes both the repository root and the requested path, then
-requires the requested path to stay under the root. Linked repositories are
-read-only in this iteration.
+A project owns exactly one workspace. New projects require only a name:
+OpenBaD resolves the default workspaces directory (`~/OpenBaD/workspaces`,
+overridable with `OPENBAD_WORKSPACES_DIR`), creates a unique slug directory,
+and records that path as the project workspace. Existing workspace paths remain
+supported for projects created before managed workspaces.
+
+### Reference folders
+
+References are selected with the native folder picker. A reference is
+canonicalized when added. The agent's `read_repo_file` tool canonicalizes both
+the reference root and the requested path, then requires the requested path to
+stay under the root. References are read-only. Users can remove a reference
+without deleting the directory.
 
 ## 3. Retrieval
 
@@ -93,9 +103,9 @@ stage without changing the project model, locator contract, or tools.
 
 | Tool | Risk | Contract |
 | --- | --- | --- |
-| `list_project_sources` | read | List linked repositories and knowledge documents. |
+| `list_project_sources` | read | List reference folders and knowledge documents. |
 | `search_project` | read | Fuse knowledge, indexed code, and memory; return citable locators. |
-| `read_repo_file` | read | Read a UTF-8 file inside a linked repository. |
+| `read_repo_file` | read | Read a UTF-8 file inside a reference folder. |
 | `add_knowledge` | write | Add a curated project note or reference to the library. |
 | `present_artifact` | read | Open a web page, image, markdown note, diff, or file beside chat. |
 
@@ -124,7 +134,7 @@ The desktop layout is intentionally conversation-first:
 - The application menu bar carries project-wide actions and a View menu that
   opens every project area, so the header can stay focused on breadcrumbs and
   status.
-- The project sidebar exposes Overview, Workspace, Repos, Knowledge,
+- The project sidebar exposes Overview, Workspace, References, Knowledge,
   Retrieval, and Memory links beneath the active project.
 - Selecting an area opens it on the right without hiding the conversation.
 - The panel is resizable with a 320 px floor and a viewport-aware ceiling.
@@ -152,7 +162,8 @@ their history across restarts is follow-up work.
 
 ## 6. Failure modes
 
-- **Linked repo escapes its root** — rejected by canonical path containment.
+- **Reference folder escapes its root** — rejected by canonical path
+  containment.
 - **Knowledge import is not UTF-8 or exceeds 4 MiB** — rejected with a clear
   error; no partial document is written.
 - **Duplicate knowledge content** — returns the existing document.
@@ -166,22 +177,22 @@ their history across restarts is follow-up work.
 
 ## 7. Follow-up
 
-1. Index linked repositories into the same retrieval model with a `repo` source
-   and repository-relative locators.
+1. Index reference folders into the same retrieval model with a `reference`
+   source and reference-relative locators.
 2. Persist artifact history and restore the most recent artifact when a session
    reopens.
 3. Add embedding-backed hybrid retrieval and explainable score breakdowns.
-4. Add native directory pickers for repository linking and knowledge import.
-5. Add file watching so workspace and repository panels reflect changes without
+4. Add a native folder picker for knowledge import.
+5. Add file watching so workspace and reference panels reflect changes without
    a manual index refresh.
-6. Add per-area access policy, especially write access to linked repositories.
+6. Add per-area access policy, especially write access to reference folders.
 
 ## 8. Verification
 
 - Store tests cover project scoping, idempotent knowledge writes, chunking,
   retrieval, deletion, and overview counts.
-- Tool tests cover search, knowledge add, linked repository reads, path escape
+- Tool tests cover search, knowledge add, reference-folder reads, path escape
   rejection, source listing, and artifact metadata.
 - Agent tests verify tool metadata reaches the observer.
-- Playwright covers project knowledge, retrieval, repository linking, and
-  assistant-presented artifacts in the split workspace.
+- Playwright covers project creation, reference folders, project knowledge,
+  retrieval, and assistant-presented artifacts in the split workspace.
