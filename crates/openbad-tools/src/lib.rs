@@ -503,6 +503,8 @@ impl ToolRegistry {
         registry.register(ClassifyPathTool);
         registry.register(RunTaskTool);
         registry.register(ListRecipesTool);
+        registry.register(ListGatesTool);
+        registry.register(RunGateTool);
         registry.register(RunRecipeTool);
         registry.register(TodoWriteTool);
         registry.register(TodoReadTool);
@@ -4564,6 +4566,180 @@ impl Tool for RunTaskTool {
     }
 }
 
+struct ListGatesTool;
+
+#[async_trait]
+impl Tool for ListGatesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_gates",
+            "List verification gates declared in .openbad/project.yaml and their ordered recipe checks.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let Some(manifest) = manifest else {
+            return Ok(ToolResult::ok("no gates (no .openbad/project.yaml)"));
+        };
+        if manifest.gates.is_empty() {
+            return Ok(ToolResult::ok("no gates declared"));
+        }
+        let content = manifest
+            .gates
+            .iter()
+            .map(|(name, gate)| {
+                format!(
+                    "- {name}: {}{}",
+                    gate.checks.join(" → "),
+                    gate.description
+                        .as_deref()
+                        .map(|description| format!(" — {description}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "gates": manifest.gates.keys().cloned().collect::<Vec<_>>()
+        })))
+    }
+}
+
+struct RunGateTool;
+
+#[async_trait]
+impl Tool for RunGateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "run_gate",
+            "Run a named verification gate: every declared recipe in order, with a pass/fail checklist and evidence written to .openbad/gates/. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(600)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Gate name from the project manifest"}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let name = string_arg(&arguments, "name")?;
+        let manifest = openbad_workspace::load_project_manifest(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(|| {
+                ToolError::Failed("no .openbad/project.yaml in this workspace".to_owned())
+            })?;
+        let gate = manifest.gates.get(&name).ok_or_else(|| {
+            ToolError::InvalidArgument(format!(
+                "unknown gate: {name}; available gates: {}",
+                manifest
+                    .gates
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "run_gate (verification gates require Full access)".to_owned(),
+            ));
+        }
+        let mut checks = Vec::new();
+        let mut passed = 0;
+        for check in &gate.checks {
+            let started = std::time::Instant::now();
+            let Some(recipe) = manifest.recipe(check) else {
+                checks.push(json!({
+                    "recipe": check,
+                    "success": false,
+                    "error": "recipe is not declared",
+                    "duration_ms": 0
+                }));
+                continue;
+            };
+            let result = RunCommandTool
+                .execute(
+                    json!({
+                        "command": recipe.command,
+                        "cwd": recipe.cwd,
+                        "timeout_seconds": recipe.timeout_seconds.unwrap_or(300)
+                    }),
+                    context,
+                )
+                .await?;
+            let success = result.metadata["success"].as_bool().unwrap_or(false);
+            if success {
+                passed += 1;
+            }
+            checks.push(json!({
+                "recipe": check,
+                "command": recipe.command,
+                "success": success,
+                "exit_code": result.metadata["exit_code"],
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "output_preview": result.content.chars().take(2_000).collect::<String>(),
+                "log_path": result.metadata["log_path"]
+            }));
+        }
+        let total = gate.checks.len();
+        let evidence = json!({
+            "gate": name,
+            "description": gate.description,
+            "created_at": now_millis(),
+            "success": passed == total,
+            "passed": passed,
+            "total": total,
+            "checks": checks
+        });
+        let directory = context.workspace.root().join(".openbad").join("gates");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{name}-{}.json", now_millis()));
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&evidence)
+                .map_err(|error| ToolError::Failed(error.to_string()))?,
+        )?;
+        let checklist = checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "- [{}] {}",
+                    if check["success"].as_bool().unwrap_or(false) {
+                        "pass"
+                    } else {
+                        "fail"
+                    },
+                    check["recipe"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(format!(
+            "gate {name}: {} ({passed}/{total} checks passed)\n{checklist}\nevidence: {}",
+            if passed == total { "PASSED" } else { "FAILED" },
+            path.display()
+        ))
+        .with_metadata(evidence))
+    }
+}
+
 struct ListRecipesTool;
 
 #[async_trait]
@@ -5413,6 +5589,10 @@ command_classes: ["read-only"]
 name: Validation
 recipes:
   check: grep -q GOOD src/value.rs
+gates:
+  release:
+    description: Release checks
+    checks: [check]
 validators:
   - pattern: "src/**/*.rs"
     command: grep -q GOOD src/value.rs
@@ -5428,6 +5608,11 @@ validators:
             .await
             .expect("list recipes");
         assert!(recipes.content.contains("check"));
+        let gates = ListGatesTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list gates");
+        assert!(gates.content.contains("release"));
 
         WriteFileTool
             .execute(
@@ -5447,6 +5632,15 @@ validators:
             .execute(json!({"path": "src/value.rs"}), &context)
             .await
             .expect("read before overwrite");
+        let gate = RunGateTool
+            .execute(json!({"name": "release"}), &context)
+            .await
+            .expect("gate");
+        assert!(gate.content.contains("PASSED"));
+        assert_eq!(gate.metadata["success"], true);
+        let evidence = gate.metadata["checks"][0]["log_path"].as_str();
+        assert!(evidence.is_some());
+
         let failed = WriteFileTool
             .execute(
                 json!({"path": "src/value.rs", "content": "BAD\n"}),

@@ -350,6 +350,7 @@ Implemented:
 | `run_task` | command | Run a named manifest command; requires Full access |
 | `list_recipes` | read | List verification recipes declared in the project manifest |
 | `run_recipe` | command | Run a lint/test/build/schema recipe; requires Full access |
+| `list_gates` / `run_gate` | read/command | Run an ordered verification gate with evidence |
 | `todo_write` | write | Replace the durable project todo list in `.openbad/todos.json` |
 | `todo_read` | read | Read the project todo list |
 | `write_handoff` | write | Write a handoff summary to `.openbad/handoff.md` |
@@ -363,6 +364,11 @@ Knowledge documents carry a confidence level and, for imported files, a BLAKE3
 source hash. `list_knowledge` and `get_knowledge` flag a document as `STALE`
 when the source file's current hash differs from the captured hash, and a
 source that has disappeared is treated as stale.
+
+Manifest `gates:` group recipes into named pre-flight checks. `run_gate`
+executes them in order and writes a JSON evidence file under `.openbad/gates/`.
+When `prove_it: true`, the prompt requires every factual claim to cite an
+executed check or be labelled UNVERIFIED.
 
 `write_file` and `edit_file` run every manifest validator whose glob matches
 the written path. Validators execute only in Full access; a failing validator

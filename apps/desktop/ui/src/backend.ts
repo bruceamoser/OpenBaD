@@ -121,6 +121,10 @@ const mockManifest: ProjectManifest = {
     lint: "cargo clippy --workspace --all-targets -- -D warnings",
   },
   validators: [{ pattern: "**/*.yaml", command: "cargo run -- check-yaml" }],
+  gates: {
+    release: { description: "Release checks", checks: ["verify", "lint"] },
+  },
+  prove_it: true,
   invariants: [
     {
       id: "INV-1",

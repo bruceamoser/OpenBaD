@@ -217,6 +217,8 @@ export type ProjectManifest = {
     command: string;
     description?: string | null;
   }[];
+  gates?: Record<string, { description?: string | null; checks: string[] }>;
+  prove_it?: boolean;
   invariants?: {
     id: string;
     statement: string;

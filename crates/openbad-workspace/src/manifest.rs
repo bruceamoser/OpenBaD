@@ -85,6 +85,13 @@ pub struct ValidatorDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateDefinition {
+    #[serde(default)]
+    pub description: Option<String>,
+    pub checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invariant {
     pub id: String,
     pub statement: String,
@@ -110,6 +117,10 @@ pub struct ProjectManifest {
     pub recipes: BTreeMap<String, CommandSpec>,
     #[serde(default)]
     pub validators: Vec<ValidatorDefinition>,
+    #[serde(default)]
+    pub gates: BTreeMap<String, GateDefinition>,
+    #[serde(default)]
+    pub prove_it: bool,
     #[serde(default)]
     pub invariants: Vec<Invariant>,
 }
@@ -210,6 +221,22 @@ impl ProjectManifest {
                 ));
             }
         }
+        if !self.gates.is_empty() {
+            summary.push_str("Verification gates:\n");
+            for (name, gate) in &self.gates {
+                summary.push_str(&format!(
+                    "- {name}: {}{}\n",
+                    gate.checks.join(" → "),
+                    gate.description
+                        .as_deref()
+                        .map(|description| format!(" — {description}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        if self.prove_it {
+            summary.push_str("Prove-it mode: label every unverified claim explicitly.\n");
+        }
         if !self.validators.is_empty() {
             summary.push_str("Validators:\n");
             for validator in &self.validators {
@@ -296,6 +323,11 @@ recipes:
 validators:
   - pattern: "src/**/*.yaml"
     command: npm run validate:yaml
+gates:
+  release:
+    description: Release checks
+    checks: [verify, lint]
+prove_it: true
 scope:
   authoritative: ["src/**", "docs/**"]
   historical: ["archive/**"]
@@ -328,6 +360,9 @@ invariants:
         assert!(manifest.summary().contains("Named tasks"));
         assert!(manifest.summary().contains("Recipes"));
         assert!(manifest.summary().contains("Validators"));
+        assert_eq!(manifest.gates["release"].checks, vec!["verify", "lint"]);
+        assert!(manifest.prove_it);
+        assert!(manifest.summary().contains("Prove-it mode"));
     }
 
     #[test]

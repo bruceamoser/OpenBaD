@@ -333,8 +333,10 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                   <p>
                     {Object.keys(manifest.commands ?? {}).length} tasks ·{" "}
                     {Object.keys(manifest.recipes ?? {}).length} recipes ·{" "}
+                    {Object.keys(manifest.gates ?? {}).length} gates ·{" "}
                     {(manifest.validators ?? []).length} validators ·{" "}
                     {(manifest.invariants ?? []).length} invariants
+                    {manifest.prove_it ? " · prove-it" : ""}
                   </p>
                 </div>
               )}
