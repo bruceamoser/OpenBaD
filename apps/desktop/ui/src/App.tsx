@@ -23,6 +23,9 @@ export default function App() {
   const [allowWrites, setAllowWrites] = useState(false);
   const [allowCommands, setAllowCommands] = useState(false);
   const [maxSteps, setMaxSteps] = useState(64);
+  const [model, setModel] = useState("deepseek-flash");
+  const [thinking, setThinking] = useState(true);
+  const [reasoningEffort, setReasoningEffort] = useState("high");
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -138,6 +141,9 @@ export default function App() {
           allowWrites,
           allowCommands,
           maxSteps,
+          model,
+          thinking,
+          reasoningEffort,
         },
         (event) => {
           setEntries((current) =>
@@ -221,7 +227,19 @@ export default function App() {
       setBusy(false);
       setStopRequested(false);
     }
-  }, [allowCommands, allowWrites, busy, loadFoundation, maxSteps, message, sessionId, workspacePath]);
+  }, [
+    allowCommands,
+    allowWrites,
+    busy,
+    loadFoundation,
+    maxSteps,
+    message,
+    model,
+    reasoningEffort,
+    sessionId,
+    thinking,
+    workspacePath,
+  ]);
 
   const openSession = useCallback(async (session: SessionSummary) => {
     setError(null);
@@ -237,6 +255,7 @@ export default function App() {
           id: nextId(),
           role: message.role === "user" ? "user" : "assistant",
           text: message.text,
+          reasoning: message.reasoning ?? "",
         })),
       );
     } catch (cause) {
@@ -362,7 +381,8 @@ export default function App() {
                   {entry.usage !== undefined && (
                     <p className="mt-3 font-mono text-[11px] text-slate-500">
                       {entry.usage.input_tokens.toLocaleString()} in ·{" "}
-                      {entry.usage.cache_read_tokens.toLocaleString()} cached ·{" "}
+                      {entry.usage.cache_read_tokens.toLocaleString()} cached (
+                      {cacheHitShare(entry.usage).toFixed(0)}%) ·{" "}
                       {entry.usage.output_tokens.toLocaleString()} out · $
                       {entry.usage.cost_usd.toFixed(4)}
                     </p>
@@ -498,6 +518,45 @@ export default function App() {
               </p>
             </Panel>
 
+            <Panel title="Model">
+              <label className="text-xs text-slate-500" htmlFor="model">
+                Route
+              </label>
+              <select
+                id="model"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-slate-200 outline-none focus:border-emerald-400/40"
+              >
+                <option value="deepseek-flash">deepseek-flash · fast</option>
+                <option value="deepseek-v4-pro">deepseek-v4-pro · reasoning</option>
+              </select>
+              <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-400">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={thinking}
+                    onChange={(event) => setThinking(event.target.checked)}
+                    className="accent-emerald-400"
+                  />
+                  Thinking
+                </label>
+                <select
+                  value={reasoningEffort}
+                  onChange={(event) => setReasoningEffort(event.target.value)}
+                  disabled={!thinking}
+                  className="rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200 outline-none focus:border-emerald-400/40 disabled:opacity-40"
+                >
+                  <option value="low">low effort</option>
+                  <option value="high">high effort</option>
+                  <option value="max">max effort</option>
+                </select>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-slate-500">
+                Changing model, thinking, or effort starts a new cache series.
+              </p>
+            </Panel>
+
             <Panel title="DeepSeek API key">
               <div className="flex items-center justify-between gap-2">
                 <Badge ok={apiKeyStatus} label={apiKeyStatus ? "Configured" : "Missing"} />
@@ -614,6 +673,11 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1024).toFixed(1)} KiB`;
   }
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function cacheHitShare(usage: { input_tokens: number; cache_read_tokens: number }): number {
+  const billed = usage.input_tokens + usage.cache_read_tokens;
+  return billed === 0 ? 0 : (usage.cache_read_tokens / billed) * 100;
 }
 
 function nextId(): string {

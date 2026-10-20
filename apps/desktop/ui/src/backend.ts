@@ -15,7 +15,7 @@ const isTauri =
 let mockKeyConfigured = false;
 let mockSessionCounter = 1;
 const mockSessions: SessionSummary[] = [];
-const mockMessages = new Map<string, { role: string; text: string }[]>();
+const mockMessages = new Map<string, { role: string; text: string; reasoning: string | null }[]>();
 
 const mockUsage: Usage = {
   input_tokens: 428,
@@ -101,6 +101,9 @@ export type ChatInput = {
   allowWrites: boolean;
   allowCommands: boolean;
   maxSteps: number;
+  model: string;
+  thinking: boolean;
+  reasoningEffort: string;
 };
 
 export async function chat(
@@ -111,12 +114,17 @@ export async function chat(
     const channel = new Channel<AgentEvent>();
     channel.onmessage = onEvent;
     return invoke<ChatReply>("chat", {
-      sessionId: input.sessionId,
-      workspacePath: input.workspacePath,
-      message: input.message,
-      allowWrites: input.allowWrites,
-      allowCommands: input.allowCommands,
-      maxSteps: input.maxSteps,
+      request: {
+        sessionId: input.sessionId,
+        workspacePath: input.workspacePath,
+        message: input.message,
+        allowWrites: input.allowWrites,
+        allowCommands: input.allowCommands,
+        maxSteps: input.maxSteps,
+        model: input.model,
+        thinking: input.thinking,
+        reasoningEffort: input.reasoningEffort,
+      },
       onEvent: channel,
     });
   }
@@ -173,8 +181,8 @@ async function mockChat(
       last_turn: 1,
     });
     mockMessages.set(sessionId, [
-      { role: "user", text: input.message },
-      { role: "assistant", text },
+      { role: "user", text: input.message, reasoning: null },
+      { role: "assistant", text, reasoning: "The user wants a workspace summary." },
     ]);
   }
 

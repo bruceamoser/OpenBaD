@@ -25,6 +25,7 @@ uuid = { workspace = true }
 openbad-core = { path = "../../../crates/openbad-core" }
 openbad-store = { path = "../../../crates/openbad-store" }
 openbad-agent = { path = "../../../crates/openbad-agent" }
+openbad-harness = { path = "../../../crates/openbad-harness" }
 openbad-llm = { path = "../../../crates/openbad-llm" }
 openbad-tools = { path = "../../../crates/openbad-tools" }
 openbad-workspace = { path = "../../../crates/openbad-workspace" }
