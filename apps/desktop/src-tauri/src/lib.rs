@@ -1848,6 +1848,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_files_lists_live_workspace_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        std::fs::write(root.path().join("README.md"), "readme").expect("readme");
+        std::fs::write(root.path().join("src/main.rs"), "fn main() {}").expect("main");
+        let files = project_files(root.path().to_string_lossy().into_owned()).expect("files");
+        assert!(files.contains(&"README.md".to_owned()));
+        assert!(files.contains(&"src/main.rs".to_owned()));
+    }
+
+    #[test]
     fn project_slugs_are_safe_and_readable() {
         assert_eq!(project_slug("My Project"), "my-project");
         assert_eq!(project_slug("  API_v2 / Desktop  "), "api-v2-desktop");
