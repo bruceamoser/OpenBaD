@@ -319,9 +319,9 @@ Implemented:
 | --- | --- | --- |
 | `recall` | read | Durable workspace memory |
 | `remember` | write | Durable decision or preference |
-| `list_project_sources` | read | Linked repositories and knowledge documents |
+| `list_project_sources` | read | Reference folders and knowledge documents |
 | `search_project` | read | Fused knowledge, indexed code, and memory with locators |
-| `read_repo_file` | read | UTF-8 file inside a read-only linked repository |
+| `read_repo_file` | read | UTF-8 file inside a read-only reference folder |
 | `add_knowledge` | write | Add a curated project note to the knowledge library |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 

@@ -58,23 +58,23 @@ scroll, and streaming tests without rebuilding the native app.
 `pnpm --dir ui test:e2e` runs the Playwright smoke tests against that mock
 backend. They cover streamed reasoning and tool cards, auto-scroll,
 cancellation, projects and sessions, checkpoints, memory, project knowledge and
-retrieval, repository linking, assistant artifacts, and the command menu.
+retrieval, reference folders, assistant artifacts, and the command menu.
 
 ## Interface
 
-The workspace is organised around projects. Add a directory containing a project
-marker (`.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`,
-`Makefile`, `AGENTS.md`, or `.openbad`) and its sessions are grouped beneath it.
-Sessions can be renamed from the sidebar.
+The workspace is organised around projects. Create one by entering a name;
+OpenBaD creates a single workspace under `~/OpenBaD/workspaces` (override with
+`OPENBAD_WORKSPACES_DIR`). Existing project directories remain supported. Each
+project groups its sessions beneath it, and sessions can be renamed inline.
 
 A top application menu (File, Edit, View, Project, Help) owns project-wide
 actions, including new session, settings, every project area, index refresh, and
-keyboard shortcuts. Each project also exposes Overview, Workspace, Repos,
+keyboard shortcuts. Each project also exposes Overview, Workspace, References,
 Knowledge, Retrieval, and Memory beneath its name. These open in a resizable
 split panel beside the chat.
-Additional repositories are read-only references. Knowledge notes and imported
-UTF-8 files are chunked and searchable through the same retrieval surface as
-indexed code and durable memory. Assistant-presented artifacts (web pages,
+Reference folders are selected with the native folder picker and are read-only.
+Knowledge notes and imported UTF-8 files are chunked and searchable through the
+same retrieval surface as indexed code and durable memory. Assistant-presented artifacts (web pages,
 images, Markdown, diffs, and files) open in the same panel.
 
 The composer carries the access mode: **Read only** (default each launch),
@@ -93,7 +93,8 @@ no fixed step budget; use Stop to end a run.
 | `list_projects` / `add_project` / `rename_project` / `remove_project` | Manage workspace projects |
 | `rename_session` | Rename a session |
 | `project_overview` / `project_files` / `project_file` | Project counts, indexed files, previews |
-| `project_repos` / `add_project_repo` / `remove_project_repo` | Manage linked repositories |
+| `workspaces_directory` / `create_project` | Resolve the default workspace root and create a named project workspace |
+| `project_repos` / `add_project_repo` / `remove_project_repo` | Manage read-only reference folders |
 | `knowledge_documents` / `knowledge_document` / `add_knowledge_note` | Read and add project knowledge |
 | `import_knowledge_file` / `delete_knowledge_document` | Import or remove knowledge |
 | `search_project` | Fuse knowledge, code, and memory with locators |

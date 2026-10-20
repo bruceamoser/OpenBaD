@@ -5,6 +5,7 @@ import {
   Database,
   FileCode2,
   FolderGit2,
+  FolderPlus,
   Gauge,
   KeyRound,
   Layers,
@@ -22,6 +23,7 @@ import {
   listProjectFiles,
   loadProjectOverview,
   loadProjectRepos,
+  pickDirectory,
   removeProjectRepo,
 } from "./backend";
 import type {
@@ -49,7 +51,7 @@ export type PanelTab =
 const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "workspace", label: "Workspace" },
-  { id: "repos", label: "Repos" },
+  { id: "repos", label: "References" },
   { id: "knowledge", label: "Knowledge" },
   { id: "retrieval", label: "Retrieval" },
   { id: "memory", label: "Memory" },
@@ -189,7 +191,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
           <p className="truncate text-[10px] text-slate-600">
             {project?.name ?? "No project"}
             {overview !== null &&
-              ` · ${overview.repos} repos · ${overview.knowledge_documents} docs`}
+              ` · ${overview.repos} references · ${overview.knowledge_documents} docs`}
           </p>
         </div>
         <button
@@ -243,7 +245,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             </div>
             <div className="grid grid-cols-2 gap-2">
               <Stat
-                label="Repos"
+                label="References"
                 value={overview?.repos ?? repos.length}
                 icon={<FolderGit2 size={12} />}
               />
@@ -268,7 +270,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 <Gauge size={13} className="text-emerald-300" /> Project context
               </div>
               <p className="mt-2 text-[11px] leading-5 text-slate-500">
-                Chat owns the left side. Workspace, repositories, knowledge,
+                Chat owns the left side. Workspace, reference folders, knowledge,
                 retrieval, and memory stay scoped to this project and open here
                 without competing with the conversation.
               </p>
@@ -326,7 +328,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         )}
 
         {tab === "repos" && (
-          <ReposPanel
+          <ReferencesPanel
             workspacePath={workspacePath}
             repos={repos}
             onRepos={setRepos}
@@ -390,7 +392,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
 }
 
 
-function ReposPanel({
+function ReferencesPanel({
   workspacePath,
   repos,
   onRepos,
@@ -403,20 +405,17 @@ function ReposPanel({
   onRefresh: () => void;
   onError: (message: string | null) => void;
 }) {
-  const [path, setPath] = useState("");
-  const [name, setName] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
   const add = async () => {
-    if (path.trim().length === 0) {
-      return;
-    }
     try {
-      const repo = await addProjectRepo(workspacePath, path.trim(), name);
+      const selected = await pickDirectory("Add reference folder");
+      if (selected === null) {
+        return;
+      }
+      const repo = await addProjectRepo(workspacePath, selected);
       onRepos([...repos, repo]);
-      setPath("");
-      setName("");
-      setNotice(`Linked ${repo.name}`);
+      setNotice(`Added reference ${repo.name}`);
       onError(null);
       onRefresh();
     } catch (cause) {
@@ -463,36 +462,18 @@ function ReposPanel({
         </div>
       ))}
       {repos.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">
-          Link another repository for read-only reference.
+        <p className="px-1 py-2 text-[11px] leading-4 text-slate-600">
+          Reference folders are read-only sources the assistant can inspect
+          alongside the project workspace.
         </p>
       )}
-      <div className="rounded-lg border border-dashed border-white/[0.09] p-2.5">
-        <p className="text-[10px] font-medium text-slate-400">Link repository</p>
-        <input
-          value={path}
-          onChange={(event) => setPath(event.target.value)}
-          aria-label="Repository path"
-          placeholder="/home/you/repos/reference"
-          className="mt-2 w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 font-mono text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
-        />
-        <div className="mt-1.5 flex gap-1.5">
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            aria-label="Repository name"
-            placeholder="Name (optional)"
-            className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
-          />
-          <button
-            type="button"
-            onClick={() => void add()}
-            className="rounded-md bg-emerald-400 px-2 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300"
-          >
-            Add
-          </button>
-        </div>
-      </div>
+      <button
+        type="button"
+        onClick={() => void add()}
+        className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-2.5 py-2 text-[10px] text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.05] hover:text-emerald-200"
+      >
+        <FolderPlus size={12} /> Add reference folder…
+      </button>
       {notice !== null && <p className="text-[10px] text-emerald-300">{notice}</p>}
     </div>
   );

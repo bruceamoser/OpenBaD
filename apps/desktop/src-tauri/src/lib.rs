@@ -924,6 +924,102 @@ fn add_project(
         .ok_or_else(|| "project disappeared after creation".to_owned())
 }
 
+fn default_workspaces_directory() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("OPENBAD_WORKSPACES_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    let base = directories::BaseDirs::new()
+        .ok_or_else(|| "could not resolve the home directory".to_owned())?;
+    Ok(base.home_dir().join("OpenBaD").join("workspaces"))
+}
+
+fn project_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in name.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character);
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    let slug: String = slug.trim_matches('-').chars().take(48).collect();
+    if slug.is_empty() {
+        "project".to_owned()
+    } else {
+        slug
+    }
+}
+
+fn create_workspace_directory(root: &Path, name: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let slug = project_slug(name);
+    for attempt in 0..1_000 {
+        let folder = if attempt == 0 {
+            slug.clone()
+        } else {
+            format!("{slug}-{}", attempt + 1)
+        };
+        let candidate = root.join(folder);
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return candidate.canonicalize().map_err(|error| error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if candidate.is_dir()
+                    && std::fs::read_dir(&candidate)
+                        .map_err(|error| error.to_string())?
+                        .next()
+                        .is_none()
+                {
+                    return candidate.canonicalize().map_err(|error| error.to_string());
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("could not find an available workspace directory".to_owned())
+}
+
+#[tauri::command]
+fn workspaces_directory() -> Result<String, String> {
+    let directory = default_workspaces_directory()?;
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    directory
+        .canonicalize()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_project(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<openbad_store::types::WorkspaceSummary, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("project name must not be empty".to_owned());
+    }
+    if name.chars().count() > 80 {
+        return Err("project name must be 80 characters or fewer".to_owned());
+    }
+    let root = default_workspaces_directory()?;
+    let path = create_workspace_directory(&root, name)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = store
+        .ensure_workspace(name, &path.to_string_lossy())
+        .map_err(|error| error.to_string())?;
+    store
+        .workspace_summary(workspace)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "project disappeared after creation".to_owned())
+}
+
 #[tauri::command]
 fn rename_project(
     state: State<'_, AppState>,
@@ -1615,6 +1711,7 @@ pub fn run() {
     ensure_defaults(&store).expect("failed to seed default providers");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             store: Arc::new(Mutex::new(store)),
             secrets: secret_store(),
@@ -1625,6 +1722,8 @@ pub fn run() {
             foundation,
             list_projects,
             add_project,
+            create_project,
+            workspaces_directory,
             rename_project,
             remove_project,
             rename_session,
@@ -1664,6 +1763,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_slugs_are_safe_and_readable() {
+        assert_eq!(project_slug("My Project"), "my-project");
+        assert_eq!(project_slug("  API_v2 / Desktop  "), "api-v2-desktop");
+        assert_eq!(project_slug("***"), "project");
+        assert_eq!(project_slug("Café Notes"), "caf-notes");
+    }
+
+    #[test]
+    fn workspace_directories_are_unique_and_not_overwritten() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = create_workspace_directory(root.path(), "Demo").expect("first");
+        assert_eq!(first, root.path().join("demo"));
+        std::fs::write(first.join("keep.txt"), "keep").expect("file");
+        let second = create_workspace_directory(root.path(), "Demo").expect("second");
+        assert_eq!(second, root.path().join("demo-2"));
+        assert!(first.join("keep.txt").is_file());
+    }
 
     #[test]
     fn foundation_reports_seeded_defaults() {
