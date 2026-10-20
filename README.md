@@ -134,8 +134,10 @@ context, and Phase 6 workspace skills load on demand. Project conventions from
 and chunks, retrieval, and overview counts. New projects ask only for a name and
 receive a managed workspace under the default workspaces directory. The desktop
 UI now has a project/session sidebar, inline session rename, a Codex-style top
-menu and project area navigation, a compact composer with access modes, a
-resizable split workspace for artifacts, and no fixed step cap.
+menu and project area navigation, a compact composer with access modes, a live
+resizable split workspace for artifacts, and no fixed step cap. The P0 tool
+surface includes reference list/glob/grep, bounded reads with totals, knowledge
+CRUD, and memory audit/forget.
 Per-call approvals, the evidence gate, LSP/PTY, whole-turn rewind,
 embedding-backed retrieval, richer document ingestion, subagents, workflows, and
 packaging remain.

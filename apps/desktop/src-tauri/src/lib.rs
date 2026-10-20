@@ -21,7 +21,8 @@ use openbad_store::types::{
     SessionMessage, SessionSummary,
 };
 use openbad_tools::{
-    CheckpointSink, KnowledgeEntryRef, MemoryStore, ProjectAreas, ProjectRepoRef, WorkspaceSearch,
+    CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, MemoryStore, ProjectAreas,
+    ProjectRepoRef, WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,14 @@ impl MemoryStore for WorkspaceMemory {
             tags: memory.tags,
             pinned: memory.pinned,
         })
+    }
+
+    fn forget(&self, id: &str) -> Result<(), String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store.forget_memory(id).map_err(|error| error.to_string())
     }
 
     fn recall(
@@ -150,6 +159,53 @@ impl ProjectAreas for StoreProjectAreas {
             .map(knowledge_ref)
     }
 
+    fn get_knowledge(&self, id: &str) -> Result<Option<KnowledgeDocumentRef>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())
+            .map(|document| document.map(knowledge_document_ref))
+    }
+
+    fn update_knowledge(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+        source: Option<&str>,
+        tags: Option<Vec<String>>,
+    ) -> Result<KnowledgeDocumentRef, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .update_knowledge_document(id, title, content, source, tags)
+            .map_err(|error| error.to_string())?;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())?
+            .map(knowledge_document_ref)
+            .ok_or_else(|| format!("knowledge document not found: {id}"))
+    }
+
+    fn delete_knowledge(&self, id: &str) -> Result<(), String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .knowledge_document(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("knowledge document not found: {id}"))?;
+        store
+            .delete_knowledge_document(id)
+            .map_err(|error| error.to_string())
+    }
+
     fn retrieve(
         &self,
         query: &str,
@@ -183,6 +239,18 @@ fn knowledge_ref(document: KnowledgeDocumentSummary) -> KnowledgeEntryRef {
         kind: document.kind,
         source: document.source,
         chunks: document.chunks,
+    }
+}
+
+fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
+    KnowledgeDocumentRef {
+        id: document.summary.id,
+        title: document.summary.title,
+        kind: document.summary.kind,
+        source: document.summary.source,
+        tags: document.summary.tags,
+        content: document.content,
+        chunks: document.summary.chunks,
     }
 }
 
@@ -637,18 +705,33 @@ fn delete_knowledge_document(
 }
 
 #[tauri::command]
-fn project_files(
-    state: State<'_, AppState>,
-    workspace_path: String,
-) -> Result<Vec<String>, String> {
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let workspace = project_workspace(&store, &workspace_path)?;
-    store
-        .list_workspace_files(workspace, 400)
-        .map_err(|error| error.to_string())
+fn project_files(workspace_path: String) -> Result<Vec<String>, String> {
+    let root =
+        std::fs::canonicalize(&workspace_path).map_err(|error| format!("workspace: {error}"))?;
+    if !root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let mut files = Vec::new();
+    for entry in ignore::WalkBuilder::new(&root)
+        .build()
+        .filter_map(Result::ok)
+    {
+        if files.len() >= 400 {
+            break;
+        }
+        if entry.file_type().is_some_and(|kind| kind.is_file()) {
+            files.push(
+                entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 #[tauri::command]
@@ -1763,6 +1846,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_files_lists_live_workspace_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        std::fs::write(root.path().join("README.md"), "readme").expect("readme");
+        std::fs::write(root.path().join("src/main.rs"), "fn main() {}").expect("main");
+        let files = project_files(root.path().to_string_lossy().into_owned()).expect("files");
+        assert!(files.contains(&"README.md".to_owned()));
+        assert!(files.contains(&"src/main.rs".to_owned()));
+    }
 
     #[test]
     fn project_slugs_are_safe_and_readable() {

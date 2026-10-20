@@ -24,10 +24,14 @@ import type {
 export function KnowledgePanel({
   workspacePath,
   onOpenArtifact,
+  revision,
+  onChanged,
 }: {
   workspacePath: string;
   onOpenArtifact: (artifact: Artifact) => void;
   onTab: (tab: "artifact" | "memory") => void;
+  revision: number;
+  onChanged: () => void;
 }) {
   const [knowledge, setKnowledge] = useState<KnowledgeDocumentSummary[]>([]);
   const [query, setQuery] = useState("");
@@ -60,8 +64,11 @@ export function KnowledgePanel({
     setKnowledge([]);
     setQuery("");
     setNotice(null);
+  }, [workspacePath]);
+
+  useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, revision]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -104,6 +111,7 @@ export function KnowledgePanel({
       setComposing(false);
       setNotice(`Added ${document.title}`);
       setError(null);
+      onChanged();
       void refresh();
     } catch (cause) {
       setError(describeError(cause));
@@ -115,6 +123,7 @@ export function KnowledgePanel({
       await deleteKnowledgeDocument(workspacePath, document.id);
       setKnowledge((items) => items.filter((item) => item.id !== document.id));
       setNotice(`Deleted ${document.title}`);
+      onChanged();
     } catch (cause) {
       setError(describeError(cause));
     }
@@ -128,6 +137,7 @@ export function KnowledgePanel({
       setImporting(false);
       setNotice(`Imported ${document.title}`);
       setError(null);
+      onChanged();
       void refresh();
     } catch (cause) {
       setError(describeError(cause));

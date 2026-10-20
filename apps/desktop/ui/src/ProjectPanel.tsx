@@ -87,6 +87,8 @@ export type ProjectPanelProps = {
   ) => void;
   artifact: Artifact | null;
   onArtifact: (artifact: Artifact | null) => void;
+  revision: number;
+  onWorkspaceChanged: () => void;
 };
 
 export default function ProjectPanel(props: ProjectPanelProps) {
@@ -116,6 +118,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     onOpenSettings,
     artifact,
     onArtifact,
+    revision,
+    onWorkspaceChanged,
   } = props;
   const workspacePath = project?.path ?? "";
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
@@ -153,10 +157,10 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   }, [refresh]);
 
   useEffect(() => {
-    if (tab === "overview" || tab === "repos" || tab === "knowledge") {
+    if (tab === "overview" || tab === "repos" || tab === "knowledge" || tab === "workspace") {
       void refresh();
     }
-  }, [refresh, tab]);
+  }, [refresh, revision, tab]);
 
   const visibleFiles = useMemo(() => {
     const needle = fileQuery.trim().toLowerCase();
@@ -187,7 +191,14 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     >
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5">
         <div className="min-w-0">
-          <p className="truncate text-[12px] font-medium text-slate-200">{title}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="truncate text-[12px] font-medium text-slate-200">{title}</p>
+            <span
+              aria-label="Project areas refresh automatically"
+              title="Refreshes automatically"
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400/60"
+            />
+          </div>
           <p className="truncate text-[10px] text-slate-600">
             {project?.name ?? "No project"}
             {overview !== null &&
@@ -296,13 +307,28 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             <SearchField
               value={fileQuery}
               onChange={setFileQuery}
-              placeholder="Filter indexed files"
+              placeholder="Filter workspace files"
               label="Filter files"
             />
-            <p className="px-1 text-[10px] text-slate-600">
-              {visibleFiles.length} indexed file{visibleFiles.length === 1 ? "" : "s"} ·
-              click to open beside the chat
-            </p>
+            <div className="flex items-center justify-between px-1">
+              <p className="text-[10px] text-slate-600">
+                {visibleFiles.length} file{visibleFiles.length === 1 ? "" : "s"} · click
+                to open
+              </p>
+              <button
+                type="button"
+                onClick={onRefreshIndex}
+                disabled={indexing}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
+              >
+                {indexing ? (
+                  <Loader2 size={10} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={10} />
+                )}
+                Refresh
+              </button>
+            </div>
             {visibleFiles.map((path) => (
               <button
                 key={path}
@@ -316,7 +342,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             ))}
             {visibleFiles.length === 0 && (
               <p className="px-1 py-3 text-[11px] text-slate-600">
-                No indexed files yet. Refresh the code index.
+                No files yet. Add or create a file in this workspace.
               </p>
             )}
             {(indexError !== null || indexSummary === null) && (
@@ -332,7 +358,10 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             workspacePath={workspacePath}
             repos={repos}
             onRepos={setRepos}
-            onRefresh={() => void refresh()}
+            onRefresh={() => {
+              void refresh();
+              onWorkspaceChanged();
+            }}
             onError={setDataError}
           />
         )}
@@ -342,6 +371,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             workspacePath={workspacePath}
             onOpenArtifact={onArtifact}
             onTab={onTab}
+            revision={revision}
+            onChanged={onWorkspaceChanged}
           />
         )}
 
@@ -384,7 +415,11 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         )}
 
         {tab === "artifact" && (
-          <ArtifactViewer artifact={artifact} workspacePath={workspacePath} />
+          <ArtifactViewer
+            artifact={artifact}
+            workspacePath={workspacePath}
+            revision={revision}
+          />
         )}
       </div>
     </aside>

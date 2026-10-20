@@ -71,6 +71,13 @@ const mockKnowledgeContent = new Map<string, string>([
   ],
 ]);
 
+let mockFiles = [
+  "apps/desktop/ui/src/App.tsx",
+  "apps/desktop/ui/src/backend.ts",
+  "crates/openbad-agent/src/lib.rs",
+  "crates/openbad-store/src/store.rs",
+  "docs/architecture/00-vision-and-feature-set.md",
+];
 let mockIndex: WorkspaceIndexSummary = {
   files: 42,
   symbols: 216,
@@ -529,13 +536,7 @@ export async function listProjectFiles(workspacePath: string): Promise<string[]>
   if (isTauri) {
     return invoke<string[]>("project_files", { workspacePath });
   }
-  return [
-    "apps/desktop/ui/src/App.tsx",
-    "apps/desktop/ui/src/backend.ts",
-    "crates/openbad-agent/src/lib.rs",
-    "crates/openbad-store/src/store.rs",
-    "docs/architecture/00-vision-and-feature-set.md",
-  ];
+  return [...mockFiles];
 }
 
 export async function previewProjectFile(
@@ -675,6 +676,13 @@ async function mockChat(
         },
       },
     });
+  }
+  if (/add\s+(?:a\s+)?file/i.test(input.message)) {
+    const path = "src/generated.rs";
+    if (!mockFiles.includes(path)) {
+      mockFiles = [...mockFiles, path].sort();
+      mockIndex = { ...mockIndex, files: mockIndex.files + 1 };
+    }
   }
   onEvent({ type: "usage", usage: mockUsage });
 
