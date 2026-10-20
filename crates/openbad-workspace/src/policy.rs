@@ -33,6 +33,10 @@ pub struct ProjectPolicy {
     pub command_classes: Vec<String>,
     #[serde(default)]
     pub deny_command_patterns: Vec<String>,
+    #[serde(default)]
+    pub allow_network: Option<bool>,
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
 }
 
 impl ProjectPolicy {
@@ -61,6 +65,27 @@ impl ProjectPolicy {
         {
             return Some(format!(
                 "policy .openbad/permissions.yaml allow_paths does not include {path}"
+            ));
+        }
+        None
+    }
+
+    #[must_use]
+    pub fn network_denied(&self, host: &str) -> Option<String> {
+        if self.allow_network == Some(false) {
+            return Some("policy .openbad/permissions.yaml sets allow_network: false".to_owned());
+        }
+        if !self.network_hosts.is_empty()
+            && !self.network_hosts.iter().any(|allowed| {
+                host.eq_ignore_ascii_case(allowed)
+                    || host
+                        .to_ascii_lowercase()
+                        .ends_with(&format!(".{}", allowed.to_ascii_lowercase()))
+            })
+        {
+            return Some(format!(
+                "policy .openbad/permissions.yaml network_hosts does not allow {host}; allowed: {}",
+                self.network_hosts.join(", ")
             ));
         }
         None
@@ -173,6 +198,20 @@ deny_command_patterns: ["--force"]
                 .command_denied("write-workspace", "git push --force")
                 .is_some()
         );
+        assert!(policy.network_denied("docs.rs").is_none());
+    }
+
+    #[test]
+    fn network_policy_enforces_allowlist_and_kill_switch() {
+        let mut policy = ProjectPolicy {
+            network_hosts: vec!["docs.rs".to_owned(), "example.com".to_owned()],
+            ..ProjectPolicy::default()
+        };
+        assert!(policy.network_denied("docs.rs").is_none());
+        assert!(policy.network_denied("api.docs.rs").is_none());
+        assert!(policy.network_denied("evil.test").is_some());
+        policy.allow_network = Some(false);
+        assert!(policy.network_denied("docs.rs").is_some());
     }
 
     #[test]

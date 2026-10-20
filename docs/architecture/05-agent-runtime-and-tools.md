@@ -342,6 +342,7 @@ Implemented:
 | `list_memories` | read | Audit memories with ids, scope, provenance, and pinned state |
 | `update_memory` | write | Correct memory content, tags, pinned state, or scope |
 | `forget_memory` | write | Forget a memory by id |
+| `web_fetch` | read | Fetch http(s) docs, extract readable text, cache by hash, respect `network_hosts` |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 | `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |
 | `classify_path` | read | Classify a path as authoritative, generated, historical, or external |
@@ -375,8 +376,13 @@ the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
 
 `.openbad/permissions.yaml` can restrict writes by glob (`allow_paths`,
 `deny_paths`, `allow_writes: false`) and commands by class or substring
-(`command_classes`, `deny_command_patterns`). Denials name the policy rule and
+(`command_classes`, `deny_command_patterns`, `allow_network`, `network_hosts`). Denials name the policy rule and
 apply to file operations, `run_command`, `run_task`, and `run_recipe`.
+
+`web_fetch` requires Full access, enforces the `network_hosts` allowlist
+(including redirects), strips scripts/styles from HTML, and stores each body
+under `.openbad/web-cache` by BLAKE3 hash with URL, title, content type, and
+fetch time. `prefer_cache` reuses a recent fetch instead of hitting the network.
 
 `run_command` classifies each command as `read-only`, `write-workspace`,
 `network`, `destructive`, or `privileged`, reports the class in metadata, and
