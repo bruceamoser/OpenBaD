@@ -491,6 +491,19 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(GitCommitTool);
+        registry.register(GitBranchTool);
+        registry.register(GitCheckoutTool);
+        registry.register(GitLogTool);
+        registry.register(GitShowTool);
+        registry.register(GitBlameTool);
+        registry.register(GitStashTool);
+        registry.register(GitWorktreeTool);
+        registry.register(RepoHealthTool);
+        registry.register(GitCommitContextTool);
+        registry.register(GithubIssueTool);
+        registry.register(GithubPrTool);
+        registry.register(GithubCiTool);
         registry.register(CanonAddTool);
         registry.register(CanonQueryTool);
         registry.register(CanonLintTool);
@@ -761,6 +774,27 @@ fn string_array_arg(arguments: &Value, name: &str, max: usize) -> Result<Vec<Str
             })
         })
         .collect()
+}
+
+fn string_array_arg_or_empty(arguments: &Value, name: &str) -> Result<Vec<String>, ToolError> {
+    let Some(values) = arguments.get(name).and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ToolError::InvalidArgument(format!("{name} entries must be strings"))
+            })
+        })
+        .collect()
+}
+
+fn integer_arg(arguments: &Value, name: &str) -> Result<i64, ToolError> {
+    arguments
+        .get(name)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| ToolError::InvalidArgument(format!("missing integer argument: {name}")))
 }
 
 fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
@@ -4027,6 +4061,642 @@ impl Tool for PresentArtifactTool {
     }
 }
 
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+async fn run_tool_shell(context: &ToolContext, command: String) -> Result<ToolResult, ToolError> {
+    RunCommandTool
+        .execute(json!({"command": command, "timeout_seconds": 300}), context)
+        .await
+}
+
+struct GitCommitTool;
+
+#[async_trait]
+impl Tool for GitCommitTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_commit",
+            "Stage paths (or all changes) and create a git commit. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}},
+                "all": {"type": "boolean"}
+            },
+            "required": ["message"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let message = string_arg(&arguments, "message")?;
+        let paths = string_array_arg_or_empty(&arguments, "paths")?;
+        let all = optional_bool(&arguments, "all").unwrap_or(false);
+        let mut command = String::from("git add -- ");
+        if all {
+            command = "git add -A".to_owned();
+        } else if paths.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "provide paths or all=true before committing".to_owned(),
+            ));
+        } else {
+            command.push_str(
+                &paths
+                    .iter()
+                    .map(|path| sh_quote(path))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        let add = run_tool_shell(context, command).await?;
+        if !add.metadata["success"].as_bool().unwrap_or(false) {
+            return Ok(add);
+        }
+        let commit =
+            run_tool_shell(context, format!("git commit -m {}", sh_quote(&message))).await?;
+        let commit_metadata = commit.metadata.clone();
+        let staged_metadata = add.metadata;
+        Ok(commit.with_metadata(json!({
+            "staged": staged_metadata,
+            "commit": commit_metadata,
+            "message": message
+        })))
+    }
+}
+
+struct GitBranchTool;
+
+#[async_trait]
+impl Tool for GitBranchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_branch",
+            "List branches, or create a branch when name is provided.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        match optional_string(&arguments, "name") {
+            Some(name) => run_tool_shell(context, format!("git branch {}", sh_quote(&name))).await,
+            None => run_tool_shell(context, "git branch --list".to_owned()).await,
+        }
+    }
+}
+
+struct GitCheckoutTool;
+
+#[async_trait]
+impl Tool for GitCheckoutTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_checkout",
+            "Switch branches, or create and switch with create=true.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "create": {"type": "boolean"}
+            },
+            "required": ["branch"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let branch = string_arg(&arguments, "branch")?;
+        let command = if optional_bool(&arguments, "create").unwrap_or(false) {
+            format!("git checkout -b {}", sh_quote(&branch))
+        } else {
+            format!("git checkout {}", sh_quote(&branch))
+        };
+        run_tool_shell(context, command).await
+    }
+}
+
+struct GitLogTool;
+
+#[async_trait]
+impl Tool for GitLogTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_log",
+            "Show recent commits, optionally filtered by path or message.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "path": {"type": "string"},
+                "grep": {"type": "string"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let limit = optional_usize(&arguments, "limit")
+            .unwrap_or(20)
+            .clamp(1, 100);
+        let mut command = format!("git log -n {limit} --oneline");
+        if let Some(grep) = optional_string(&arguments, "grep") {
+            command.push_str(&format!(" --grep={}", sh_quote(&grep)));
+        }
+        if let Some(path) = optional_string(&arguments, "path") {
+            command.push_str(&format!(" -- {}", sh_quote(&path)));
+        }
+        run_tool_shell(context, command).await
+    }
+}
+
+struct GitShowTool;
+
+#[async_trait]
+impl Tool for GitShowTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_show",
+            "Show a commit or a file at a revision.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "rev": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "required": ["rev"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let rev = string_arg(&arguments, "rev")?;
+        let target = optional_string(&arguments, "path")
+            .map(|path| format!("{rev}:{path}"))
+            .unwrap_or(rev);
+        run_tool_shell(context, format!("git show {}", sh_quote(&target))).await
+    }
+}
+
+struct GitBlameTool;
+
+#[async_trait]
+impl Tool for GitBlameTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_blame",
+            "Show line authorship for a file, optionally bounded by line range.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = string_arg(&arguments, "path")?;
+        let range = match (
+            optional_usize(&arguments, "start_line"),
+            optional_usize(&arguments, "end_line"),
+        ) {
+            (Some(start), Some(end)) => format!("-L {start},{end} "),
+            _ => String::new(),
+        };
+        run_tool_shell(context, format!("git blame {range}-- {}", sh_quote(&path))).await
+    }
+}
+
+struct GitStashTool;
+
+#[async_trait]
+impl Tool for GitStashTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_stash",
+            "List, push, pop, apply, or drop a git stash.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "push", "pop", "apply", "drop"]},
+                "message": {"type": "string"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "list".to_owned());
+        let command = match action.as_str() {
+            "list" => "git stash list".to_owned(),
+            "push" => format!(
+                "git stash push{}",
+                optional_string(&arguments, "message")
+                    .map(|message| format!(" -m {}", sh_quote(&message)))
+                    .unwrap_or_default()
+            ),
+            "pop" => "git stash pop".to_owned(),
+            "apply" => "git stash apply".to_owned(),
+            "drop" => "git stash drop".to_owned(),
+            other => {
+                return Err(ToolError::InvalidArgument(format!(
+                    "unknown stash action: {other}"
+                )));
+            }
+        };
+        run_tool_shell(context, command).await
+    }
+}
+
+struct GitWorktreeTool;
+
+#[async_trait]
+impl Tool for GitWorktreeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_worktree",
+            "Manage git worktrees: list, add, or remove.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "add", "remove"]},
+                "path": {"type": "string"},
+                "branch": {"type": "string"},
+                "create_branch": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "list".to_owned());
+        let command = match action.as_str() {
+            "list" => "git worktree list".to_owned(),
+            "add" => {
+                let path = string_arg(&arguments, "path")?;
+                let branch = string_arg(&arguments, "branch")?;
+                if optional_bool(&arguments, "create_branch").unwrap_or(false) {
+                    format!(
+                        "git worktree add -b {} {}",
+                        sh_quote(&branch),
+                        sh_quote(&path)
+                    )
+                } else {
+                    format!("git worktree add {} {}", sh_quote(&path), sh_quote(&branch))
+                }
+            }
+            "remove" => {
+                let path = string_arg(&arguments, "path")?;
+                format!("git worktree remove {}", sh_quote(&path))
+            }
+            other => {
+                return Err(ToolError::InvalidArgument(format!(
+                    "unknown worktree action: {other}"
+                )));
+            }
+        };
+        run_tool_shell(context, command).await
+    }
+}
+
+struct RepoHealthTool;
+
+#[async_trait]
+impl Tool for RepoHealthTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "repo_health",
+            "Report branch, ahead/behind, modified, staged, and untracked state for the workspace repository.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let status =
+            run_tool_shell(context, "git status --porcelain=v1 --branch".to_owned()).await?;
+        let divergence = run_tool_shell(
+            context,
+            "git rev-list --left-right --count @{upstream}...HEAD".to_owned(),
+        )
+        .await?;
+        Ok(
+            ToolResult::ok(format!("{}\n{}", status.content, divergence.content)).with_metadata(
+                json!({
+                    "status": status.metadata,
+                    "divergence": divergence.metadata
+                }),
+            ),
+        )
+    }
+}
+
+struct GitCommitContextTool;
+
+#[async_trait]
+impl Tool for GitCommitContextTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "git_commit_context",
+            "Collect branch, recent commit, and staged/unstaged stats to draft a conventional commit message.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let branch = run_tool_shell(context, "git branch --show-current".to_owned()).await?;
+        let last = run_tool_shell(context, "git log -1 --oneline".to_owned()).await?;
+        let unstaged = run_tool_shell(context, "git diff --stat".to_owned()).await?;
+        let staged = run_tool_shell(context, "git diff --cached --stat".to_owned()).await?;
+        Ok(ToolResult::ok(format!(
+            "branch:\n{}\nlast commit:\n{}\nunstaged:\n{}\nstaged:\n{}",
+            branch.content, last.content, unstaged.content, staged.content
+        )))
+    }
+}
+
+struct GithubIssueTool;
+
+#[async_trait]
+impl Tool for GithubIssueTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "github_issue",
+            "List, view, create, comment on, or close GitHub issues through gh.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "get", "create", "comment", "close"]},
+                "number": {"type": "integer", "minimum": 1},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "state": {"type": "string", "enum": ["open", "closed", "all"]},
+                "query": {"type": "string"},
+                "confirm": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "list".to_owned());
+        let command = match action.as_str() {
+            "list" => {
+                let limit = 20;
+                let state =
+                    optional_string(&arguments, "state").unwrap_or_else(|| "open".to_owned());
+                let mut command = format!(
+                    "gh issue list --limit {limit} --state {state} --json number,title,state,labels"
+                );
+                if let Some(query) = optional_string(&arguments, "query") {
+                    command.push_str(&format!(" --search {}", sh_quote(&query)));
+                }
+                command
+            }
+            "get" => format!(
+                "gh issue view {} --json number,title,body,state,labels,comments",
+                integer_arg(&arguments, "number")?
+            ),
+            "create" => {
+                let title = string_arg(&arguments, "title")?;
+                let body = string_arg(&arguments, "body")?;
+                let mut command = format!(
+                    "gh issue create --title {} --body {}",
+                    sh_quote(&title),
+                    sh_quote(&body)
+                );
+                for label in string_array_arg_or_empty(&arguments, "labels")? {
+                    command.push_str(&format!(" --label {}", sh_quote(&label)));
+                }
+                command
+            }
+            "comment" => format!(
+                "gh issue comment {} --body {}",
+                integer_arg(&arguments, "number")?,
+                sh_quote(&string_arg(&arguments, "body")?)
+            ),
+            "close" => {
+                if !optional_bool(&arguments, "confirm").unwrap_or(false) {
+                    return Err(ToolError::ApprovalRequired(
+                        "github_issue close requires confirm=true".to_owned(),
+                    ));
+                }
+                format!("gh issue close {}", integer_arg(&arguments, "number")?)
+            }
+            other => {
+                return Err(ToolError::InvalidArgument(format!(
+                    "unknown issue action: {other}"
+                )));
+            }
+        };
+        run_tool_shell(context, command).await
+    }
+}
+
+struct GithubPrTool;
+
+#[async_trait]
+impl Tool for GithubPrTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "github_pr",
+            "View, diff, create, comment on, check, or merge GitHub pull requests through gh. Merge requires confirm=true.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["view", "diff", "create", "comment", "checks", "merge"]},
+                "number": {"type": "integer", "minimum": 1},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "base": {"type": "string"},
+                "head": {"type": "string"},
+                "draft": {"type": "boolean"},
+                "confirm": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "view".to_owned());
+        let command = match action.as_str() {
+            "view" => format!(
+                "gh pr view {} --json number,title,body,state,mergeable,reviews,files,statusCheckRollup",
+                integer_arg(&arguments, "number")?
+            ),
+            "diff" => format!("gh pr diff {}", integer_arg(&arguments, "number")?),
+            "create" => {
+                let title = string_arg(&arguments, "title")?;
+                let body = string_arg(&arguments, "body")?;
+                let mut command = format!(
+                    "gh pr create --title {} --body {}",
+                    sh_quote(&title),
+                    sh_quote(&body)
+                );
+                if let Some(base) = optional_string(&arguments, "base") {
+                    command.push_str(&format!(" --base {}", sh_quote(&base)));
+                }
+                if let Some(head) = optional_string(&arguments, "head") {
+                    command.push_str(&format!(" --head {}", sh_quote(&head)));
+                }
+                if optional_bool(&arguments, "draft").unwrap_or(false) {
+                    command.push_str(" --draft");
+                }
+                command
+            }
+            "comment" => format!(
+                "gh pr comment {} --body {}",
+                integer_arg(&arguments, "number")?,
+                sh_quote(&string_arg(&arguments, "body")?)
+            ),
+            "checks" => format!("gh pr checks {}", integer_arg(&arguments, "number")?),
+            "merge" => {
+                if !optional_bool(&arguments, "confirm").unwrap_or(false) {
+                    return Err(ToolError::ApprovalRequired(
+                        "github_pr merge requires confirm=true".to_owned(),
+                    ));
+                }
+                format!(
+                    "gh pr merge {} --squash --delete-branch",
+                    integer_arg(&arguments, "number")?
+                )
+            }
+            other => {
+                return Err(ToolError::InvalidArgument(format!(
+                    "unknown pull request action: {other}"
+                )));
+            }
+        };
+        run_tool_shell(context, command).await
+    }
+}
+
+struct GithubCiTool;
+
+#[async_trait]
+impl Tool for GithubCiTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "github_ci",
+            "List recent workflow runs or fetch failed logs for a run through gh.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "logs"]},
+                "run_id": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "list".to_owned());
+        let command = match action.as_str() {
+            "list" => format!(
+                "gh run list --limit {} --json databaseId,name,status,conclusion,headBranch,createdAt",
+                optional_usize(&arguments, "limit")
+                    .unwrap_or(10)
+                    .clamp(1, 50)
+            ),
+            "logs" => format!(
+                "gh run view {} --log-failed",
+                string_arg(&arguments, "run_id")?
+            ),
+            other => {
+                return Err(ToolError::InvalidArgument(format!(
+                    "unknown CI action: {other}"
+                )));
+            }
+        };
+        run_tool_shell(context, command).await
+    }
+}
+
 struct CanonAddTool;
 
 #[async_trait]
@@ -6503,6 +7173,66 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn git_tools_commit_branch_and_inspect_a_repository() {
+        let directory = tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+        };
+        assert!(run(&["init"]).success());
+        assert!(run(&["config", "user.email", "test@example.com"]).success());
+        assert!(run(&["config", "user.name", "Test"]).success());
+        fs::write(directory.path().join("file.txt"), "hello\n").expect("file");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+
+        let health = RepoHealthTool
+            .execute(json!({}), &context)
+            .await
+            .expect("health");
+        assert!(health.content.contains("file.txt"));
+        let commit = GitCommitTool
+            .execute(
+                json!({"message": "initial commit", "paths": ["file.txt"]}),
+                &context,
+            )
+            .await
+            .expect("commit");
+        assert_eq!(commit.metadata["commit"]["success"], true);
+        let log = GitLogTool
+            .execute(json!({"limit": 5}), &context)
+            .await
+            .expect("log");
+        assert!(log.content.contains("initial commit"));
+        GitBranchTool
+            .execute(json!({"name": "feature"}), &context)
+            .await
+            .expect("branch");
+        GitCheckoutTool
+            .execute(json!({"branch": "feature"}), &context)
+            .await
+            .expect("checkout");
+        let context_info = GitCommitContextTool
+            .execute(json!({}), &context)
+            .await
+            .expect("context");
+        assert!(context_info.content.contains("feature"));
+        let worktrees = GitWorktreeTool
+            .execute(json!({"action": "list"}), &context)
+            .await
+            .expect("worktrees");
+        assert!(worktrees.metadata["success"].as_bool().unwrap_or(true));
+        let denied = GithubIssueTool
+            .execute(json!({"action": "close", "number": 1}), &context)
+            .await
+            .expect_err("close requires confirm");
+        assert!(denied.to_string().contains("confirm"));
     }
 
     #[tokio::test]
