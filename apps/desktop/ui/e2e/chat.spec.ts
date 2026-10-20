@@ -256,6 +256,9 @@ test("uses the application menu to open project areas and help", async ({
   page,
 }) => {
   await page.goto("/");
+  await clickMenu(page, "View", "Overview");
+  await expect(page.getByText(/2 recipes/)).toBeVisible();
+
   await clickMenu(page, "View", "Knowledge");
 
   await expect(

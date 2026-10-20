@@ -77,6 +77,14 @@ pub struct CommandDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatorDefinition {
+    pub pattern: String,
+    pub command: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invariant {
     pub id: String,
     pub statement: String,
@@ -98,6 +106,10 @@ pub struct ProjectManifest {
     pub scope: ScopeMap,
     #[serde(default)]
     pub commands: BTreeMap<String, CommandSpec>,
+    #[serde(default)]
+    pub recipes: BTreeMap<String, CommandSpec>,
+    #[serde(default)]
+    pub validators: Vec<ValidatorDefinition>,
     #[serde(default)]
     pub invariants: Vec<Invariant>,
 }
@@ -134,6 +146,28 @@ impl ProjectManifest {
     }
 
     #[must_use]
+    pub fn recipe(&self, name: &str) -> Option<CommandDefinition> {
+        self.recipes.get(name).map(|spec| match spec {
+            CommandSpec::Shell(command) => CommandDefinition {
+                command: command.clone(),
+                description: None,
+                cwd: None,
+                timeout_seconds: None,
+            },
+            CommandSpec::Detailed(definition) => definition.clone(),
+        })
+    }
+
+    #[must_use]
+    pub fn validators_for(&self, path: &str) -> Vec<&ValidatorDefinition> {
+        let path = path.trim_start_matches("./").replace('\\', "/");
+        self.validators
+            .iter()
+            .filter(|validator| glob_matches(&validator.pattern, &path))
+            .collect()
+    }
+
+    #[must_use]
     pub fn summary(&self) -> String {
         let mut summary = String::new();
         if let Some(name) = &self.name {
@@ -156,6 +190,32 @@ impl ProjectManifest {
                     description
                         .map(|description| format!(" — {description}"))
                         .unwrap_or_default()
+                ));
+            }
+        }
+        if !self.recipes.is_empty() {
+            summary.push_str("Recipes:\n");
+            for (name, spec) in &self.recipes {
+                let (command, description) = match spec {
+                    CommandSpec::Shell(command) => (command.clone(), None),
+                    CommandSpec::Detailed(definition) => {
+                        (definition.command.clone(), definition.description.clone())
+                    }
+                };
+                summary.push_str(&format!(
+                    "- {name}: `{command}`{}\n",
+                    description
+                        .map(|description| format!(" — {description}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        if !self.validators.is_empty() {
+            summary.push_str("Validators:\n");
+            for validator in &self.validators {
+                summary.push_str(&format!(
+                    "- {} runs `{}`\n",
+                    validator.pattern, validator.command
                 ));
             }
         }
@@ -228,6 +288,14 @@ commands:
   test:
     command: npm test
     cwd: ./
+recipes:
+  verify:
+    command: npm run verify
+    description: Typecheck and test
+  lint: cargo clippy
+validators:
+  - pattern: "src/**/*.yaml"
+    command: npm run validate:yaml
 scope:
   authoritative: ["src/**", "docs/**"]
   historical: ["archive/**"]
@@ -251,7 +319,15 @@ invariants:
             "npm run verify"
         );
         assert!(manifest.command("test").expect("test").cwd.as_deref() == Some("./"));
+        assert_eq!(
+            manifest.recipe("verify").expect("recipe").command,
+            "npm run verify"
+        );
+        assert_eq!(manifest.validators_for("src/packs/a.yaml").len(), 1);
+        assert!(manifest.validators_for("docs/readme.md").is_empty());
         assert!(manifest.summary().contains("Named tasks"));
+        assert!(manifest.summary().contains("Recipes"));
+        assert!(manifest.summary().contains("Validators"));
     }
 
     #[test]

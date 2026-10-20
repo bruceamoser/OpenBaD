@@ -50,6 +50,11 @@ Migration `0006_project_areas` adds the project areas; migration
 - `knowledge_fts` — FTS5 index over chunk content, carrying workspace and
   document identity so retrieval can be scoped and cited.
 
+Project manifests also declare a `recipes:` registry for verification
+(lint/test/build/schema commands) and `validators:` glob/command pairs. Writes
+matching a validator run it before the result is accepted; failures roll the
+file back to its previous content.
+
 Knowledge writes are transactional: the document, its chunks, and its FTS rows
 are inserted together. Imported files record the source path and a BLAKE3
 source hash so later reads can flag stale notes; notes accept `verified`,

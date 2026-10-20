@@ -304,7 +304,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               {manifest === null ? (
                 <p className="mt-2 text-[10px] leading-4 text-slate-600">
                   Add <code className="text-slate-400">.openbad/project.yaml</code> to
-                  declare named tasks, scope, and invariants.
+                  declare named tasks, verification recipes, validators, scope, and
+                  invariants.
                 </p>
               ) : (
                 <div className="mt-2 space-y-1 text-[10px] leading-4 text-slate-500">
@@ -315,8 +316,9 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                     manifest.description !== undefined && <p>{manifest.description}</p>}
                   <p>
                     {Object.keys(manifest.commands ?? {}).length} tasks ·{" "}
-                    {(manifest.invariants ?? []).length} invariants ·{" "}
-                    {manifest.scope?.historical?.length ?? 0} historical paths
+                    {Object.keys(manifest.recipes ?? {}).length} recipes ·{" "}
+                    {(manifest.validators ?? []).length} validators ·{" "}
+                    {(manifest.invariants ?? []).length} invariants
                   </p>
                 </div>
               )}

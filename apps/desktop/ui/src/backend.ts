@@ -93,6 +93,14 @@ const mockManifest: ProjectManifest = {
     verify: "cargo test --workspace",
     web: "pnpm --dir apps/desktop/ui test:e2e",
   },
+  recipes: {
+    verify: {
+      command: "cargo test --workspace",
+      description: "Unit and integration tests",
+    },
+    lint: "cargo clippy --workspace --all-targets -- -D warnings",
+  },
+  validators: [{ pattern: "**/*.yaml", command: "cargo run -- check-yaml" }],
   invariants: [
     {
       id: "INV-1",
