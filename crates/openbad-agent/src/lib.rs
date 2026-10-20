@@ -12,7 +12,9 @@ use openbad_llm::chat::{
 use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
-use openbad_tools::{CheckpointSink, MemoryStore, ToolContext, ToolRegistry, WorkspaceSearch};
+use openbad_tools::{
+    CheckpointSink, MemoryStore, ToolContext, ToolRegistry, WorkspaceSearch, discover_skills,
+};
 use openbad_workspace::WorkspaceService;
 use serde_json::Value;
 use uuid::Uuid;
@@ -393,6 +395,17 @@ Report what changed and any remaining risk. Never claim a file changed unless a 
             prompt.push_str("\n\nProject conventions (follow unless they conflict with safety or explicit user instructions):\n");
             prompt.push_str(&instructions);
         }
+        let skills = discover_skills(self.workspace.root());
+        if !skills.is_empty() {
+            prompt.push_str("\n\nWorkspace skills (call read_skill to load one):\n");
+            for skill in skills {
+                if skill.description.is_empty() {
+                    prompt.push_str(&format!("- {}\n", skill.name));
+                } else {
+                    prompt.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+                }
+            }
+        }
         prompt
     }
 }
@@ -701,6 +714,30 @@ mod tests {
         let prompt = agent.system_prompt();
         assert!(prompt.contains("From AGENTS.md"));
         assert!(prompt.contains("Use the repository test command."));
+    }
+
+    #[test]
+    fn system_prompt_lists_workspace_skills() {
+        let directory = tempdir().expect("tempdir");
+        let skill_dir = directory.path().join(".openbad/skills/review");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: review\ndescription: Review changes\n---\n",
+        )
+        .expect("skill");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig::default(),
+        );
+        let prompt = agent.system_prompt();
+        assert!(prompt.contains("review: Review changes"));
     }
 
     #[test]
