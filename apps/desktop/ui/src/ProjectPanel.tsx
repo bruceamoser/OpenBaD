@@ -310,10 +310,25 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               placeholder="Filter indexed files"
               label="Filter files"
             />
-            <p className="px-1 text-[10px] text-slate-600">
-              {visibleFiles.length} indexed file{visibleFiles.length === 1 ? "" : "s"} ·
-              click to open beside the chat
-            </p>
+            <div className="flex items-center justify-between px-1">
+              <p className="text-[10px] text-slate-600">
+                {visibleFiles.length} indexed file{visibleFiles.length === 1 ? "" : "s"} ·
+                click to open
+              </p>
+              <button
+                type="button"
+                onClick={onRefreshIndex}
+                disabled={indexing}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
+              >
+                {indexing ? (
+                  <Loader2 size={10} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={10} />
+                )}
+                Refresh
+              </button>
+            </div>
             {visibleFiles.map((path) => (
               <button
                 key={path}
