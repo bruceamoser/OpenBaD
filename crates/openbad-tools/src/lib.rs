@@ -530,6 +530,13 @@ impl ToolRegistry {
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
         registry.register(PresentArtifactTool);
+        registry.register(ScaffoldProjectTool);
+        registry.register(WorkspaceGcTool);
+        registry.register(SessionCheckpointTool);
+        registry.register(SessionResumeTool);
+        registry.register(ReferencesToTool);
+        registry.register(GoldenCompareTool);
+        registry.register(GoldenAcceptTool);
         registry.register(PlanWriteTool);
         registry.register(PlanReadTool);
         registry.register(PlanUpdateStepTool);
@@ -4960,6 +4967,431 @@ fn job_alive(pid: u32) -> bool {
         return false;
     };
     stat.split_whitespace().nth(2) != Some("Z")
+}
+
+struct ScaffoldProjectTool;
+
+#[async_trait]
+impl Tool for ScaffoldProjectTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "scaffold_project",
+            "Create a starter project skeleton: manifest, README, docs, scratch, artifacts, and knowledge directories. Refuses to overwrite unless force=true.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "kind": {"type": "string", "enum": ["software", "docs", "creative", "general"]},
+                "force": {"type": "boolean"}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("scaffold_project".to_owned()));
+        }
+        let name = string_arg(&arguments, "name")?;
+        let kind = optional_string(&arguments, "kind").unwrap_or_else(|| "general".to_owned());
+        let force = optional_bool(&arguments, "force").unwrap_or(false);
+        let manifest_path = context.workspace.root().join(".openbad/project.yaml");
+        if manifest_path.exists() && !force {
+            return Err(ToolError::Failed(
+                "project manifest already exists; pass force=true to replace it".to_owned(),
+            ));
+        }
+        check_write_policy(context, &manifest_path)?;
+        let (scope, commands) = match kind.as_str() {
+            "software" => (
+                "authoritative: [\"src/**\", \"apps/**\", \"docs/**\"]\n  generated: [\"target/**\", \"dist/**\"]\n  scratch: [\"scratch/**\"]",
+                "commands:\n  verify: cargo test --workspace",
+            ),
+            "docs" => (
+                "authoritative: [\"docs/**\", \"knowledge/**\"]\n  generated: [\"artifacts/**\"]\n  scratch: [\"scratch/**\"]",
+                "commands: {}",
+            ),
+            "creative" => (
+                "authoritative: [\"src/**\", \"content/**\", \"docs/**\"]\n  generated: [\"artifacts/**\"]\n  scratch: [\"scratch/**\"]",
+                "commands: {}",
+            ),
+            _ => (
+                "authoritative: [\"docs/**\", \"knowledge/**\"]\n  generated: [\"artifacts/**\"]\n  scratch: [\"scratch/**\"]",
+                "commands: {}",
+            ),
+        };
+        let manifest = format!(
+            "name: {name}\ndescription: Scaffolded {kind} project\nscope:\n  {scope}\n{commands}\n"
+        );
+        std::fs::create_dir_all(context.workspace.root().join(".openbad"))?;
+        std::fs::write(&manifest_path, manifest)?;
+        let readme = context.workspace.root().join("README.md");
+        if !readme.exists() || force {
+            std::fs::write(
+                &readme,
+                format!(
+                    "# {name}\n\nScaffolded with OpenBaD.\n\n- `docs/` — design and decisions\n- `knowledge/` — curated notes\n- `scratch/` — ephemeral work\n- `artifacts/` — published outputs\n"
+                ),
+            )?;
+        }
+        for directory in ["docs", "knowledge", "scratch", "artifacts"] {
+            std::fs::create_dir_all(context.workspace.root().join(directory))?;
+        }
+        std::fs::write(
+            context.workspace.root().join("docs/README.md"),
+            "# Docs\n\nProject documentation index.\n",
+        )
+        .ok();
+        Ok(ToolResult::ok(format!("scaffolded {kind} project {name}"))
+            .with_metadata(json!({"name": name, "kind": kind, "manifest": manifest_path})))
+    }
+}
+
+struct WorkspaceGcTool;
+
+#[async_trait]
+impl Tool for WorkspaceGcTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "workspace_gc",
+            "Report large or generated workspace files. With delete=true and confirm=true, remove files under scratch/artifacts/dist/target.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "max_mb": {"type": "integer", "minimum": 1, "maximum": 10000},
+                "delete": {"type": "boolean"},
+                "confirm": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let max_mb = optional_usize(&arguments, "max_mb")
+            .unwrap_or(10)
+            .clamp(1, 10_000);
+        let max_bytes = max_mb as u64 * 1024 * 1024;
+        let delete = optional_bool(&arguments, "delete").unwrap_or(false);
+        if delete && !optional_bool(&arguments, "confirm").unwrap_or(false) {
+            return Err(ToolError::ApprovalRequired(
+                "workspace_gc delete requires confirm=true".to_owned(),
+            ));
+        }
+        let roots = ["scratch", "artifacts", "dist", "target"];
+        let mut candidates = Vec::new();
+        let mut total = 0_u64;
+        for root in roots {
+            let path = context.workspace.root().join(root);
+            if !path.is_dir() {
+                continue;
+            }
+            for entry in WalkBuilder::new(&path).build().filter_map(Result::ok) {
+                if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                    continue;
+                }
+                let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                total += size;
+                if size >= max_bytes {
+                    candidates.push((entry.path().to_path_buf(), size));
+                }
+            }
+        }
+        candidates.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+        let mut removed = Vec::new();
+        if delete {
+            for (path, _) in &candidates {
+                check_write_policy(context, path)?;
+                if std::fs::remove_file(path).is_ok() {
+                    removed.push(relative_to_root(context, path));
+                }
+            }
+        }
+        let content = candidates
+            .iter()
+            .take(100)
+            .map(|(path, size)| {
+                format!(
+                    "{}: {} MB",
+                    relative_to_root(context, path),
+                    size / 1_048_576
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolResult::ok(if candidates.is_empty() {
+            "no large generated files".to_owned()
+        } else {
+            content
+        })
+        .with_metadata(json!({
+            "candidates": candidates.len(),
+            "total_bytes": total,
+            "removed": removed
+        })))
+    }
+}
+
+struct SessionCheckpointTool;
+
+#[async_trait]
+impl Tool for SessionCheckpointTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "session_checkpoint",
+            "Capture plan, todos, handoff, claims, unknowns, and recent audit entries under .openbad/checkpoints.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"label": {"type": "string"}},
+            "required": ["label"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("session_checkpoint".to_owned()));
+        }
+        let label = safe_label(&string_arg(&arguments, "label")?)?;
+        let root = context.workspace.root();
+        let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+        let checkpoint = json!({
+            "label": label,
+            "created_at": now_millis(),
+            "plan": openbad_workspace::load_plan(root).ok().flatten(),
+            "todos": read(&root.join(".openbad/todos.json")),
+            "handoff": read(&root.join(".openbad/handoff.md")),
+            "claims": openbad_workspace::load_claims(root).unwrap_or_default(),
+            "unknowns": openbad_workspace::load_unknowns(root).unwrap_or_default(),
+            "audit_tail": read(&root.join(".openbad/audit.jsonl"))
+                .lines()
+                .rev()
+                .take(25)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+        });
+        let directory = root.join(".openbad/checkpoints");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{label}.json"));
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&checkpoint)
+                .map_err(|error| ToolError::Failed(error.to_string()))?,
+        )?;
+        Ok(ToolResult::ok(format!("checkpoint {label} saved"))
+            .with_metadata(json!({"label": label, "path": path})))
+    }
+}
+
+struct SessionResumeTool;
+
+#[async_trait]
+impl Tool for SessionResumeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "session_resume",
+            "Read a session checkpoint summary, or list checkpoints when no label is given.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"label": {"type": "string"}},
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let directory = context.workspace.root().join(".openbad/checkpoints");
+        if !directory.is_dir() {
+            return Ok(ToolResult::ok("no session checkpoints"));
+        }
+        let label = optional_string(&arguments, "label");
+        if label.is_none() {
+            let mut names = std::fs::read_dir(&directory)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            return Ok(ToolResult::ok(names.join("\n")));
+        }
+        let label = safe_label(&label.unwrap_or_default())?;
+        let content = std::fs::read_to_string(directory.join(format!("{label}.json")))
+            .map_err(|error| ToolError::InvalidArgument(format!("unknown checkpoint: {error}")))?;
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"label": label})))
+    }
+}
+
+struct ReferencesToTool;
+
+#[async_trait]
+impl Tool for ReferencesToTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "references_to",
+            "Find likely references to a file by searching for its stem across the workspace (blast-radius preview).",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 200}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = string_arg(&arguments, "path")?;
+        let stem = Path::new(&path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&path)
+            .to_owned();
+        let result = GrepTool
+            .execute(
+                json!({
+                    "query": stem,
+                    "max_results": optional_usize(&arguments, "max_results").unwrap_or(100),
+                    "case_sensitive": false
+                }),
+                context,
+            )
+            .await?;
+        let metadata = result.metadata.clone();
+        Ok(result.with_metadata(json!({"stem": stem, "matches": metadata})))
+    }
+}
+
+struct GoldenCompareTool;
+
+#[async_trait]
+impl Tool for GoldenCompareTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "golden_compare",
+            "Compare a generated file to a committed baseline and return a unified diff.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "baseline": {"type": "string"}
+            },
+            "required": ["path", "baseline"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let baseline = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "baseline")?))?;
+        let current = std::fs::read_to_string(&path)?;
+        let expected = std::fs::read_to_string(&baseline)?;
+        let diff = similar::TextDiff::from_lines(&expected, &current)
+            .unified_diff()
+            .context_radius(3)
+            .header("baseline", "current")
+            .to_string();
+        Ok(ToolResult::ok(if current == expected {
+            "golden: pass".to_owned()
+        } else {
+            diff
+        })
+        .with_metadata(json!({"matches": current == expected})))
+    }
+}
+
+struct GoldenAcceptTool;
+
+#[async_trait]
+impl Tool for GoldenAcceptTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "golden_accept",
+            "Promote a generated file to the committed baseline. Requires confirm=true.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "baseline": {"type": "string"},
+                "confirm": {"type": "boolean"}
+            },
+            "required": ["path", "baseline"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("golden_accept".to_owned()));
+        }
+        if !optional_bool(&arguments, "confirm").unwrap_or(false) {
+            return Err(ToolError::ApprovalRequired(
+                "golden_accept requires confirm=true".to_owned(),
+            ));
+        }
+        let path = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "path")?))?;
+        let baseline = context
+            .workspace
+            .resolve(Path::new(&string_arg(&arguments, "baseline")?))?;
+        check_write_policy(context, &baseline)?;
+        if let Some(parent) = baseline.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&path, &baseline)?;
+        Ok(ToolResult::ok(format!(
+            "accepted {} as golden",
+            baseline.display()
+        )))
+    }
 }
 
 struct PlanWriteTool;
@@ -9420,6 +9852,92 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    #[tokio::test]
+    async fn scaffolding_gc_checkpoints_blast_radius_and_golden() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        ScaffoldProjectTool
+            .execute(json!({"name": "Demo", "kind": "software"}), &context)
+            .await
+            .expect("scaffold");
+        assert!(directory.path().join(".openbad/project.yaml").exists());
+        assert!(directory.path().join("README.md").exists());
+        assert!(directory.path().join("docs/README.md").exists());
+
+        fs::write(
+            directory.path().join("scratch/big.bin"),
+            vec![0_u8; 2 * 1024 * 1024],
+        )
+        .expect("big");
+        let gc = WorkspaceGcTool
+            .execute(json!({"max_mb": 1}), &context)
+            .await
+            .expect("gc");
+        assert!(gc.content.contains("scratch/big.bin"));
+        WorkspaceGcTool
+            .execute(
+                json!({"max_mb": 1, "delete": true, "confirm": true}),
+                &context,
+            )
+            .await
+            .expect("gc delete");
+        assert!(!directory.path().join("scratch/big.bin").exists());
+
+        fs::write(
+            directory.path().join(".openbad/todos.json"),
+            r#"[{"id":"1","text":"Do it","state":"doing"}]"#,
+        )
+        .expect("todos");
+        SessionCheckpointTool
+            .execute(json!({"label": "before-test"}), &context)
+            .await
+            .expect("checkpoint");
+        let resumed = SessionResumeTool
+            .execute(json!({"label": "before-test"}), &context)
+            .await
+            .expect("resume");
+        assert!(resumed.content.contains("Do it"));
+        let listed = SessionResumeTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("before-test.json"));
+
+        fs::write(directory.path().join("alpha.rs"), "pub fn alpha() {}\n").expect("alpha");
+        fs::write(directory.path().join("beta.rs"), "use alpha;\n").expect("beta");
+        let references = ReferencesToTool
+            .execute(json!({"path": "alpha.rs"}), &context)
+            .await
+            .expect("references");
+        assert!(references.content.contains("alpha.rs"));
+        assert!(references.content.contains("beta.rs"));
+
+        fs::write(directory.path().join("current.txt"), "new\n").expect("current");
+        fs::write(directory.path().join("golden.txt"), "old\n").expect("golden");
+        let compare = GoldenCompareTool
+            .execute(
+                json!({"path": "current.txt", "baseline": "golden.txt"}),
+                &context,
+            )
+            .await
+            .expect("compare");
+        assert_eq!(compare.metadata["matches"], false);
+        assert!(compare.content.contains("-old"));
+        GoldenAcceptTool
+            .execute(
+                json!({"path": "current.txt", "baseline": "golden.txt", "confirm": true}),
+                &context,
+            )
+            .await
+            .expect("accept");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("golden.txt")).expect("golden"),
+            "new\n"
+        );
     }
 
     #[tokio::test]

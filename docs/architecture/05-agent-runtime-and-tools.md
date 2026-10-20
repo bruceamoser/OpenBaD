@@ -343,6 +343,11 @@ Implemented:
 | `diff_files` / `file_citation` | read | Cross-path diffs and stable `path@hash:line` citations |
 | `git_changes_since` | read | Commits and changed paths since a revision |
 | `registry_lookup` | read | crates.io/npm/PyPI version checks with network policy |
+| `scaffold_project` | write | Create a starter manifest, README, docs, knowledge, scratch, artifacts |
+| `workspace_gc` | write | Report or remove large generated files with confirmation |
+| `session_checkpoint` / `session_resume` | write/read | Capture or restore plan/todos/handoff/claims/audit summaries |
+| `references_to` | read | Blast-radius reference search for a file stem |
+| `golden_compare` / `golden_accept` | read/write | Snapshot regression comparison and baseline promotion |
 | `plan_write` / `plan_read` / `plan_update_step` / `plan_verify` | write/read/command | Draft plan, human approval, and executable step verification |
 | `context_report` | read | Estimate loaded files/knowledge/memory tokens and rules |
 | `record_claim` / `list_claims` | write/read | Provenance-tagged claims with evidence |
@@ -438,6 +443,11 @@ the rules, and ruled-out findings. Ruled-out paths and hypotheses live in
 `deny_paths`, `allow_writes: false`) and commands by class or substring
 (`command_classes`, `deny_command_patterns`, `allow_network`, `network_hosts`). Denials name the policy rule and
 apply to file operations, `run_command`, `run_task`, and `run_recipe`.
+
+`scaffold_project` creates a reviewable starter layout. `session_checkpoint`
+captures plan, todos, handoff, claims, unknowns, and recent audit entries for
+`session_resume`. `references_to` provides a blast-radius preview and
+`golden_compare`/`golden_accept` manage committed baselines.
 
 `plan_write` stores a draft in `.openbad/plan.json`; the prompt says not to
 execute it until a human approves it in Project → Plan. `plan_verify` runs a
