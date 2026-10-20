@@ -374,7 +374,11 @@ Implemented:
 | `git_log` / `git_show` / `git_blame` / `git_stash` | read/command | Archaeology and stash management |
 | `git_worktree` | command | Add, list, and remove worktrees |
 | `repo_health` / `git_commit_context` | read | Ahead/behind, dirty state, and commit-message context |
-| `github_issue` / `github_pr` / `github_ci` | command | Issue, PR, and CI operations through `gh`; close/merge require `confirm=true` |
+| `github` | command | Full GitHub surface through `gh`: status, repositories, branches and protection, issues, labels, milestones, pull requests, reviews and merges, Actions, releases, Pages, search, and generic `gh api`; destructive actions require `confirm=true` |
+| `github_issue` / `github_pr` / `github_ci` | command | Compatibility aliases for the most common issue, PR, and CI operations |
+| `plugin_list` / `plugin_describe` | read | Discover installed and bundled plugins and their actions |
+| `plugin_call` / `plugin_test` | command | Run a plugin action or its declared test command with JSON stdin/stdout and evidence |
+| `write_plugin` / `plugin_install_builtin` | write | Scaffold a plugin or install the bundled AsciiDoc plugin |
 | `web_fetch` | read | Fetch http(s) docs, extract readable text, cache by hash, respect `network_hosts` |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 | `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |
@@ -432,9 +436,38 @@ restores the previous file content and returns its output. Writes and edits that
 generated or historical scope return a manifest-derived warning.
 
 Git and GitHub tools run through the same command policy and audit log. The
-GitHub tools assume `gh` is installed and authenticated (`gh auth login`);
-they never embed tokens. Merge and close actions require an explicit
-`confirm=true`.
+`github` tool drives `gh` and assumes it is authenticated (`gh auth login`);
+it never embeds tokens. `area: "status"` reports authentication and the current
+repository. Repository targeting accepts `repository: "owner/name"` or
+`owner` + `repo`; otherwise `gh` uses the workspace repository. Merge, close,
+delete, cancel, unpublish, approval, and change-request actions require an
+explicit `confirm=true`. Release assets and run download destinations must be
+workspace-relative. `dry_run: true` previews the exact `gh` command without
+executing it, and `area: "api"` accepts a method, endpoint, fields, or a JSON
+body for capabilities not yet surfaced explicitly.
+
+The GitHub surface is:
+
+| Area | Actions |
+| --- | --- |
+| `status` | authentication and current repository |
+| `repo` | view, list, create, fork, edit, delete, archive, unarchive, rename, clone, sync |
+| `branch` | list, get, create, delete, rename, protection, protect |
+| `issue` | list, get, create, update, comment, close, reopen, delete, lock, unlock, pin, unpin, comments |
+| `label` | list, create, edit, delete, clone |
+| `milestone` | list, create, update, close, open, delete |
+| `pr` | list, view, diff, files, commits, comments, create, update, comment, review, merge, close, reopen, ready, checks, checkout, update-branch, lock, unlock |
+| `workflow` | list, view, dispatch, enable, disable |
+| `run` | list, view, logs, artifacts, download, cancel, rerun, delete, watch |
+| `release` | list, view, create, edit, upload, delete, download |
+| `pages` | status, site, builds, build, request-build, unpublish |
+| `search` | repos, issues, prs, code, commits |
+| `api` | generic `gh api` with method, fields, JSON body, pagination, and jq |
+
+Four skills ship inside the binary and are indexed in every prompt:
+`github-workflow`, `github-releases-pages`, `plugin-development`, and
+`asciidoc-rendering`. A workspace skill with the same name overrides the
+built-in.
 
 `.openbad/context.yaml` declares `pinned` and `excluded` globs. Excluded paths
 are refused by direct reads and filtered from list, grep, glob, symbol, and
@@ -666,12 +699,63 @@ version: 1
 Rules:
 
 - Only the name and description enter the stable prompt index.
-- The body loads on demand via the `skill` tool and appends to history.
+- The body loads on demand via `read_skill` and appends to history.
 - Skill scripts run with the same approval policy as shell tools.
-- Workspace skills override global skills by name.
+- Built-in skills cover GitHub workflows, releases and Pages, plugin
+  development, and AsciiDoc rendering. They are always available.
+- Workspace skills (`.openbad/skills`, `.claude/skills`) override built-ins by
+  name; `.openbad` wins over `.claude`.
+- A plugin may ship `SKILL.md`; it is indexed once the plugin is installed
+  under `.openbad/plugins/<name>/`.
 - Skills cannot silently add tools; `allowed_tools` narrows the set.
 
-### 11.1 Inline completion and constrained edits
+### 11.1 Plugin runtime
+
+Plugins keep optional capabilities out of the core binary. A plugin lives in
+`.openbad/plugins/<name>/` and declares a `plugin.yaml`:
+
+```yaml
+name: asciidoc
+description: Render AsciiDoc with asciidoctor.
+version: 0.1.0
+command: python3 main.py
+test_command: python3 -m py_compile main.py
+timeout_seconds: 120
+permissions: []          # write, network, or destructive
+actions:
+  render:
+    description: Render a workspace .adoc file.
+    input_schema: {type: object, properties: {path: {type: string}}}
+```
+
+The command runs from the plugin directory. It receives one JSON object on
+stdin:
+
+```json
+{"plugin": "asciidoc", "action": "render", "arguments": {"path": "docs/guide.adoc"}, "workspace": "/path/to/project"}
+```
+
+It prints one JSON object on stdout:
+
+```json
+{"ok": true, "content": "rendered docs/guide.html", "metadata": {"bytes": 4211}}
+```
+
+`content`, `metadata`, and `is_error` are optional; non-JSON output is treated
+as text and stderr is appended to failures. Each run is recorded under
+`.openbad/plugin-runs/` with exit code, duration, and bounded stdout/stderr.
+`plugin_call` and `plugin_test` require Full access, enforce the manifest
+timeout, and honor `.openbad/permissions.yaml`. `permissions: [destructive]`
+also requires `confirm=true`. `dry_run: true` returns the command and request
+without execution.
+
+`write_plugin` scaffolds `plugin.yaml`, a Python/Node/shell entrypoint,
+`SKILL.md`, and `README.md`; the assistant then edits the entrypoint, runs
+`plugin_test`, and exercises actions with `plugin_call`. The bundled AsciiDoc
+plugin is installed with `plugin_install_builtin` and reports a missing
+`asciidoctor` binary as an actionable failure instead of silently succeeding.
+
+### 11.2 Inline completion and constrained edits
 
 Two DeepSeek beta features are used outside the main agent loop:
 

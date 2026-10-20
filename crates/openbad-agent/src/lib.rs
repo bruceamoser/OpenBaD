@@ -14,7 +14,7 @@ use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
     CheckpointSink, MemoryStore, ProjectAreas, ToolContext, ToolRegistry, WorkspaceSearch,
-    discover_skills,
+    discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
@@ -488,7 +488,7 @@ list_repo_dir, glob_repo, and grep_repo before reading files; use stat_repo_file
 for bounded reads. Reads report total_lines and continuation metadata.\n\
 Use list_knowledge/get_knowledge to audit knowledge, update_knowledge or\n\
 delete_knowledge to correct it, and list_memories/forget_memory to audit memory.\n\
-Use git_log/git_blame/repo_health for repository archaeology and state, git_commit_context before drafting a commit, git_worktree for isolated branches, and github_issue/github_pr/github_ci when the repo is GitHub-backed. Use canon_query/canon_lint to resolve competing versions of project truth, glossary_lookup for terminology, adr_write for durable decisions, yaml_query for structured documents, and check_invariants before claiming project invariants hold. Use ask_question when a decision blocks correctness instead of guessing; the human answers in Project → Questions and the answer appears in the next prompt. Use instructions_for for nested project conventions and undo_last to reverse a bad write. Use scaffold_project for greenfield setup, session_checkpoint before long tasks, references_to before changing shared files, and golden_compare/golden_accept for snapshot tests. Use plan_write for multi-step work, wait for approval in Project → Plan, plan_update_step for progress, and plan_verify for executable acceptance criteria. Use archive_list/archive_read for zip contents, diff_files for comparisons, file_citation for stable evidence, git_changes_since for drift, and registry_lookup before claiming a package version exists. Use job_start/job_status/job_logs for long builds instead of blocking, and run_command parse=rust|pytest|eslint|typescript for structured diagnostics. Use record_claim with executed/read/inferred/assumed provenance and record_unknown for unresolved gaps; context_report estimates what the turn is holding. Use preview_write before risky large writes, snapshot_create before experiments, snapshot_restore only with confirmation, and assert_project for structural release checks. Use typed knowledge kinds and review_knowledge for curation; pass supersedes when replacing a note, and export_knowledge/import_knowledge for git review. Use web_fetch for external docs and specs, cite the URL and fetch date, and record a dead end when a page does not answer the question. Use context_map to see what this turn has loaded, pin_context/exclude_context for residency rules, and record_dead_end when evidence rules out a path or hypothesis so it is not re-explored. Use present_artifact when showing a web page, image, diff, or note is clearer\n\
+Use git_log/git_blame/repo_health for repository archaeology and state, git_commit_context before drafting a commit, git_worktree for isolated branches, and the github tool when the repository is GitHub-backed (status, branches, issues, pull requests, reviews, merges, Actions, releases, Pages, and generic API). Use canon_query/canon_lint to resolve competing versions of project truth, glossary_lookup for terminology, adr_write for durable decisions, yaml_query for structured documents, and check_invariants before claiming project invariants hold. Use ask_question when a decision blocks correctness instead of guessing; the human answers in Project → Questions and the answer appears in the next prompt. Use instructions_for for nested project conventions and undo_last to reverse a bad write. Use scaffold_project for greenfield setup, session_checkpoint before long tasks, references_to before changing shared files, and golden_compare/golden_accept for snapshot tests. Use plan_write for multi-step work, wait for approval in Project → Plan, plan_update_step for progress, and plan_verify for executable acceptance criteria. Use archive_list/archive_read for zip contents, diff_files for comparisons, file_citation for stable evidence, git_changes_since for drift, and registry_lookup before claiming a package version exists. Use job_start/job_status/job_logs for long builds instead of blocking, and run_command parse=rust|pytest|eslint|typescript for structured diagnostics. Use record_claim with executed/read/inferred/assumed provenance and record_unknown for unresolved gaps; context_report estimates what the turn is holding. Use preview_write before risky large writes, snapshot_create before experiments, snapshot_restore only with confirmation, and assert_project for structural release checks. Use typed knowledge kinds and review_knowledge for curation; pass supersedes when replacing a note, and export_knowledge/import_knowledge for git review. Use web_fetch for external docs and specs, cite the URL and fetch date, and record a dead end when a page does not answer the question. Use context_map to see what this turn has loaded, pin_context/exclude_context for residency rules, and record_dead_end when evidence rules out a path or hypothesis so it is not re-explored. Use present_artifact when showing a web page, image, diff, or note is clearer\n\
 than prose. Cite knowledge locators. Report what changed and any remaining risk. Never claim a file changed unless a tool succeeded.",
             self.workspace.root().display()
         );
@@ -542,13 +542,34 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
         }
         let skills = discover_skills(self.workspace.root());
         if !skills.is_empty() {
-            prompt.push_str("\n\nWorkspace skills (call read_skill to load one):\n");
+            prompt.push_str("\nSkills (call read_skill to load one):\n");
             for skill in skills {
+                let suffix = if skill.builtin { " [builtin]" } else { "" };
                 if skill.description.is_empty() {
-                    prompt.push_str(&format!("- {}\n", skill.name));
+                    prompt.push_str(&format!("- {}{suffix}\n", skill.name));
                 } else {
-                    prompt.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+                    prompt.push_str(&format!(
+                        "- {}{suffix}: {}\n",
+                        skill.name, skill.description
+                    ));
                 }
+            }
+        }
+        let plugins = discover_plugins(self.workspace.root());
+        prompt.push_str("\nPlugins extend the tool surface. Use plugin_list/plugin_describe and plugin_call to run one; write_plugin scaffolds a new plugin, then edit it, run plugin_test, and plugin_call. Install bundled plugins with plugin_install_builtin.\n");
+        if !plugins.is_empty() {
+            prompt.push_str("Installed plugins:\n");
+            for plugin in plugins {
+                let actions = plugin.action_names();
+                let actions = if actions.is_empty() {
+                    "any action".to_owned()
+                } else {
+                    actions.join(", ")
+                };
+                prompt.push_str(&format!(
+                    "- {}: {} [actions: {actions}]\n",
+                    plugin.name, plugin.description
+                ));
             }
         }
         prompt

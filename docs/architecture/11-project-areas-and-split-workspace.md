@@ -71,6 +71,14 @@ A sibling `.openbad/permissions.yaml` can restrict writes and command classes.
 It is reviewable policy, not prompt discipline: tools check it before mutating
 files or spawning commands and return the specific rule that blocked the action.
 
+Optional capabilities live under `.openbad/plugins/<name>/`. Each plugin has a
+`plugin.yaml`, an entrypoint, and optionally a `SKILL.md`; it exchanges one JSON
+request/response over stdin/stdout and runs under the same command policy and
+timeout rules. Run evidence goes to `.openbad/plugin-runs/`. The assistant can
+scaffold, edit, test, and call plugins, and the bundled AsciiDoc plugin is
+installed with `plugin_install_builtin` rather than adding a mandatory
+`asciidoctor` dependency to the desktop build.
+
 Recipes may target reference folders with an absolute `cwd`; named runners
 allow that explicitly. Invariant `check: manual` is attested, not executed.
 Canon lint supports fenced-code skipping, off markers, and `paths_ignore`.

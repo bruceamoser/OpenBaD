@@ -1,11 +1,12 @@
 //! Tool registry, schemas, and built-in coding tools.
+#![recursion_limit = "256"]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use globset::Glob;
@@ -322,15 +323,44 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
+    pub builtin: bool,
 }
 
-/// Discover workspace skills from `.openbad/skills` and `.claude/skills`.
-/// `.openbad` wins when both define the same name.
+const BUILTIN_SKILLS: &[&str] = &[
+    include_str!("../assets/skills/github-workflow.md"),
+    include_str!("../assets/skills/github-releases-pages.md"),
+    include_str!("../assets/skills/plugin-development.md"),
+    include_str!("../assets/skills/asciidoc-rendering.md"),
+];
+
+#[must_use]
+pub fn builtin_skill_content(name: &str) -> Option<&'static str> {
+    BUILTIN_SKILLS.iter().copied().find(|content| {
+        let (skill_name, _) = parse_skill_frontmatter(content, "");
+        skill_name == name
+    })
+}
+
+/// Discover built-in skills plus workspace skills from `.openbad/skills`,
+/// `.claude/skills`, and `.openbad/plugins/*/SKILL.md`. Workspace skills win
+/// when they define the same name.
 #[must_use]
 pub fn discover_skills(root: &Path) -> Vec<Skill> {
     let mut skills = BTreeMap::new();
+    for content in BUILTIN_SKILLS {
+        let (name, description) = parse_skill_frontmatter(content, "skill");
+        skills.insert(
+            name.clone(),
+            Skill {
+                path: PathBuf::from(format!("<builtin:{name}>")),
+                name,
+                description,
+                builtin: true,
+            },
+        );
+    }
     let Ok(canonical_root) = root.canonicalize() else {
-        return Vec::new();
+        return skills.into_values().collect();
     };
     for relative in [".claude/skills", ".openbad/skills"] {
         let directory = root.join(relative);
@@ -370,6 +400,37 @@ pub fn discover_skills(root: &Path) -> Vec<Skill> {
                     name,
                     description,
                     path: candidate,
+                    builtin: false,
+                },
+            );
+        }
+    }
+    let plugins = root.join(".openbad").join("plugins");
+    if let Ok(entries) = std::fs::read_dir(&plugins) {
+        for entry in entries.filter_map(Result::ok) {
+            let candidate = entry.path().join("SKILL.md");
+            let Ok(candidate) = candidate.canonicalize() else {
+                continue;
+            };
+            if !candidate.starts_with(&canonical_root) || !candidate.is_file() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            let fallback = candidate
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or("plugin");
+            let (name, description) = parse_skill_frontmatter(&content, fallback);
+            skills.insert(
+                name.clone(),
+                Skill {
+                    name,
+                    description,
+                    path: candidate,
+                    builtin: false,
                 },
             );
         }
@@ -395,6 +456,332 @@ fn parse_skill_frontmatter(content: &str, fallback: &str) -> (String, String) {
         }
     }
     (name, description)
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PluginAction {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub input_schema: Option<Value>,
+}
+
+fn default_plugin_timeout() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PluginManifest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub version: String,
+    pub command: String,
+    #[serde(default)]
+    pub test_command: Option<String>,
+    #[serde(default = "default_plugin_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub actions: BTreeMap<String, PluginAction>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+impl PluginManifest {
+    #[must_use]
+    pub fn action_names(&self) -> Vec<String> {
+        self.actions.keys().cloned().collect()
+    }
+}
+
+fn valid_plugin_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+fn plugin_root(root: &Path) -> PathBuf {
+    root.join(".openbad").join("plugins")
+}
+
+fn plugin_directory(root: &Path, name: &str) -> Result<PathBuf, ToolError> {
+    if !valid_plugin_name(name) {
+        return Err(ToolError::InvalidArgument(format!(
+            "invalid plugin name: {name}"
+        )));
+    }
+    let plugins = plugin_root(root);
+    let directory = plugins.join(name);
+    let canonical_plugins = plugins
+        .canonicalize()
+        .map_err(|error| ToolError::Failed(format!("plugin directory is unavailable: {error}")))?;
+    let canonical = directory
+        .canonicalize()
+        .map_err(|error| ToolError::Failed(format!("plugin not found: {name} ({error})")))?;
+    if !canonical.starts_with(&canonical_plugins) {
+        return Err(ToolError::Failed(format!(
+            "plugin directory escapes .openbad/plugins: {name}"
+        )));
+    }
+    Ok(canonical)
+}
+
+/// Discover plugins declared under `.openbad/plugins/*/plugin.yaml`.
+#[must_use]
+pub fn discover_plugins(root: &Path) -> Vec<PluginManifest> {
+    let plugins = plugin_root(root);
+    let Ok(entries) = std::fs::read_dir(&plugins) else {
+        return Vec::new();
+    };
+    let mut found = BTreeMap::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path().join("plugin.yaml");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_yaml::from_str::<PluginManifest>(&content) else {
+            continue;
+        };
+        found.insert(manifest.name.clone(), manifest);
+    }
+    found.into_values().collect()
+}
+
+fn load_plugin(root: &Path, name: &str) -> Result<(PluginManifest, PathBuf), ToolError> {
+    let directory = plugin_directory(root, name)?;
+    let path = directory.join("plugin.yaml");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| ToolError::Failed(format!("cannot read {}: {error}", path.display())))?;
+    let manifest: PluginManifest = serde_yaml::from_str(&content)
+        .map_err(|error| ToolError::Failed(format!("invalid plugin.yaml: {error}")))?;
+    if manifest.name != name {
+        return Err(ToolError::Failed(format!(
+            "plugin.yaml name {} does not match directory {name}",
+            manifest.name
+        )));
+    }
+    if manifest.command.trim().is_empty() {
+        return Err(ToolError::Failed(format!(
+            "plugin {name} has an empty command"
+        )));
+    }
+    Ok((manifest, directory))
+}
+
+fn plugin_command_class(manifest: &PluginManifest) -> CommandClass {
+    if manifest
+        .permissions
+        .iter()
+        .any(|permission| permission.eq_ignore_ascii_case("destructive"))
+    {
+        CommandClass::Destructive
+    } else if manifest
+        .permissions
+        .iter()
+        .any(|permission| permission.eq_ignore_ascii_case("network"))
+    {
+        CommandClass::Network
+    } else if manifest
+        .permissions
+        .iter()
+        .any(|permission| permission.eq_ignore_ascii_case("write"))
+    {
+        CommandClass::WriteWorkspace
+    } else {
+        classify_command(&manifest.command)
+    }
+}
+
+struct PluginRunOutcome {
+    content: String,
+    metadata: Value,
+    is_error: bool,
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_plugin_process(
+    root: &Path,
+    manifest: &PluginManifest,
+    directory: &Path,
+    action: &str,
+    arguments: &Value,
+    timeout_seconds: u64,
+    max_output_bytes: usize,
+) -> Result<PluginRunOutcome, ToolError> {
+    let payload = json!({
+        "plugin": manifest.name,
+        "action": action,
+        "arguments": arguments,
+        "workspace": root,
+    });
+    let mut process = if cfg!(windows) {
+        let mut process = std::process::Command::new("cmd");
+        process.args(["/C", &manifest.command]);
+        process
+    } else {
+        let mut process = std::process::Command::new("sh");
+        process.args(["-c", &manifest.command]);
+        process
+    };
+    process
+        .current_dir(directory)
+        .env("OPENBAD_WORKSPACE", root)
+        .env("OPENBAD_PLUGIN", &manifest.name)
+        .env("OPENBAD_PLUGIN_ACTION", action)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+    let started = Instant::now();
+    let mut child = process.spawn().map_err(|error| {
+        ToolError::Failed(format!("cannot start plugin {}: {error}", manifest.name))
+    })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.to_string().as_bytes())?;
+    }
+    let stdout_reader = child.stdout.take().map(|mut stream| {
+        std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = stream.read_to_string(&mut output);
+            output
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut stream| {
+        std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = stream.read_to_string(&mut output);
+            output
+        })
+    });
+    let status = child.wait_timeout(Duration::from_secs(timeout_seconds))?;
+    kill_process_tree(&mut child);
+    let status = match status {
+        Some(status) => status,
+        None => {
+            let _ = child.wait();
+            return Err(ToolError::Timeout(timeout_seconds));
+        }
+    };
+    let stdout = stdout_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let duration_ms = started.elapsed().as_millis();
+    let exit_code = status.code().unwrap_or(-1);
+    let trimmed = stdout.trim();
+    let parsed = serde_json::from_str::<Value>(trimmed).ok();
+    let mut is_error = !status.success();
+    let mut metadata = json!({});
+    let content = match parsed {
+        Some(Value::Object(mut object)) => {
+            if object.get("ok").and_then(Value::as_bool) == Some(false)
+                || object.get("is_error").and_then(Value::as_bool) == Some(true)
+            {
+                is_error = true;
+            }
+            if let Some(value) = object.remove("metadata") {
+                metadata = value;
+            }
+            match object.remove("content") {
+                Some(Value::String(text)) => text,
+                Some(other) => other.to_string(),
+                None => match object.get("data") {
+                    Some(data) => serde_json::to_string_pretty(data).unwrap_or_default(),
+                    None => trimmed.to_owned(),
+                },
+            }
+        }
+        Some(other) => serde_json::to_string_pretty(&other).unwrap_or_default(),
+        None => stdout.clone(),
+    };
+    let mut content = if content.trim().is_empty() {
+        if stderr.trim().is_empty() {
+            format!(
+                "plugin {} action {action} produced no output",
+                manifest.name
+            )
+        } else {
+            stderr.clone()
+        }
+    } else {
+        content
+    };
+    if is_error && !stderr.trim().is_empty() && !content.contains(stderr.trim()) {
+        content.push_str("\n\nstderr:\n");
+        content.push_str(stderr.trim());
+    }
+    let content = truncate(&content, max_output_bytes);
+    let evidence = record_plugin_run(
+        root,
+        manifest,
+        action,
+        exit_code,
+        duration_ms,
+        &stdout,
+        &stderr,
+    );
+    if let Some(map) = metadata.as_object_mut() {
+        map.insert("plugin".to_owned(), json!(manifest.name));
+        map.insert("action".to_owned(), json!(action));
+        map.insert("exit_code".to_owned(), json!(exit_code));
+        map.insert("duration_ms".to_owned(), json!(duration_ms));
+        if let Ok(path) = &evidence {
+            map.insert("evidence_path".to_owned(), json!(path));
+        }
+    }
+    Ok(PluginRunOutcome {
+        content,
+        metadata,
+        is_error,
+    })
+}
+
+fn record_plugin_run(
+    root: &Path,
+    manifest: &PluginManifest,
+    action: &str,
+    exit_code: i32,
+    duration_ms: u128,
+    stdout: &str,
+    stderr: &str,
+) -> Result<PathBuf, std::io::Error> {
+    let directory = root.join(".openbad").join("plugin-runs");
+    std::fs::create_dir_all(&directory)?;
+    let safe_action: String = action
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let path = directory.join(format!("{}-{safe_action}.json", now_millis()));
+    let record = json!({
+        "plugin": manifest.name,
+        "action": action,
+        "command": manifest.command,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "stdout": truncate(stdout, 16 * 1024),
+        "stderr": truncate(stderr, 16 * 1024),
+        "recorded_at": now_millis(),
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&record).unwrap_or_default(),
+    )?;
+    Ok(path)
 }
 
 pub trait CheckpointSink: Send + Sync {
@@ -574,6 +961,7 @@ impl ToolRegistry {
         registry.register(GitWorktreeTool);
         registry.register(RepoHealthTool);
         registry.register(GitCommitContextTool);
+        registry.register(GithubTool);
         registry.register(GithubIssueTool);
         registry.register(GithubPrTool);
         registry.register(GithubCiTool);
@@ -609,6 +997,12 @@ impl ToolRegistry {
         registry.register(WriteSkillTool);
         registry.register(ListSkillsTool);
         registry.register(ReadSkillTool);
+        registry.register(ListPluginsTool);
+        registry.register(DescribePluginTool);
+        registry.register(CallPluginTool);
+        registry.register(TestPluginTool);
+        registry.register(WritePluginTool);
+        registry.register(InstallBuiltinPluginTool);
         registry
     }
 
@@ -7396,6 +7790,1534 @@ impl Tool for GitCommitContextTool {
     }
 }
 
+fn github_slug(arguments: &Value) -> Result<Option<String>, ToolError> {
+    if let Some(repository) = optional_string(arguments, "repository") {
+        let repository = repository.trim();
+        let mut parts = repository.split('/');
+        let owner = parts.next().unwrap_or_default();
+        let name = parts.next().unwrap_or_default();
+        if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+            return Err(ToolError::InvalidArgument(format!(
+                "repository must be owner/name: {repository}"
+            )));
+        }
+        return Ok(Some(repository.to_owned()));
+    }
+    match (
+        optional_string(arguments, "owner"),
+        optional_string(arguments, "repo"),
+    ) {
+        (Some(owner), Some(repo)) => Ok(Some(format!("{owner}/{repo}"))),
+        (None, None) => Ok(None),
+        _ => Err(ToolError::InvalidArgument(
+            "provide both owner and repo, or a repository slug".to_owned(),
+        )),
+    }
+}
+
+fn github_repo_flag(arguments: &Value) -> Result<String, ToolError> {
+    Ok(github_slug(arguments)?
+        .map(|repository| format!(" --repo {}", sh_quote(&repository)))
+        .unwrap_or_default())
+}
+
+fn github_api_repo(arguments: &Value) -> Result<String, ToolError> {
+    Ok(github_slug(arguments)?.unwrap_or_else(|| "{owner}/{repo}".to_owned()))
+}
+
+fn github_target(arguments: &Value) -> Result<String, ToolError> {
+    github_slug(arguments)?
+        .map(|repository| sh_quote(&repository))
+        .ok_or_else(|| {
+            ToolError::InvalidArgument(
+                "this action requires repository=owner/name or owner and repo".to_owned(),
+            )
+        })
+}
+
+fn push_flag(command: &mut String, flag: &str, value: Option<String>) {
+    if let Some(value) = value {
+        command.push_str(&format!(" {flag} {}", sh_quote(&value)));
+    }
+}
+
+fn push_bool(command: &mut String, flag: &str, enabled: bool) {
+    if enabled {
+        command.push(' ');
+        command.push_str(flag);
+    }
+}
+
+fn push_values(command: &mut String, flag: &str, values: &[String]) {
+    for value in values {
+        command.push_str(&format!(" {flag} {}", sh_quote(value)));
+    }
+}
+
+fn github_number(arguments: &Value) -> Result<String, ToolError> {
+    if let Some(number) = arguments.get("number").and_then(Value::as_u64) {
+        return Ok(number.to_string());
+    }
+    if let Some(number) = arguments.get("number").and_then(Value::as_str) {
+        return Ok(number.to_owned());
+    }
+    Err(ToolError::InvalidArgument(
+        "missing number argument".to_owned(),
+    ))
+}
+
+fn github_relative_path(raw: &str) -> Result<String, ToolError> {
+    let path = Path::new(raw);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ToolError::InvalidArgument(format!(
+            "path must stay inside the workspace: {raw}"
+        )));
+    }
+    Ok(raw.to_owned())
+}
+
+fn github_file_paths(arguments: &Value) -> Result<Vec<String>, ToolError> {
+    string_array_arg_or_empty(arguments, "files")?
+        .iter()
+        .map(|path| github_relative_path(path))
+        .collect()
+}
+
+fn github_json_flag(arguments: &Value, default: &str) -> String {
+    let fields = arguments
+        .get("json")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    if fields.is_empty() {
+        default.to_owned()
+    } else {
+        fields
+    }
+}
+
+fn github_api_query(arguments: &Value) -> String {
+    let mut query = String::new();
+    if optional_bool(arguments, "paginate").unwrap_or(false) {
+        query.push_str(" --paginate");
+    }
+    if optional_bool(arguments, "slurp").unwrap_or(false) {
+        query.push_str(" --slurp");
+    }
+    push_flag(
+        &mut query,
+        "--jq",
+        optional_string(arguments, "jq").filter(|value| !value.trim().is_empty()),
+    );
+    query
+}
+
+fn github_api_body_command(method: &str, endpoint: &str, body: &Value) -> String {
+    let payload = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_owned());
+    format!(
+        "printf '%s' {} | gh api --method {} {} --input -",
+        sh_quote(&payload),
+        method.to_ascii_uppercase(),
+        sh_quote(endpoint)
+    )
+}
+
+fn github_api_fields(arguments: &Value) -> Result<String, ToolError> {
+    let Some(fields) = arguments.get("fields").and_then(Value::as_object) else {
+        return Ok(String::new());
+    };
+    let mut command = String::new();
+    for (key, value) in fields {
+        match value {
+            Value::String(text) => {
+                command.push_str(&format!(" -f {}={}", sh_quote(key), sh_quote(text)));
+            }
+            Value::Bool(flag) => {
+                command.push_str(&format!(" -F {}={flag}", sh_quote(key)));
+            }
+            Value::Number(number) => {
+                command.push_str(&format!(" -F {}={number}", sh_quote(key)));
+            }
+            Value::Array(values) => {
+                for value in values {
+                    let text = value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned);
+                    command.push_str(&format!(" -f {}[]={}", sh_quote(key), sh_quote(&text)));
+                }
+            }
+            Value::Null => {}
+            other => {
+                command.push_str(&format!(
+                    " -f {}={}",
+                    sh_quote(key),
+                    sh_quote(&other.to_string())
+                ));
+            }
+        }
+    }
+    Ok(command)
+}
+
+fn github_api_command(arguments: &Value) -> Result<String, ToolError> {
+    let endpoint = string_arg(arguments, "endpoint")?;
+    let has_body = arguments.get("body").is_some_and(Value::is_object);
+    let method = optional_string(arguments, "method")
+        .unwrap_or_else(|| if has_body { "POST" } else { "GET" }.to_owned())
+        .to_ascii_uppercase();
+    if method == "DELETE" {
+        github_require_confirm(arguments, "github api delete")?;
+    }
+    if let Some(body) = arguments.get("body").filter(|body| body.is_object()) {
+        let mut command = github_api_body_command(&method, &endpoint, body);
+        command.push_str(&github_api_query(arguments));
+        return Ok(command);
+    }
+    let mut command = format!(
+        "gh api --method {method} {}{}",
+        sh_quote(&endpoint),
+        github_api_fields(arguments)?
+    );
+    command.push_str(&github_api_query(arguments));
+    Ok(command)
+}
+
+fn github_require_confirm(arguments: &Value, action: &str) -> Result<(), ToolError> {
+    if optional_bool(arguments, "confirm").unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(ToolError::ApprovalRequired(format!(
+            "{action} requires confirm=true after checking the blast radius"
+        )))
+    }
+}
+
+fn github_branch_encoded(branch: &str) -> String {
+    branch
+        .chars()
+        .map(|character| match character {
+            '/' => "%2F".to_owned(),
+            '#' => "%23".to_owned(),
+            '?' => "%3F".to_owned(),
+            '%' => "%25".to_owned(),
+            ' ' => "%20".to_owned(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+fn github_repo_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let command = match action {
+        "view" => format!(
+            "gh repo view{flag} --json {}",
+            github_json_flag(
+                arguments,
+                "nameWithOwner,description,defaultBranchRef,url,visibility,isPrivate,isFork,stargazerCount,forkCount,updatedAt,repositoryTopics"
+            )
+        ),
+        "list" => {
+            let mut command = format!(
+                "gh repo list{} --limit {} --json {}",
+                optional_string(arguments, "owner")
+                    .map(|owner| format!(" {}", sh_quote(&owner)))
+                    .unwrap_or_default(),
+                optional_usize(arguments, "limit")
+                    .unwrap_or(30)
+                    .clamp(1, 100),
+                github_json_flag(
+                    arguments,
+                    "nameWithOwner,description,visibility,isPrivate,updatedAt,stargazerCount"
+                )
+            );
+            push_bool(
+                &mut command,
+                "--fork",
+                optional_bool(arguments, "forks").unwrap_or(false),
+            );
+            command
+        }
+        "create" => {
+            let name = string_arg(arguments, "name")?;
+            let mut command = format!("gh repo create {}", sh_quote(&name));
+            push_bool(
+                &mut command,
+                "--private",
+                optional_bool(arguments, "private").unwrap_or(true),
+            );
+            push_bool(
+                &mut command,
+                "--public",
+                optional_bool(arguments, "private") == Some(false),
+            );
+            push_flag(
+                &mut command,
+                "--description",
+                optional_string(arguments, "description"),
+            );
+            command
+        }
+        "fork" => {
+            let target = github_target(arguments)?;
+            format!("gh repo fork {target} --clone=false")
+        }
+        "edit" => {
+            let mut command = format!("gh repo edit{flag}");
+            push_flag(
+                &mut command,
+                "--description",
+                optional_string(arguments, "description"),
+            );
+            push_flag(
+                &mut command,
+                "--visibility",
+                optional_string(arguments, "visibility"),
+            );
+            push_values(
+                &mut command,
+                "--add-topic",
+                &string_array_arg_or_empty(arguments, "add_topics")?,
+            );
+            push_values(
+                &mut command,
+                "--remove-topic",
+                &string_array_arg_or_empty(arguments, "remove_topics")?,
+            );
+            command
+        }
+        "delete" => {
+            github_require_confirm(arguments, "github repo delete")?;
+            format!("gh repo delete {} --yes", github_target(arguments)?)
+        }
+        "archive" => format!("gh repo archive {} --yes", github_target(arguments)?),
+        "unarchive" => format!("gh repo unarchive {} --yes", github_target(arguments)?),
+        "rename" => format!(
+            "gh repo rename {} --repo {} --yes",
+            sh_quote(&string_arg(arguments, "new_name")?),
+            github_target(arguments)?
+        ),
+        "clone" => {
+            let target = github_target(arguments)?;
+            let mut command = format!("gh repo clone {target}");
+            push_flag(&mut command, "", optional_string(arguments, "directory"));
+            command
+        }
+        "sync" => {
+            let mut command = format!("gh repo sync{flag}");
+            push_flag(
+                &mut command,
+                "--source",
+                optional_string(arguments, "source"),
+            );
+            command
+        }
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown repo action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_branch_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let repo = github_api_repo(arguments)?;
+    let branch = optional_string(arguments, "branch");
+    let command = match action {
+        "list" => {
+            let limit = optional_usize(arguments, "limit")
+                .unwrap_or(30)
+                .clamp(1, 100);
+            format!(
+                "gh api {} --jq {}",
+                sh_quote(&format!("repos/{repo}/branches?per_page={limit}")),
+                sh_quote(".[] | {name: .name, protected: .protected, sha: .commit.sha}")
+            )
+        }
+        "get" => {
+            let branch = branch
+                .ok_or_else(|| ToolError::InvalidArgument("branch is required".to_owned()))?;
+            format!(
+                "gh api {}",
+                sh_quote(&format!(
+                    "repos/{repo}/branches/{}",
+                    github_branch_encoded(&branch)
+                ))
+            )
+        }
+        "create" => {
+            let branch = branch
+                .ok_or_else(|| ToolError::InvalidArgument("branch is required".to_owned()))?;
+            if let Some(sha) = optional_string(arguments, "sha") {
+                format!(
+                    "gh api --method POST {} -f ref={} -f sha={}",
+                    sh_quote(&format!("repos/{repo}/git/refs")),
+                    sh_quote(&format!("refs/heads/{branch}")),
+                    sh_quote(&sha)
+                )
+            } else if let Some(base) = optional_string(arguments, "base") {
+                format!(
+                    "sha=$(gh api {} --jq .object.sha) && gh api --method POST {} -f ref={} -f sha=\"$sha\"",
+                    sh_quote(&format!("repos/{repo}/git/ref/heads/{base}")),
+                    sh_quote(&format!("repos/{repo}/git/refs")),
+                    sh_quote(&format!("refs/heads/{branch}"))
+                )
+            } else {
+                return Err(ToolError::InvalidArgument(
+                    "branch create requires sha or base".to_owned(),
+                ));
+            }
+        }
+        "delete" => {
+            github_require_confirm(arguments, "github branch delete")?;
+            let branch = branch
+                .ok_or_else(|| ToolError::InvalidArgument("branch is required".to_owned()))?;
+            format!(
+                "gh api --method DELETE {}",
+                sh_quote(&format!("repos/{repo}/git/refs/heads/{branch}"))
+            )
+        }
+        "protection" => {
+            let branch = branch
+                .ok_or_else(|| ToolError::InvalidArgument("branch is required".to_owned()))?;
+            format!(
+                "gh api {}",
+                sh_quote(&format!(
+                    "repos/{repo}/branches/{}/protection",
+                    github_branch_encoded(&branch)
+                ))
+            )
+        }
+        "protect" => {
+            let branch = branch
+                .ok_or_else(|| ToolError::InvalidArgument("branch is required".to_owned()))?;
+            let body = arguments
+                .get("body")
+                .filter(|body| body.is_object())
+                .ok_or_else(|| {
+                    ToolError::InvalidArgument(
+                        "branch protect requires a body object with the protection settings"
+                            .to_owned(),
+                    )
+                })?;
+            github_api_body_command(
+                "PUT",
+                &format!(
+                    "repos/{repo}/branches/{}/protection",
+                    github_branch_encoded(&branch)
+                ),
+                body,
+            )
+        }
+        "rename" => {
+            let branch = branch
+                .ok_or_else(|| ToolError::InvalidArgument("branch is required".to_owned()))?;
+            let new_name = string_arg(arguments, "new_name")?;
+            format!(
+                "gh api --method POST {} -f new_name={}",
+                sh_quote(&format!(
+                    "repos/{repo}/branches/{}/rename",
+                    github_branch_encoded(&branch)
+                )),
+                sh_quote(&new_name)
+            )
+        }
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown branch action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_issue_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let command = match action {
+        "list" => {
+            let mut command = format!(
+                "gh issue list{flag} --limit {} --state {} --json {}",
+                optional_usize(arguments, "limit")
+                    .unwrap_or(20)
+                    .clamp(1, 100),
+                optional_string(arguments, "state").unwrap_or_else(|| "open".to_owned()),
+                github_json_flag(
+                    arguments,
+                    "number,title,state,labels,assignees,author,updatedAt,url"
+                )
+            );
+            push_flag(
+                &mut command,
+                "--search",
+                optional_string(arguments, "query"),
+            );
+            push_values(
+                &mut command,
+                "--label",
+                &string_array_arg_or_empty(arguments, "labels")?,
+            );
+            push_flag(
+                &mut command,
+                "--assignee",
+                optional_string(arguments, "assignee"),
+            );
+            command
+        }
+        "get" => format!(
+            "gh issue view {}{flag} --json {}",
+            github_number(arguments)?,
+            github_json_flag(
+                arguments,
+                "number,title,body,state,labels,assignees,milestone,comments,author,createdAt,updatedAt,url"
+            )
+        ),
+        "create" => {
+            let mut command = format!(
+                "gh issue create{flag} --title {} --body {}",
+                sh_quote(&string_arg(arguments, "title")?),
+                sh_quote(&optional_string(arguments, "body").unwrap_or_default())
+            );
+            push_values(
+                &mut command,
+                "--label",
+                &string_array_arg_or_empty(arguments, "labels")?,
+            );
+            push_values(
+                &mut command,
+                "--assignee",
+                &string_array_arg_or_empty(arguments, "assignees")?,
+            );
+            push_flag(
+                &mut command,
+                "--milestone",
+                optional_string(arguments, "milestone"),
+            );
+            command
+        }
+        "update" => {
+            let number = github_number(arguments)?;
+            let state = optional_string(arguments, "state");
+            if state.as_deref() == Some("closed") {
+                github_require_confirm(arguments, "github issue close")?;
+            }
+            if let Some(state) = state.as_deref()
+                && !matches!(state, "open" | "closed")
+            {
+                return Err(ToolError::InvalidArgument(format!(
+                    "state must be open or closed: {state}"
+                )));
+            }
+            let mut edits = String::new();
+            push_flag(&mut edits, "--title", optional_string(arguments, "title"));
+            push_flag(&mut edits, "--body", optional_string(arguments, "body"));
+            push_values(
+                &mut edits,
+                "--add-label",
+                &string_array_arg_or_empty(arguments, "add_labels")?,
+            );
+            push_values(
+                &mut edits,
+                "--remove-label",
+                &string_array_arg_or_empty(arguments, "remove_labels")?,
+            );
+            push_values(
+                &mut edits,
+                "--add-assignee",
+                &string_array_arg_or_empty(arguments, "add_assignees")?,
+            );
+            push_values(
+                &mut edits,
+                "--remove-assignee",
+                &string_array_arg_or_empty(arguments, "remove_assignees")?,
+            );
+            push_flag(
+                &mut edits,
+                "--milestone",
+                optional_string(arguments, "milestone"),
+            );
+            let state_command = match state.as_deref() {
+                Some("closed") => Some(format!("gh issue close {number}{flag}")),
+                Some("open") => Some(format!("gh issue reopen {number}{flag}")),
+                _ => None,
+            };
+            match (edits.trim().is_empty(), state_command) {
+                (true, Some(command)) => command,
+                (true, None) => {
+                    return Err(ToolError::InvalidArgument(
+                        "issue update requires a title, body, labels, assignees, milestone, or state"
+                            .to_owned(),
+                    ));
+                }
+                (false, Some(state_command)) => {
+                    format!("gh issue edit {number}{flag}{edits} && {state_command}")
+                }
+                (false, None) => format!("gh issue edit {number}{flag}{edits}"),
+            }
+        }
+        "comment" => format!(
+            "gh issue comment {}{flag} --body {}",
+            github_number(arguments)?,
+            sh_quote(&string_arg(arguments, "body")?)
+        ),
+        "close" => {
+            github_require_confirm(arguments, "github issue close")?;
+            let mut command = format!("gh issue close {}{flag}", github_number(arguments)?);
+            push_flag(
+                &mut command,
+                "--reason",
+                optional_string(arguments, "reason"),
+            );
+            command
+        }
+        "reopen" => format!("gh issue reopen {}{flag}", github_number(arguments)?),
+        "delete" => {
+            github_require_confirm(arguments, "github issue delete")?;
+            format!("gh issue delete {}{flag} --yes", github_number(arguments)?)
+        }
+        "lock" => {
+            let mut command = format!("gh issue lock {}{flag}", github_number(arguments)?);
+            push_flag(
+                &mut command,
+                "--reason",
+                optional_string(arguments, "reason"),
+            );
+            command
+        }
+        "unlock" => format!("gh issue unlock {}{flag}", github_number(arguments)?),
+        "pin" => format!("gh issue pin {}{flag}", github_number(arguments)?),
+        "unpin" => format!("gh issue unpin {}{flag}", github_number(arguments)?),
+        "comments" => format!(
+            "gh issue view {}{flag} --comments",
+            github_number(arguments)?
+        ),
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown issue action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_label_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let command = match action {
+        "list" => format!(
+            "gh label list{flag} --limit {} --json name,color,description",
+            optional_usize(arguments, "limit")
+                .unwrap_or(100)
+                .clamp(1, 100)
+        ),
+        "create" => {
+            let mut command = format!(
+                "gh label create {}{flag} --color {}",
+                sh_quote(&string_arg(arguments, "name")?),
+                sh_quote(
+                    &optional_string(arguments, "color").unwrap_or_else(|| "ededed".to_owned())
+                )
+            );
+            push_flag(
+                &mut command,
+                "--description",
+                optional_string(arguments, "description"),
+            );
+            push_bool(
+                &mut command,
+                "--force",
+                optional_bool(arguments, "force").unwrap_or(false),
+            );
+            command
+        }
+        "edit" => {
+            let mut command = format!(
+                "gh label edit {}{flag}",
+                sh_quote(&string_arg(arguments, "name")?)
+            );
+            push_flag(
+                &mut command,
+                "--new-name",
+                optional_string(arguments, "new_name"),
+            );
+            push_flag(&mut command, "--color", optional_string(arguments, "color"));
+            push_flag(
+                &mut command,
+                "--description",
+                optional_string(arguments, "description"),
+            );
+            command
+        }
+        "delete" => {
+            github_require_confirm(arguments, "github label delete")?;
+            format!(
+                "gh label delete {}{flag} --yes",
+                sh_quote(&string_arg(arguments, "name")?)
+            )
+        }
+        "clone" => {
+            let mut command = format!(
+                "gh label clone {}{flag}",
+                sh_quote(&string_arg(arguments, "source")?)
+            );
+            push_bool(
+                &mut command,
+                "--force",
+                optional_bool(arguments, "force").unwrap_or(false),
+            );
+            command
+        }
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown label action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_milestone_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let repo = github_api_repo(arguments)?;
+    let command = match action {
+        "list" => format!(
+            "gh api {} --jq {}",
+            sh_quote(&format!(
+                "repos/{repo}/milestones?state={}&per_page={}",
+                optional_string(arguments, "state").unwrap_or_else(|| "open".to_owned()),
+                optional_usize(arguments, "limit")
+                    .unwrap_or(30)
+                    .clamp(1, 100)
+            )),
+            sh_quote(
+                ".[] | {number: .number, title: .title, state: .state, due_on: .due_on, open_issues: .open_issues, closed_issues: .closed_issues}"
+            )
+        ),
+        "create" => {
+            let mut command = format!(
+                "gh api --method POST {} -f title={}",
+                sh_quote(&format!("repos/{repo}/milestones")),
+                sh_quote(&string_arg(arguments, "title")?)
+            );
+            push_flag(
+                &mut command,
+                "-f",
+                optional_string(arguments, "description")
+                    .map(|value| format!("description={value}")),
+            );
+            push_flag(
+                &mut command,
+                "-f",
+                optional_string(arguments, "due_on").map(|value| format!("due_on={value}")),
+            );
+            command
+        }
+        "update" | "close" | "open" => {
+            let number = github_number(arguments)?;
+            let mut command = format!(
+                "gh api --method PATCH {}",
+                sh_quote(&format!("repos/{repo}/milestones/{number}"))
+            );
+            let state = match action {
+                "close" => Some("closed".to_owned()),
+                "open" => Some("open".to_owned()),
+                _ => optional_string(arguments, "state"),
+            };
+            push_flag(
+                &mut command,
+                "-f",
+                state.map(|value| format!("state={value}")),
+            );
+            push_flag(
+                &mut command,
+                "-f",
+                optional_string(arguments, "title").map(|value| format!("title={value}")),
+            );
+            push_flag(
+                &mut command,
+                "-f",
+                optional_string(arguments, "description")
+                    .map(|value| format!("description={value}")),
+            );
+            push_flag(
+                &mut command,
+                "-f",
+                optional_string(arguments, "due_on").map(|value| format!("due_on={value}")),
+            );
+            command
+        }
+        "delete" => {
+            github_require_confirm(arguments, "github milestone delete")?;
+            format!(
+                "gh api --method DELETE {}",
+                sh_quote(&format!(
+                    "repos/{repo}/milestones/{}",
+                    github_number(arguments)?
+                ))
+            )
+        }
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown milestone action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_pr_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let command = match action {
+        "list" => {
+            let mut command = format!(
+                "gh pr list{flag} --limit {} --state {} --json {}",
+                optional_usize(arguments, "limit")
+                    .unwrap_or(20)
+                    .clamp(1, 100),
+                optional_string(arguments, "state").unwrap_or_else(|| "open".to_owned()),
+                github_json_flag(
+                    arguments,
+                    "number,title,state,isDraft,headRefName,baseRefName,author,updatedAt,url"
+                )
+            );
+            push_flag(
+                &mut command,
+                "--search",
+                optional_string(arguments, "query"),
+            );
+            push_flag(&mut command, "--base", optional_string(arguments, "base"));
+            push_flag(&mut command, "--head", optional_string(arguments, "head"));
+            command
+        }
+        "view" => format!(
+            "gh pr view {}{flag} --json {}",
+            github_number(arguments)?,
+            github_json_flag(
+                arguments,
+                "number,title,body,state,isDraft,mergeable,mergeStateStatus,headRefName,baseRefName,author,labels,assignees,reviewRequests,reviews,files,commits,statusCheckRollup,url,createdAt,updatedAt"
+            )
+        ),
+        "diff" => {
+            let mut command = format!("gh pr diff {}{flag}", github_number(arguments)?);
+            push_bool(
+                &mut command,
+                "--name-only",
+                optional_bool(arguments, "name_only").unwrap_or(false),
+            );
+            command
+        }
+        "files" => format!(
+            "gh pr view {}{flag} --json files",
+            github_number(arguments)?
+        ),
+        "commits" => format!(
+            "gh pr view {}{flag} --json commits",
+            github_number(arguments)?
+        ),
+        "comments" => format!("gh pr view {}{flag} --comments", github_number(arguments)?),
+        "create" => {
+            let mut command = format!(
+                "gh pr create{flag} --title {} --body {}",
+                sh_quote(&string_arg(arguments, "title")?),
+                sh_quote(&optional_string(arguments, "body").unwrap_or_default())
+            );
+            push_flag(&mut command, "--base", optional_string(arguments, "base"));
+            push_flag(&mut command, "--head", optional_string(arguments, "head"));
+            push_bool(
+                &mut command,
+                "--draft",
+                optional_bool(arguments, "draft").unwrap_or(false),
+            );
+            push_values(
+                &mut command,
+                "--label",
+                &string_array_arg_or_empty(arguments, "labels")?,
+            );
+            push_values(
+                &mut command,
+                "--assignee",
+                &string_array_arg_or_empty(arguments, "assignees")?,
+            );
+            push_values(
+                &mut command,
+                "--reviewer",
+                &string_array_arg_or_empty(arguments, "reviewers")?,
+            );
+            push_flag(
+                &mut command,
+                "--milestone",
+                optional_string(arguments, "milestone"),
+            );
+            command
+        }
+        "update" => {
+            let mut command = format!("gh pr edit {}{flag}", github_number(arguments)?);
+            push_flag(&mut command, "--title", optional_string(arguments, "title"));
+            push_flag(&mut command, "--body", optional_string(arguments, "body"));
+            push_flag(&mut command, "--base", optional_string(arguments, "base"));
+            push_values(
+                &mut command,
+                "--add-label",
+                &string_array_arg_or_empty(arguments, "add_labels")?,
+            );
+            push_values(
+                &mut command,
+                "--remove-label",
+                &string_array_arg_or_empty(arguments, "remove_labels")?,
+            );
+            push_values(
+                &mut command,
+                "--add-assignee",
+                &string_array_arg_or_empty(arguments, "add_assignees")?,
+            );
+            push_values(
+                &mut command,
+                "--remove-assignee",
+                &string_array_arg_or_empty(arguments, "remove_assignees")?,
+            );
+            push_values(
+                &mut command,
+                "--add-reviewer",
+                &string_array_arg_or_empty(arguments, "add_reviewers")?,
+            );
+            push_values(
+                &mut command,
+                "--remove-reviewer",
+                &string_array_arg_or_empty(arguments, "remove_reviewers")?,
+            );
+            command
+        }
+        "comment" => format!(
+            "gh pr comment {}{flag} --body {}",
+            github_number(arguments)?,
+            sh_quote(&string_arg(arguments, "body")?)
+        ),
+        "review" => {
+            let event = optional_string(arguments, "event").unwrap_or_else(|| "comment".to_owned());
+            if matches!(event.as_str(), "approve" | "request-changes") {
+                github_require_confirm(arguments, &format!("github pr review {event}"))?;
+            }
+            let mut command = format!("gh pr review {}{flag}", github_number(arguments)?);
+            command.push_str(match event.as_str() {
+                "approve" => " --approve",
+                "request-changes" => " --request-changes",
+                "comment" => " --comment",
+                other => {
+                    return Err(ToolError::InvalidArgument(format!(
+                        "unknown review event: {other}"
+                    )));
+                }
+            });
+            push_flag(&mut command, "--body", optional_string(arguments, "body"));
+            command
+        }
+        "merge" => {
+            github_require_confirm(arguments, "github pr merge")?;
+            let mut command = format!("gh pr merge {}{flag}", github_number(arguments)?);
+            let method =
+                optional_string(arguments, "merge_method").unwrap_or_else(|| "squash".to_owned());
+            command.push_str(match method.as_str() {
+                "squash" => " --squash",
+                "merge" => " --merge",
+                "rebase" => " --rebase",
+                other => {
+                    return Err(ToolError::InvalidArgument(format!(
+                        "unknown merge method: {other}"
+                    )));
+                }
+            });
+            push_bool(
+                &mut command,
+                "--delete-branch",
+                optional_bool(arguments, "delete_branch").unwrap_or(false),
+            );
+            push_bool(
+                &mut command,
+                "--auto",
+                optional_bool(arguments, "auto").unwrap_or(false),
+            );
+            push_flag(
+                &mut command,
+                "--subject",
+                optional_string(arguments, "title"),
+            );
+            push_flag(&mut command, "--body", optional_string(arguments, "body"));
+            command
+        }
+        "close" => {
+            github_require_confirm(arguments, "github pr close")?;
+            format!("gh pr close {}{flag}", github_number(arguments)?)
+        }
+        "reopen" => format!("gh pr reopen {}{flag}", github_number(arguments)?),
+        "ready" => format!("gh pr ready {}{flag}", github_number(arguments)?),
+        "checks" => {
+            let mut command = format!("gh pr checks {}{flag}", github_number(arguments)?);
+            push_bool(
+                &mut command,
+                "--watch",
+                optional_bool(arguments, "watch").unwrap_or(false),
+            );
+            command
+        }
+        "checkout" => format!("gh pr checkout {}{flag}", github_number(arguments)?),
+        "update-branch" => format!("gh pr update-branch {}{flag}", github_number(arguments)?),
+        "lock" => format!("gh pr lock {}{flag}", github_number(arguments)?),
+        "unlock" => format!("gh pr unlock {}{flag}", github_number(arguments)?),
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown pr action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_workflow_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let command = match action {
+        "list" => format!(
+            "gh workflow list{flag} --all --limit {} --json id,name,path,state",
+            optional_usize(arguments, "limit")
+                .unwrap_or(50)
+                .clamp(1, 100)
+        ),
+        "view" => {
+            let workflow = string_arg(arguments, "workflow")?;
+            let mut command = format!("gh workflow view {}{flag}", sh_quote(&workflow));
+            push_bool(
+                &mut command,
+                "--yaml",
+                optional_bool(arguments, "yaml").unwrap_or(false),
+            );
+            command
+        }
+        "dispatch" => {
+            let workflow = string_arg(arguments, "workflow")?;
+            let mut command = format!("gh workflow run {}{flag}", sh_quote(&workflow));
+            push_flag(&mut command, "--ref", optional_string(arguments, "ref"));
+            if let Some(inputs) = arguments.get("inputs").and_then(Value::as_object) {
+                for (key, value) in inputs {
+                    let text = value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned);
+                    command.push_str(&format!(" -f {}={}", sh_quote(key), sh_quote(&text)));
+                }
+            }
+            command
+        }
+        "enable" => format!(
+            "gh workflow enable {}{flag}",
+            sh_quote(&string_arg(arguments, "workflow")?)
+        ),
+        "disable" => format!(
+            "gh workflow disable {}{flag}",
+            sh_quote(&string_arg(arguments, "workflow")?)
+        ),
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown workflow action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_run_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let run_id = || string_arg(arguments, "run_id");
+    let command = match action {
+        "list" => {
+            let mut command = format!(
+                "gh run list{flag} --limit {} --json {}",
+                optional_usize(arguments, "limit")
+                    .unwrap_or(20)
+                    .clamp(1, 100),
+                github_json_flag(
+                    arguments,
+                    "databaseId,name,workflowName,status,conclusion,headBranch,event,createdAt,url"
+                )
+            );
+            push_flag(
+                &mut command,
+                "--workflow",
+                optional_string(arguments, "workflow"),
+            );
+            push_flag(
+                &mut command,
+                "--branch",
+                optional_string(arguments, "branch"),
+            );
+            push_flag(
+                &mut command,
+                "--status",
+                optional_string(arguments, "status"),
+            );
+            command
+        }
+        "view" => format!(
+            "gh run view {}{flag} --json {}",
+            run_id()?,
+            github_json_flag(
+                arguments,
+                "databaseId,name,workflowName,status,conclusion,headBranch,headSha,event,createdAt,updatedAt,jobs,url"
+            )
+        ),
+        "logs" => {
+            let mut command = format!("gh run view {}{flag}", run_id()?);
+            push_bool(
+                &mut command,
+                "--log-failed",
+                optional_bool(arguments, "failed_only").unwrap_or(false),
+            );
+            if !optional_bool(arguments, "failed_only").unwrap_or(false) {
+                command.push_str(" --log");
+            }
+            command
+        }
+        "artifacts" => format!(
+            "gh api {} --jq {}",
+            sh_quote(&format!(
+                "repos/{}/actions/runs/{}/artifacts",
+                github_api_repo(arguments)?,
+                run_id()?
+            )),
+            sh_quote(
+                ".artifacts[] | {id: .id, name: .name, size_in_bytes: .size_in_bytes, expired: .expired}"
+            )
+        ),
+        "download" => {
+            let mut command = format!("gh run download {}{flag}", run_id()?);
+            push_flag(
+                &mut command,
+                "--name",
+                optional_string(arguments, "artifact"),
+            );
+            if let Some(directory) = optional_string(arguments, "directory") {
+                command.push_str(&format!(
+                    " --dir {}",
+                    sh_quote(&github_relative_path(&directory)?)
+                ));
+            }
+            command
+        }
+        "cancel" => {
+            github_require_confirm(arguments, "github run cancel")?;
+            format!("gh run cancel {}{flag}", run_id()?)
+        }
+        "rerun" => {
+            let mut command = format!("gh run rerun {}{flag}", run_id()?);
+            push_bool(
+                &mut command,
+                "--failed",
+                optional_bool(arguments, "failed_only").unwrap_or(false),
+            );
+            command
+        }
+        "delete" => {
+            github_require_confirm(arguments, "github run delete")?;
+            format!("gh run delete {}{flag}", run_id()?)
+        }
+        "watch" => format!(
+            "gh run watch {}{flag} --exit-status --interval 10",
+            run_id()?
+        ),
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown run action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_release_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let flag = github_repo_flag(arguments)?;
+    let tag = || string_arg(arguments, "tag");
+    let command = match action {
+        "list" => format!(
+            "gh release list{flag} --limit {} --json tagName,name,isDraft,isPrerelease,publishedAt",
+            optional_usize(arguments, "limit")
+                .unwrap_or(30)
+                .clamp(1, 100)
+        ),
+        "view" => format!(
+            "gh release view {}{flag} --json {}",
+            sh_quote(&tag()?),
+            github_json_flag(
+                arguments,
+                "tagName,name,body,isDraft,isPrerelease,publishedAt,url,author,assets"
+            )
+        ),
+        "create" => {
+            let mut command = format!("gh release create {}{flag}", sh_quote(&tag()?));
+            push_flag(&mut command, "--title", optional_string(arguments, "title"));
+            push_flag(&mut command, "--notes", optional_string(arguments, "notes"));
+            push_bool(
+                &mut command,
+                "--generate-notes",
+                optional_bool(arguments, "generate_notes").unwrap_or(false),
+            );
+            push_bool(
+                &mut command,
+                "--draft",
+                optional_bool(arguments, "draft").unwrap_or(false),
+            );
+            push_bool(
+                &mut command,
+                "--prerelease",
+                optional_bool(arguments, "prerelease").unwrap_or(false),
+            );
+            push_bool(
+                &mut command,
+                "--latest",
+                optional_bool(arguments, "latest").unwrap_or(false),
+            );
+            push_flag(
+                &mut command,
+                "--target",
+                optional_string(arguments, "target"),
+            );
+            for file in github_file_paths(arguments)? {
+                command.push(' ');
+                command.push_str(&sh_quote(&file));
+            }
+            command
+        }
+        "edit" => {
+            let mut command = format!("gh release edit {}{flag}", sh_quote(&tag()?));
+            push_flag(&mut command, "--title", optional_string(arguments, "title"));
+            push_flag(&mut command, "--notes", optional_string(arguments, "notes"));
+            if let Some(draft) = optional_bool(arguments, "draft") {
+                command.push_str(if draft { " --draft" } else { " --draft=false" });
+            }
+            if let Some(prerelease) = optional_bool(arguments, "prerelease") {
+                command.push_str(if prerelease {
+                    " --prerelease"
+                } else {
+                    " --prerelease=false"
+                });
+            }
+            push_flag(
+                &mut command,
+                "--target",
+                optional_string(arguments, "target"),
+            );
+            command
+        }
+        "upload" => {
+            let mut command = format!("gh release upload {}{flag}", sh_quote(&tag()?));
+            let files = github_file_paths(arguments)?;
+            if files.is_empty() {
+                return Err(ToolError::InvalidArgument(
+                    "release upload requires files".to_owned(),
+                ));
+            }
+            for file in files {
+                command.push(' ');
+                command.push_str(&sh_quote(&file));
+            }
+            push_bool(
+                &mut command,
+                "--clobber",
+                optional_bool(arguments, "clobber").unwrap_or(false),
+            );
+            command
+        }
+        "delete" => {
+            github_require_confirm(arguments, "github release delete")?;
+            let mut command = format!("gh release delete {}{flag} --yes", sh_quote(&tag()?));
+            push_bool(
+                &mut command,
+                "--cleanup-tag",
+                optional_bool(arguments, "cleanup_tag").unwrap_or(false),
+            );
+            command
+        }
+        "download" => {
+            let mut command = format!("gh release download {}{flag}", sh_quote(&tag()?));
+            push_flag(
+                &mut command,
+                "--pattern",
+                optional_string(arguments, "pattern"),
+            );
+            if let Some(directory) = optional_string(arguments, "directory") {
+                command.push_str(&format!(
+                    " --dir {}",
+                    sh_quote(&github_relative_path(&directory)?)
+                ));
+            }
+            command
+        }
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown release action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_pages_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let repo = github_api_repo(arguments)?;
+    let command = match action {
+        "status" | "site" => format!(
+            "gh api {} --jq {}",
+            sh_quote(&format!("repos/{repo}/pages")),
+            sh_quote(
+                "{html_url: .html_url, status: .status, cname: .cname, branch: .source.branch, path: .source.path, build_type: .build_type}"
+            )
+        ),
+        "builds" => format!(
+            "gh api {} --jq {}",
+            sh_quote(&format!("repos/{repo}/pages/builds?per_page=20")),
+            sh_quote(
+                ".[] | {status: .status, url: .url, created_at: .created_at, updated_at: .updated_at, error: .error.message}"
+            )
+        ),
+        "build" | "request-build" => {
+            github_api_body_command("POST", &format!("repos/{repo}/pages/builds"), &json!({}))
+        }
+        "unpublish" => {
+            github_require_confirm(arguments, "github pages unpublish")?;
+            format!(
+                "gh api --method DELETE {}",
+                sh_quote(&format!("repos/{repo}/pages"))
+            )
+        }
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown pages action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_search_command(arguments: &Value, action: &str) -> Result<String, ToolError> {
+    let query = string_arg(arguments, "query")?;
+    let flag = github_repo_flag(arguments)?;
+    let limit = optional_usize(arguments, "limit")
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let command = match action {
+        "repos" => format!(
+            "gh search repos {} --limit {limit} --json nameWithOwner,description,isPrivate,stargazerCount,url",
+            sh_quote(&query)
+        ),
+        "issues" => format!(
+            "gh search issues {}{flag} --limit {limit} --json number,title,state,repository,url,updatedAt",
+            sh_quote(&query)
+        ),
+        "prs" => format!(
+            "gh search prs {}{flag} --limit {limit} --json number,title,state,repository,url,updatedAt",
+            sh_quote(&query)
+        ),
+        "code" => format!(
+            "gh search code {}{flag} --limit {limit} --json path,repository,url",
+            sh_quote(&query)
+        ),
+        "commits" => format!(
+            "gh search commits {}{flag} --limit {limit} --json sha,commit,repository,url",
+            sh_quote(&query)
+        ),
+        other => {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown search action: {other}"
+            )));
+        }
+    };
+    Ok(command)
+}
+
+fn github_command(arguments: &Value) -> Result<String, ToolError> {
+    let area = optional_string(arguments, "area").unwrap_or_else(|| "status".to_owned());
+    let action = optional_string(arguments, "action").unwrap_or_else(|| match area.as_str() {
+        "status" => "status".to_owned(),
+        "repo" => "view".to_owned(),
+        "branch" | "issue" | "label" | "milestone" | "pr" | "workflow" | "run" | "release" => {
+            "list".to_owned()
+        }
+        "pages" => "status".to_owned(),
+        "search" => "issues".to_owned(),
+        "api" => "get".to_owned(),
+        _ => "view".to_owned(),
+    });
+    match area.as_str() {
+        "status" => {
+            let flag = github_repo_flag(arguments)?;
+            Ok(format!(
+                "gh auth status && {{ printf '\\n---\\n'; gh repo view{flag} --json nameWithOwner,defaultBranchRef,url,visibility,isPrivate 2>/dev/null || echo 'no GitHub repository in the current workspace'; }}"
+            ))
+        }
+        "repo" => github_repo_command(arguments, &action),
+        "branch" => github_branch_command(arguments, &action),
+        "issue" => github_issue_command(arguments, &action),
+        "label" => github_label_command(arguments, &action),
+        "milestone" => github_milestone_command(arguments, &action),
+        "pr" => github_pr_command(arguments, &action),
+        "workflow" => github_workflow_command(arguments, &action),
+        "run" => github_run_command(arguments, &action),
+        "release" => github_release_command(arguments, &action),
+        "pages" => github_pages_command(arguments, &action),
+        "search" => github_search_command(arguments, &action),
+        "api" => github_api_command(arguments),
+        other => Err(ToolError::InvalidArgument(format!(
+            "unknown GitHub area: {other}"
+        ))),
+    }
+}
+
+struct GithubTool;
+
+#[async_trait]
+impl Tool for GithubTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "github",
+            "Full GitHub surface through gh: status, repo, branch, issue, label, milestone, pr (review/merge), workflow, run, release, pages, search, and generic api. Destructive actions require confirm=true. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(300)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "area": {
+                    "type": "string",
+                    "enum": ["status", "repo", "branch", "issue", "label", "milestone", "pr", "workflow", "run", "release", "pages", "search", "api"],
+                    "description": "GitHub resource family."
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Action within the area. repo: view/list/create/fork/edit/delete/archive/unarchive/rename/clone/sync. branch: list/get/create/delete/protection/protect/rename. issue: list/get/create/update/comment/close/reopen/delete/lock/unlock/pin/unpin/comments. label: list/create/edit/delete/clone. milestone: list/create/update/close/open/delete. pr: list/view/diff/files/commits/comments/create/update/comment/review/merge/close/reopen/ready/checks/checkout/update-branch/lock/unlock. workflow: list/view/dispatch/enable/disable. run: list/view/logs/artifacts/download/cancel/rerun/delete/watch. release: list/view/create/edit/upload/delete/download. pages: status/site/builds/build/request-build/unpublish. search: repos/issues/prs/code/commits. api: get/post/patch/put/delete."
+                },
+                "repository": {"type": "string", "description": "owner/name; defaults to the workspace repository."},
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "number": {"type": "integer", "minimum": 1},
+                "run_id": {"type": "string"},
+                "workflow": {"type": "string"},
+                "branch": {"type": "string"},
+                "base": {"type": "string"},
+                "head": {"type": "string"},
+                "sha": {"type": "string"},
+                "title": {"type": "string"},
+                "body": {"type": ["string", "object"], "description": "Text body, or a JSON object for branch protection/api requests."},
+                "notes": {"type": "string"},
+                "description": {"type": "string"},
+                "query": {"type": "string"},
+                "endpoint": {"type": "string"},
+                "method": {"type": "string"},
+                "jq": {"type": "string"},
+                "fields": {"type": "object"},
+                "inputs": {"type": "object"},
+                "tag": {"type": "string"},
+                "name": {"type": "string"},
+                "new_name": {"type": "string"},
+                "source": {"type": "string"},
+                "target": {"type": "string"},
+                "ref": {"type": "string"},
+                "state": {"type": "string"},
+                "status": {"type": "string"},
+                "visibility": {"type": "string"},
+                "color": {"type": "string"},
+                "milestone": {"type": "string"},
+                "assignee": {"type": "string"},
+                "pattern": {"type": "string"},
+                "artifact": {"type": "string"},
+                "directory": {"type": "string"},
+                "merge_method": {"type": "string", "enum": ["squash", "merge", "rebase"]},
+                "event": {"type": "string", "enum": ["comment", "approve", "request-changes"]},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "assignees": {"type": "array", "items": {"type": "string"}},
+                "reviewers": {"type": "array", "items": {"type": "string"}},
+                "add_labels": {"type": "array", "items": {"type": "string"}},
+                "remove_labels": {"type": "array", "items": {"type": "string"}},
+                "add_assignees": {"type": "array", "items": {"type": "string"}},
+                "remove_assignees": {"type": "array", "items": {"type": "string"}},
+                "add_reviewers": {"type": "array", "items": {"type": "string"}},
+                "remove_reviewers": {"type": "array", "items": {"type": "string"}},
+                "add_topics": {"type": "array", "items": {"type": "string"}},
+                "remove_topics": {"type": "array", "items": {"type": "string"}},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "json": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "private": {"type": "boolean"},
+                "draft": {"type": "boolean"},
+                "prerelease": {"type": "boolean"},
+                "latest": {"type": "boolean"},
+                "generate_notes": {"type": "boolean"},
+                "cleanup_tag": {"type": "boolean"},
+                "clobber": {"type": "boolean"},
+                "delete_branch": {"type": "boolean"},
+                "auto": {"type": "boolean"},
+                "watch": {"type": "boolean"},
+                "failed_only": {"type": "boolean"},
+                "yaml": {"type": "boolean"},
+                "name_only": {"type": "boolean"},
+                "forks": {"type": "boolean"},
+                "force": {"type": "boolean"},
+                "paginate": {"type": "boolean"},
+                "slurp": {"type": "boolean"},
+                "confirm": {"type": "boolean"},
+                "dry_run": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        mut arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "github (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
+        }
+        if let Some(body) = arguments.get("body").and_then(Value::as_object) {
+            let area = optional_string(&arguments, "area").unwrap_or_default();
+            if area != "branch" && area != "api" {
+                return Err(ToolError::InvalidArgument(
+                    "body objects are only supported for branch protection and api".to_owned(),
+                ));
+            }
+            if area == "api" {
+                let mut object = serde_json::Map::new();
+                for (key, value) in body {
+                    object.insert(key.clone(), value.clone());
+                }
+                arguments["body"] = Value::Object(object);
+            }
+        }
+        let command = github_command(&arguments)?;
+        if optional_bool(&arguments, "dry_run").unwrap_or(false) {
+            return Ok(
+                ToolResult::ok(format!("dry run: {command}")).with_metadata(json!({
+                    "dry_run": true,
+                    "command": command,
+                })),
+            );
+        }
+        let class = classify_command(&command);
+        check_command_policy(context, class, &command)?;
+        run_tool_shell(context, command).await
+    }
+}
+
 struct GithubIssueTool;
 
 #[async_trait]
@@ -9799,10 +11721,11 @@ impl Tool for ListSkillsTool {
         let content = skills
             .iter()
             .map(|skill| {
+                let suffix = if skill.builtin { " [builtin]" } else { "" };
                 if skill.description.is_empty() {
-                    format!("- {}", skill.name)
+                    format!("- {}{suffix}", skill.name)
                 } else {
-                    format!("- {}: {}", skill.name, skill.description)
+                    format!("- {}{suffix}: {}", skill.name, skill.description)
                 }
             })
             .collect::<Vec<_>>()
@@ -9841,6 +11764,13 @@ impl Tool for ReadSkillTool {
             .into_iter()
             .find(|skill| skill.name == name)
             .ok_or_else(|| ToolError::Failed(format!("skill not found: {name}")))?;
+        if skill.builtin {
+            let content = builtin_skill_content(&name).ok_or_else(|| {
+                ToolError::Failed(format!("built-in skill content is missing: {name}"))
+            })?;
+            return Ok(ToolResult::ok(truncate(content, context.max_output_bytes))
+                .with_metadata(json!({"name": name, "builtin": true})));
+        }
         let canonical = skill.path.canonicalize()?;
         let root = context.workspace.root().canonicalize()?;
         if !canonical.starts_with(&root) {
@@ -9851,6 +11781,576 @@ impl Tool for ReadSkillTool {
         let content = std::fs::read_to_string(&canonical)?;
         Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
             .with_metadata(json!({"name": skill.name, "path": skill.path})))
+    }
+}
+
+const BUILTIN_PLUGINS: &[&str] = &["asciidoc"];
+
+fn builtin_plugin_files(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match name {
+        "asciidoc" => Some(&[
+            (
+                "plugin.yaml",
+                include_str!("../assets/plugins/asciidoc/plugin.yaml"),
+            ),
+            (
+                "main.py",
+                include_str!("../assets/plugins/asciidoc/main.py"),
+            ),
+            (
+                "SKILL.md",
+                include_str!("../assets/plugins/asciidoc/SKILL.md"),
+            ),
+            (
+                "README.md",
+                include_str!("../assets/plugins/asciidoc/README.md"),
+            ),
+        ]),
+        _ => None,
+    }
+}
+
+struct ListPluginsTool;
+
+#[async_trait]
+impl Tool for ListPluginsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plugin_list",
+            "List installed workspace plugins with their actions, plus bundled plugins that can be installed.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let plugins = discover_plugins(context.workspace.root());
+        let installed: Vec<String> = plugins.iter().map(|plugin| plugin.name.clone()).collect();
+        let available: Vec<&str> = BUILTIN_PLUGINS
+            .iter()
+            .copied()
+            .filter(|name| !installed.iter().any(|installed| installed == name))
+            .collect();
+        let mut lines = Vec::new();
+        for plugin in &plugins {
+            let actions = plugin.action_names();
+            let actions = if actions.is_empty() {
+                "any action".to_owned()
+            } else {
+                actions.join(", ")
+            };
+            lines.push(format!(
+                "- {} ({}): {} [actions: {actions}]",
+                plugin.name,
+                if plugin.version.is_empty() {
+                    "unversioned"
+                } else {
+                    &plugin.version
+                },
+                plugin.description
+            ));
+        }
+        if !available.is_empty() {
+            lines.push(format!(
+                "bundled, not installed: {} (use plugin_install_builtin)",
+                available.join(", ")
+            ));
+        }
+        if lines.is_empty() {
+            return Ok(ToolResult::ok("no plugins installed"));
+        }
+        Ok(ToolResult::ok(lines.join("\n")).with_metadata(json!({
+            "plugins": plugins,
+            "bundled": available,
+        })))
+    }
+}
+
+struct DescribePluginTool;
+
+#[async_trait]
+impl Tool for DescribePluginTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plugin_describe",
+            "Show a plugin's manifest, actions, and input schemas.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let name = string_arg(&arguments, "name")?;
+        let (manifest, directory) = load_plugin(context.workspace.root(), &name)?;
+        let content = serde_json::to_string_pretty(&manifest).unwrap_or_default();
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "name": manifest.name,
+            "path": directory,
+            "actions": manifest.action_names(),
+        })))
+    }
+}
+
+struct CallPluginTool;
+
+#[async_trait]
+impl Tool for CallPluginTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plugin_call",
+            "Run one action of a workspace plugin. The plugin receives a JSON request on stdin and must emit JSON with content/metadata. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(120)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string"},
+                "action": {"type": "string", "default": "run"},
+                "arguments": {"type": "object"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                "confirm": {"type": "boolean", "description": "Required for plugins declaring destructive permission."},
+                "dry_run": {"type": "boolean", "description": "Return the command and request without executing."}
+            },
+            "required": ["plugin"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let root = context.workspace.root();
+        let name = string_arg(&arguments, "plugin")?;
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "run".to_owned());
+        let plugin_arguments = arguments
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if !plugin_arguments.is_object() {
+            return Err(ToolError::InvalidArgument(
+                "arguments must be an object".to_owned(),
+            ));
+        }
+        let (manifest, directory) = load_plugin(root, &name)?;
+        if !manifest.actions.is_empty() && !manifest.actions.contains_key(&action) {
+            return Err(ToolError::InvalidArgument(format!(
+                "plugin {name} has no action {action}; available: {}",
+                manifest.action_names().join(", ")
+            )));
+        }
+        let timeout = optional_usize(&arguments, "timeout_seconds")
+            .map_or(manifest.timeout_seconds, |value| value as u64)
+            .clamp(1, 600);
+        if optional_bool(&arguments, "dry_run").unwrap_or(false) {
+            return Ok(ToolResult::ok(format!(
+                "dry run: {} (cwd {}) with stdin request {}",
+                manifest.command,
+                directory.display(),
+                json!({
+                    "plugin": manifest.name,
+                    "action": action,
+                    "arguments": plugin_arguments,
+                    "workspace": root,
+                })
+            ))
+            .with_metadata(json!({
+                "plugin": manifest.name,
+                "action": action,
+                "command": manifest.command,
+                "dry_run": true,
+            })));
+        }
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "plugin_call (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
+        }
+        let class = plugin_command_class(&manifest);
+        if class == CommandClass::Destructive
+            && !optional_bool(&arguments, "confirm").unwrap_or(false)
+        {
+            return Err(ToolError::ApprovalRequired(format!(
+                "plugin_call {name}:{action} (plugin declares destructive permission; set confirm=true)"
+            )));
+        }
+        check_command_policy(context, class, &manifest.command)?;
+        let outcome = run_plugin_process(
+            root,
+            &manifest,
+            &directory,
+            &action,
+            &plugin_arguments,
+            timeout,
+            context.max_output_bytes,
+        )?;
+        let result = ToolResult {
+            content: outcome.content,
+            is_error: outcome.is_error,
+            metadata: outcome.metadata,
+        };
+        Ok(result)
+    }
+}
+
+struct TestPluginTool;
+
+#[async_trait]
+impl Tool for TestPluginTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plugin_test",
+            "Run a plugin's declared test_command and record the result under .openbad/plugin-runs. Requires Full access.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(180)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+            },
+            "required": ["plugin"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "plugin_test (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
+        }
+        let root = context.workspace.root();
+        let name = string_arg(&arguments, "plugin")?;
+        let (manifest, directory) = load_plugin(root, &name)?;
+        let test_command = manifest.test_command.clone().ok_or_else(|| {
+            ToolError::InvalidArgument(format!("plugin {name} has no test_command"))
+        })?;
+        let timeout = optional_usize(&arguments, "timeout_seconds")
+            .map_or_else(|| manifest.timeout_seconds.max(120), |value| value as u64);
+        let test_manifest = PluginManifest {
+            command: test_command.clone(),
+            actions: BTreeMap::new(),
+            ..manifest.clone()
+        };
+        let class = plugin_command_class(&test_manifest);
+        check_command_policy(context, class, &test_command)?;
+        let outcome = run_plugin_process(
+            root,
+            &test_manifest,
+            &directory,
+            "__test__",
+            &json!({}),
+            timeout.clamp(1, 600),
+            context.max_output_bytes,
+        )?;
+        let status = if outcome.is_error { "failed" } else { "passed" };
+        let content = format!("plugin test {status}: {name}\n\n{}", outcome.content);
+        Ok(ToolResult {
+            content,
+            is_error: outcome.is_error,
+            metadata: outcome.metadata,
+        })
+    }
+}
+
+fn plugin_entrypoint(
+    name: &str,
+    runtime: &str,
+    actions: &[String],
+) -> Result<(&'static str, String, String), ToolError> {
+    match runtime {
+        "python" => Ok((
+            "main.py",
+            format!(
+                r#"#!/usr/bin/env python3
+"""OpenBaD plugin: {name}."""
+
+import json
+import sys
+
+ACTIONS = {actions:?}
+
+
+def main() -> None:
+    try:
+        request = json.load(sys.stdin)
+    except json.JSONDecodeError as error:
+        print(json.dumps({{"ok": False, "is_error": True, "content": f"invalid request: {{error}}"}}))
+        sys.exit(1)
+    action = request.get("action", "run")
+    arguments = request.get("arguments") or {{}}
+    if action not in ACTIONS and action != "run":
+        print(json.dumps({{"ok": False, "is_error": True, "content": f"unknown action: {{action}}"}}))
+        sys.exit(1)
+    # Replace this with the real implementation. Keep the JSON contract stable.
+    print(json.dumps({{"ok": True, "content": f"{name}:{{action}} received {{json.dumps(arguments)}}"}}))
+
+
+if __name__ == "__main__":
+    main()
+"#
+            ),
+            "python3 -m py_compile main.py".to_owned(),
+        )),
+        "node" => Ok((
+            "main.js",
+            format!(
+                r#"#!/usr/bin/env node
+// OpenBaD plugin: {name}.
+const actions = {actions_json};
+
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {{ input += chunk; }});
+process.stdin.on("end", () => {{
+  let request;
+  try {{
+    request = JSON.parse(input || "{{}}");
+  }} catch (error) {{
+    console.log(JSON.stringify({{ ok: false, is_error: true, content: `invalid request: ${{error}}` }}));
+    process.exitCode = 1;
+    return;
+  }}
+  const action = request.action || "run";
+  const args = request.arguments || {{}};
+  if (!actions.includes(action) && action !== "run") {{
+    console.log(JSON.stringify({{ ok: false, is_error: true, content: `unknown action: ${{action}}` }}));
+    process.exitCode = 1;
+    return;
+  }}
+  console.log(JSON.stringify({{ ok: true, content: `{name}:${{action}} received ${{JSON.stringify(args)}}` }}));
+}});
+"#,
+                actions_json = serde_json::to_string(actions).unwrap_or_else(|_| "[]".to_owned())
+            ),
+            "node --check main.js".to_owned(),
+        )),
+        "shell" => Ok((
+            "main.sh",
+            format!(
+                r#"#!/bin/sh
+# OpenBaD plugin: {name}.
+# Reads one JSON request on stdin and must print one JSON object on stdout.
+request=$(cat)
+printf '%s\n' '{{"ok":true,"content":"{name} ran"}}'
+"#
+            ),
+            "sh -n main.sh".to_owned(),
+        )),
+        other => Err(ToolError::InvalidArgument(format!(
+            "unsupported runtime {other}; use python, node, or shell"
+        ))),
+    }
+}
+
+struct WritePluginTool;
+
+#[async_trait]
+impl Tool for WritePluginTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "write_plugin",
+            "Scaffold a workspace plugin under .openbad/plugins/<name> with plugin.yaml, an entrypoint, a SKILL.md, and a test command. Edit the files afterwards; use plugin_test and plugin_call to verify.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "runtime": {"type": "string", "enum": ["python", "node", "shell"]},
+                "actions": {"type": "array", "items": {"type": "string"}},
+                "test_command": {"type": "string"},
+                "permissions": {"type": "array", "items": {"type": "string", "enum": ["write", "network", "destructive"]}},
+                "overwrite": {"type": "boolean"}
+            },
+            "required": ["name", "description"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired("write_plugin".to_owned()));
+        }
+        let root = context.workspace.root();
+        let name = string_arg(&arguments, "name")?;
+        if !valid_plugin_name(&name) {
+            return Err(ToolError::InvalidArgument(format!(
+                "invalid plugin name: {name}"
+            )));
+        }
+        let mut actions = string_array_arg_or_empty(&arguments, "actions")?;
+        if actions.is_empty() {
+            actions.push("run".to_owned());
+        }
+        for action in &actions {
+            if !valid_plugin_name(action) {
+                return Err(ToolError::InvalidArgument(format!(
+                    "invalid action name: {action}"
+                )));
+            }
+        }
+        let runtime = optional_string(&arguments, "runtime").unwrap_or_else(|| "python".to_owned());
+        let description = string_arg(&arguments, "description")?;
+        let directory = plugin_root(root).join(&name);
+        if directory.exists() && !optional_bool(&arguments, "overwrite").unwrap_or(false) {
+            return Err(ToolError::Failed(format!(
+                "plugin already exists: {} (set overwrite=true to replace the manifest and entrypoint)",
+                directory.display()
+            )));
+        }
+        if directory.exists() {
+            plugin_directory(root, &name)?;
+        }
+        std::fs::create_dir_all(&directory)?;
+        let (entrypoint, body, default_test) = plugin_entrypoint(&name, &runtime, &actions)?;
+        let test_command = optional_string(&arguments, "test_command").unwrap_or(default_test);
+        let permissions = string_array_arg_or_empty(&arguments, "permissions")?;
+        let manifest = PluginManifest {
+            name: name.clone(),
+            description: description.clone(),
+            version: "0.1.0".to_owned(),
+            command: match runtime.as_str() {
+                "python" => "python3 main.py".to_owned(),
+                "node" => "node main.js".to_owned(),
+                _ => "sh main.sh".to_owned(),
+            },
+            test_command: Some(test_command),
+            timeout_seconds: 60,
+            actions: actions
+                .iter()
+                .map(|action| {
+                    (
+                        action.clone(),
+                        PluginAction {
+                            description: String::new(),
+                            input_schema: None,
+                        },
+                    )
+                })
+                .collect(),
+            permissions,
+        };
+        let manifest_yaml = serde_yaml::to_string(&manifest)
+            .map_err(|error| ToolError::Failed(format!("cannot serialize plugin.yaml: {error}")))?;
+        let frontmatter = serde_yaml::to_string(&json!({
+            "name": name,
+            "description": description,
+        }))
+        .map_err(|error| ToolError::Failed(format!("cannot serialize SKILL.md: {error}")))?;
+        std::fs::write(directory.join("plugin.yaml"), manifest_yaml)?;
+        std::fs::write(directory.join(entrypoint), body)?;
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!(
+                "---\n{frontmatter}---\n\n# {name}\n\nCall `plugin_call` with `plugin: \"{name}\"` and an action from: {}.\n",
+                actions.join(", ")
+            ),
+        )?;
+        std::fs::write(
+            directory.join("README.md"),
+            format!(
+                "# {name}\n\n{description}\n\nRun a smoke test with `plugin_test`, then call actions with `plugin_call`.\n"
+            ),
+        )?;
+        Ok(ToolResult::ok(format!(
+            "plugin {name} scaffolded at {}\nentrypoint: {entrypoint}\nnext: edit the entrypoint, then plugin_test and plugin_call",
+            directory.display()
+        ))
+        .with_metadata(json!({
+            "name": name,
+            "path": directory,
+            "entrypoint": entrypoint,
+            "actions": actions,
+        })))
+    }
+}
+
+struct InstallBuiltinPluginTool;
+
+#[async_trait]
+impl Tool for InstallBuiltinPluginTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "plugin_install_builtin",
+            "Install a bundled plugin into .openbad/plugins. Currently bundles asciidoc (asciidoctor renderer).",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "enum": ["asciidoc"]},
+                "overwrite": {"type": "boolean"}
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::ApprovalRequired(
+                "plugin_install_builtin".to_owned(),
+            ));
+        }
+        let name = string_arg(&arguments, "name")?;
+        let files = builtin_plugin_files(&name).ok_or_else(|| {
+            ToolError::InvalidArgument(format!(
+                "unknown bundled plugin {name}; available: {}",
+                BUILTIN_PLUGINS.join(", ")
+            ))
+        })?;
+        let directory = plugin_root(context.workspace.root()).join(&name);
+        if directory.exists() && !optional_bool(&arguments, "overwrite").unwrap_or(false) {
+            return Err(ToolError::Failed(format!(
+                "plugin already installed: {} (set overwrite=true to refresh it)",
+                directory.display()
+            )));
+        }
+        if directory.exists() {
+            plugin_directory(context.workspace.root(), &name)?;
+        }
+        std::fs::create_dir_all(&directory)?;
+        for (path, content) in files {
+            std::fs::write(directory.join(path), content)?;
+        }
+        Ok(ToolResult::ok(format!(
+            "installed bundled plugin {name} at {}\nnext: plugin_call(plugin=\"{name}\", action=\"check\")",
+            directory.display()
+        ))
+        .with_metadata(json!({"name": name, "path": directory})))
     }
 }
 
@@ -12403,7 +14903,10 @@ invariants:
         .expect("skill");
         let context = context(directory.path());
 
-        let skills = discover_skills(directory.path());
+        let skills: Vec<Skill> = discover_skills(directory.path())
+            .into_iter()
+            .filter(|skill| !skill.builtin)
+            .collect();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "rust-review");
         assert_eq!(skills[0].description, "Review Rust changes");
@@ -12434,7 +14937,11 @@ invariants:
         fs::create_dir_all(&skills_dir).expect("skills");
         symlink(&outside_skill, skills_dir.join("secret.md")).expect("symlink");
 
-        assert!(discover_skills(directory.path()).is_empty());
+        assert!(
+            discover_skills(directory.path())
+                .iter()
+                .all(|skill| skill.builtin)
+        );
     }
 
     #[test]
@@ -12480,5 +14987,275 @@ invariants:
         assert!(definitions.len() >= 17);
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
+    }
+
+    #[tokio::test]
+    async fn builtin_skills_are_available_without_workspace_files() {
+        let directory = tempdir().expect("tempdir");
+        let context = context(directory.path());
+        let skills = discover_skills(directory.path());
+        let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        for expected in [
+            "github-workflow",
+            "github-releases-pages",
+            "plugin-development",
+            "asciidoc-rendering",
+        ] {
+            assert!(names.contains(&expected), "missing skill {expected}");
+        }
+        assert!(skills.iter().all(|skill| skill.builtin));
+
+        let loaded = ReadSkillTool
+            .execute(json!({"name": "github-workflow"}), &context)
+            .await
+            .expect("read builtin skill");
+        assert!(loaded.content.contains("area: \"pr\""));
+        assert_eq!(loaded.metadata["builtin"], true);
+
+        let listed = ListSkillsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list skills");
+        assert!(listed.content.contains("[builtin]"));
+    }
+
+    #[tokio::test]
+    async fn workspace_skills_override_builtin_skills() {
+        let directory = tempdir().expect("tempdir");
+        let skill_dir = directory.path().join(".openbad/skills/github-workflow");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: github-workflow\ndescription: local override\n---\nlocal",
+        )
+        .expect("skill");
+        let skills = discover_skills(directory.path());
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "github-workflow")
+            .expect("skill");
+        assert!(!skill.builtin);
+        assert_eq!(skill.description, "local override");
+    }
+
+    #[test]
+    fn github_commands_cover_common_workflows() {
+        let issue = github_command(&json!({
+            "area": "issue",
+            "action": "create",
+            "repository": "acme/repo",
+            "title": "Bug",
+            "body": "Details",
+            "labels": ["bug"]
+        }))
+        .expect("issue command");
+        assert!(issue.starts_with("gh issue create --repo 'acme/repo'"));
+        assert!(issue.contains("--label 'bug'"));
+
+        let review = github_command(&json!({
+            "area": "pr",
+            "action": "review",
+            "number": 7,
+            "event": "approve",
+            "confirm": true
+        }))
+        .expect("review command");
+        assert!(review.contains("gh pr review 7"));
+        assert!(review.contains("--approve"));
+
+        let merge = github_command(&json!({
+            "area": "pr",
+            "action": "merge",
+            "number": 7
+        }));
+        assert!(matches!(merge, Err(ToolError::ApprovalRequired(_))));
+
+        let update = github_command(&json!({
+            "area": "issue",
+            "action": "update",
+            "repository": "acme/repo",
+            "number": 9,
+            "add_labels": ["triage"],
+            "state": "closed",
+            "confirm": true
+        }))
+        .expect("issue update");
+        assert!(update.contains("gh issue edit 9"));
+        assert!(update.contains("gh issue close 9"));
+
+        let protect = github_command(&json!({
+            "area": "branch",
+            "action": "protect",
+            "repository": "acme/repo",
+            "branch": "main",
+            "body": {"required_status_checks": {"strict": true, "contexts": ["ci"]}}
+        }))
+        .expect("protect command");
+        assert!(protect.contains("--method PUT"));
+        assert!(protect.contains("required_status_checks"));
+
+        let pages = github_command(&json!({
+            "area": "pages",
+            "action": "build",
+            "repository": "acme/repo"
+        }))
+        .expect("pages command");
+        assert!(pages.contains("repos/acme/repo/pages/builds"));
+        assert!(pages.contains("--method POST"));
+
+        let api = github_command(&json!({
+            "area": "api",
+            "endpoint": "repos/acme/repo/issues",
+            "fields": {"state": "open", "per_page": 10}
+        }))
+        .expect("api command");
+        assert!(api.contains("gh api --method GET"));
+        assert!(api.contains("-F 'per_page'=10"));
+
+        let delete = github_command(&json!({
+            "area": "api",
+            "method": "DELETE",
+            "endpoint": "repos/acme/repo/issues/1"
+        }));
+        assert!(matches!(delete, Err(ToolError::ApprovalRequired(_))));
+    }
+
+    #[test]
+    fn github_rejects_paths_outside_the_workspace() {
+        let upload = github_command(&json!({
+            "area": "release",
+            "action": "upload",
+            "repository": "acme/repo",
+            "tag": "v1.0.0",
+            "files": ["/etc/passwd"]
+        }));
+        assert!(matches!(upload, Err(ToolError::InvalidArgument(_))));
+
+        let traversal = github_command(&json!({
+            "area": "release",
+            "action": "create",
+            "repository": "acme/repo",
+            "tag": "v1.0.0",
+            "files": ["../escape.zip"]
+        }));
+        assert!(matches!(traversal, Err(ToolError::InvalidArgument(_))));
+    }
+
+    #[tokio::test]
+    async fn plugins_scaffold_test_and_call() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+        let scaffold = WritePluginTool
+            .execute(
+                json!({
+                    "name": "greeter",
+                    "description": "Say hello",
+                    "runtime": "shell",
+                    "actions": ["run", "echo"]
+                }),
+                &context,
+            )
+            .await
+            .expect("scaffold");
+        assert!(scaffold.content.contains("plugin greeter scaffolded"));
+        assert!(
+            directory
+                .path()
+                .join(".openbad/plugins/greeter/plugin.yaml")
+                .is_file()
+        );
+        assert!(
+            directory
+                .path()
+                .join(".openbad/plugins/greeter/SKILL.md")
+                .is_file()
+        );
+
+        let listed = ListPluginsTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("greeter"));
+
+        let tested = TestPluginTool
+            .execute(json!({"plugin": "greeter"}), &context)
+            .await
+            .expect("test plugin");
+        assert!(!tested.is_error, "{}", tested.content);
+        assert!(tested.content.contains("passed"));
+
+        let called = CallPluginTool
+            .execute(
+                json!({"plugin": "greeter", "action": "echo", "arguments": {"name": "Ada"}}),
+                &context,
+            )
+            .await
+            .expect("call plugin");
+        assert!(!called.is_error, "{}", called.content);
+        assert!(called.content.contains("greeter ran"));
+        assert_eq!(called.metadata["plugin"], "greeter");
+        assert!(called.metadata["evidence_path"].as_str().is_some());
+
+        let missing = CallPluginTool
+            .execute(json!({"plugin": "greeter", "action": "nope"}), &context)
+            .await;
+        assert!(matches!(missing, Err(ToolError::InvalidArgument(_))));
+    }
+
+    #[tokio::test]
+    async fn bundled_asciidoc_plugin_installs() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let installed = InstallBuiltinPluginTool
+            .execute(json!({"name": "asciidoc"}), &context)
+            .await
+            .expect("install");
+        assert!(
+            installed
+                .content
+                .contains("installed bundled plugin asciidoc")
+        );
+        assert!(
+            directory
+                .path()
+                .join(".openbad/plugins/asciidoc/main.py")
+                .is_file()
+        );
+        let (manifest, _) = load_plugin(directory.path(), "asciidoc").expect("manifest");
+        assert!(manifest.actions.contains_key("render"));
+        assert!(manifest.actions.contains_key("check"));
+        let skills = discover_skills(directory.path());
+        assert!(
+            skills
+                .iter()
+                .any(|skill| skill.name == "asciidoc" && !skill.builtin)
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_dry_run_previews_without_full_access() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        WritePluginTool
+            .execute(
+                json!({"name": "preview", "description": "preview", "runtime": "shell"}),
+                &context,
+            )
+            .await
+            .expect("scaffold");
+        context.allow_writes = false;
+        let preview = CallPluginTool
+            .execute(
+                json!({"plugin": "preview", "action": "run", "dry_run": true}),
+                &context,
+            )
+            .await
+            .expect("dry run");
+        assert!(preview.content.contains("dry run: sh main.sh"));
+        assert_eq!(preview.metadata["dry_run"], true);
     }
 }
