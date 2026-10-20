@@ -215,3 +215,11 @@ test("links a project repository", async ({ page }) => {
 
   await expect(page.getByText("clarity", { exact: true })).toBeVisible();
 });
+
+test("opens workspace files in the split pane", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await page.getByRole("button", { name: "apps/desktop/ui/src/App.tsx" }).click();
+
+  await expect(page.getByText("Mock preview for the browser harness.")).toBeVisible();
+});
