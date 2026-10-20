@@ -65,3 +65,7 @@ session knows what moved without re-reading every document.
   Memory, Todos, Questions, and Plan; running subagents add a pulse. Assistant
   responses can be copied from the header or footer, and user messages have a
   copy action. See `08-desktop-application.md`.
+- **Subagent waiting.** `subagent` gained `action: "wait"` with an optional
+  `timeout_seconds` (default 120, max 600), so the main agent collects a worker's
+  result instead of duplicating its work. The prompt now prefers `wait` over a
+  single `status` poll.

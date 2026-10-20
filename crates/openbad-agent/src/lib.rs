@@ -599,7 +599,7 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
         );
         if self.subagents.is_some() {
             prompt.push_str(
-                "\nUse subagent action \"spawn\" to hand a well-scoped independent task to a background worker when parallel work or a fresh focused context helps. It inherits this session's access mode, runs in the same workspace, appears in Project → Agents, and cannot ask the human questions. Collect its result with action \"status\" instead of assuming it finished.",
+                "\nUse subagent action \"spawn\" to hand a well-scoped independent task to a background worker when parallel work or a fresh focused context helps. It inherits this session's access mode, runs in the same workspace, appears in Project → Agents, and cannot ask the human questions. Collect its result with action \"wait\" (or \"status\" for a one-shot check) instead of duplicating its work or assuming it finished.",
             );
         }
         if let Ok(policy) = openbad_workspace::load_context_policy(self.workspace.root()) {
