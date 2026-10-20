@@ -391,7 +391,11 @@ export default function App() {
       void loadProjectAreaCounts(workspacePath)
         .then((counts) => {
           if (active) {
-            setAreaCounts(counts);
+            setAreaCounts((previous) =>
+              previous !== null && JSON.stringify(previous) === JSON.stringify(counts)
+                ? previous
+                : counts,
+            );
           }
         })
         .catch(() => undefined);
