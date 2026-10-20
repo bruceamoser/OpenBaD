@@ -68,6 +68,12 @@ export async function loadSession(sessionId: string): Promise<SessionView> {
   };
 }
 
+export async function cancelChat(): Promise<void> {
+  if (isTauri) {
+    await invoke("cancel_chat");
+  }
+}
+
 export async function apiKeyStatus(): Promise<boolean> {
   return isTauri ? invoke<boolean>("api_key_status") : mockKeyConfigured;
 }

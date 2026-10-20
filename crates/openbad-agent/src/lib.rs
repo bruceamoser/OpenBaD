@@ -9,7 +9,7 @@ use openbad_llm::DeepSeekClient;
 use openbad_llm::chat::{
     ChatMessage, ChatRole, FunctionCall, StreamEvent, ToolCall, ToolCallDelta,
 };
-use openbad_llm::pricing::{UsageTotals, deepseek_pricing};
+use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{ToolContext, ToolRegistry};
@@ -48,6 +48,9 @@ pub trait AgentObserver: Send + Sync {
     fn on_tool_call(&self, _step: u32, _call: &ToolCall) {}
     fn on_tool_result(&self, _step: u32, _name: &str, _content: &str, _is_error: bool) {}
     fn on_usage(&self, _usage: &UsageTotals) {}
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 struct NoopObserver;
@@ -73,6 +76,8 @@ pub enum AgentError {
     EmptyResponse,
     #[error("invalid tool arguments for {tool}: {message}")]
     InvalidToolArguments { tool: String, message: String },
+    #[error("agent turn was cancelled")]
+    Cancelled,
 }
 
 pub struct Agent<T: HttpTransport> {
@@ -122,6 +127,7 @@ impl<T: HttpTransport> Agent<T> {
         let system_hash = hash_bytes(system_prompt.as_bytes());
         let series_id = Uuid::now_v7();
         let mut usage_totals = UsageTotals::default();
+        let peak_pricing = PeakCalendar::new().is_peak_now();
 
         let context = Arc::new({
             let mut context = ToolContext::new(self.workspace.clone());
@@ -131,6 +137,9 @@ impl<T: HttpTransport> Agent<T> {
         });
 
         for step in 1..=self.config.max_steps {
+            if observer.is_cancelled() {
+                return Err(AgentError::Cancelled);
+            }
             observer.on_step(step);
             let request = self.client.build_request(
                 messages.clone(),
@@ -163,7 +172,10 @@ impl<T: HttpTransport> Agent<T> {
             };
 
             if let Some(pricing) = deepseek_pricing(self.client.model()) {
-                usage_totals.record(&response_usage, &pricing.cost(&response_usage, false));
+                usage_totals.record(
+                    &response_usage,
+                    &pricing.cost(&response_usage, peak_pricing),
+                );
             } else {
                 usage_totals.record(&response_usage, &Default::default());
             }
@@ -195,6 +207,9 @@ impl<T: HttpTransport> Agent<T> {
             }
 
             for call in tool_calls {
+                if observer.is_cancelled() {
+                    return Err(AgentError::Cancelled);
+                }
                 observer.on_tool_call(step, &call);
                 let content = match serde_json::from_str::<Value>(&call.function.arguments) {
                     Ok(arguments) => match self
@@ -495,6 +510,37 @@ mod tests {
             .await
             .expect_err("max steps");
         assert!(matches!(error, AgentError::MaxSteps(2)));
+    }
+
+    struct CancelObserver;
+
+    impl AgentObserver for CancelObserver {
+        fn is_cancelled(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_turns_stop_before_the_next_model_call() {
+        let directory = tempdir().expect("tempdir");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let error = agent
+            .run_with_observer(vec![ChatMessage::user("stop")], &CancelObserver)
+            .await
+            .expect_err("cancelled");
+        assert!(matches!(error, AgentError::Cancelled));
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   apiKeyStatus as fetchApiKeyStatus,
+  cancelChat,
   chat as sendChat,
   clearApiKey as clearStoredApiKey,
   loadFoundation as fetchFoundation,
@@ -24,6 +25,7 @@ export default function App() {
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followRef = useRef(true);
@@ -83,6 +85,15 @@ export default function App() {
     }
   }, [apiKeyInput]);
 
+  const stop = useCallback(async () => {
+    setStopRequested(true);
+    try {
+      await cancelChat();
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  }, []);
+
   const clearApiKey = useCallback(async () => {
     setError(null);
     try {
@@ -99,6 +110,7 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setStopRequested(false);
     setError(null);
     setMessage("");
     followRef.current = true;
@@ -205,6 +217,7 @@ export default function App() {
       );
     } finally {
       setBusy(false);
+      setStopRequested(false);
     }
   }, [allowCommands, allowWrites, busy, loadFoundation, message, sessionId, workspacePath]);
 
@@ -402,14 +415,26 @@ export default function App() {
                     Allow commands
                   </label>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void send()}
-                  disabled={busy || message.trim().length === 0}
-                  className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busy ? "Running…" : "Send"}
-                </button>
+                <div className="flex items-center gap-2">
+                  {busy && (
+                    <button
+                      type="button"
+                      onClick={() => void stop()}
+                      disabled={stopRequested}
+                      className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-300 transition hover:bg-amber-400/20 disabled:opacity-40"
+                    >
+                      {stopRequested ? "Stopping…" : "Stop"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void send()}
+                    disabled={busy || message.trim().length === 0}
+                    className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {busy ? "Running…" : "Send"}
+                  </button>
+                </div>
               </div>
             </div>
           </section>

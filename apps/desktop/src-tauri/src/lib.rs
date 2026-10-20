@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use openbad_agent::{AgentConfig, AgentObserver, default_agent};
@@ -29,6 +30,7 @@ const USER_ID_SETTING: &str = "install_user_id";
 pub struct AppState {
     store: Mutex<Store>,
     secrets: Box<dyn SecretStore>,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,7 @@ pub enum AgentEvent {
 
 struct ChannelObserver {
     channel: Channel<AgentEvent>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl AgentObserver for ChannelObserver {
@@ -118,6 +121,10 @@ impl AgentObserver for ChannelObserver {
 
     fn on_usage(&self, usage: &UsageTotals) {
         let _ = self.channel.send(AgentEvent::Usage { usage: *usage });
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
     }
 }
 
@@ -228,6 +235,12 @@ fn save_api_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn cancel_chat(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
 fn clear_api_key(state: State<'_, AppState>) -> Result<(), String> {
     state
         .secrets
@@ -268,6 +281,7 @@ async fn chat(
     }
 
     let api_key = resolve_api_key(&state)?;
+    state.cancel.store(false, Ordering::SeqCst);
 
     let (session, workspace_id, history, turn) = {
         let store = state
@@ -348,7 +362,10 @@ async fn chat(
         },
     );
 
-    let observer = ChannelObserver { channel: on_event };
+    let observer = ChannelObserver {
+        channel: on_event,
+        cancel: state.cancel.clone(),
+    };
     let run = match agent.run_with_observer(history, &observer).await {
         Ok(run) => run,
         Err(error) => {
@@ -631,6 +648,7 @@ pub fn run() {
         .manage(AppState {
             store: Mutex::new(store),
             secrets: secret_store(),
+            cancel: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             health,
@@ -638,6 +656,7 @@ pub fn run() {
             workspace_default,
             save_api_key,
             clear_api_key,
+            cancel_chat,
             api_key_status,
             sessions,
             session_view,
