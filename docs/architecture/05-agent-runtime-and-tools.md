@@ -348,6 +348,11 @@ Implemented:
 | `list_memories` | read | Audit memories with ids, scope, provenance, and pinned state |
 | `update_memory` | write | Correct memory content, tags, pinned state, or scope |
 | `forget_memory` | write | Forget a memory by id |
+| `git_commit` / `git_branch` / `git_checkout` | command | Safe git write verbs |
+| `git_log` / `git_show` / `git_blame` / `git_stash` | read/command | Archaeology and stash management |
+| `git_worktree` | command | Add, list, and remove worktrees |
+| `repo_health` / `git_commit_context` | read | Ahead/behind, dirty state, and commit-message context |
+| `github_issue` / `github_pr` / `github_ci` | command | Issue, PR, and CI operations through `gh`; close/merge require `confirm=true` |
 | `web_fetch` | read | Fetch http(s) docs, extract readable text, cache by hash, respect `network_hosts` |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 | `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |
@@ -385,6 +390,11 @@ executed check or be labelled UNVERIFIED.
 the written path. Validators execute only in Full access; a failing validator
 restores the previous file content and returns its output. Writes and edits that target
 generated or historical scope return a manifest-derived warning.
+
+Git and GitHub tools run through the same command policy and audit log. The
+GitHub tools assume `gh` is installed and authenticated (`gh auth login`);
+they never embed tokens. Merge and close actions require an explicit
+`confirm=true`.
 
 `.openbad/context.yaml` declares `pinned` and `excluded` globs. Excluded paths
 are refused by direct reads and filtered from list, grep, glob, symbol, and
