@@ -1,25 +1,41 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
 
-# Distribution / packaging
-/build/
+# Node / UI
+node_modules/
 dist/
+.vite/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
 
-# SvelteKit dev build (wui-svelte/build is ephemeral)
-wui-svelte/build/
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+apps/desktop/ui/dist/
 
-# Keep the WUI build assets that ship with the package
-!src/openbad/wui/build/
-*.egg-info/
-*.egg
+# SQLite / local data
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+backups/
+spill/
+checkpoints/
+.openbad/
 
-# Virtual environments
-.venv/
-.venv-wsl/
-venv/
-env/
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 
 # IDE
 .vscode/
@@ -32,20 +48,19 @@ env/
 .DS_Store
 Thumbs.db
 
-# Testing
+# Python (archived v0 only; kept for historical work)
+__pycache__/
+*.py[cod]
+.venv/
 .pytest_cache/
-.coverage
-htmlcov/
-
-# Ruff
 .ruff_cache/
 
-# Protobuf generated files (gRPC stubs only — _pb2.py are committed)
-*_pb2.pyi
-*_pb2_grpc.py
+# Logs / coverage
+*.log
+coverage/
+htmlcov/
+lcov.info
 
-# Environment variables
-.env
-.env.local
-data/state.db
-build-root-old/
+# Temporary
+tmp/
+.tmp/

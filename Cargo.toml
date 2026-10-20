@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/desktop/src-tauri",
+    "crates/openbad-core",
+    "crates/openbad-store",
+    "crates/openbad-harness",
+    "crates/openbad-llm",
+    "crates/openbad-tools",
+    "crates/openbad-agent",
+    "crates/openbad-workspace",
+    "crates/openbad-memory",
+    "crates/openbad-knowledge",
+    "crates/openbad-autonomic",
+    "crates/openbad-governance",
+    "crates/openbad-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Bruce Amoser"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+directories = "6"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
