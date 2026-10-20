@@ -13,6 +13,7 @@ const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 let mockKeyConfigured = false;
+let mockCancelled = false;
 let mockSessionCounter = 1;
 const mockSessions: SessionSummary[] = [];
 const mockMessages = new Map<string, { role: string; text: string; reasoning: string | null }[]>();
@@ -71,7 +72,9 @@ export async function loadSession(sessionId: string): Promise<SessionView> {
 export async function cancelChat(): Promise<void> {
   if (isTauri) {
     await invoke("cancel_chat");
+    return;
   }
+  mockCancelled = true;
 }
 
 export async function apiKeyStatus(): Promise<boolean> {
@@ -135,19 +138,20 @@ async function mockChat(
   input: ChatInput,
   onEvent: (event: AgentEvent) => void,
 ): Promise<ChatReply> {
+  mockCancelled = false;
   const sessionId = input.sessionId ?? `mock-session-${mockSessionCounter++}`;
   const text =
     "I read `Cargo.toml`. It is a virtual workspace with twelve `openbad-*` crates plus the Tauri desktop app. The core crates are store, harness, llm, tools, agent, workspace, governance, memory, knowledge, autonomic, and mcp.";
 
   onEvent({ type: "step", step: 1 });
-  await delay(120);
+  await tick(120);
   for (const chunk of [
     "The user wants a workspace summary. ",
     "I should read Cargo.toml first. ",
     "Then I can group the crates by role.",
   ]) {
     onEvent({ type: "reasoning", step: 1, text: chunk });
-    await delay(90);
+    await tick(90);
   }
   onEvent({
     type: "tool_call",
@@ -155,7 +159,7 @@ async function mockChat(
     name: "read_file",
     arguments: '{"path":"Cargo.toml"}',
   });
-  await delay(140);
+  await tick(140);
   onEvent({
     type: "tool_result",
     step: 1,
@@ -166,7 +170,7 @@ async function mockChat(
   onEvent({ type: "step", step: 2 });
   for (const chunk of text.match(/.{1,36}/g) ?? [text]) {
     onEvent({ type: "content", step: 2, text: chunk });
-    await delay(45);
+    await tick(45);
   }
   onEvent({ type: "usage", usage: mockUsage });
 
@@ -198,4 +202,11 @@ async function mockChat(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function tick(milliseconds: number): Promise<void> {
+  await delay(milliseconds);
+  if (mockCancelled) {
+    throw new Error("agent turn was cancelled");
+  }
 }
