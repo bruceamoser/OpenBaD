@@ -33,3 +33,8 @@ session knows what moved without re-reading every document.
   specific absolute path. Grants live in the project database
   (`outside_access_grants`), are read/write scoped, and are managed in Settings
   → Access. See sections 7.1 and 11.1 of `05-agent-runtime-and-tools.md`.
+- **Steering and queuing.** A running turn accepts steering messages through
+  `steer_chat`; they are appended before the next provider request. The desktop
+  composer also queues messages for the next turn. See the turn rules in
+  `05-agent-runtime-and-tools.md` and the composer notes in
+  `08-desktop-application.md`.

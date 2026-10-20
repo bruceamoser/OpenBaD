@@ -116,6 +116,41 @@ test("stops an in-flight turn", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
 });
 
+test("steers a running turn", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
+  await composer.fill("Summarize the workspace slowly");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+
+  await composer.fill("Focus on the crates, not the app.");
+  await page.getByRole("button", { name: "Steer current turn" }).click();
+
+  await expect(page.getByText("Steering", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Focus on the crates, not the app.", { exact: false }),
+  ).toBeVisible();
+  await expect(composer).toHaveValue("");
+});
+
+test("queues a message until the running turn finishes", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
+  await composer.fill("Summarize the workspace slowly");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+
+  await composer.fill("Then list the crates.");
+  await page.getByRole("button", { name: "Queue message" }).click();
+  await expect(page.getByText(/Queued · 1/)).toBeVisible();
+  await expect(composer).toHaveValue("");
+
+  await expect(
+    page.getByText("Then list the crates.", { exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(/Queued · 1/)).toHaveCount(0);
+});
+
 test("remembers model preferences", async ({ page }) => {
   await page.goto("/");
   await openSettings(page);

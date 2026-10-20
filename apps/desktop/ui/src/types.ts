@@ -44,6 +44,7 @@ export type ChatEntry = {
   reasoning?: string;
   status?: string;
   tools?: string[];
+  steering?: boolean;
   usage?: Usage;
 };
 

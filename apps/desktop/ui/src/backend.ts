@@ -485,6 +485,16 @@ export async function loadSession(sessionId: string): Promise<SessionView> {
   };
 }
 
+export async function steerChat(message: string): Promise<void> {
+  if (isTauri) {
+    await invoke("steer_chat", { message });
+    return;
+  }
+  if (message.trim().length === 0) {
+    throw new Error("steering message must not be empty");
+  }
+}
+
 export async function cancelChat(): Promise<void> {
   if (isTauri) {
     await invoke("cancel_chat");
@@ -886,6 +896,9 @@ async function mockChat(
   onEvent: (event: AgentEvent) => void,
 ): Promise<ChatReply> {
   mockCancelled = false;
+  if (/slow/i.test(input.message)) {
+    await tick(1_400);
+  }
   const sessionId = input.sessionId ?? `mock-session-${mockSessionCounter++}`;
   const text = /markdown|mermaid/i.test(input.message)
     ? [

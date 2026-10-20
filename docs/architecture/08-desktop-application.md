@@ -72,6 +72,11 @@ keeps a usable width.
 - Approvals: inline cards with exact command/diff and allow/deny actions.
 - Turn footer: input/output/cache tokens, cost, cache hit %, model, elapsed.
 - Cancel button always visible during a turn.
+- While a turn is running, the composer offers **Steer** (append to the live
+  turn before its next model request) and **Queue** (send automatically when
+  the current turn finishes). Enter steers; Shift+Enter inserts a newline.
+  Queued messages are listed above the composer and can be removed. Steering
+  messages are marked in the transcript.
 - Access mode: Read only, Can edit, or Full access. The choice is stored in
   the session metadata, restored when the session is reopened, and applied to
   every tool call in the turn. New sessions start read-only.

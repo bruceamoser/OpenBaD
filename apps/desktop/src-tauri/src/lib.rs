@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use openbad_agent::{AgentConfig, AgentObserver, default_agent};
+use openbad_agent::{AgentConfig, AgentObserver, SteeringInbox, default_agent};
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
 #[cfg(feature = "keyring")]
@@ -38,6 +38,7 @@ pub struct AppState {
     store: Arc<Mutex<Store>>,
     secrets: Box<dyn SecretStore>,
     cancel: Arc<AtomicBool>,
+    steering: Arc<SteeringInbox>,
 }
 
 struct StoreSearch {
@@ -1743,6 +1744,19 @@ pub struct ChatInput {
 }
 
 #[tauri::command]
+fn steer_chat(state: State<'_, AppState>, message: String) -> Result<(), String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("steering message must not be empty".to_owned());
+    }
+    if state.steering.push(message.to_owned()) {
+        Ok(())
+    } else {
+        Err("no active turn to steer".to_owned())
+    }
+}
+
+#[tauri::command]
 async fn chat(
     state: State<'_, AppState>,
     request: ChatInput,
@@ -1914,6 +1928,7 @@ async fn chat(
         );
     }
     agent = agent
+        .with_steering(Arc::clone(&state.steering))
         .with_redactions(redactions)
         .with_checkpoints(Arc::new(SessionCheckpoints {
             store: Arc::clone(&state.store),
@@ -1933,7 +1948,10 @@ async fn chat(
         channel: on_event,
         cancel: state.cancel.clone(),
     };
-    let run = match agent.run_with_observer(history, &observer).await {
+    state.steering.begin();
+    let outcome = agent.run_with_observer(history, &observer).await;
+    state.steering.end();
+    let run = match outcome {
         Ok(run) => run,
         Err(error) => {
             if let Ok(store) = state.store.lock() {
@@ -1963,6 +1981,19 @@ async fn chat(
 
         for message in &run.new_messages {
             match message.role {
+                ChatRole::User => {
+                    store
+                        .append_event(
+                            session,
+                            NewEvent::new(SessionEventKind::UserMessage)
+                                .with_turn(turn)
+                                .with_step(run.steps)
+                                .with_payload(json!({
+                                    "content": message.content.clone().unwrap_or_default()
+                                })),
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
                 ChatRole::Assistant => {
                     let payload = json!({
                         "content": message.content,
@@ -2247,6 +2278,7 @@ pub fn run() {
             store: Arc::new(Mutex::new(store)),
             secrets: secret_store(),
             cancel: Arc::new(AtomicBool::new(false)),
+            steering: Arc::new(SteeringInbox::default()),
         })
         .invoke_handler(tauri::generate_handler![
             health,
@@ -2265,6 +2297,7 @@ pub fn run() {
             save_api_key,
             clear_api_key,
             cancel_chat,
+            steer_chat,
             api_key_status,
             sessions,
             search_sessions,
