@@ -237,6 +237,11 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
+The built-in surface is capped at **128 tools**. The registry currently exposes
+**113**, leaving 15 slots free. Every new capability must fit that budget; prefer
+one stable proxy tool with an `action`/`operation` field over one tool per
+operation, and keep at least four slots free for hotfixes.
+
 ### 6.3 Execution pipeline
 
 ```mermaid
@@ -340,11 +345,11 @@ Implemented:
 | `glob_repo` | read | Find reference-folder files by glob |
 | `grep_repo` | read | Search reference-folder text; case-insensitive by default |
 | `read_repo_file` | read | UTF-8 file inside a read-only reference folder; reports total lines |
-| `pin_context` / `exclude_context` | write | Maintain `.openbad/context.yaml` residency rules |
+| `context_rules` | write | List, pin, or exclude `.openbad/context.yaml` residency rules |
 | `list_context_rules` / `context_map` | read | Audit pinned/excluded rules and files loaded this turn |
-| `record_dead_end` / `list_dead_ends` | write/read | Negative knowledge in `.openbad/dead-ends.json` |
+| `ledger` | write/read | Claims, known unknowns, and ruled-out findings in `.openbad/*.json` |
 | `ask_question` / `list_questions` | write/read | Queue structured human decisions in `.openbad/questions.json` |
-| `canon_add` / `canon_ban` / `canon_query` / `canon_lint` | write/read | Canon ledger, banned-phrase authoring, and lint |
+| `canon` | write/read | Canon ledger, banned-phrase authoring/lint, and glossary lookup |
 | `write_skill` | write | Durable procedure with preconditions, steps, verification, and rollback |
 | `glossary_add` / `glossary_lookup` | write/read | Glossary terms, expansions, and aliases |
 | `adr_write` / `adr_list` / `adr_read` | write/read | Architecture decision records |
@@ -365,13 +370,11 @@ Implemented:
 | `workspace_gc` | write | Report or remove large generated files with confirmation |
 | `session_checkpoint` / `session_resume` | write/read | Capture or restore plan/todos/handoff/claims/audit summaries |
 | `references_to` | read | Blast-radius reference search for a file stem |
-| `golden_compare` / `golden_accept` | read/write | Snapshot regression comparison and baseline promotion |
+| `golden` | read/write | Snapshot regression comparison and baseline promotion |
 | `plan_write` / `plan_read` / `plan_update_step` / `plan_verify` | write/read/command | Draft plan, human approval, and executable step verification |
 | `context_report` | read | Estimate loaded files/knowledge/memory tokens and rules |
-| `record_claim` / `list_claims` | write/read | Provenance-tagged claims with evidence |
-| `record_unknown` / `list_unknowns` | write/read | Known-unknown register |
 | `preview_write` | read | Unified diff for a proposed write without touching disk |
-| `snapshot_create` / `snapshot_list` / `snapshot_restore` | write/read | Bounded workspace snapshots with explicit restore confirmation |
+| `snapshot` | write/read | Create, list, or restore bounded workspace snapshots with explicit confirmation |
 | `assert_project` | read | Count/schema/local-link structural assertions |
 | `move_file` | write | Rename or move a file inside the workspace |
 | `list_trash` / `restore_trash` | read/write | Inspect and restore soft-deleted files |
@@ -436,12 +439,12 @@ executed check or be labelled UNVERIFIED.
 
 `read_file` and `read_repo_file` accept `max_bytes` or `budget_tokens` and report
 the effective cap. `context_report` estimates loaded evidence tokens and lists
-rules. `record_claim` stores executed/read/inferred/assumed provenance, while
-`record_unknown` maintains the unresolved-question register.
+rules. `ledger` kind claim stores executed/read/inferred/assumed provenance,
+while kind unknown maintains the unresolved-question register.
 
 `write_file` and `edit_file` screen content for obvious secrets (private keys,
 cloud/API/GitHub/Slack tokens) before writing. `preview_write` lets the model
-show a diff first. `snapshot_create` copies the workspace (excluding `.git`,
+show a diff first. `snapshot` action create copies the workspace (excluding `.git`,
 `target`, `node_modules`, `dist`, `.openbad`) under `.openbad/snapshots/`, and
 `assert_project` provides count, schema, and local-link checks for gates.
 
@@ -504,7 +507,7 @@ captures plan, todos, handoff, claims, unknowns, and recent audit entries for
 `session_resume`. `instructions_for` also accepts a reference-folder id and
 searches that repo's ancestors for `AGENTS.md`. `references_to` provides a
 blast-radius preview and
-`golden_compare`/`golden_accept` manage committed baselines.
+`golden` action compare/accept manages committed baselines.
 
 `plan_write` stores a draft in `.openbad/plan.json`; the prompt says not to
 execute it until a human approves it in Project → Plan. `plan_verify` runs a
