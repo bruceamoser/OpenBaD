@@ -23,7 +23,7 @@ accounting that 0001 does not address.
 | LSP code intelligence | P4-03 | F-16 | Not started |
 | MCP client + proxy tool | P6-06 | F-21 | Done |
 | Persistent terminal (PTY) | P4-04 | — | Done |
-| Workflow engine | P6-05 | F-20 | Not started |
+| Workflow engine | P6-05 | F-20 | Done |
 | Session history search | — | — | Not started |
 
 ## 2. The constraint nobody documented
