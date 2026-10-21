@@ -4,6 +4,13 @@ The assistant loads this file with the project instructions. Add a short entry
 whenever an architecture document or the tool/runtime surface changes, so a new
 session knows what moved without re-reading every document.
 
+## 2026-10-21
+
+- **Multi-step chat formatting.** Visible assistant text is accumulated across
+  steps and joined with a blank line, and the streaming UI inserts the same
+  boundary when a new step starts writing. This fixes run-on paragraphs when a
+  step ends without a trailing newline.
+
 ## 2026-10-20
 
 - **GitHub surface.** `docs/architecture/05-agent-runtime-and-tools.md` now

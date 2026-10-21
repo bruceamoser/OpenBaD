@@ -344,6 +344,7 @@ impl<T: HttpTransport> Agent<T> {
         } else {
             self.config.max_steps
         };
+        let mut visible_text = String::new();
         for step in 1..=step_budget {
             context.set_turn(step);
             if observer.is_cancelled() {
@@ -398,6 +399,13 @@ impl<T: HttpTransport> Agent<T> {
 
             let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
             let text = assistant.content.clone().unwrap_or_default();
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                if !visible_text.is_empty() {
+                    visible_text.push_str("\n\n");
+                }
+                visible_text.push_str(trimmed);
+            }
             if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
                 eprintln!(
                     "[agent] step {step} finish={finish_reason:?} content={text:?} tool_calls={}",
@@ -429,7 +437,7 @@ impl<T: HttpTransport> Agent<T> {
                 }
                 return Ok(AgentRun {
                     new_messages: messages[start_len..].to_vec(),
-                    text,
+                    text: visible_text,
                     usage: usage_totals,
                     steps: step,
                 });
@@ -997,6 +1005,38 @@ mod tests {
         assert!(audit.contains(r#""is_error":false"#));
     }
 
+    #[tokio::test]
+    async fn multi_step_text_is_joined_with_blank_lines() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Looking at the file.","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"The file says hello."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("read hello.txt")])
+            .await
+            .expect("run");
+        assert_eq!(run.text, "Looking at the file.\n\nThe file says hello.");
+        assert_eq!(run.steps, 2);
+    }
+
     struct SteeringTransport {
         responses: Mutex<VecDeque<HttpResponse>>,
         requests: Mutex<Vec<HttpRequest>>,
@@ -1062,7 +1102,7 @@ mod tests {
             .expect("run");
         steering.end();
         assert_eq!(run.steps, 2);
-        assert_eq!(run.text, "Second answer.");
+        assert_eq!(run.text, "First answer.\n\nSecond answer.");
         assert!(run.new_messages.iter().any(|message| {
             message.role == ChatRole::User
                 && message.content.as_deref() == Some("Please mention the second answer.")
