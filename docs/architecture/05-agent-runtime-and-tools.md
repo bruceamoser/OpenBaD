@@ -1008,6 +1008,11 @@ pub struct TurnBudget {
 - Cancellation propagates to the provider stream and all child processes.
 - A cancelled turn preserves partial assistant text and completed tool results.
 - A repeated-failure guard stops loops after N identical failures.
+- Before each provider request, if the history exceeds `compact_after_bytes`
+  (600 KB by default), tool messages older than the recent window (8 messages
+  by default) are replaced with `[compacted tool result; N bytes omitted]`.
+  System, user, and assistant text are never rewritten. This is a deterministic
+  first-stage compactor; it intentionally resets the cache prefix.
 
 ## 16. Runtime pseudocode
 

@@ -6,6 +6,10 @@ session knows what moved without re-reading every document.
 
 ## 2026-10-21
 
+- **Deterministic tool-result compaction.** Before a request exceeds 600 KB,
+  old tool results outside the recent 8-message window are replaced with a
+  compact marker. User/assistant text is preserved and the cache prefix is
+  deliberately reset.
 - **Parallel read tools.** Consecutive read-only tool calls now execute
   concurrently, including `<domain>_run` calls whose inner tool is read-only.
   Write and execute calls remain serial, and tool-message order and audit
