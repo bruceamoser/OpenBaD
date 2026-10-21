@@ -185,6 +185,8 @@ export default function App() {
   const sessionSearchRef = useRef<HTMLInputElement | null>(null);
   const followRef = useRef(true);
   const autoCollapsedSidebar = useRef(false);
+  const sendRef = useRef<(text?: string) => void>(() => undefined);
+  const steerRef = useRef<(text?: string) => void>(() => undefined);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -524,16 +526,19 @@ export default function App() {
         ...items.filter((item) => item.path !== grant.path),
         grant,
       ]);
-      setAccessNotice(
-        `Access granted to ${grant.path}. Continue when ready; the next turn will use it.`,
-      );
-      setMessage(`Access granted for ${grant.path}. Continue with the task.`);
+      setAccessNotice(`Access granted to ${grant.path}. Resuming the task.`);
+      const continuation = `Access granted for ${grant.path}. Continue with the task.`;
+      if (busy) {
+        steerRef.current(continuation);
+      } else {
+        sendRef.current(continuation);
+      }
       composerRef.current?.focus();
       window.setTimeout(() => setAccessNotice(null), 8_000);
     } catch (cause) {
       setError(describeError(cause));
     }
-  }, [accessRequest, workspacePath]);
+  }, [accessRequest, busy, workspacePath]);
 
   const revokeAccess = useCallback(
     async (grant: OutsideAccessGrant) => {
@@ -841,13 +846,13 @@ export default function App() {
     workspacePath,
   ]);
 
-  const steer = useCallback(async () => {
-    const text = message.trim();
+  const steer = useCallback(async (override?: string) => {
+    const text = (override ?? message).trim();
     if (text.length === 0) {
       return;
     }
     if (!busy) {
-      void send();
+      void send(text);
       return;
     }
     try {
@@ -863,6 +868,12 @@ export default function App() {
       setMessage("");
     }
   }, [busy, message, send]);
+  sendRef.current = (text) => {
+    void send(text);
+  };
+  steerRef.current = (text) => {
+    void steer(text);
+  };
 
   const queue = useCallback(() => {
     const text = message.trim();

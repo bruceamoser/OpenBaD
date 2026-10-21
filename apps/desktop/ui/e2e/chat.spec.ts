@@ -64,6 +64,14 @@ test("requests and grants access outside the workspace", async ({ page }) => {
   await expect(dialog.getByText("Compare the implementation")).toBeVisible();
   await dialog.getByRole("button", { name: "Grant access" }).click();
   await expect(page.getByText(/Access granted to/)).toBeVisible();
+  await expect(
+    page.getByText(
+      "Access granted for /home/you/other-project. Continue with the task.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: /Ask OpenBaD/ }),
+  ).toHaveValue("");
 
   await openSettings(page);
   const settings = page.getByRole("dialog", { name: "Settings" });
