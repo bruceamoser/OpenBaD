@@ -401,7 +401,40 @@ export async function renameSession(sessionId: string, title: string): Promise<v
 }
 
 export async function loadSessions(): Promise<SessionSummary[]> {
-  return isTauri ? invoke<SessionSummary[]>("sessions") : [...mockSessions];
+  return isTauri
+    ? invoke<SessionSummary[]>("sessions")
+    : mockSessions.filter((session) => session.status !== "archived");
+}
+
+export async function loadArchivedSessions(): Promise<SessionSummary[]> {
+  return isTauri
+    ? invoke<SessionSummary[]>("archived_sessions")
+    : mockSessions.filter((session) => session.status === "archived");
+}
+
+export async function archiveSession(
+  sessionId: string,
+  archived: boolean,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("archive_session", { sessionId, archived });
+    return;
+  }
+  const session = mockSessions.find((item) => item.id === sessionId);
+  if (session) {
+    session.status = archived ? "archived" : "active";
+  }
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("delete_session", { sessionId });
+    return;
+  }
+  const index = mockSessions.findIndex((item) => item.id === sessionId);
+  if (index >= 0) {
+    mockSessions.splice(index, 1);
+  }
 }
 
 export async function setSessionAccessMode(

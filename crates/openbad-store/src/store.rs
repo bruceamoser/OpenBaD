@@ -56,6 +56,15 @@ enum WriteCommand {
         access_mode: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
+    SetSessionArchived {
+        session_id: SessionId,
+        archived: bool,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    DeleteSession {
+        session_id: SessionId,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
     AddOutsideAccessGrant {
         workspace_id: WorkspaceId,
         path: String,
@@ -967,7 +976,7 @@ impl Store {
                     s.metadata_json
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
-             WHERE s.deleted_at IS NULL
+             WHERE s.deleted_at IS NULL AND s.status != 'archived'
              ORDER BY s.updated_at DESC
              LIMIT ?1",
         )?;
@@ -1277,6 +1286,86 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn list_archived_sessions(&self, limit: u32) -> Result<Vec<SessionSummary>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT s.id, s.workspace_id, w.path, s.title, s.status, s.created_at,
+                    s.updated_at,
+                    COALESCE((SELECT MAX(t.turn) FROM session_turns t
+                              WHERE t.session_id = s.id), s.last_turn, 0),
+                    s.metadata_json
+             FROM sessions s
+             LEFT JOIN workspaces w ON w.id = s.workspace_id
+             WHERE s.deleted_at IS NULL AND s.status = 'archived'
+             ORDER BY s.updated_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::from(limit)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (
+                id,
+                workspace_id,
+                workspace_path,
+                title,
+                status,
+                created_at,
+                updated_at,
+                last_turn,
+                metadata_json,
+            ) = row?;
+            sessions.push(SessionSummary {
+                id: SessionId::from(
+                    Uuid::parse_str(&id)
+                        .map_err(|error| StoreError::InvalidData(error.to_string()))?,
+                ),
+                workspace_id: workspace_id
+                    .map(|value| {
+                        Uuid::parse_str(&value)
+                            .map(WorkspaceId::from)
+                            .map_err(|error| StoreError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?,
+                workspace_path,
+                title,
+                status,
+                created_at,
+                updated_at,
+                last_turn: last_turn as u32,
+                access_mode: access_mode_from_metadata(&metadata_json),
+            });
+        }
+        Ok(sessions)
+    }
+
+    pub fn set_session_archived(
+        &self,
+        session_id: SessionId,
+        archived: bool,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::SetSessionArchived {
+            session_id,
+            archived,
+            reply,
+        })
+    }
+
+    pub fn delete_session(&self, session_id: SessionId) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::DeleteSession { session_id, reply })
+    }
+
     pub fn search_sessions(
         &self,
         query: &str,
@@ -1299,6 +1388,7 @@ impl Store {
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.deleted_at IS NULL
+               AND s.status != 'archived'
                AND (s.title LIKE ?1 ESCAPE '\\'
                     OR EXISTS (SELECT 1 FROM session_messages m
                                WHERE m.session_id = s.id
@@ -2813,6 +2903,49 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 })();
                 let _ = reply.send(result);
             }
+            WriteCommand::SetSessionArchived {
+                session_id,
+                archived,
+                reply,
+            } => {
+                let result = connection
+                    .execute(
+                        "UPDATE sessions SET status = ?1, updated_at = ?2
+                         WHERE id = ?3 AND deleted_at IS NULL",
+                        params![
+                            if archived { "archived" } else { "active" },
+                            now_millis(),
+                            session_id.to_string()
+                        ],
+                    )
+                    .map_err(StoreError::from)
+                    .and_then(|changed| {
+                        if changed == 0 {
+                            Err(StoreError::NotFound(session_id.to_string()))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                let _ = reply.send(result);
+            }
+            WriteCommand::DeleteSession { session_id, reply } => {
+                let result = connection
+                    .execute(
+                        "UPDATE sessions
+                         SET deleted_at = ?1, status = 'deleted', updated_at = ?1
+                         WHERE id = ?2 AND deleted_at IS NULL",
+                        params![now_millis(), session_id.to_string()],
+                    )
+                    .map_err(StoreError::from)
+                    .and_then(|changed| {
+                        if changed == 0 {
+                            Err(StoreError::NotFound(session_id.to_string()))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                let _ = reply.send(result);
+            }
             WriteCommand::AddOutsideAccessGrant {
                 workspace_id,
                 path,
@@ -3758,6 +3891,41 @@ mod tests {
         assert!(matches!(
             store.set_session_access_mode(session, "admin"),
             Err(StoreError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn sessions_archive_restore_and_delete() {
+        let store = Store::open_in_memory().expect("store");
+        let session = store.create_session(None, None).expect("session");
+        assert_eq!(store.list_sessions(10).expect("active").len(), 1);
+
+        store.set_session_archived(session, true).expect("archive");
+        assert!(store.list_sessions(10).expect("active").is_empty());
+        let archived = store.list_archived_sessions(10).expect("archived");
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].status, "archived");
+
+        store.set_session_archived(session, false).expect("restore");
+        assert!(
+            store
+                .list_archived_sessions(10)
+                .expect("archived")
+                .is_empty()
+        );
+        assert_eq!(store.list_sessions(10).expect("active").len(), 1);
+
+        store.delete_session(session).expect("delete");
+        assert!(store.list_sessions(10).expect("active").is_empty());
+        assert!(
+            store
+                .list_archived_sessions(10)
+                .expect("archived")
+                .is_empty()
+        );
+        assert!(matches!(
+            store.delete_session(session),
+            Err(StoreError::NotFound(_))
         ));
     }
 

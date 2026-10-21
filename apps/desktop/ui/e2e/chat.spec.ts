@@ -249,6 +249,33 @@ test("renames a session inline", async ({ page }) => {
   await expect(page.locator("aside").getByText("Workspace summary", { exact: true })).toBeVisible();
 });
 
+test("archives and restores a session", async ({ page }) => {
+  await page.goto("/");
+  await sendPrompt(page);
+
+  await page.locator("aside").getByText(prompt, { exact: true }).hover();
+  await page.getByRole("button", { name: "Archive session" }).click();
+  await expect(page.locator("aside").getByText("Archived (1)", { exact: true })).toBeVisible();
+  await expect(page.locator("aside").getByText(prompt, { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Archived (1)" }).click();
+  const archived = page.locator("aside").getByText(prompt, { exact: true });
+  await expect(archived).toBeVisible();
+  await archived.hover();
+  await page.getByRole("button", { name: "Restore session" }).click();
+  await expect(page.locator("aside").getByText("Archived (1)", { exact: true })).toHaveCount(0);
+});
+
+test("deletes a session", async ({ page }) => {
+  await page.goto("/");
+  await sendPrompt(page);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("aside").getByText(prompt, { exact: true }).hover();
+  await page.getByRole("button", { name: "Delete session" }).click();
+  await expect(page.locator("aside").getByText(prompt, { exact: true })).toHaveCount(0);
+});
+
 test("creates a project workspace from a name", async ({ page }) => {
   await page.goto("/");
 

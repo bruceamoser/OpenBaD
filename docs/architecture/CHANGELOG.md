@@ -10,6 +10,10 @@ session knows what moved without re-reading every document.
   `openbad_approval` metadata. The desktop shows the tool, risk, and reason,
   and approving switches the session to Full access, persists it, and sends a
   continuation so the task resumes.
+- **Session archive and delete.** Sessions can now be archived, restored, or
+  soft-deleted from the sidebar. The active list excludes archived sessions,
+  archived sessions have a separate expandable section, and deleting the open
+  session clears the chat.
 - **Risk gate.** The agent now resolves the effective risk of direct and
   `<domain>_run` calls and refuses approval-required tools before execution when
   the session lacks command access, returning an audited error instead of
