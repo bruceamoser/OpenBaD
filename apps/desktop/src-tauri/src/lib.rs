@@ -24,9 +24,9 @@ use openbad_store::types::{
 };
 use openbad_tools::{
     CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
-    LspService, MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SessionEventView,
-    SessionHistory, SessionHistoryHit, SubagentInfo, SubagentRuntime, SubagentSpec,
-    WorkspaceSearch,
+    LspService, McpService, McpToolSummary, MemoryStore, OutsideGrant, ProjectAreas,
+    ProjectRepoRef, SessionEventView, SessionHistory, SessionHistoryHit, SubagentInfo,
+    SubagentRuntime, SubagentSpec, WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -603,6 +603,61 @@ impl LspService for DesktopLsp {
     }
 }
 
+struct DesktopMcp {
+    manager: Result<Arc<openbad_mcp::McpManager>, String>,
+}
+
+impl DesktopMcp {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            manager: openbad_mcp::McpManager::new(&root)
+                .map(Arc::new)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn manager(&self) -> Result<Arc<openbad_mcp::McpManager>, String> {
+        self.manager.as_ref().map(Arc::clone).map_err(Clone::clone)
+    }
+}
+
+#[async_trait::async_trait]
+impl McpService for DesktopMcp {
+    async fn catalog(&self) -> Result<Vec<McpToolSummary>, String> {
+        let manager = self.manager()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .catalog()
+                .map(|tools| {
+                    tools
+                        .into_iter()
+                        .map(|tool| McpToolSummary {
+                            server: tool.server,
+                            name: tool.name,
+                            description: tool.description,
+                        })
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn call(&self, server: &str, tool: &str, arguments: Value) -> Result<String, String> {
+        let manager = self.manager()?;
+        let server = server.to_owned();
+        let tool = tool.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .call(&server, &tool, arguments)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+}
+
 #[derive(Clone)]
 struct SubagentSettings {
     store: Arc<Mutex<Store>>,
@@ -857,6 +912,7 @@ async fn run_subagent(
         store: Arc::clone(&settings.store),
         workspace_id: settings.workspace_id,
     }))
+    .with_mcp(Arc::new(DesktopMcp::new(settings.workspace_path.clone())))
     .with_redactions(vec![settings.api_key.clone()]);
 
     let observer = SubagentObserver {
@@ -2567,6 +2623,7 @@ async fn chat(
                 store: Arc::clone(&state.store),
                 workspace_id,
             }))
+            .with_mcp(Arc::new(DesktopMcp::new(workspace_path.clone())))
             .with_subagents(Arc::new(SubagentRunner {
                 settings: Arc::new(SubagentSettings {
                     store: Arc::clone(&state.store),
