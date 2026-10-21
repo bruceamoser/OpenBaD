@@ -80,6 +80,7 @@ import type {
   OutsideAccessRequest,
   ProjectAreaCounts,
   SessionSummary,
+  ToolApprovalRequest,
   Usage,
   WorkspaceIndexSummary,
   WorkspaceSummary,
@@ -167,6 +168,7 @@ export default function App() {
   const [projectRevision, setProjectRevision] = useState(0);
   const [areaCounts, setAreaCounts] = useState<ProjectAreaCounts | null>(null);
   const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
+  const [toolApproval, setToolApproval] = useState<ToolApprovalRequest | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
@@ -476,6 +478,7 @@ export default function App() {
     setEntries([]);
     setPermissionMode("read");
     setAccessRequest(null);
+    setToolApproval(null);
     setQueuedMessages([]);
     setError(null);
     followRef.current = true;
@@ -486,6 +489,7 @@ export default function App() {
     setEntries([]);
     setPermissionMode("read");
     setAccessRequest(null);
+    setToolApproval(null);
     setQueuedMessages([]);
     setError(null);
     followRef.current = true;
@@ -539,6 +543,23 @@ export default function App() {
       setError(describeError(cause));
     }
   }, [accessRequest, busy, workspacePath]);
+
+  const approveToolAccess = useCallback(async () => {
+    if (toolApproval === null) {
+      return;
+    }
+    changePermissionMode("full");
+    setToolApproval(null);
+    setAccessNotice(`Tool access approved. This session is now in Full access.`);
+    const continuation = `Approved ${toolApproval.tool}. Continue and retry the action.`;
+    if (busy) {
+      steerRef.current(continuation);
+    } else {
+      sendRef.current(continuation);
+    }
+    composerRef.current?.focus();
+    window.setTimeout(() => setAccessNotice(null), 8_000);
+  }, [busy, changePermissionMode, toolApproval]);
 
   const revokeAccess = useCallback(
     async (grant: OutsideAccessGrant) => {
@@ -734,6 +755,10 @@ export default function App() {
             const nextAccessRequest = accessRequestFromMetadata(event.metadata);
             if (nextAccessRequest !== null) {
               setAccessRequest(nextAccessRequest);
+            }
+            const nextToolApproval = toolApprovalFromMetadata(event.metadata);
+            if (nextToolApproval !== null) {
+              setToolApproval(nextToolApproval);
             }
           }
           setEntries((current) =>
@@ -1798,6 +1823,14 @@ export default function App() {
         />
       )}
 
+      {toolApproval !== null && (
+        <ToolApprovalDialog
+          request={toolApproval}
+          onApprove={() => void approveToolAccess()}
+          onDeny={() => setToolApproval(null)}
+        />
+      )}
+
       {shortcutsOpen && (
         <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
@@ -2788,6 +2821,80 @@ function accessRequestFromMetadata(metadata: unknown): OutsideAccessRequest | nu
     write: record.write === true,
     reason: record.reason,
   };
+}
+
+function toolApprovalFromMetadata(metadata: unknown): ToolApprovalRequest | null {
+  if (typeof metadata !== "object" || metadata === null) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>).openbad_approval;
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.tool !== "string" ||
+    typeof record.risk !== "string" ||
+    typeof record.reason !== "string"
+  ) {
+    return null;
+  }
+  return { tool: record.tool, risk: record.risk, reason: record.reason };
+}
+
+function ToolApprovalDialog({
+  request,
+  onApprove,
+  onDeny,
+}: {
+  request: ToolApprovalRequest;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Tool approval request"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+    >
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 text-amber-300">
+            <Shield size={16} />
+          </div>
+          <div>
+            <h2 className="text-[14px] font-medium">Approve this tool?</h2>
+            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+              {request.reason}. Approval applies to this session.
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/30 px-2.5 py-2">
+          <span className="font-mono text-[11px] text-slate-300">{request.tool}</span>
+          <span className="ml-auto rounded border border-amber-400/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-amber-300">
+            {request.risk}
+          </span>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onDeny}
+            className="rounded-md border border-white/10 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/5"
+          >
+            Deny
+          </button>
+          <button
+            type="button"
+            onClick={onApprove}
+            className="rounded-md border border-emerald-400/30 bg-emerald-400/15 px-3 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-400/20"
+          >
+            Approve for session
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function AccessRequestDialog({

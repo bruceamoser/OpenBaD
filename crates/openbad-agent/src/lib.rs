@@ -19,7 +19,7 @@ use openbad_tools::{
     ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Messages the human injects into a running turn. They are delivered before
@@ -274,21 +274,28 @@ impl<T: HttpTransport> Agent<T> {
         let content = match serde_json::from_str::<Value>(&call.function.arguments) {
             Ok(arguments) => {
                 let risk = self.tools.risk_for_call(&call.function.name, &arguments);
-                if risk.is_some_and(|risk| risk.requires_approval()) && !context.allow_commands {
+                let blocked = risk.filter(|risk| risk.requires_approval());
+                if let Some(risk) = blocked.filter(|_| !context.allow_commands) {
+                    let risk_name = format!("{risk:?}").to_lowercase();
+                    let reason = format!(
+                        "{} needs {risk_name} access; approving switches this session to Full access",
+                        call.function.name
+                    );
                     let content = redact_secrets(
                         &format!(
-                            "error: approval required for {} (switch the composer access mode to Full access)",
+                            "error: approval required for {} ({reason})",
                             call.function.name
                         ),
                         &self.redactions,
                     );
-                    observer.on_tool_result(
-                        step,
-                        &call.function.name,
-                        &content,
-                        true,
-                        &Value::Null,
-                    );
+                    let metadata = json!({
+                        "openbad_approval": {
+                            "tool": call.function.name,
+                            "risk": risk_name,
+                            "reason": reason,
+                        }
+                    });
+                    observer.on_tool_result(step, &call.function.name, &content, true, &metadata);
                     content
                 } else {
                     match self
@@ -1180,6 +1187,25 @@ mod tests {
         }
     }
 
+    struct MetadataObserver {
+        metadata: Mutex<Value>,
+    }
+
+    impl AgentObserver for MetadataObserver {
+        fn on_tool_result(
+            &self,
+            _step: u32,
+            _name: &str,
+            _content: &str,
+            is_error: bool,
+            metadata: &Value,
+        ) {
+            if is_error {
+                *self.metadata.lock().expect("metadata") = metadata.clone();
+            }
+        }
+    }
+
     struct ExecuteProbe {
         ran: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -1235,11 +1261,16 @@ mod tests {
                 ..AgentConfig::default()
             },
         );
+        let observer = MetadataObserver {
+            metadata: Mutex::new(Value::Null),
+        };
         let run = agent
-            .run(vec![ChatMessage::user("run probe")])
+            .run_with_observer(vec![ChatMessage::user("run probe")], &observer)
             .await
             .expect("run");
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+        let metadata = observer.metadata.lock().expect("metadata");
+        assert_eq!(metadata["openbad_approval"]["tool"], json!("execute_probe"));
         assert!(run.new_messages.iter().any(|message| {
             message.role == ChatRole::Tool
                 && message

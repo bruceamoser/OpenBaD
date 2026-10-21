@@ -147,6 +147,12 @@ export type OutsideAccessRequest = {
   reason: string;
 };
 
+export type ToolApprovalRequest = {
+  tool: string;
+  risk: string;
+  reason: string;
+};
+
 export type FoundationState =
   | { kind: "loading" }
   | { kind: "ready"; foundation: Foundation }
