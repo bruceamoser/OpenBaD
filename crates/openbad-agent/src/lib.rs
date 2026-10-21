@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::join_all};
 use openbad_harness::{ApiFormat, ReasoningEffort, RequestEnvelope, canonical_json, hash_bytes};
 use openbad_llm::DeepSeekClient;
 use openbad_llm::chat::{
@@ -258,6 +258,86 @@ impl<T: HttpTransport> Agent<T> {
         self
     }
 
+    async fn execute_tool_call(
+        &self,
+        step: u32,
+        call: &ToolCall,
+        context: &ToolContext,
+        observer: &dyn AgentObserver,
+    ) -> String {
+        let started = std::time::Instant::now();
+        let content = match serde_json::from_str::<Value>(&call.function.arguments) {
+            Ok(arguments) => match self
+                .tools
+                .execute(&call.function.name, arguments, context)
+                .await
+            {
+                Ok(result) if result.is_error => {
+                    let content =
+                        redact_secrets(&format!("error: {}", result.content), &self.redactions);
+                    observer.on_tool_result(
+                        step,
+                        &call.function.name,
+                        &content,
+                        true,
+                        &result.metadata,
+                    );
+                    content
+                }
+                Ok(result) => {
+                    let content = redact_secrets(&result.content, &self.redactions);
+                    observer.on_tool_result(
+                        step,
+                        &call.function.name,
+                        &content,
+                        false,
+                        &result.metadata,
+                    );
+                    content
+                }
+                Err(error) => {
+                    let content = redact_secrets(&format!("error: {error}"), &self.redactions);
+                    observer.on_tool_result(
+                        step,
+                        &call.function.name,
+                        &content,
+                        true,
+                        &Value::Null,
+                    );
+                    content
+                }
+            },
+            Err(error) => {
+                let content = redact_secrets(
+                    &format!(
+                        "error: invalid arguments for {}: {error}",
+                        call.function.name
+                    ),
+                    &self.redactions,
+                );
+                observer.on_tool_result(step, &call.function.name, &content, true, &Value::Null);
+                content
+            }
+        };
+        let content = redact_secrets(&content, &self.redactions);
+        append_tool_audit(
+            self.workspace.root(),
+            step,
+            &call.function.name,
+            &redact_secrets(&call.function.arguments, &self.redactions),
+            &content,
+            started.elapsed().as_millis() as u64,
+        );
+        if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+            eprintln!(
+                "[agent]   result {}: {}",
+                call.function.name,
+                content.chars().take(500).collect::<String>()
+            );
+        }
+        content
+    }
+
     async fn close_terminals(&self) {
         if let Some(terminal) = &self.terminal {
             terminal.close_all().await;
@@ -443,92 +523,47 @@ impl<T: HttpTransport> Agent<T> {
                 });
             }
 
-            for call in tool_calls {
+            let mut call_index = 0;
+            while call_index < tool_calls.len() {
                 if observer.is_cancelled() {
                     self.close_terminals().await;
                     return Err(AgentError::Cancelled);
                 }
-                observer.on_tool_call(step, &call);
-                let started = std::time::Instant::now();
-                let content = match serde_json::from_str::<Value>(&call.function.arguments) {
-                    Ok(arguments) => match self
-                        .tools
-                        .execute(&call.function.name, arguments, &context)
-                        .await
+                let mut batch_end = call_index + 1;
+                if self.tools.parallel_safe(
+                    &tool_calls[call_index].function.name,
+                    &tool_calls[call_index].function.arguments,
+                ) {
+                    while batch_end < tool_calls.len()
+                        && self.tools.parallel_safe(
+                            &tool_calls[batch_end].function.name,
+                            &tool_calls[batch_end].function.arguments,
+                        )
                     {
-                        Ok(result) if result.is_error => {
-                            let content = redact_secrets(
-                                &format!("error: {}", result.content),
-                                &self.redactions,
-                            );
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &content,
-                                true,
-                                &result.metadata,
-                            );
-                            content
-                        }
-                        Ok(result) => {
-                            let content = redact_secrets(&result.content, &self.redactions);
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &content,
-                                false,
-                                &result.metadata,
-                            );
-                            content
-                        }
-                        Err(error) => {
-                            let content =
-                                redact_secrets(&format!("error: {error}"), &self.redactions);
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &content,
-                                true,
-                                &Value::Null,
-                            );
-                            content
-                        }
-                    },
-                    Err(error) => {
-                        let content = redact_secrets(
-                            &format!(
-                                "error: invalid arguments for {}: {error}",
-                                call.function.name
-                            ),
-                            &self.redactions,
-                        );
-                        observer.on_tool_result(
-                            step,
-                            &call.function.name,
-                            &content,
-                            true,
-                            &Value::Null,
-                        );
-                        content
+                        batch_end += 1;
                     }
-                };
-                let content = redact_secrets(&content, &self.redactions);
-                append_tool_audit(
-                    self.workspace.root(),
-                    step,
-                    &call.function.name,
-                    &redact_secrets(&call.function.arguments, &self.redactions),
-                    &content,
-                    started.elapsed().as_millis() as u64,
-                );
-                if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
-                    eprintln!(
-                        "[agent]   result {}: {}",
-                        call.function.name,
-                        content.chars().take(500).collect::<String>()
-                    );
                 }
-                messages.push(ChatMessage::tool(call.id, content));
+                let batch = &tool_calls[call_index..batch_end];
+                for call in batch {
+                    observer.on_tool_call(step, call);
+                }
+                if batch.len() == 1 {
+                    let content = self
+                        .execute_tool_call(step, &batch[0], &context, observer)
+                        .await;
+                    messages.push(ChatMessage::tool(batch[0].id.clone(), content));
+                } else {
+                    let contents = join_all(
+                        batch
+                            .iter()
+                            .map(|call| self.execute_tool_call(step, call, &context, observer)),
+                    )
+                    .await;
+                    for (call, content) in batch.iter().zip(contents) {
+                        messages.push(ChatMessage::tool(call.id.clone(), content));
+                    }
+                }
+                call_index = batch_end;
             }
 
             if step == step_budget {
@@ -1029,6 +1064,85 @@ mod tests {
             .expect("run");
         assert_eq!(run.text, "Looking at the file.\n\nThe file says hello.");
         assert_eq!(run.steps, 2);
+    }
+
+    struct SlowReadTool {
+        name: &'static str,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl openbad_tools::Tool for SlowReadTool {
+        fn definition(&self) -> openbad_tools::ToolDefinition {
+            openbad_tools::ToolDefinition::new(
+                self.name,
+                "Slow read-only test tool.",
+                openbad_governance::RiskLevel::Read,
+            )
+            .with_schema(json!({"type": "object", "properties": {}}))
+        }
+
+        async fn execute(
+            &self,
+            _arguments: Value,
+            _context: &ToolContext,
+        ) -> Result<openbad_tools::ToolResult, openbad_tools::ToolError> {
+            use std::sync::atomic::Ordering;
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(openbad_tools::ToolResult::ok(self.name))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_read_tool_calls_run_concurrently() {
+        let directory = tempdir().expect("tempdir");
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(SlowReadTool {
+            name: "slow_a",
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        });
+        registry.register(SlowReadTool {
+            name: "slow_b",
+            active: Arc::clone(&active),
+            max_active: Arc::clone(&max_active),
+        });
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"slow_a","arguments":"{}"}},{"id":"call-2","type":"function","function":{"name":"slow_b","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Both completed."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            registry,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("run both")])
+            .await
+            .expect("run");
+        assert_eq!(run.text, "Both completed.");
+        assert!(
+            max_active.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "read calls did not overlap"
+        );
     }
 
     struct SteeringTransport {
