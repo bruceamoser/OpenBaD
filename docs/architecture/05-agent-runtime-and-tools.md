@@ -238,7 +238,7 @@ The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
 The built-in surface is capped at **128 tools**. The registry currently exposes
-**114**, leaving 14 slots free. Every new capability must fit that budget; prefer
+**115**, leaving 13 slots free. Every new capability must fit that budget; prefer
 one stable proxy tool with an `action`/`operation` field over one tool per
 operation, and keep at least four slots free for hotfixes.
 

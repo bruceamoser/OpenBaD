@@ -124,7 +124,11 @@ export async function startMockDeepSeek() {
   });
   return {
     baseUrl: `http://127.0.0.1:${port}`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () =>
+      new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections?.();
+      }),
   };
 }
 
@@ -157,6 +161,7 @@ export class WebDriverClient {
           alwaysMatch: { "tauri:options": { application } },
         },
       }),
+      signal: AbortSignal.timeout(120_000),
     });
     const payload = await response.json();
     if (!response.ok || payload.value?.error) {
@@ -170,6 +175,7 @@ export class WebDriverClient {
       method,
       headers: body === undefined ? {} : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
     const text = await response.text();
     const payload = text.length > 0 ? JSON.parse(text) : {};
@@ -209,7 +215,10 @@ export class WebDriverClient {
   }
 
   async quit() {
-    await fetch(`${this.baseUrl}/session/${this.sessionId}`, { method: "DELETE" });
+    await fetch(`${this.baseUrl}/session/${this.sessionId}`, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => undefined);
   }
 }
 
@@ -248,6 +257,7 @@ export async function startTauriDriver({ port, nativePort, nativeDriver, env = {
     stdio: ["ignore", "pipe", "pipe"],
     cwd,
     env: cleanDesktopEnv(env),
+    detached: true,
   });
   let output = "";
   child.stdout.on("data", (chunk) => {
@@ -265,14 +275,33 @@ export async function startTauriDriver({ port, nativePort, nativeDriver, env = {
     try {
       const response = await fetch(`${driverUrl}/status`);
       if (response.ok) {
-        return { child, driverUrl, output: () => output };
+        return {
+          child,
+          driverUrl,
+          output: () => output,
+          stop: () => {
+            if (child.exitCode === null && child.pid) {
+              try {
+                process.kill(-child.pid, "SIGKILL");
+              } catch {
+                child.kill();
+              }
+            }
+          },
+        };
       }
     } catch {
       // Driver is still starting.
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  child.kill();
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill();
+    }
+  }
   throw new Error(`tauri-driver did not start:\n${output}`);
 }
 

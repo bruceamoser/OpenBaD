@@ -51,12 +51,16 @@ before(async () => {
     },
   });
   driverOutput = driver.output;
-  client = await WebDriverClient.create(driver.driverUrl, resolveAppBinary());
+  try {
+    client = await WebDriverClient.create(driver.driverUrl, resolveAppBinary());
+  } catch (error) {
+    throw new Error(`${error.message}\n${driverOutput()}`);
+  }
 });
 
 after(async () => {
   await client?.quit().catch(() => undefined);
-  if (driver?.child.exitCode === null) driver.child.kill();
+  driver?.stop();
   await mock?.close();
   await fixture?.cleanup();
 });

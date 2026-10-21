@@ -828,6 +828,36 @@ pub struct LspLocation {
     pub character: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHistoryHit {
+    pub session_id: String,
+    pub title: String,
+    pub seq: u64,
+    pub kind: String,
+    pub snippet: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEventView {
+    pub seq: u64,
+    pub turn: Option<u32>,
+    pub kind: String,
+    pub content: String,
+    pub created_at: i64,
+}
+
+/// Workspace-scoped session history supplied by the host.
+pub trait SessionHistory: Send + Sync {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionHistoryHit>, String>;
+    fn read(
+        &self,
+        session_id: &str,
+        from_seq: Option<u64>,
+        to_seq: Option<u64>,
+    ) -> Result<Vec<SessionEventView>, String>;
+}
+
 /// Precise language-server queries supplied by the host.
 #[async_trait]
 pub trait LspService: Send + Sync {
@@ -872,6 +902,7 @@ pub struct ToolContext {
     pub project: Option<Arc<dyn ProjectAreas>>,
     pub subagents: Option<Arc<dyn SubagentRuntime>>,
     pub lsp: Option<Arc<dyn LspService>>,
+    pub sessions: Option<Arc<dyn SessionHistory>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
     outside_grants: Vec<OutsideGrant>,
@@ -891,6 +922,7 @@ impl ToolContext {
             project: None,
             subagents: None,
             lsp: None,
+            sessions: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             outside_grants: Vec::new(),
@@ -1039,6 +1071,7 @@ impl ToolRegistry {
         registry.register(GrepTool);
         registry.register(SearchCodeTool);
         registry.register(LspTool);
+        registry.register(SessionTool);
         registry.register(GlobTool);
         registry.register(FindSymbolsTool);
         registry.register(WriteFileTool);
@@ -13154,6 +13187,100 @@ fn render_lsp_locations(
     Ok(content)
 }
 
+struct SessionTool;
+
+#[async_trait]
+impl Tool for SessionTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "session",
+            "Search or read this workspace's session history. action search finds events by text; action read returns a sequence range from one session. History from other workspaces is never visible.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["search", "read"]},
+                "query": {"type": "string"},
+                "session_id": {"type": "string"},
+                "from_seq": {"type": "integer", "minimum": 0},
+                "to_seq": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let history = context.sessions.as_ref().ok_or_else(|| {
+            ToolError::Failed("session history is not available in this context".to_owned())
+        })?;
+        match required_string(&arguments, "action")?.as_str() {
+            "search" => {
+                let query = required_string(&arguments, "query")?;
+                let limit = optional_usize(&arguments, "limit")
+                    .unwrap_or(10)
+                    .clamp(1, 50);
+                let hits = history.search(&query, limit).map_err(ToolError::Failed)?;
+                if hits.is_empty() {
+                    return Ok(ToolResult::ok("no matching session events"));
+                }
+                let lines = hits
+                    .iter()
+                    .map(|hit| {
+                        format!(
+                            "- {} · {} · seq {} · {} · {}\n  {}",
+                            hit.title,
+                            hit.session_id,
+                            hit.seq,
+                            hit.kind,
+                            hit.created_at,
+                            hit.snippet
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(ToolResult::ok(truncate(&lines, context.max_output_bytes)).with_metadata(json!({
+                    "hits": hits.len(),
+                    "sessions": hits.iter().map(|hit| hit.session_id.clone()).collect::<Vec<_>>(),
+                })))
+            }
+            "read" => {
+                let session_id = required_string(&arguments, "session_id")?;
+                let from = optional_u64(&arguments, "from_seq");
+                let to = optional_u64(&arguments, "to_seq");
+                let events = history
+                    .read(&session_id, from, to)
+                    .map_err(ToolError::Failed)?;
+                if events.is_empty() {
+                    return Ok(ToolResult::ok("no events in that range"));
+                }
+                let lines = events
+                    .iter()
+                    .map(|event| {
+                        let turn = event
+                            .turn
+                            .map(|turn| format!(" turn {turn}"))
+                            .unwrap_or_default();
+                        format!("[{}]{turn} {}: {}", event.seq, event.kind, event.content)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(ToolResult::ok(truncate(&lines, context.max_output_bytes))
+                    .with_metadata(json!({"events": events.len(), "session_id": session_id})))
+            }
+            action => Err(ToolError::InvalidArgument(format!(
+                "unsupported session action: {action}"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -15614,6 +15741,62 @@ invariants:
         }
     }
 
+    struct MockSessions;
+
+    impl SessionHistory for MockSessions {
+        fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionHistoryHit>, String> {
+            Ok(vec![SessionHistoryHit {
+                session_id: "session-1".to_owned(),
+                title: "Cache design".to_owned(),
+                seq: 4,
+                kind: "assistant/message".to_owned(),
+                snippet: format!("matched {query}"),
+                created_at: 1,
+            }]
+            .into_iter()
+            .take(limit)
+            .collect())
+        }
+
+        fn read(
+            &self,
+            _session_id: &str,
+            _from_seq: Option<u64>,
+            _to_seq: Option<u64>,
+        ) -> Result<Vec<SessionEventView>, String> {
+            Ok(vec![SessionEventView {
+                seq: 4,
+                turn: Some(2),
+                kind: "assistant/message".to_owned(),
+                content: "the decision".to_owned(),
+                created_at: 1,
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn session_tool_searches_and_reads_history() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.sessions = Some(Arc::new(MockSessions));
+
+        let search = SessionTool
+            .execute(json!({"action": "search", "query": "cache"}), &context)
+            .await
+            .expect("search");
+        assert!(search.content.contains("Cache design"));
+        assert!(search.content.contains("matched cache"));
+
+        let read = SessionTool
+            .execute(
+                json!({"action": "read", "session_id": "session-1", "from_seq": 1}),
+                &context,
+            )
+            .await
+            .expect("read");
+        assert!(read.content.contains("the decision"));
+    }
+
     #[tokio::test]
     async fn lsp_tool_requires_a_service_and_renders_locations() {
         let directory = tempdir().expect("tempdir");
@@ -15809,6 +15992,7 @@ invariants:
             "canon",
             "context_rules",
             "lsp",
+            "session",
         ] {
             assert!(
                 definitions.iter().any(|tool| tool.name == expected),

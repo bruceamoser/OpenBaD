@@ -24,8 +24,9 @@ use openbad_store::types::{
 };
 use openbad_tools::{
     CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
-    LspService, MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SubagentInfo,
-    SubagentRuntime, SubagentSpec, WorkspaceSearch,
+    LspService, MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SessionEventView,
+    SessionHistory, SessionHistoryHit, SubagentInfo, SubagentRuntime, SubagentSpec,
+    WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,68 @@ struct StoreSearch {
 struct WorkspaceMemory {
     store: Arc<Mutex<Store>>,
     workspace_id: WorkspaceId,
+}
+
+struct WorkspaceSessions {
+    store: Arc<Mutex<Store>>,
+    workspace_id: WorkspaceId,
+}
+
+impl SessionHistory for WorkspaceSessions {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionHistoryHit>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .search_session_events(self.workspace_id, query, limit as u32)
+            .map(|hits| {
+                hits.into_iter()
+                    .map(|hit| SessionHistoryHit {
+                        session_id: hit.session_id,
+                        title: hit.session_title,
+                        seq: hit.seq,
+                        kind: hit.kind,
+                        snippet: hit.snippet,
+                        created_at: hit.created_at,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn read(
+        &self,
+        session_id: &str,
+        from_seq: Option<u64>,
+        to_seq: Option<u64>,
+    ) -> Result<Vec<SessionEventView>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .read_session_events(self.workspace_id, session_id, from_seq, to_seq)
+            .map(|events| {
+                events
+                    .into_iter()
+                    .map(|event| SessionEventView {
+                        seq: event.seq,
+                        turn: event.turn,
+                        kind: event.kind,
+                        content: event
+                            .payload
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .or_else(|| event.payload.get("message").and_then(Value::as_str))
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| event.payload.to_string()),
+                        created_at: event.created_at,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl MemoryStore for WorkspaceMemory {
@@ -790,6 +853,10 @@ async fn run_subagent(
     }))
     .with_outside_grants(settings.grants.clone())
     .with_lsp(Arc::new(DesktopLsp::new(settings.workspace_path.clone())))
+    .with_sessions(Arc::new(WorkspaceSessions {
+        store: Arc::clone(&settings.store),
+        workspace_id: settings.workspace_id,
+    }))
     .with_redactions(vec![settings.api_key.clone()]);
 
     let observer = SubagentObserver {
@@ -2496,6 +2563,10 @@ async fn chat(
         agent = agent
             .with_outside_grants(subagent_grants.clone())
             .with_lsp(Arc::new(DesktopLsp::new(workspace_path.clone())))
+            .with_sessions(Arc::new(WorkspaceSessions {
+                store: Arc::clone(&state.store),
+                workspace_id,
+            }))
             .with_subagents(Arc::new(SubagentRunner {
                 settings: Arc::new(SubagentSettings {
                     store: Arc::clone(&state.store),
@@ -2962,7 +3033,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0012_subagents");
+        assert_eq!(payload.doctor.schema_version, "0013_session_fts");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

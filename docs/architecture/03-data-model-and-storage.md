@@ -183,14 +183,15 @@ Rules:
 
 ```sql
 CREATE VIRTUAL TABLE session_events_fts USING fts5(
-    content,
-    content='',
-    tokenize='porter unicode61'
+    search_text,
+    content='session_events',
+    content_rowid='rowid'
 );
 ```
 
-The application inserts `search_text` when `surface = 1`, keyed by
-`session_events.rowid`. Deleting a session deletes its FTS rows first.
+The application writes `search_text` for surface events, and triggers keep the
+FTS index in sync on insert, update, and delete. Session search joins the FTS
+rows back to `session_events` and filters by `sessions.workspace_id`.
 
 ### 4.4 Projections
 

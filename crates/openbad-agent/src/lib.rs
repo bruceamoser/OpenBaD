@@ -14,8 +14,8 @@ use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
-    CheckpointSink, LspService, MemoryStore, OutsideGrant, ProjectAreas, SubagentRuntime,
-    ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
+    CheckpointSink, LspService, MemoryStore, OutsideGrant, ProjectAreas, SessionHistory,
+    SubagentRuntime, ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
@@ -147,6 +147,7 @@ pub struct Agent<T: HttpTransport> {
     project: Option<Arc<dyn ProjectAreas>>,
     subagents: Option<Arc<dyn SubagentRuntime>>,
     lsp: Option<Arc<dyn LspService>>,
+    sessions: Option<Arc<dyn SessionHistory>>,
     outside_grants: Vec<OutsideGrant>,
     steering: Option<Arc<SteeringInbox>>,
     redactions: Vec<String>,
@@ -171,6 +172,7 @@ impl<T: HttpTransport> Agent<T> {
             project: None,
             subagents: None,
             lsp: None,
+            sessions: None,
             outside_grants: Vec::new(),
             steering: None,
             redactions: Vec::new(),
@@ -211,6 +213,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_lsp(mut self, lsp: Arc<dyn LspService>) -> Self {
         self.lsp = Some(lsp);
+        self
+    }
+
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Arc<dyn SessionHistory>) -> Self {
+        self.sessions = Some(sessions);
         self
     }
 
@@ -282,6 +290,7 @@ impl<T: HttpTransport> Agent<T> {
             context.project = self.project.clone();
             context.subagents = self.subagents.clone();
             context.lsp = self.lsp.clone();
+            context.sessions = self.sessions.clone();
             context.set_outside_grants(self.outside_grants.clone());
             context
         });
@@ -614,6 +623,11 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
         if self.lsp.is_some() {
             prompt.push_str(
                 "\nUse lsp for precise definitions, implementations, references, or hover when textual search is ambiguous. Use ordinary search/read for simple navigation.",
+            );
+        }
+        if self.sessions.is_some() {
+            prompt.push_str(
+                "\nUse session action search to find decisions in this workspace's past chats and action read to inspect a specific sequence range. Session history is workspace-scoped.",
             );
         }
         if let Ok(policy) = openbad_workspace::load_context_policy(self.workspace.root()) {
