@@ -161,7 +161,7 @@ export class WebDriverClient {
           alwaysMatch: { "tauri:options": { application } },
         },
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(120_000),
     });
     const payload = await response.json();
     if (!response.ok || payload.value?.error) {
