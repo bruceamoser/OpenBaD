@@ -90,3 +90,9 @@ session knows what moved without re-reading every document.
   event text. The `session` tool searches this workspace's history and reads a
   sequence range; cross-workspace reads are rejected. Schema is now
   `0013_session_fts`, and the built-in surface is 115 of 128 slots.
+- **MCP client and proxy tools.** `openbad-mcp` now speaks line-delimited
+  JSON-RPC over stdio and JSON-RPC over HTTP, loads `.openbad/mcp.yaml`, and
+  enforces per-server `allowed_tools`. `tool_search` searches the catalog and
+  `mcp_call` invokes a tool; the catalog is appended as an untrusted tail
+  message so server changes do not alter the cached prefix. The built-in
+  surface is 117 of 128 slots.

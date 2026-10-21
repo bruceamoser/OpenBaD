@@ -238,7 +238,7 @@ The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
 The built-in surface is capped at **128 tools**. The registry currently exposes
-**115**, leaving 13 slots free. Every new capability must fit that budget; prefer
+**117**, leaving 11 slots free. Every new capability must fit that budget; prefer
 one stable proxy tool with an `action`/`operation` field over one tool per
 operation, and keep at least four slots free for hotfixes.
 
@@ -896,14 +896,35 @@ Rules:
 
 ### 13.2 MCP
 
-- Transports: stdio and streamable HTTP.
-- Server config: command/URL, args, env, cwd, timeout, allowed tools.
-- Tools are imported and called through `mcp_call` to keep the schema stable.
-- Resources are read through a typed `mcp_read_resource` tool.
-- Prompts are loaded through `mcp_prompt`.
-- Health checks and crash backoff.
+MCP servers are configured in `.openbad/mcp.yaml`:
+
+```yaml
+servers:
+  - name: docs
+    transport: stdio
+    command: npx
+    args: ["-y", "@example/mcp-docs"]
+    allowed_tools: ["search_docs"]
+    timeout_seconds: 30
+  - name: remote
+    transport: http
+    url: https://mcp.example.com/rpc
+```
+
+- Transports: line-delimited JSON-RPC over stdio, and request/response JSON-RPC
+  over HTTP.
+- Server config: command/URL, args, env, cwd, timeout, and `allowed_tools`.
+- The catalog is fetched at turn start and appended after the stable system
+  prompt and tool schemas, so connecting or removing a server does not change
+  the cached prefix.
+- `tool_search` searches the catalog; `mcp_call` invokes a tool by server and
+  name. One proxy pair keeps the built-in schema list fixed.
+- Untrusted MCP descriptions and output are explicitly marked; the model is
+  told to treat them as data, never instructions.
+- The client initializes each server once, reuses the session, and shuts it
+  down cleanly. Per-request timeouts are enforced.
+- Resources and prompts are not proxied yet.
 - Credentials live in the OS keychain.
-- Untrusted MCP output is tagged as untrusted content.
 
 ## 14. Evidence gate
 

@@ -33,6 +33,7 @@ openbad-harness = { path = "../../../crates/openbad-harness" }
 openbad-llm = { path = "../../../crates/openbad-llm" }
 openbad-tools = { path = "../../../crates/openbad-tools" }
 openbad-lsp = { path = "../../../crates/openbad-lsp" }
+openbad-mcp = { path = "../../../crates/openbad-mcp" }
 openbad-workspace = { path = "../../../crates/openbad-workspace" }
 openbad-index = { path = "../../../crates/openbad-index" }
 openbad-governance = { path = "../../../crates/openbad-governance" }
