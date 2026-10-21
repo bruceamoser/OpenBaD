@@ -6,6 +6,10 @@ session knows what moved without re-reading every document.
 
 ## 2026-10-21
 
+- **Parallel read tools.** Consecutive read-only tool calls now execute
+  concurrently, including `<domain>_run` calls whose inner tool is read-only.
+  Write and execute calls remain serial, and tool-message order and audit
+  records are preserved.
 - **Tool-output spilling.** Results above the 64 KiB model-facing cap are saved
   under `.openbad/spill/` with a `spilled_path`, and the new `read_spill` tool
   pages through them. The internal extraction cap remains 256 KiB.

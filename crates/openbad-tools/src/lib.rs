@@ -1286,6 +1286,31 @@ impl ToolRegistry {
             .collect()
     }
 
+    #[must_use]
+    pub fn parallel_safe(&self, name: &str, arguments: &str) -> bool {
+        if self.grouped {
+            if name.ends_with("_list") {
+                return true;
+            }
+            if let Some(domain) = name.strip_suffix("_run") {
+                let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
+                    return false;
+                };
+                let Some(tool) = arguments.get("tool").and_then(Value::as_str) else {
+                    return false;
+                };
+                return tool_domain(tool) == domain
+                    && self
+                        .tools
+                        .get(tool)
+                        .is_some_and(|tool| tool.definition().risk == RiskLevel::Read);
+            }
+        }
+        self.tools
+            .get(name)
+            .is_some_and(|tool| tool.definition().risk == RiskLevel::Read)
+    }
+
     pub async fn execute(
         &self,
         name: &str,
