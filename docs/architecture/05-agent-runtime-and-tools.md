@@ -238,9 +238,24 @@ The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
 The built-in surface is capped at **128 tools**. The registry currently exposes
-**113**, leaving 15 slots free. Every new capability must fit that budget; prefer
+**114**, leaving 14 slots free. Every new capability must fit that budget; prefer
 one stable proxy tool with an `action`/`operation` field over one tool per
 operation, and keep at least four slots free for hotfixes.
+
+LSP servers are configured in `.openbad/lsp.yaml`:
+
+```yaml
+servers:
+  - language: rust
+    command: rust-analyzer
+    extensions: [rs]
+    args: []
+    initialization_options: {}
+```
+
+The `lsp` tool accepts one-based UTF-16 line and character coordinates,
+returns one-based locations, caps results visibly, and reports a clear error
+when no server is configured for the file type.
 
 ### 6.3 Execution pipeline
 

@@ -15,6 +15,7 @@ members = [
     "crates/openbad-autonomic",
     "crates/openbad-governance",
     "crates/openbad-mcp",
+    "crates/openbad-lsp",
 ]
 
 [workspace.package]

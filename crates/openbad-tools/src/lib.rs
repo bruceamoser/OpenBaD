@@ -821,6 +821,37 @@ pub struct SubagentInfo {
     pub finished_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspLocation {
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+}
+
+/// Precise language-server queries supplied by the host.
+#[async_trait]
+pub trait LspService: Send + Sync {
+    async fn definition(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<LspLocation>, String>;
+    async fn references(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<LspLocation>, String>;
+    async fn implementation(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<LspLocation>, String>;
+    async fn hover(&self, path: &Path, line: u32, character: u32) -> Result<String, String>;
+}
+
 /// Starts and observes background subagents. Implemented by the host so the
 /// tool layer stays independent of the desktop runtime.
 pub trait SubagentRuntime: Send + Sync {
@@ -840,6 +871,7 @@ pub struct ToolContext {
     pub memory: Option<Arc<dyn MemoryStore>>,
     pub project: Option<Arc<dyn ProjectAreas>>,
     pub subagents: Option<Arc<dyn SubagentRuntime>>,
+    pub lsp: Option<Arc<dyn LspService>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
     outside_grants: Vec<OutsideGrant>,
@@ -858,6 +890,7 @@ impl ToolContext {
             memory: None,
             project: None,
             subagents: None,
+            lsp: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             outside_grants: Vec::new(),
@@ -1005,6 +1038,7 @@ impl ToolRegistry {
         registry.register(ListDirTool);
         registry.register(GrepTool);
         registry.register(SearchCodeTool);
+        registry.register(LspTool);
         registry.register(GlobTool);
         registry.register(FindSymbolsTool);
         registry.register(WriteFileTool);
@@ -12996,6 +13030,130 @@ impl Tool for ContextRulesTool {
     }
 }
 
+struct LspTool;
+
+#[async_trait]
+impl Tool for LspTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "lsp",
+            "Query a configured language server for precise navigation: goToDefinition, findReferences, goToImplementation, or hover. Use search/read for ordinary navigation; use lsp when textual matches are ambiguous or before a change that needs exact definitions, implementations, or references.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["goToDefinition", "findReferences", "goToImplementation", "hover"]},
+                "file_path": {"type": "string"},
+                "line": {"type": "integer", "minimum": 1},
+                "character": {"type": "integer", "minimum": 1},
+                "max_locations": {"type": "integer", "minimum": 1, "maximum": 500},
+                "max_result_chars": {"type": "integer", "minimum": 1, "maximum": 50000}
+            },
+            "required": ["operation", "file_path", "line", "character"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let service = context.lsp.as_ref().ok_or_else(|| {
+            ToolError::Failed(
+                "LSP is not available; configure .openbad/lsp.yaml and restart OpenBaD".to_owned(),
+            )
+        })?;
+        let operation = required_string(&arguments, "operation")?;
+        let path = context.resolve_read(Path::new(&required_string(&arguments, "file_path")?))?;
+        let line = optional_u64(&arguments, "line").unwrap_or(1) as u32;
+        let character = optional_u64(&arguments, "character").unwrap_or(1) as u32;
+        if line == 0 || character == 0 {
+            return Err(ToolError::InvalidArgument(
+                "line and character are one-based and must be positive".to_owned(),
+            ));
+        }
+        let max_locations = optional_usize(&arguments, "max_locations")
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let max_chars = optional_usize(&arguments, "max_result_chars")
+            .unwrap_or(16_000)
+            .clamp(1, 50_000);
+        match operation.as_str() {
+            "hover" => {
+                let text = service
+                    .hover(&path, line, character)
+                    .await
+                    .map_err(ToolError::Failed)?;
+                Ok(ToolResult::ok(truncate(
+                    if text.trim().is_empty() {
+                        "no hover information"
+                    } else {
+                        &text
+                    },
+                    max_chars,
+                ))
+                .with_metadata(json!({"operation": operation})))
+            }
+            "goToDefinition" | "findReferences" | "goToImplementation" => {
+                let locations = match operation.as_str() {
+                    "goToDefinition" => service.definition(&path, line, character).await,
+                    "findReferences" => service.references(&path, line, character).await,
+                    _ => service.implementation(&path, line, character).await,
+                }
+                .map_err(ToolError::Failed)?;
+                render_lsp_locations(&locations, max_locations, max_chars)
+                    .map(|content| {
+                        ToolResult::ok(content).with_metadata(json!({
+                            "operation": operation,
+                            "locations": locations.len(),
+                        }))
+                    })
+                    .map_err(ToolError::Failed)
+            }
+            other => Err(ToolError::InvalidArgument(format!(
+                "unknown lsp operation: {other}"
+            ))),
+        }
+    }
+}
+
+fn render_lsp_locations(
+    locations: &[LspLocation],
+    max_locations: usize,
+    max_chars: usize,
+) -> Result<String, String> {
+    if locations.is_empty() {
+        return Ok("no locations".to_owned());
+    }
+    let mut lines = Vec::new();
+    for location in locations.iter().take(max_locations) {
+        lines.push(format!(
+            "{}:{}:{}",
+            location.path, location.line, location.character
+        ));
+        if lines.len() >= max_locations {
+            break;
+        }
+    }
+    if locations.len() > max_locations {
+        lines.push(format!(
+            "[omitted {} locations; max_locations={max_locations}]",
+            locations.len() - max_locations
+        ));
+    }
+    let mut content = lines.join("\n");
+    if content.len() > max_chars {
+        content = format!(
+            "{}\n[omitted {} characters; max_result_chars={max_chars}]",
+            truncate(&content, max_chars),
+            content.len().saturating_sub(max_chars)
+        );
+    }
+    Ok(content)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -15405,6 +15563,100 @@ invariants:
         }
     }
 
+    struct MockLsp;
+
+    #[async_trait]
+    impl LspService for MockLsp {
+        async fn definition(
+            &self,
+            path: &Path,
+            line: u32,
+            character: u32,
+        ) -> Result<Vec<LspLocation>, String> {
+            Ok(vec![LspLocation {
+                path: path.display().to_string(),
+                line: line + 10,
+                character,
+            }])
+        }
+
+        async fn references(
+            &self,
+            path: &Path,
+            line: u32,
+            character: u32,
+        ) -> Result<Vec<LspLocation>, String> {
+            Ok(vec![
+                LspLocation {
+                    path: path.display().to_string(),
+                    line,
+                    character,
+                },
+                LspLocation {
+                    path: path.display().to_string(),
+                    line: line + 1,
+                    character,
+                },
+            ])
+        }
+
+        async fn implementation(
+            &self,
+            path: &Path,
+            line: u32,
+            character: u32,
+        ) -> Result<Vec<LspLocation>, String> {
+            self.definition(path, line, character).await
+        }
+
+        async fn hover(&self, _path: &Path, _line: u32, _character: u32) -> Result<String, String> {
+            Ok("hover text".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn lsp_tool_requires_a_service_and_renders_locations() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("main.rs"), "fn main() {}").expect("file");
+        let mut context = context(directory.path());
+        context.lsp = None;
+        let unavailable = LspTool
+            .execute(
+                json!({"operation": "hover", "file_path": "main.rs", "line": 1, "character": 1}),
+                &context,
+            )
+            .await;
+        assert!(unavailable.is_err());
+
+        context.lsp = Some(Arc::new(MockLsp));
+        let definitions = LspTool
+            .execute(
+                json!({"operation": "goToDefinition", "file_path": "main.rs", "line": 2, "character": 3}),
+                &context,
+            )
+            .await
+            .expect("definition");
+        assert!(definitions.content.contains(":12:3"));
+
+        let references = LspTool
+            .execute(
+                json!({"operation": "findReferences", "file_path": "main.rs", "line": 2, "character": 3, "max_locations": 1}),
+                &context,
+            )
+            .await
+            .expect("references");
+        assert!(references.content.contains("omitted 1 locations"));
+
+        let hover = LspTool
+            .execute(
+                json!({"operation": "hover", "file_path": "main.rs", "line": 1, "character": 1}),
+                &context,
+            )
+            .await
+            .expect("hover");
+        assert_eq!(hover.content, "hover text");
+    }
+
     #[tokio::test]
     async fn subagent_tool_spawns_lists_reports_and_cancels() {
         let directory = tempdir().expect("tempdir");
@@ -15556,6 +15808,7 @@ invariants:
             "golden",
             "canon",
             "context_rules",
+            "lsp",
         ] {
             assert!(
                 definitions.iter().any(|tool| tool.name == expected),

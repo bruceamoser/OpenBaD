@@ -23,8 +23,9 @@ use openbad_store::types::{
     SessionMessage, SessionSummary, SubagentRecord, SubagentUpdate,
 };
 use openbad_tools::{
-    CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, MemoryStore, OutsideGrant,
-    ProjectAreas, ProjectRepoRef, SubagentInfo, SubagentRuntime, SubagentSpec, WorkspaceSearch,
+    CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
+    LspService, MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SubagentInfo,
+    SubagentRuntime, SubagentSpec, WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -441,6 +442,104 @@ fn knowledge_document_ref(document: KnowledgeDocument) -> KnowledgeDocumentRef {
     }
 }
 
+struct DesktopLsp {
+    manager: Result<Arc<openbad_lsp::LspManager>, String>,
+}
+
+impl DesktopLsp {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            manager: openbad_lsp::LspManager::new(root)
+                .map(Arc::new)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn manager(&self) -> Result<Arc<openbad_lsp::LspManager>, String> {
+        self.manager.as_ref().map(Arc::clone).map_err(Clone::clone)
+    }
+}
+
+fn tool_locations(locations: Vec<openbad_lsp::LspLocation>) -> Vec<ToolLspLocation> {
+    locations
+        .into_iter()
+        .map(|location| ToolLspLocation {
+            path: location.path.display().to_string(),
+            line: location.line,
+            character: location.character,
+        })
+        .collect()
+}
+
+#[async_trait::async_trait]
+impl LspService for DesktopLsp {
+    async fn definition(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<ToolLspLocation>, String> {
+        let manager = self.manager()?;
+        let path = path.to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .definition(&path, line, character)
+                .map(tool_locations)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn references(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<ToolLspLocation>, String> {
+        let manager = self.manager()?;
+        let path = path.to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .references(&path, line, character)
+                .map(tool_locations)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn implementation(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<ToolLspLocation>, String> {
+        let manager = self.manager()?;
+        let path = path.to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .implementation(&path, line, character)
+                .map(tool_locations)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn hover(&self, path: &Path, line: u32, character: u32) -> Result<String, String> {
+        let manager = self.manager()?;
+        let path = path.to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .hover(&path, line, character)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+}
+
 #[derive(Clone)]
 struct SubagentSettings {
     store: Arc<Mutex<Store>>,
@@ -690,6 +789,7 @@ async fn run_subagent(
         workspace_id: settings.workspace_id,
     }))
     .with_outside_grants(settings.grants.clone())
+    .with_lsp(Arc::new(DesktopLsp::new(settings.workspace_path.clone())))
     .with_redactions(vec![settings.api_key.clone()]);
 
     let observer = SubagentObserver {
@@ -2395,6 +2495,7 @@ async fn chat(
             .collect();
         agent = agent
             .with_outside_grants(subagent_grants.clone())
+            .with_lsp(Arc::new(DesktopLsp::new(workspace_path.clone())))
             .with_subagents(Arc::new(SubagentRunner {
                 settings: Arc::new(SubagentSettings {
                     store: Arc::clone(&state.store),

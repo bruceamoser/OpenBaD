@@ -32,11 +32,13 @@ openbad-agent = { path = "../../../crates/openbad-agent" }
 openbad-harness = { path = "../../../crates/openbad-harness" }
 openbad-llm = { path = "../../../crates/openbad-llm" }
 openbad-tools = { path = "../../../crates/openbad-tools" }
+openbad-lsp = { path = "../../../crates/openbad-lsp" }
 openbad-workspace = { path = "../../../crates/openbad-workspace" }
 openbad-index = { path = "../../../crates/openbad-index" }
 openbad-governance = { path = "../../../crates/openbad-governance" }
 similar = "2"
 base64 = "0.22"
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
