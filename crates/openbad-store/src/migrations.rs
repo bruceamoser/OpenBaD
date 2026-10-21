@@ -52,6 +52,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0012_subagents",
         include_str!("../migrations/0012_subagents.sql"),
     ),
+    (
+        "0013_session_fts",
+        include_str!("../migrations/0013_session_fts.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
-use openbad_core::event::{NewEvent, SessionEvent};
+use openbad_core::event::{NewEvent, SessionEvent, SessionEventKind};
 use openbad_core::{ModelRouteId, ProviderId, SessionId, WorkspaceId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
@@ -18,8 +18,9 @@ use crate::types::{
     AuditRecord, AuditReport, DoctorReport, FileCheckpoint, FileCheckpointSummary, IndexHit,
     IndexSummary, IndexedFile, KnowledgeDocument, KnowledgeDocumentSummary, MemoryRecord,
     ModelRouteRecord, NewModelRoute, NewProvider, NewSession, NewWorkspace, OutsideAccessGrant,
-    ProjectHit, ProjectOverview, ProjectRepo, ProviderRecord, SessionMessage, SessionSummary,
-    SessionTurn, SubagentRecord, SubagentUpdate, SymbolHit, WorkspaceSummary,
+    ProjectHit, ProjectOverview, ProjectRepo, ProviderRecord, SessionEventRecord, SessionMessage,
+    SessionSearchHit, SessionSummary, SessionTurn, SubagentRecord, SubagentUpdate, SymbolHit,
+    WorkspaceSummary,
 };
 
 enum WriteCommand {
@@ -1715,6 +1716,104 @@ impl Store {
         })
     }
 
+    pub fn search_session_events(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SessionSearchHit>, StoreError> {
+        let terms = fts_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT e.session_id, s.title, e.seq, e.kind,
+                    snippet(session_events_fts, 0, '[', ']', '…', 12), e.created_at
+             FROM session_events_fts
+             JOIN session_events e ON e.rowid = session_events_fts.rowid
+             JOIN sessions s ON s.id = e.session_id
+             WHERE session_events_fts MATCH ?1
+               AND s.workspace_id = ?2
+               AND s.deleted_at IS NULL
+             ORDER BY session_events_fts.rank
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                terms,
+                workspace_id.to_string(),
+                i64::from(limit.clamp(1, 100))
+            ],
+            |row| {
+                Ok(SessionSearchHit {
+                    session_id: row.get(0)?,
+                    session_title: row.get(1)?,
+                    seq: row.get::<_, i64>(2)?.max(0) as u64,
+                    kind: row.get(3)?,
+                    snippet: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn read_session_events(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: &str,
+        from_seq: Option<u64>,
+        to_seq: Option<u64>,
+    ) -> Result<Vec<SessionEventRecord>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT e.seq, e.turn, e.step, e.kind, e.payload_json, e.created_at
+             FROM session_events e
+             JOIN sessions s ON s.id = e.session_id
+             WHERE s.id = ?1
+               AND s.workspace_id = ?2
+               AND s.deleted_at IS NULL
+               AND e.seq >= ?3
+               AND e.seq <= ?4
+             ORDER BY e.seq
+             LIMIT 500",
+        )?;
+        let rows = statement.query_map(
+            params![
+                session_id,
+                workspace_id.to_string(),
+                from_seq.unwrap_or(0) as i64,
+                to_seq.unwrap_or(i64::MAX as u64) as i64
+            ],
+            |row| {
+                let payload: String = row.get(4)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    payload,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (seq, turn, step, kind, payload, created_at) = row?;
+            events.push(SessionEventRecord {
+                seq: seq.max(0) as u64,
+                turn: turn.map(|value| value as u32),
+                step: step.map(|value| value as u32),
+                kind,
+                payload: serde_json::from_str(&payload)?,
+                created_at,
+            });
+        }
+        Ok(events)
+    }
+
     pub fn create_subagent(&self, record: SubagentRecord) -> Result<SubagentRecord, StoreError> {
         self.write(|reply| WriteCommand::CreateSubagent { record, reply })
     }
@@ -3130,6 +3229,19 @@ fn create_session(connection: &Connection, session: NewSession) -> Result<Sessio
     Ok(id)
 }
 
+fn event_search_text(kind: &SessionEventKind, payload: &Value) -> Option<String> {
+    if !kind.is_surface() {
+        return None;
+    }
+    payload
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
 fn append_event(
     connection: &mut Connection,
     session_id: SessionId,
@@ -3164,10 +3276,11 @@ fn append_event(
         created_at,
     };
 
+    let search_text = event_search_text(&event.kind, &event.payload);
     transaction.execute(
         "INSERT INTO session_events
-         (id, session_id, seq, turn, step, kind, surface, payload_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, session_id, seq, turn, step, kind, surface, payload_json, search_text, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             event.id.to_string(),
             session_id.to_string(),
@@ -3177,6 +3290,7 @@ fn append_event(
             kind.as_str(),
             if surface { 1_i64 } else { 0_i64 },
             payload_json,
+            search_text,
             created_at,
         ],
     )?;
@@ -3292,7 +3406,7 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(store.schema_version().expect("version"), "0012_subagents");
+        assert_eq!(store.schema_version().expect("version"), "0013_session_fts");
     }
 
     #[test]
@@ -3367,6 +3481,60 @@ mod tests {
             .expect("prune");
         assert_eq!(pruned, 1);
         assert!(store.get_subagent("agent-1").expect("get").is_none());
+    }
+
+    #[test]
+    fn session_search_and_read_are_workspace_scoped() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("demo", "/tmp/openbad-session-search")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("Cache design"))
+            .expect("session");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::UserMessage)
+                    .with_payload(json!({"content": "How should the cache prefix stay stable?"})),
+            )
+            .expect("user event");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::AssistantMessage)
+                    .with_payload(json!({"content": "Keep the tool schema sorted and immutable."})),
+            )
+            .expect("assistant event");
+
+        let hits = store
+            .search_session_events(workspace, "cache", 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, session.to_string());
+        assert!(hits[0].snippet.contains("cache"));
+
+        let events = store
+            .read_session_events(workspace, &session.to_string(), Some(1), Some(2))
+            .expect("read");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "user/message");
+        assert!(
+            events[1].payload["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("tool schema")
+        );
+
+        let other = store
+            .create_workspace("other", "/tmp/openbad-other")
+            .expect("other workspace");
+        assert!(
+            store
+                .read_session_events(other, &session.to_string(), None, None)
+                .expect("scoped read")
+                .is_empty()
+        );
     }
 
     #[test]

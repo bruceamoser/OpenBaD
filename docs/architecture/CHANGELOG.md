@@ -86,3 +86,7 @@ session knows what moved without re-reading every document.
   `lsp` tool for definition, references, implementation, and hover queries over
   a configured stdio language server. Configure servers in `.openbad/lsp.yaml`.
   The built-in surface is now 114 of 128 slots.
+- **Session history search.** `session_fts` indexes user, assistant, and tool
+  event text. The `session` tool searches this workspace's history and reads a
+  sequence range; cross-workspace reads are rejected. Schema is now
+  `0013_session_fts`, and the built-in surface is 115 of 128 slots.

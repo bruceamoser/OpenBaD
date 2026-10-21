@@ -383,3 +383,25 @@ pub struct SubagentUpdate {
     pub error: Option<String>,
     pub steps: Option<u32>,
 }
+
+/// A full-text hit in the session event log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub session_title: String,
+    pub seq: u64,
+    pub kind: String,
+    pub snippet: String,
+    pub created_at: i64,
+}
+
+/// A session event returned by the history reader.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionEventRecord {
+    pub seq: u64,
+    pub turn: Option<u32>,
+    pub step: Option<u32>,
+    pub kind: String,
+    pub payload: Value,
+    pub created_at: i64,
+}
