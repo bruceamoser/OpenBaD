@@ -6,6 +6,10 @@ session knows what moved without re-reading every document.
 
 ## 2026-10-21
 
+- **Risk gate.** The agent now resolves the effective risk of direct and
+  `<domain>_run` calls and refuses approval-required tools before execution when
+  the session lacks command access, returning an audited error instead of
+  running the tool.
 - **Deterministic tool-result compaction.** Before a request exceeds 600 KB,
   old tool results outside the recent 8-message window are replaced with a
   compact marker. User/assistant text is preserved and the cache prefix is
