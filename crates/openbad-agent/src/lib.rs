@@ -272,36 +272,16 @@ impl<T: HttpTransport> Agent<T> {
     ) -> String {
         let started = std::time::Instant::now();
         let content = match serde_json::from_str::<Value>(&call.function.arguments) {
-            Ok(arguments) => match self
-                .tools
-                .execute(&call.function.name, arguments, context)
-                .await
-            {
-                Ok(result) if result.is_error => {
-                    let content =
-                        redact_secrets(&format!("error: {}", result.content), &self.redactions);
-                    observer.on_tool_result(
-                        step,
-                        &call.function.name,
-                        &content,
-                        true,
-                        &result.metadata,
+            Ok(arguments) => {
+                let risk = self.tools.risk_for_call(&call.function.name, &arguments);
+                if risk.is_some_and(|risk| risk.requires_approval()) && !context.allow_commands {
+                    let content = redact_secrets(
+                        &format!(
+                            "error: approval required for {} (switch the composer access mode to Full access)",
+                            call.function.name
+                        ),
+                        &self.redactions,
                     );
-                    content
-                }
-                Ok(result) => {
-                    let content = redact_secrets(&result.content, &self.redactions);
-                    observer.on_tool_result(
-                        step,
-                        &call.function.name,
-                        &content,
-                        false,
-                        &result.metadata,
-                    );
-                    content
-                }
-                Err(error) => {
-                    let content = redact_secrets(&format!("error: {error}"), &self.redactions);
                     observer.on_tool_result(
                         step,
                         &call.function.name,
@@ -310,8 +290,52 @@ impl<T: HttpTransport> Agent<T> {
                         &Value::Null,
                     );
                     content
+                } else {
+                    match self
+                        .tools
+                        .execute(&call.function.name, arguments, context)
+                        .await
+                    {
+                        Ok(result) if result.is_error => {
+                            let content = redact_secrets(
+                                &format!("error: {}", result.content),
+                                &self.redactions,
+                            );
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &content,
+                                true,
+                                &result.metadata,
+                            );
+                            content
+                        }
+                        Ok(result) => {
+                            let content = redact_secrets(&result.content, &self.redactions);
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &content,
+                                false,
+                                &result.metadata,
+                            );
+                            content
+                        }
+                        Err(error) => {
+                            let content =
+                                redact_secrets(&format!("error: {error}"), &self.redactions);
+                            observer.on_tool_result(
+                                step,
+                                &call.function.name,
+                                &content,
+                                true,
+                                &Value::Null,
+                            );
+                            content
+                        }
+                    }
                 }
-            },
+            }
             Err(error) => {
                 let content = redact_secrets(
                     &format!(
@@ -1154,6 +1178,75 @@ mod tests {
             *self.before.lock().expect("before") = before_bytes;
             *self.after.lock().expect("after") = after_bytes;
         }
+    }
+
+    struct ExecuteProbe {
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl openbad_tools::Tool for ExecuteProbe {
+        fn definition(&self) -> openbad_tools::ToolDefinition {
+            openbad_tools::ToolDefinition::new(
+                "execute_probe",
+                "Execute-risk test tool.",
+                openbad_governance::RiskLevel::Execute,
+            )
+            .with_schema(json!({"type": "object", "properties": {}}))
+        }
+
+        async fn execute(
+            &self,
+            _arguments: Value,
+            _context: &ToolContext,
+        ) -> Result<openbad_tools::ToolResult, openbad_tools::ToolError> {
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(openbad_tools::ToolResult::ok("ran"))
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_tools_are_blocked_without_command_access() {
+        let directory = tempdir().expect("tempdir");
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(ExecuteProbe {
+            ran: Arc::clone(&ran),
+        });
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"execute_probe","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Blocked."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            registry,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                allow_commands: false,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("run probe")])
+            .await
+            .expect("run");
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == ChatRole::Tool
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("approval required"))
+        }));
     }
 
     #[tokio::test]

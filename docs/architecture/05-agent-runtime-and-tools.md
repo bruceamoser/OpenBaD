@@ -293,6 +293,9 @@ Rules:
 
 - Argument validation happens before any side effect.
 - Policy checks run before approval; a denied capability never prompts.
+- The agent resolves the effective risk of `<domain>_run` calls from the inner
+  tool and refuses execute, network, or destructive tools before execution
+  unless the session has command access.
 - Mutating tools are serialized per workspace.
 - Read-only tools can run concurrently.
 - Every tool has a timeout and a kill-on-drop guard.

@@ -1287,6 +1287,23 @@ impl ToolRegistry {
     }
 
     #[must_use]
+    pub fn risk_for_call(&self, name: &str, arguments: &Value) -> Option<RiskLevel> {
+        if self.grouped {
+            if name.ends_with("_list") {
+                return Some(RiskLevel::Read);
+            }
+            if let Some(domain) = name.strip_suffix("_run") {
+                let tool = arguments.get("tool").and_then(Value::as_str)?;
+                if tool_domain(tool) != domain {
+                    return None;
+                }
+                return self.tools.get(tool).map(|tool| tool.definition().risk);
+            }
+        }
+        self.tools.get(name).map(|tool| tool.definition().risk)
+    }
+
+    #[must_use]
     pub fn parallel_safe(&self, name: &str, arguments: &str) -> bool {
         if self.grouped {
             if name.ends_with("_list") {
