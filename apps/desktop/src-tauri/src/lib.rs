@@ -26,7 +26,7 @@ use openbad_tools::{
     CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
     LspService, McpService, McpToolSummary, MemoryStore, OutsideGrant, ProjectAreas,
     ProjectRepoRef, SessionEventView, SessionHistory, SessionHistoryHit, SubagentInfo,
-    SubagentRuntime, SubagentSpec, WorkspaceSearch,
+    SubagentRuntime, SubagentSpec, TerminalRead, TerminalService, WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,7 @@ pub struct AppState {
     cancel: Arc<AtomicBool>,
     steering: Arc<SteeringInbox>,
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    terminal: Arc<openbad_terminal::TerminalManager>,
 }
 
 struct StoreSearch {
@@ -658,6 +659,69 @@ impl McpService for DesktopMcp {
     }
 }
 
+struct DesktopTerminal {
+    manager: Arc<openbad_terminal::TerminalManager>,
+}
+
+#[async_trait::async_trait]
+impl TerminalService for DesktopTerminal {
+    async fn create(&self, cwd: &Path, shell: Option<&str>) -> Result<String, String> {
+        let manager = Arc::clone(&self.manager);
+        let cwd = cwd.to_path_buf();
+        let shell = shell.map(str::to_owned);
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .create(&cwd, shell.as_deref())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn send(&self, id: &str, data: &str) -> Result<(), String> {
+        let manager = Arc::clone(&self.manager);
+        let id = id.to_owned();
+        let data = data.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager.send(&id, &data).map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn read(&self, id: &str) -> Result<TerminalRead, String> {
+        let manager = Arc::clone(&self.manager);
+        let id = id.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .read(&id)
+                .map(|output| TerminalRead {
+                    content: output.content,
+                    running: output.running,
+                    truncated: output.truncated,
+                })
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn close(&self, id: &str) -> Result<(), String> {
+        let manager = Arc::clone(&self.manager);
+        let id = id.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager.close(&id).map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn close_all(&self) {
+        let manager = Arc::clone(&self.manager);
+        let _ = tauri::async_runtime::spawn_blocking(move || manager.close_all()).await;
+    }
+}
+
 #[derive(Clone)]
 struct SubagentSettings {
     store: Arc<Mutex<Store>>,
@@ -671,6 +735,7 @@ struct SubagentSettings {
     base_url: String,
     user_id: String,
     grants: Vec<OutsideGrant>,
+    terminal: Arc<openbad_terminal::TerminalManager>,
 }
 
 struct SubagentRunner {
@@ -913,6 +978,9 @@ async fn run_subagent(
         workspace_id: settings.workspace_id,
     }))
     .with_mcp(Arc::new(DesktopMcp::new(settings.workspace_path.clone())))
+    .with_terminal(Arc::new(DesktopTerminal {
+        manager: Arc::clone(&settings.terminal),
+    }))
     .with_redactions(vec![settings.api_key.clone()]);
 
     let observer = SubagentObserver {
@@ -2624,6 +2692,9 @@ async fn chat(
                 workspace_id,
             }))
             .with_mcp(Arc::new(DesktopMcp::new(workspace_path.clone())))
+            .with_terminal(Arc::new(DesktopTerminal {
+                manager: Arc::clone(&state.terminal),
+            }))
             .with_subagents(Arc::new(SubagentRunner {
                 settings: Arc::new(SubagentSettings {
                     store: Arc::clone(&state.store),
@@ -2637,6 +2708,7 @@ async fn chat(
                     base_url: base_url.clone(),
                     user_id: user_id.clone(),
                     grants: subagent_grants,
+                    terminal: Arc::clone(&state.terminal),
                 }),
                 active: Arc::clone(&state.subagent_cancels),
             }));
@@ -2990,6 +3062,7 @@ pub fn run() {
             cancel: Arc::new(AtomicBool::new(false)),
             steering: Arc::new(SteeringInbox::default()),
             subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
+            terminal: Arc::new(openbad_terminal::TerminalManager::new()),
         })
         .invoke_handler(tauri::generate_handler![
             health,

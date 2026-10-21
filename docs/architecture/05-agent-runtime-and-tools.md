@@ -238,7 +238,7 @@ The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
 The built-in surface is capped at **128 tools**. The registry currently exposes
-**117**, leaving 11 slots free. Every new capability must fit that budget; prefer
+**118**, leaving 10 slots free. Every new capability must fit that budget; prefer
 one stable proxy tool with an `action`/`operation` field over one tool per
 operation, and keep at least four slots free for hotfixes.
 
@@ -317,7 +317,8 @@ Revoking a grant in Settings → Access takes effect on the next turn.
 
 | Tool | Risk | Concurrency | Notes |
 | --- | --- | --- | --- |
-| `run_command` | execute | serial | PTY or pipe; cwd confined to the workspace unless `allow_external_cwd` and an approved write grant cover it |
+| `run_command` | execute | serial | One-shot command; cwd confined to the workspace unless `allow_external_cwd` and an approved write grant cover it |
+| `terminal` | execute | serial | Persistent PTY session with `create`/`send`/`read`/`close` |
 | `start_job` | execute | serial | Background process with ID |
 | `job_status` | read | safe | Status + progress |
 | `job_logs` | read | safe | Tail with spill |
@@ -560,6 +561,13 @@ fetch time. `prefer_cache` reuses a recent fetch instead of hitting the network.
 pytest, ESLint, and TypeScript; diagnostics are summarized in the result and
 returned in metadata. Long-running commands can use the `job_*` tools, which
 record PID and log files under `.openbad/jobs` and support explicit stop.
+
+`terminal` creates a real PTY-backed shell, keeps it alive across turns, and
+lets the model send input and drain incremental output. Sessions are keyed by a
+host-generated id, output is capped at 256 KiB (the oldest bytes are dropped
+with a notice), and `close` kills the whole process group. Cancelling a turn
+closes all sessions opened by that turn; the app also closes every session on
+shutdown. Like `run_command`, it requires Full access.
 
 `run_command` classifies each command as `read-only`, `write-workspace`,
 `network`, `destructive`, or `privileged`, reports the class in metadata, and
