@@ -108,7 +108,6 @@ pub struct McpToolInfo {
 pub struct McpManager {
     config: McpConfig,
     clients: Mutex<HashMap<String, Arc<Mutex<McpClient>>>>,
-    http: reqwest::blocking::Client,
 }
 
 impl McpManager {
@@ -116,10 +115,6 @@ impl McpManager {
         Ok(Self {
             config: McpConfig::load(root)?,
             clients: Mutex::new(HashMap::new()),
-            http: reqwest::blocking::Client::builder()
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .map_err(|error| McpError::Protocol(error.to_string()))?,
         })
     }
 
@@ -226,8 +221,11 @@ impl McpManager {
             .url
             .as_deref()
             .ok_or_else(|| McpError::Protocol("HTTP MCP server has no URL".to_owned()))?;
-        let response = self
-            .http
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|error| McpError::Protocol(error.to_string()))?;
+        let response = client
             .post(url)
             .json(&json!({
                 "jsonrpc": "2.0",
@@ -472,7 +470,6 @@ for line in sys.stdin:
                 servers: vec![server],
             },
             clients: Mutex::new(HashMap::new()),
-            http: reqwest::blocking::Client::new(),
         };
         let catalog = manager.catalog().expect("catalog");
         assert_eq!(catalog.len(), 1);
