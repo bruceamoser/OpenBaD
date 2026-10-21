@@ -341,6 +341,7 @@ OpenBaD uses **stable proxy tools**:
 
 | Proxy tool | Schema | Dynamic behavior |
 | --- | --- | --- |
+| `<domain>_list` / `<domain>_run` | stable | Lists a domain's tool schemas on demand, then dispatches one by name |
 | `mcp_call` | stable | Arguments: `server`, `tool`, `arguments` |
 | `skill` | stable | Arguments: `name`, `arguments`; loads skill body on demand |
 | `tool_search` | stable | Searches the tool catalog and returns descriptions |
@@ -348,10 +349,12 @@ OpenBaD uses **stable proxy tools**:
 
 The actual catalog is injected as a **tail message** (or retrieved on demand),
 not as part of the static tool schema. Tool descriptions for dynamic tools are
-returned by tool calls and live in history.
+returned by tool calls and live in history. Built-in tools are grouped into
+domains, so adding a tool to an existing domain changes neither the facade
+schema nor the tool-schema hash; only adding a new domain does.
 
 This keeps the tool schema hash stable across MCP server changes, skill
-installs, and tool discovery.
+installs, tool additions, and tool discovery.
 
 ## 7. Volatile runtime context
 
