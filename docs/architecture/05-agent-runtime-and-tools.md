@@ -237,10 +237,24 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-The built-in surface is capped at **128 tools**. The registry currently exposes
-**119**, leaving 9 slots free. Every new capability must fit that budget; prefer
-one stable proxy tool with an `action`/`operation` field over one tool per
-operation, and keep at least four slots free for hotfixes.
+**Domain facades.** The registry contains 119 internal tools grouped into 17
+domains: artifacts, collaboration, context, exec, files, git, governance,
+knowledge, memory, orchestration, plan, plugins, repos, search, session,
+snapshots, and web. The model sees two stable tools per domain:
+
+- `<domain>_list` returns the domain's tool names, descriptions, risk levels,
+  and JSON input schemas. It takes no arguments.
+- `<domain>_run` takes `{ "tool": "...", "arguments": { ... } }`, verifies that
+  the tool belongs to that domain, and invokes it.
+
+That is **34 schemas against the 128-tool cap**, leaving 94 slots free. Adding a
+tool to an existing domain does not change any model-facing schema or the
+tool-schema hash; only adding a new domain does. Internal tool names remain
+executable by the workflow engine and tests, but they are not advertised to the
+provider.
+
+The cap still applies to the facade surface. Keep the facade set small, and
+prefer adding capabilities to an existing domain over creating a new domain.
 
 LSP servers are configured in `.openbad/lsp.yaml`:
 
