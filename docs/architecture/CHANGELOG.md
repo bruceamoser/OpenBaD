@@ -82,3 +82,7 @@ session knows what moved without re-reading every document.
   merged into `ledger`; `snapshot_*` into `snapshot`; `golden_*` into `golden`;
   `canon_*` and `glossary_*` into `canon`; and the context-rule tools into
   `context_rules`. The built-in surface is now 113 of the 128-slot cap.
+- **LSP code intelligence.** New `openbad-lsp` crate, `LspService` seam, and
+  `lsp` tool for definition, references, implementation, and hover queries over
+  a configured stdio language server. Configure servers in `.openbad/lsp.yaml`.
+  The built-in surface is now 114 of 128 slots.

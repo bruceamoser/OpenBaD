@@ -14,8 +14,8 @@ use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
-    CheckpointSink, MemoryStore, OutsideGrant, ProjectAreas, SubagentRuntime, ToolContext,
-    ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
+    CheckpointSink, LspService, MemoryStore, OutsideGrant, ProjectAreas, SubagentRuntime,
+    ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
@@ -146,6 +146,7 @@ pub struct Agent<T: HttpTransport> {
     memory: Option<Arc<dyn MemoryStore>>,
     project: Option<Arc<dyn ProjectAreas>>,
     subagents: Option<Arc<dyn SubagentRuntime>>,
+    lsp: Option<Arc<dyn LspService>>,
     outside_grants: Vec<OutsideGrant>,
     steering: Option<Arc<SteeringInbox>>,
     redactions: Vec<String>,
@@ -169,6 +170,7 @@ impl<T: HttpTransport> Agent<T> {
             memory: None,
             project: None,
             subagents: None,
+            lsp: None,
             outside_grants: Vec::new(),
             steering: None,
             redactions: Vec::new(),
@@ -203,6 +205,12 @@ impl<T: HttpTransport> Agent<T> {
     #[must_use]
     pub fn with_subagents(mut self, subagents: Arc<dyn SubagentRuntime>) -> Self {
         self.subagents = Some(subagents);
+        self
+    }
+
+    #[must_use]
+    pub fn with_lsp(mut self, lsp: Arc<dyn LspService>) -> Self {
+        self.lsp = Some(lsp);
         self
     }
 
@@ -273,6 +281,7 @@ impl<T: HttpTransport> Agent<T> {
             context.memory = self.memory.clone();
             context.project = self.project.clone();
             context.subagents = self.subagents.clone();
+            context.lsp = self.lsp.clone();
             context.set_outside_grants(self.outside_grants.clone());
             context
         });
@@ -600,6 +609,11 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
         if self.subagents.is_some() {
             prompt.push_str(
                 "\nUse subagent action \"spawn\" to hand a well-scoped independent task to a background worker when parallel work or a fresh focused context helps. It inherits this session's access mode, runs in the same workspace, appears in Project → Agents, and cannot ask the human questions. Collect its result with action \"wait\" (or \"status\" for a one-shot check) instead of duplicating its work or assuming it finished.",
+            );
+        }
+        if self.lsp.is_some() {
+            prompt.push_str(
+                "\nUse lsp for precise definitions, implementations, references, or hover when textual search is ambiguous. Use ordinary search/read for simple navigation.",
             );
         }
         if let Ok(policy) = openbad_workspace::load_context_policy(self.workspace.root()) {
