@@ -15,8 +15,8 @@ use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
     CheckpointSink, LspService, McpService, MemoryStore, OutsideGrant, ProjectAreas,
-    SessionHistory, SubagentRuntime, TerminalService, ToolContext, ToolRegistry, WorkspaceSearch,
-    discover_plugins, discover_skills,
+    RegistryWorkflowEngine, SessionHistory, SubagentRuntime, TerminalService, ToolContext,
+    ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::Value;
@@ -140,7 +140,7 @@ pub enum AgentError {
 
 pub struct Agent<T: HttpTransport> {
     client: DeepSeekClient<T>,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     workspace: Arc<WorkspaceService>,
     search: Option<Arc<dyn WorkspaceSearch>>,
     checkpoints: Option<Arc<dyn CheckpointSink>>,
@@ -167,7 +167,7 @@ impl<T: HttpTransport> Agent<T> {
     ) -> Self {
         Self {
             client,
-            tools,
+            tools: Arc::new(tools),
             workspace,
             search: None,
             checkpoints: None,
@@ -332,6 +332,9 @@ impl<T: HttpTransport> Agent<T> {
             context.sessions = self.sessions.clone();
             context.mcp = self.mcp.clone();
             context.terminal = self.terminal.clone();
+            context.workflow = Some(Arc::new(RegistryWorkflowEngine::new(Arc::clone(
+                &self.tools,
+            ))));
             context.set_outside_grants(self.outside_grants.clone());
             context
         });
@@ -684,6 +687,9 @@ than prose. Cite knowledge locators. Report what changed and any remaining risk.
                 "\nUse terminal action create for a persistent shell, send to run commands, read to collect output, and close when finished. Reuse one terminal for related commands.",
             );
         }
+        prompt.push_str(
+            "\nUse workflow to run a JSON batch of tool steps with ${{steps.id.content}} references and for_each fan-out when one call can replace many round-trips. Workflows use the same access mode and approvals as direct calls.",
+        );
         if let Ok(policy) = openbad_workspace::load_context_policy(self.workspace.root()) {
             let summary = policy.summary();
             if !summary.is_empty() {
