@@ -75,6 +75,7 @@ OpenBaD/
 | `openbad-autonomic` | Heartbeat, job supervisor, schedules, pulse metrics | Tool execution details |
 | `openbad-governance` | Capability policy, risk classification, approvals, audit, redaction, secrets | Model calls |
 | `openbad-mcp` | MCP server lifecycle, tool/resource/prompt import, auth | Agent loop |
+| `openbad-terminal` | Persistent PTY sessions, output buffering, process-group cleanup | Agent loop |
 | `apps/desktop/src-tauri` | Tauri commands, event bridge, window/tray/menu, updater | Domain logic |
 
 ## 4. Dependency graph
