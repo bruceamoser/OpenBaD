@@ -567,8 +567,7 @@ record PID and log files under `.openbad/jobs` and support explicit stop.
 lets the model send input and drain incremental output. Sessions are keyed by a
 host-generated id, output is capped at 256 KiB (the oldest bytes are dropped
 with a notice), and `close` kills the whole process group. Cancelling a turn
-closes all sessions opened by that turn; the app also closes every session on
-shutdown. Like `run_command`, it requires Full access.
+closes every terminal session; the app also closes every session on shutdown. Like `run_command`, it requires Full access.
 
 `workflow` runs a JSON script of tool steps through the same registry. Each
 step has an `id`, a `tool`, and `arguments`; later steps reference earlier
