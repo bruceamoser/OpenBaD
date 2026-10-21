@@ -237,7 +237,7 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-**Domain facades.** The registry contains 119 internal tools grouped into 17
+**Domain facades.** The registry contains 120 internal tools grouped into 17
 domains: artifacts, collaboration, context, exec, files, git, governance,
 knowledge, memory, orchestration, plan, plugins, repos, search, session,
 snapshots, and web. The model sees two stable tools per domain:
@@ -298,6 +298,10 @@ Rules:
 - Every tool has a timeout and a kill-on-drop guard.
 - Output is validated against `output_schema`; invalid output is a tool error.
 - Tool errors are returned as evidence with `is_error = true`, not panics.
+- Results above the 64 KiB model-facing cap are written under
+  `.openbad/spill/`; the model gets a head/tail excerpt plus `spilled_path`, and
+  `read_spill` pages through the file with `offset` and `max_bytes`. The internal
+  extraction cap is 256 KiB.
 
 ## 7. Built-in tools
 

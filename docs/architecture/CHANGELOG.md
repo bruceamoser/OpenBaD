@@ -6,6 +6,9 @@ session knows what moved without re-reading every document.
 
 ## 2026-10-21
 
+- **Tool-output spilling.** Results above the 64 KiB model-facing cap are saved
+  under `.openbad/spill/` with a `spilled_path`, and the new `read_spill` tool
+  pages through them. The internal extraction cap remains 256 KiB.
 - **Domain-based tool surface.** Built-in tools are now grouped into 17
   domains. The model sees `<domain>_list` and `<domain>_run` for each domain,
   reducing the provider-facing schema set from 119 to 34 while keeping all 119
