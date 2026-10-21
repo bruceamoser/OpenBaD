@@ -238,7 +238,7 @@ The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
 The built-in surface is capped at **128 tools**. The registry currently exposes
-**118**, leaving 10 slots free. Every new capability must fit that budget; prefer
+**119**, leaving 9 slots free. Every new capability must fit that budget; prefer
 one stable proxy tool with an `action`/`operation` field over one tool per
 operation, and keep at least four slots free for hotfixes.
 
@@ -319,6 +319,7 @@ Revoking a grant in Settings → Access takes effect on the next turn.
 | --- | --- | --- | --- |
 | `run_command` | execute | serial | One-shot command; cwd confined to the workspace unless `allow_external_cwd` and an approved write grant cover it |
 | `terminal` | execute | serial | Persistent PTY session with `create`/`send`/`read`/`close` |
+| `workflow` | execute | serial | JSON workflow of tool calls with sequential steps and `for_each` fan-out |
 | `start_job` | execute | serial | Background process with ID |
 | `job_status` | read | safe | Status + progress |
 | `job_logs` | read | safe | Tail with spill |
@@ -566,8 +567,17 @@ record PID and log files under `.openbad/jobs` and support explicit stop.
 lets the model send input and drain incremental output. Sessions are keyed by a
 host-generated id, output is capped at 256 KiB (the oldest bytes are dropped
 with a notice), and `close` kills the whole process group. Cancelling a turn
-closes all sessions opened by that turn; the app also closes every session on
-shutdown. Like `run_command`, it requires Full access.
+closes every terminal session; the app also closes every session on shutdown. Like `run_command`, it requires Full access.
+
+`workflow` runs a JSON script of tool steps through the same registry. Each
+step has an `id`, a `tool`, and `arguments`; later steps reference earlier
+results with `${{steps.<id>.content}}` or `${{steps.<id>.metadata...}}`.
+`for_each` fans out over an array (up to 50 items) with `as` naming the loop
+variable, and `result` selects the final value. The tool schema never changes
+when a workflow changes. Workflows stop on the first failing step, reject
+recursive `workflow` calls, cap scripts at 64 steps and output at the session
+limit, and inherit the caller's access mode and command policy. `run_in_background`
+returns a run id for `action: "status"`.
 
 `run_command` classifies each command as `read-only`, `write-workspace`,
 `network`, `destructive`, or `privileged`, reports the class in metadata, and

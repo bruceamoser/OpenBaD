@@ -878,6 +878,12 @@ pub trait TerminalService: Send + Sync {
     async fn close_all(&self) {}
 }
 
+/// Deterministic workflow execution supplied by the host.
+#[async_trait]
+pub trait WorkflowEngine: Send + Sync {
+    async fn run(&self, script: &str, context: &ToolContext) -> Result<String, String>;
+}
+
 /// Workspace-scoped session history supplied by the host.
 pub trait SessionHistory: Send + Sync {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionHistoryHit>, String>;
@@ -936,9 +942,39 @@ pub struct ToolContext {
     pub sessions: Option<Arc<dyn SessionHistory>>,
     pub mcp: Option<Arc<dyn McpService>>,
     pub terminal: Option<Arc<dyn TerminalService>>,
+    pub workflow: Option<Arc<dyn WorkflowEngine>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
     outside_grants: Vec<OutsideGrant>,
+}
+
+impl Clone for ToolContext {
+    fn clone(&self) -> Self {
+        Self {
+            workspace: Arc::clone(&self.workspace),
+            allow_writes: self.allow_writes,
+            allow_commands: self.allow_commands,
+            max_output_bytes: self.max_output_bytes,
+            search: self.search.clone(),
+            checkpoints: self.checkpoints.clone(),
+            memory: self.memory.clone(),
+            project: self.project.clone(),
+            subagents: self.subagents.clone(),
+            lsp: self.lsp.clone(),
+            sessions: self.sessions.clone(),
+            mcp: self.mcp.clone(),
+            terminal: self.terminal.clone(),
+            workflow: self.workflow.clone(),
+            turn: AtomicU32::new(self.turn.load(Ordering::SeqCst)),
+            read_paths: Mutex::new(
+                self.read_paths
+                    .lock()
+                    .map(|paths| paths.clone())
+                    .unwrap_or_default(),
+            ),
+            outside_grants: self.outside_grants.clone(),
+        }
+    }
 }
 
 impl ToolContext {
@@ -958,6 +994,7 @@ impl ToolContext {
             sessions: None,
             mcp: None,
             terminal: None,
+            workflow: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             outside_grants: Vec::new(),
@@ -1110,6 +1147,7 @@ impl ToolRegistry {
         registry.register(McpCallTool);
         registry.register(ToolSearchTool);
         registry.register(TerminalTool);
+        registry.register(WorkflowTool);
         registry.register(GlobTool);
         registry.register(FindSymbolsTool);
         registry.register(WriteFileTool);
@@ -13431,6 +13469,315 @@ impl Tool for ToolSearchTool {
     }
 }
 
+/// Workflow engine that executes steps through the built-in tool registry.
+pub struct RegistryWorkflowEngine {
+    tools: Arc<ToolRegistry>,
+}
+
+impl RegistryWorkflowEngine {
+    #[must_use]
+    pub fn new(tools: Arc<ToolRegistry>) -> Self {
+        Self { tools }
+    }
+}
+
+#[async_trait]
+impl WorkflowEngine for RegistryWorkflowEngine {
+    async fn run(&self, script: &str, context: &ToolContext) -> Result<String, String> {
+        let spec: Value = serde_json::from_str(script)
+            .map_err(|error| format!("workflow script is not valid JSON: {error}"))?;
+        let steps = spec
+            .get("steps")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "workflow requires a steps array".to_owned())?;
+        if steps.is_empty() {
+            return Err("workflow has no steps".to_owned());
+        }
+        if steps.len() > 64 {
+            return Err("workflow is limited to 64 steps".to_owned());
+        }
+        let mut outputs = serde_json::Map::new();
+        let mut last = Value::Null;
+        for step in steps {
+            let id = step
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "each workflow step needs an id".to_owned())?;
+            let tool = step
+                .get("tool")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("step {id} needs a tool"))?;
+            if tool == "workflow" {
+                return Err("workflow cannot call itself".to_owned());
+            }
+            let arguments = step.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let scope = json!({"steps": outputs});
+            let results = if let Some(for_each) = step.get("for_each") {
+                let collection = match for_each {
+                    Value::String(template) => resolve_template(template, &scope)?,
+                    other => other.clone(),
+                };
+                let collection = collection
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| "for_each must resolve to an array".to_owned())?;
+                if collection.len() > 50 {
+                    return Err("for_each is limited to 50 items".to_owned());
+                }
+                let alias = step.get("as").and_then(Value::as_str).unwrap_or("item");
+                let mut results = Vec::new();
+                for item in collection {
+                    let mut item_scope = scope.clone();
+                    if let Some(object) = item_scope.as_object_mut() {
+                        object.insert(alias.to_owned(), item);
+                    }
+                    let item_arguments = resolve_value(&arguments, &item_scope)?;
+                    let result = self
+                        .tools
+                        .execute(tool, item_arguments, context)
+                        .await
+                        .map_err(|error| format!("step {id}: {error}"))?;
+                    if result.is_error {
+                        return Err(format!("step {id}: {}", result.content));
+                    }
+                    results.push(json!({
+                        "content": result.content,
+                        "metadata": result.metadata
+                    }));
+                }
+                Value::Array(results)
+            } else {
+                let arguments = resolve_value(&arguments, &scope)?;
+                let result = self
+                    .tools
+                    .execute(tool, arguments, context)
+                    .await
+                    .map_err(|error| format!("step {id}: {error}"))?;
+                if result.is_error {
+                    return Err(format!("step {id}: {}", result.content));
+                }
+                json!({
+                    "content": result.content,
+                    "metadata": result.metadata
+                })
+            };
+            last = results.clone();
+            outputs.insert(id.to_owned(), results);
+        }
+        let scope = json!({"steps": outputs});
+        let value = if let Some(template) = spec.get("result") {
+            resolve_template(
+                template
+                    .as_str()
+                    .ok_or_else(|| "result must be a string template".to_owned())?,
+                &scope,
+            )?
+        } else {
+            last
+        };
+        Ok(match value {
+            Value::String(text) => text,
+            other => serde_json::to_string_pretty(&other).map_err(|error| error.to_string())?,
+        })
+    }
+}
+
+fn resolve_value(value: &Value, scope: &Value) -> Result<Value, String> {
+    match value {
+        Value::String(text) => resolve_template(text, scope),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| resolve_value(item, scope))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), resolve_value(value, scope)?)))
+            .collect::<Result<serde_json::Map<_, _>, String>>()
+            .map(Value::Object),
+        other => Ok(other.clone()),
+    }
+}
+
+fn resolve_template(template: &str, scope: &Value) -> Result<Value, String> {
+    let trimmed = template.trim();
+    if let Some(path) = trimmed
+        .strip_prefix("${{")
+        .and_then(|rest| rest.strip_suffix("}}"))
+    {
+        if !path.contains("}}") && !path.contains("${{") {
+            return lookup_path(scope, path.trim());
+        }
+    }
+    let mut output = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${{") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 3..];
+        let end = after
+            .find("}}")
+            .ok_or_else(|| "unterminated ${{...}} template".to_owned())?;
+        let value = lookup_path(scope, after[..end].trim())?;
+        match value {
+            Value::String(text) => output.push_str(&text),
+            Value::Number(number) => output.push_str(&number.to_string()),
+            Value::Bool(boolean) => output.push_str(&boolean.to_string()),
+            Value::Null => {}
+            other => {
+                return Err(format!(
+                    "template value is not scalar: {}",
+                    serde_json::to_string(&other).unwrap_or_default()
+                ));
+            }
+        }
+        rest = &after[end + 2..];
+    }
+    output.push_str(rest);
+    Ok(Value::String(output))
+}
+
+fn lookup_path(scope: &Value, path: &str) -> Result<Value, String> {
+    let mut current = scope;
+    for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+        current = match current {
+            Value::Object(object) => object
+                .get(segment)
+                .ok_or_else(|| format!("workflow reference not found: {path}"))?,
+            Value::Array(items) => {
+                let index: usize = segment
+                    .parse()
+                    .map_err(|_| format!("workflow reference not found: {path}"))?;
+                items
+                    .get(index)
+                    .ok_or_else(|| format!("workflow reference not found: {path}"))?
+            }
+            _ => return Err(format!("workflow reference not found: {path}")),
+        };
+    }
+    Ok(current.clone())
+}
+
+#[derive(Clone)]
+struct WorkflowRun {
+    status: &'static str,
+    content: String,
+    error: String,
+}
+
+static WORKFLOW_RUNS: LazyLock<Mutex<HashMap<String, WorkflowRun>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct WorkflowTool;
+
+#[async_trait]
+impl Tool for WorkflowTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "workflow",
+            "Run a deterministic JSON workflow of tool calls, with sequential steps, for_each fan-out, and a final template. One call replaces many round-trips. Use run_in_background for long workflows, then action status with the returned run_id.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(300)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["run", "status"]},
+                "script": {"type": "string", "description": "JSON workflow with steps and optional result template"},
+                "run_in_background": {"type": "boolean"},
+                "run_id": {"type": "string"}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = required_string(&arguments, "action")?;
+        if action == "status" {
+            let run_id = required_string(&arguments, "run_id")?;
+            let run = WORKFLOW_RUNS
+                .lock()
+                .map_err(|_| ToolError::Failed("workflow store poisoned".to_owned()))?
+                .get(&run_id)
+                .cloned()
+                .ok_or_else(|| {
+                    ToolError::InvalidArgument(format!("unknown workflow run: {run_id}"))
+                })?;
+            if run.status == "running" {
+                return Ok(ToolResult::ok(format!("{run_id}: running"))
+                    .with_metadata(json!({"run_id": run_id, "status": run.status})));
+            }
+            let content = if run.error.is_empty() {
+                run.content
+            } else {
+                format!("workflow failed: {}", run.error)
+            };
+            return Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+                .with_metadata(json!({"run_id": run_id, "status": run.status})));
+        }
+        if action != "run" {
+            return Err(ToolError::InvalidArgument(format!(
+                "unknown workflow action: {action}"
+            )));
+        }
+        let engine = context.workflow.as_ref().ok_or_else(|| {
+            ToolError::Failed("workflow engine is not available in this host".to_owned())
+        })?;
+        let script = required_string(&arguments, "script")?;
+        if optional_bool(&arguments, "run_in_background").unwrap_or(false) {
+            let run_id = format!("workflow-{}", now_millis());
+            {
+                let mut runs = WORKFLOW_RUNS
+                    .lock()
+                    .map_err(|_| ToolError::Failed("workflow store poisoned".to_owned()))?;
+                if runs.len() >= 100 {
+                    runs.retain(|_, run| run.status == "running");
+                }
+                runs.insert(
+                    run_id.clone(),
+                    WorkflowRun {
+                        status: "running",
+                        content: String::new(),
+                        error: String::new(),
+                    },
+                );
+            }
+            let engine = Arc::clone(engine);
+            let context = context.clone();
+            let task_id = run_id.clone();
+            tokio::spawn(async move {
+                let outcome = engine.run(&script, &context).await;
+                if let Ok(mut runs) = WORKFLOW_RUNS.lock() {
+                    if let Some(run) = runs.get_mut(&task_id) {
+                        match outcome {
+                            Ok(content) => {
+                                run.status = "completed";
+                                run.content = content;
+                            }
+                            Err(error) => {
+                                run.status = "failed";
+                                run.error = error;
+                            }
+                        }
+                    }
+                }
+            });
+            return Ok(ToolResult::ok(format!("started {run_id}"))
+                .with_metadata(json!({"run_id": run_id, "status": "running"})));
+        }
+        let content = engine
+            .run(&script, context)
+            .await
+            .map_err(ToolError::Failed)?;
+        Ok(ToolResult::ok(truncate(&content, context.max_output_bytes))
+            .with_metadata(json!({"status": "completed"})))
+    }
+}
+
 struct TerminalTool;
 
 #[async_trait]
@@ -16077,6 +16424,94 @@ invariants:
     }
 
     #[tokio::test]
+    async fn workflow_engine_runs_steps_and_rejects_recursion() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("a.txt"), "alpha").expect("a");
+        fs::write(directory.path().join("b.txt"), "beta").expect("b");
+        let context = context(directory.path());
+        let engine = RegistryWorkflowEngine::new(Arc::new(ToolRegistry::with_builtin_tools()));
+        let output = engine
+            .run(
+                r#"{
+                    "steps": [
+                        {"id": "a", "tool": "read_file", "arguments": {"path": "a.txt"}},
+                        {"id": "b", "tool": "read_file", "arguments": {"path": "b.txt"}}
+                    ],
+                    "result": "${{steps.a.content}}-${{steps.b.content}}"
+                }"#,
+                &context,
+            )
+            .await
+            .expect("workflow");
+        assert!(output.contains("alpha"));
+        assert!(output.contains("beta"));
+
+        let recursive = engine
+            .run(
+                r#"{"steps":[{"id":"loop","tool":"workflow","arguments":{}}]}"#,
+                &context,
+            )
+            .await;
+        assert!(recursive.is_err());
+    }
+
+    #[tokio::test]
+    async fn workflow_engine_fans_out_and_resolves_items() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("a.txt"), "alpha").expect("a");
+        fs::write(directory.path().join("b.txt"), "beta").expect("b");
+        let context = context(directory.path());
+        let engine = RegistryWorkflowEngine::new(Arc::new(ToolRegistry::with_builtin_tools()));
+        let output = engine
+            .run(
+                r#"{
+                    "steps": [
+                        {"id": "contents", "tool": "read_file", "arguments": {"path": "${{item}}"}, "for_each": ["a.txt", "b.txt"], "as": "item"}
+                    ],
+                    "result": "${{steps.contents}}"
+                }"#,
+                &context,
+            )
+            .await
+            .expect("fan out");
+        assert!(output.contains("alpha"));
+        assert!(output.contains("beta"));
+    }
+
+    #[tokio::test]
+    async fn workflow_tool_runs_in_background_and_reports_status() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.workflow = Some(Arc::new(RegistryWorkflowEngine::new(Arc::new(
+            ToolRegistry::with_builtin_tools(),
+        ))));
+        let script =
+            r#"{"steps":[{"id":"hello","tool":"list_dir","arguments":{}}],"result":"done"}"#;
+        let started = WorkflowTool
+            .execute(
+                json!({"action": "run", "script": script, "run_in_background": true}),
+                &context,
+            )
+            .await
+            .expect("start");
+        let run_id = started.metadata["run_id"]
+            .as_str()
+            .expect("run id")
+            .to_owned();
+        for _ in 0..100 {
+            let status = WorkflowTool
+                .execute(json!({"action": "status", "run_id": run_id}), &context)
+                .await
+                .expect("status");
+            if status.content.contains("done") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("workflow did not complete");
+    }
+
+    #[tokio::test]
     async fn terminal_tool_round_trips_and_requires_full_access() {
         let directory = tempdir().expect("tempdir");
         let mut context = context(directory.path());
@@ -16366,6 +16801,7 @@ invariants:
             "mcp_call",
             "tool_search",
             "terminal",
+            "workflow",
         ] {
             assert!(
                 definitions.iter().any(|tool| tool.name == expected),

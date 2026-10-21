@@ -19,12 +19,12 @@ accounting that 0001 does not address.
 
 | Workstream | Existing task | Feature id | Status |
 | --- | --- | --- | --- |
-| Consolidation (free slots) | — | — | Not started |
-| LSP code intelligence | P4-03 | F-16 | Not started |
+| Consolidation (free slots) | — | — | Done |
+| LSP code intelligence | P4-03 | F-16 | Done |
 | MCP client + proxy tool | P6-06 | F-21 | Done |
 | Persistent terminal (PTY) | P4-04 | — | Done |
-| Workflow engine | P6-05 | F-20 | Not started |
-| Session history search | — | — | Not started |
+| Workflow engine | P6-05 | F-20 | Done |
+| Session history search | — | — | Done |
 
 ## 2. The constraint nobody documented
 

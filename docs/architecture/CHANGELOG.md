@@ -99,4 +99,9 @@ session knows what moved without re-reading every document.
 - **Persistent terminal.** New `openbad-terminal` crate wraps `portable-pty`
   with create/send/read/close sessions, a bounded output ring, and process-group
   cleanup. The `terminal` tool requires Full access, and cancelling a turn
-  closes its sessions. The built-in surface is 118 of 128 slots.
+  closes terminal sessions. The built-in surface is 118 of 128 slots.
+- **Deterministic workflows.** The `workflow` tool runs JSON scripts of tool
+  steps through the registry with sequential steps, `for_each` fan-out,
+  `${{steps.id...}}` references, result templates, a 64-step cap, and
+  background status. Nested calls inherit the session access mode. The
+  built-in surface is 119 of 128 slots.
