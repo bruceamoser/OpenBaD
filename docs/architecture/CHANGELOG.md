@@ -96,3 +96,7 @@ session knows what moved without re-reading every document.
   `mcp_call` invokes a tool; the catalog is appended as an untrusted tail
   message so server changes do not alter the cached prefix. The built-in
   surface is 117 of 128 slots.
+- **Persistent terminal.** New `openbad-terminal` crate wraps `portable-pty`
+  with create/send/read/close sessions, a bounded output ring, and process-group
+  cleanup. The `terminal` tool requires Full access, and cancelling a turn
+  closes its sessions. The built-in surface is 118 of 128 slots.

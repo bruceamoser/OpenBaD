@@ -861,6 +861,23 @@ pub trait McpService: Send + Sync {
     async fn call(&self, server: &str, tool: &str, arguments: Value) -> Result<String, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalRead {
+    pub content: String,
+    pub running: bool,
+    pub truncated: bool,
+}
+
+/// Persistent PTY sessions supplied by the host.
+#[async_trait]
+pub trait TerminalService: Send + Sync {
+    async fn create(&self, cwd: &Path, shell: Option<&str>) -> Result<String, String>;
+    async fn send(&self, id: &str, data: &str) -> Result<(), String>;
+    async fn read(&self, id: &str) -> Result<TerminalRead, String>;
+    async fn close(&self, id: &str) -> Result<(), String>;
+    async fn close_all(&self) {}
+}
+
 /// Workspace-scoped session history supplied by the host.
 pub trait SessionHistory: Send + Sync {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionHistoryHit>, String>;
@@ -918,6 +935,7 @@ pub struct ToolContext {
     pub lsp: Option<Arc<dyn LspService>>,
     pub sessions: Option<Arc<dyn SessionHistory>>,
     pub mcp: Option<Arc<dyn McpService>>,
+    pub terminal: Option<Arc<dyn TerminalService>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
     outside_grants: Vec<OutsideGrant>,
@@ -939,6 +957,7 @@ impl ToolContext {
             lsp: None,
             sessions: None,
             mcp: None,
+            terminal: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             outside_grants: Vec::new(),
@@ -1090,6 +1109,7 @@ impl ToolRegistry {
         registry.register(SessionTool);
         registry.register(McpCallTool);
         registry.register(ToolSearchTool);
+        registry.register(TerminalTool);
         registry.register(GlobTool);
         registry.register(FindSymbolsTool);
         registry.register(WriteFileTool);
@@ -13411,6 +13431,103 @@ impl Tool for ToolSearchTool {
     }
 }
 
+struct TerminalTool;
+
+#[async_trait]
+impl Tool for TerminalTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "terminal",
+            "Create and use a persistent PTY shell. Requires Full access. Use create, then send commands and read output; close when done. Output is capped and long sessions drop the oldest output with a notice.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(120)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "send", "read", "close"]},
+                "cwd": {"type": "string", "description": "Workspace-relative directory for create"},
+                "shell": {"type": "string", "description": "Shell executable for create"},
+                "terminal_id": {"type": "string"},
+                "data": {"type": "string"}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "terminal (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
+        }
+        let service = context.terminal.as_ref().ok_or_else(|| {
+            ToolError::Failed("terminal is not available in this host".to_owned())
+        })?;
+        let action = required_string(&arguments, "action")?;
+        match action.as_str() {
+            "create" => {
+                let cwd = optional_string(&arguments, "cwd")
+                    .map(|cwd| context.workspace.resolve(Path::new(&cwd)))
+                    .transpose()
+                    .map_err(|error| ToolError::InvalidArgument(error.to_string()))?
+                    .unwrap_or_else(|| context.workspace.root().to_path_buf());
+                let shell = optional_string(&arguments, "shell");
+                let id = service
+                    .create(&cwd, shell.as_deref())
+                    .await
+                    .map_err(ToolError::Failed)?;
+                Ok(
+                    ToolResult::ok(format!("terminal {id} started in {}", cwd.display()))
+                        .with_metadata(json!({"terminal_id": id})),
+                )
+            }
+            "send" => {
+                let id = required_string(&arguments, "terminal_id")?;
+                let data = required_string(&arguments, "data")?;
+                service.send(&id, &data).await.map_err(ToolError::Failed)?;
+                Ok(ToolResult::ok(format!(
+                    "sent {data_len} bytes to {id}",
+                    data_len = data.len()
+                )))
+            }
+            "read" => {
+                let id = required_string(&arguments, "terminal_id")?;
+                let output = service.read(&id).await.map_err(ToolError::Failed)?;
+                let mut content = truncate(&output.content, context.max_output_bytes);
+                if output.truncated {
+                    content.push_str("\n[older terminal output was dropped]");
+                }
+                if !output.running {
+                    content.push_str("\n[process exited]");
+                }
+                if content.is_empty() {
+                    content.push_str("[no new output]");
+                }
+                Ok(ToolResult::ok(content).with_metadata(json!({
+                    "terminal_id": id,
+                    "running": output.running,
+                    "truncated": output.truncated
+                })))
+            }
+            "close" => {
+                let id = required_string(&arguments, "terminal_id")?;
+                service.close(&id).await.map_err(ToolError::Failed)?;
+                Ok(ToolResult::ok(format!("closed {id}")))
+            }
+            other => Err(ToolError::InvalidArgument(format!(
+                "unknown terminal action: {other}"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -15928,6 +16045,73 @@ invariants:
         }
     }
 
+    struct MockTerminal {
+        sent: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl TerminalService for MockTerminal {
+        async fn create(&self, _cwd: &Path, _shell: Option<&str>) -> Result<String, String> {
+            Ok("term-1".to_owned())
+        }
+
+        async fn send(&self, id: &str, data: &str) -> Result<(), String> {
+            self.sent
+                .lock()
+                .map_err(|_| "poisoned".to_owned())?
+                .push((id.to_owned(), data.to_owned()));
+            Ok(())
+        }
+
+        async fn read(&self, _id: &str) -> Result<TerminalRead, String> {
+            Ok(TerminalRead {
+                content: "openbad-ready".to_owned(),
+                running: true,
+                truncated: false,
+            })
+        }
+
+        async fn close(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_tool_round_trips_and_requires_full_access() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.terminal = Some(Arc::new(MockTerminal {
+            sent: Mutex::new(Vec::new()),
+        }));
+        context.allow_commands = false;
+        assert!(
+            TerminalTool
+                .execute(json!({"action": "create"}), &context)
+                .await
+                .is_err()
+        );
+
+        context.allow_commands = true;
+        let created = TerminalTool
+            .execute(json!({"action": "create"}), &context)
+            .await
+            .expect("create");
+        assert!(created.content.contains("term-1"));
+        TerminalTool
+            .execute(
+                json!({"action": "send", "terminal_id": "term-1", "data": "echo hi"}),
+                &context,
+            )
+            .await
+            .expect("send");
+        let read = TerminalTool
+            .execute(json!({"action": "read", "terminal_id": "term-1"}), &context)
+            .await
+            .expect("read");
+        assert!(read.content.contains("openbad-ready"));
+        assert_eq!(read.metadata["running"], true);
+    }
+
     #[tokio::test]
     async fn mcp_tools_search_and_call_with_untrusted_marking() {
         let directory = tempdir().expect("tempdir");
@@ -16181,6 +16365,7 @@ invariants:
             "session",
             "mcp_call",
             "tool_search",
+            "terminal",
         ] {
             assert!(
                 definitions.iter().any(|tool| tool.name == expected),
