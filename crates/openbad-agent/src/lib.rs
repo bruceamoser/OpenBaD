@@ -75,6 +75,8 @@ pub struct AgentConfig {
     pub allow_commands: bool,
     pub stream: bool,
     pub system_prompt: Option<String>,
+    pub compact_after_bytes: usize,
+    pub compact_keep_recent: usize,
 }
 
 impl Default for AgentConfig {
@@ -86,6 +88,8 @@ impl Default for AgentConfig {
             allow_commands: false,
             stream: true,
             system_prompt: None,
+            compact_after_bytes: 600_000,
+            compact_keep_recent: 8,
         }
     }
 }
@@ -106,6 +110,7 @@ pub trait AgentObserver: Send + Sync {
     ) {
     }
     fn on_usage(&self, _usage: &UsageTotals) {}
+    fn on_compaction(&self, _before_bytes: usize, _after_bytes: usize) {}
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -435,6 +440,14 @@ impl<T: HttpTransport> Agent<T> {
             if let Some(steering) = &self.steering {
                 for message in steering.drain() {
                     messages.push(ChatMessage::user(message));
+                }
+            }
+            if self.config.compact_after_bytes > 0 {
+                let before = messages.iter().map(message_bytes).sum::<usize>();
+                if before > self.config.compact_after_bytes {
+                    compact_tool_results(&mut messages, self.config.compact_keep_recent);
+                    let after = messages.iter().map(message_bytes).sum::<usize>();
+                    observer.on_compaction(before, after);
                 }
             }
             let request = self.client.build_request(
@@ -847,6 +860,40 @@ fn load_project_instructions(root: &std::path::Path) -> Option<String> {
     }
 }
 
+fn message_bytes(message: &ChatMessage) -> usize {
+    let content = message.content.as_deref().map_or(0, str::len);
+    let reasoning = message.reasoning_content.as_deref().map_or(0, str::len);
+    let tool_calls = message.tool_calls.as_ref().map_or(0, |calls| {
+        calls
+            .iter()
+            .map(|call| call.function.name.len() + call.function.arguments.len())
+            .sum()
+    });
+    content + reasoning + tool_calls + 32
+}
+
+fn compact_tool_results(messages: &mut [ChatMessage], keep_recent: usize) -> usize {
+    if messages.len() <= keep_recent.saturating_add(1) {
+        return 0;
+    }
+    let cutoff = messages.len() - keep_recent.max(1);
+    let mut omitted = 0;
+    for message in messages.iter_mut().take(cutoff) {
+        if message.role != ChatRole::Tool {
+            continue;
+        }
+        let Some(content) = message.content.as_mut() else {
+            continue;
+        };
+        if content.len() <= 256 || content.starts_with("[compacted tool result") {
+            continue;
+        }
+        omitted += content.len();
+        *content = format!("[compacted tool result; {} bytes omitted]", omitted);
+    }
+    omitted
+}
+
 fn append_tool_audit(
     root: &std::path::Path,
     turn: u32,
@@ -1095,6 +1142,60 @@ mod tests {
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(openbad_tools::ToolResult::ok(self.name))
         }
+    }
+
+    struct CompactObserver {
+        before: Mutex<usize>,
+        after: Mutex<usize>,
+    }
+
+    impl AgentObserver for CompactObserver {
+        fn on_compaction(&self, before_bytes: usize, after_bytes: usize) {
+            *self.before.lock().expect("before") = before_bytes;
+            *self.after.lock().expect("after") = after_bytes;
+        }
+    }
+
+    #[tokio::test]
+    async fn old_tool_results_are_compacted_before_the_request() {
+        let directory = tempdir().expect("tempdir");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            )])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                compact_after_bytes: 1_000,
+                compact_keep_recent: 2,
+                ..AgentConfig::default()
+            },
+        );
+        let mut history = Vec::new();
+        for index in 0..8 {
+            history.push(ChatMessage::tool(
+                format!("call-{index}"),
+                format!("{index}:{}", "x".repeat(400)),
+            ));
+        }
+        history.push(ChatMessage::user("finish"));
+        let observer = CompactObserver {
+            before: Mutex::new(0),
+            after: Mutex::new(0),
+        };
+        let run = agent
+            .run_with_observer(history, &observer)
+            .await
+            .expect("run");
+        assert_eq!(run.text, "Done.");
+        let before = *observer.before.lock().expect("before");
+        let after = *observer.after.lock().expect("after");
+        assert!(before > after);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
