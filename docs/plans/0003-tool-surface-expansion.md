@@ -366,6 +366,12 @@ Starting point: **128 / 128 used**.
 
 Keep at least four slots free as headroom for hotfixes.
 
+**Superseded by domain facades (2026-10-21).** The registry now groups 119
+internal tools into 17 domains and exposes only `<domain>_list` and
+`<domain>_run` — 34 model-facing schemas. The arithmetic above still records
+how the internal tool set grew, but it no longer describes the provider-facing
+surface. New capabilities should be added inside an existing domain.
+
 ## 13. Sequencing
 
 1. **W0 consolidation** — frees slots, no new capability. Ship alone so it is

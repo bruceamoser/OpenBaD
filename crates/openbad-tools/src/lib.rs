@@ -1117,6 +1117,7 @@ pub trait Tool: Send + Sync {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
+    grouped: bool,
 }
 
 impl ToolRegistry {
@@ -1247,6 +1248,7 @@ impl ToolRegistry {
         registry.register(TestPluginTool);
         registry.register(WritePluginTool);
         registry.register(InstallBuiltinPluginTool);
+        registry.grouped = true;
         registry
     }
 
@@ -1257,7 +1259,19 @@ impl ToolRegistry {
 
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|tool| tool.definition()).collect()
+        if !self.grouped {
+            return self.tools.values().map(|tool| tool.definition()).collect();
+        }
+        let mut domains: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for name in self.tools.keys() {
+            *domains.entry(tool_domain(name)).or_default() += 1;
+        }
+        let mut definitions = Vec::with_capacity(domains.len() * 2);
+        for domain in domains.keys() {
+            definitions.push(domain_list_definition(domain));
+            definitions.push(domain_run_definition(domain));
+        }
+        definitions
     }
 
     #[must_use]
@@ -1274,11 +1288,199 @@ impl ToolRegistry {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        if self.grouped {
+            if let Some(domain) = name.strip_suffix("_list") {
+                if !self.tools.keys().any(|tool| tool_domain(tool) == domain) {
+                    return Err(ToolError::InvalidArgument(format!(
+                        "unknown tool domain: {domain}"
+                    )));
+                }
+                return Ok(ToolResult::ok(truncate(
+                    &self.domain_catalog(domain)?,
+                    context.max_output_bytes,
+                )));
+            }
+            if let Some(domain) = name.strip_suffix("_run") {
+                let tool_name = arguments
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ToolError::InvalidArgument("missing string argument: tool".to_owned())
+                    })?;
+                if tool_domain(tool_name) != domain {
+                    return Err(ToolError::InvalidArgument(format!(
+                        "tool {tool_name} is not in the {domain} domain"
+                    )));
+                }
+                let arguments = arguments
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let tool = self.tools.get(tool_name).ok_or_else(|| {
+                    ToolError::InvalidArgument(format!("unknown tool: {tool_name}"))
+                })?;
+                return tool.execute(arguments, context).await;
+            }
+        }
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::InvalidArgument(format!("unknown tool: {name}")))?;
         tool.execute(arguments, context).await
+    }
+
+    fn domain_catalog(&self, domain: &str) -> Result<String, ToolError> {
+        let tools = self
+            .tools
+            .iter()
+            .filter(|(name, _)| tool_domain(name) == domain)
+            .map(|(name, tool)| {
+                let definition = tool.definition();
+                json!({
+                    "name": name,
+                    "description": definition.description,
+                    "risk": risk_name(definition.risk),
+                    "arguments": definition.input_schema,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string_pretty(&json!({"domain": domain, "tools": tools}))
+            .map_err(|error| ToolError::Failed(error.to_string()))
+    }
+}
+
+fn risk_name(risk: RiskLevel) -> &'static str {
+    match risk {
+        RiskLevel::Read => "read",
+        RiskLevel::Write => "write",
+        RiskLevel::Execute => "execute",
+        RiskLevel::Network => "network",
+        RiskLevel::Destructive => "destructive",
+    }
+}
+
+fn domain_list_definition(domain: &str) -> ToolDefinition {
+    ToolDefinition::new(
+        format!("{domain}_list"),
+        domain_description(domain),
+        RiskLevel::Read,
+    )
+    .with_schema(json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    }))
+}
+
+fn domain_run_definition(domain: &str) -> ToolDefinition {
+    ToolDefinition::new(
+        format!("{domain}_run"),
+        format!(
+            "Run a tool from the {domain} domain. Call {domain}_list first to discover tool names and input schemas."
+        ),
+        RiskLevel::Execute,
+    )
+    .with_schema(json!({
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string"},
+            "arguments": {"type": "object"}
+        },
+        "required": ["tool"],
+        "additionalProperties": false
+    }))
+}
+
+fn domain_description(domain: &str) -> String {
+    let purpose = match domain {
+        "artifacts" => "archives, diffs, citations, and presented artifacts",
+        "collaboration" => "questions, filesystem access requests, and human input",
+        "context" => "context residency, maps, budgets, and pin/exclude rules",
+        "exec" => "commands, tests, background jobs, and persistent terminals",
+        "files" => "workspace file reads, writes, edits, moves, and directory listing",
+        "git" => "local Git state and the full GitHub surface",
+        "governance" => "canon, ADRs, invariants, ledgers, and structured YAML",
+        "knowledge" => "long-form knowledge documents and review status",
+        "memory" => "short durable memories, recall, update, and forget",
+        "orchestration" => "subagents and deterministic multi-step workflows",
+        "plan" => "plans, todos, recipes, tasks, and gates",
+        "plugins" => "skills and plugin discovery, testing, and invocation",
+        "repos" => "reference repositories linked to the project",
+        "search" => "code, project, symbol, reference, and LSP search",
+        "session" => "session checkpoints, resume, handoff, and history search",
+        "snapshots" => "workspace snapshots and golden comparisons",
+        "web" => "web fetch, package registry lookup, and MCP tools",
+        _ => "general-purpose tools",
+    };
+    format!(
+        "List the {domain} domain tools ({purpose}). Returns each tool name, description, risk, and input schema. Call {domain}_run to invoke one."
+    )
+}
+
+fn tool_domain(name: &str) -> &'static str {
+    match name {
+        "read_file"
+        | "read_files"
+        | "stat_file"
+        | "list_dir"
+        | "glob"
+        | "grep"
+        | "write_file"
+        | "edit_file"
+        | "delete_file"
+        | "move_file"
+        | "list_trash"
+        | "restore_trash"
+        | "preview_write"
+        | "undo_last"
+        | "instructions_for"
+        | "workspace_gc"
+        | "scaffold_project"
+        | "read_project_manifest" => "files",
+        "search_code" | "search_project" | "find_symbols" | "references_to" | "repo_map"
+        | "outline" | "classify_path" | "lsp" => "search",
+        "list_project_sources"
+        | "read_repo_file"
+        | "read_repo_files"
+        | "list_repo_dir"
+        | "glob_repo"
+        | "grep_repo"
+        | "stat_repo_file" => "repos",
+        "git_blame" | "git_branch" | "git_changes_since" | "git_checkout" | "git_commit"
+        | "git_commit_context" | "git_diff" | "git_log" | "git_show" | "git_stash"
+        | "git_status" | "git_worktree" | "github" | "repo_health" => "git",
+        "run_command" | "run_tests" | "job_list" | "job_logs" | "job_start" | "job_status"
+        | "job_stop" | "terminal" => "exec",
+        "remember" | "recall" | "list_memories" | "update_memory" | "forget_memory" => "memory",
+        "add_knowledge" | "delete_knowledge" | "export_knowledge" | "get_knowledge"
+        | "import_knowledge" | "list_knowledge" | "review_knowledge" | "update_knowledge" => {
+            "knowledge"
+        }
+        "plan_read" | "plan_update_step" | "plan_verify" | "plan_write" | "todo_read"
+        | "todo_write" | "run_task" | "list_recipes" | "list_gates" | "run_gate" | "run_recipe" => {
+            "plan"
+        }
+        "adr_list" | "adr_read" | "adr_write" | "assert_project" | "canon" | "check_invariants"
+        | "ledger" | "yaml_query" => "governance",
+        "context_map" | "context_report" | "context_rules" => "context",
+        "session" | "session_checkpoint" | "session_resume" | "write_handoff" => "session",
+        "list_skills"
+        | "read_skill"
+        | "write_skill"
+        | "plugin_call"
+        | "plugin_describe"
+        | "plugin_install_builtin"
+        | "plugin_list"
+        | "plugin_test"
+        | "write_plugin" => "plugins",
+        "archive_list" | "archive_read" | "diff_files" | "file_citation" | "present_artifact" => {
+            "artifacts"
+        }
+        "golden" | "snapshot" => "snapshots",
+        "ask_question" | "list_questions" | "request_fs_access" => "collaboration",
+        "mcp_call" | "registry_lookup" | "tool_search" | "web_fetch" => "web",
+        "subagent" | "workflow" => "orchestration",
+        _ => "general",
     }
 }
 
@@ -13507,10 +13709,13 @@ impl WorkflowEngine for RegistryWorkflowEngine {
                 .get("tool")
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("step {id} needs a tool"))?;
-            if tool == "workflow" {
+            let arguments = step.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            if tool == "workflow"
+                || (tool.ends_with("_run")
+                    && arguments.get("tool").and_then(Value::as_str) == Some("workflow"))
+            {
                 return Err("workflow cannot call itself".to_owned());
             }
-            let arguments = step.get("arguments").cloned().unwrap_or_else(|| json!({}));
             let scope = json!({"steps": outputs});
             let results = if let Some(for_each) = step.get("for_each") {
                 let collection = match for_each {
@@ -16785,61 +16990,97 @@ invariants:
             "provider tool limit: {} built-ins registered",
             definitions.len()
         );
-        for expected in [
+        for domain in [
+            "artifacts",
+            "collaboration",
+            "context",
+            "exec",
+            "files",
+            "git",
+            "governance",
+            "knowledge",
+            "memory",
+            "orchestration",
+            "plan",
+            "plugins",
+            "repos",
+            "search",
+            "session",
+            "snapshots",
+            "web",
+        ] {
+            for suffix in ["list", "run"] {
+                let expected = format!("{domain}_{suffix}");
+                assert!(
+                    definitions.iter().any(|tool| tool.name == expected),
+                    "missing domain facade {expected}"
+                );
+            }
+        }
+        assert_eq!(
+            definitions.len(),
+            34,
+            "{:?}",
+            definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        for removed in [
+            "read_file",
             "github",
+            "workflow",
+            "terminal",
+            "mcp_call",
             "plugin_list",
-            "plugin_call",
-            "request_fs_access",
-            "subagent",
-            "ledger",
+            "session",
             "snapshot",
             "golden",
             "canon",
             "context_rules",
             "lsp",
-            "session",
-            "mcp_call",
-            "tool_search",
-            "terminal",
-            "workflow",
-        ] {
-            assert!(
-                definitions.iter().any(|tool| tool.name == expected),
-                "missing built-in tool {expected}"
-            );
-        }
-        for removed in [
-            "github_issue",
-            "github_pr",
-            "github_ci",
-            "record_claim",
-            "list_claims",
-            "record_unknown",
-            "list_unknowns",
-            "record_dead_end",
-            "list_dead_ends",
-            "snapshot_create",
-            "snapshot_list",
-            "snapshot_restore",
-            "golden_compare",
-            "golden_accept",
-            "canon_add",
-            "canon_ban",
-            "canon_query",
-            "canon_lint",
-            "glossary_add",
-            "glossary_lookup",
-            "pin_context",
-            "exclude_context",
-            "list_context_rules",
         ] {
             assert!(
                 !definitions.iter().any(|tool| tool.name == removed),
-                "deprecated tool still registered: {removed}"
+                "direct tool still exposed: {removed}"
             );
         }
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
+    }
+
+    #[tokio::test]
+    async fn domain_facades_list_and_dispatch_tools() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello through a domain").expect("file");
+        let registry = ToolRegistry::with_builtin_tools();
+        let context = context(directory.path());
+
+        let listed = registry
+            .execute("files_list", json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("read_file"));
+        assert!(listed.content.contains("arguments"));
+
+        let read = registry
+            .execute(
+                "files_run",
+                json!({"tool": "read_file", "arguments": {"path": "hello.txt"}}),
+                &context,
+            )
+            .await
+            .expect("run");
+        assert!(read.content.contains("hello through a domain"));
+
+        let wrong_domain = registry
+            .execute(
+                "files_run",
+                json!({"tool": "git_status", "arguments": {}}),
+                &context,
+            )
+            .await;
+        assert!(wrong_domain.is_err());
     }
 
     #[tokio::test]

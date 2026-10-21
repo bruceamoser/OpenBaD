@@ -6,6 +6,11 @@ session knows what moved without re-reading every document.
 
 ## 2026-10-21
 
+- **Domain-based tool surface.** Built-in tools are now grouped into 17
+  domains. The model sees `<domain>_list` and `<domain>_run` for each domain,
+  reducing the provider-facing schema set from 119 to 34 while keeping all 119
+  internal tools available. Adding tools to an existing domain no longer
+  changes the tool-schema hash.
 - **Multi-step chat formatting.** Visible assistant text is accumulated across
   steps and joined with a blank line, and the streaming UI inserts the same
   boundary when a new step starts writing. This fixes run-on paragraphs when a
