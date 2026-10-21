@@ -124,7 +124,11 @@ export async function startMockDeepSeek() {
   });
   return {
     baseUrl: `http://127.0.0.1:${port}`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () =>
+      new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections?.();
+      }),
   };
 }
 
@@ -253,6 +257,7 @@ export async function startTauriDriver({ port, nativePort, nativeDriver, env = {
     stdio: ["ignore", "pipe", "pipe"],
     cwd,
     env: cleanDesktopEnv(env),
+    detached: true,
   });
   let output = "";
   child.stdout.on("data", (chunk) => {
@@ -270,14 +275,33 @@ export async function startTauriDriver({ port, nativePort, nativeDriver, env = {
     try {
       const response = await fetch(`${driverUrl}/status`);
       if (response.ok) {
-        return { child, driverUrl, output: () => output };
+        return {
+          child,
+          driverUrl,
+          output: () => output,
+          stop: () => {
+            if (child.exitCode === null && child.pid) {
+              try {
+                process.kill(-child.pid, "SIGKILL");
+              } catch {
+                child.kill();
+              }
+            }
+          },
+        };
       }
     } catch {
       // Driver is still starting.
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  child.kill();
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill();
+    }
+  }
   throw new Error(`tauri-driver did not start:\n${output}`);
 }
 

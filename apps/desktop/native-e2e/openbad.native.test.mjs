@@ -56,7 +56,7 @@ before(async () => {
 
 after(async () => {
   await client?.quit().catch(() => undefined);
-  if (driver?.child.exitCode === null) driver.child.kill();
+  driver?.stop();
   await mock?.close();
   await fixture?.cleanup();
 });
