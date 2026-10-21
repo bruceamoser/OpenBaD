@@ -157,6 +157,7 @@ export class WebDriverClient {
           alwaysMatch: { "tauri:options": { application } },
         },
       }),
+      signal: AbortSignal.timeout(30_000),
     });
     const payload = await response.json();
     if (!response.ok || payload.value?.error) {
@@ -170,6 +171,7 @@ export class WebDriverClient {
       method,
       headers: body === undefined ? {} : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
     const text = await response.text();
     const payload = text.length > 0 ? JSON.parse(text) : {};
@@ -209,7 +211,10 @@ export class WebDriverClient {
   }
 
   async quit() {
-    await fetch(`${this.baseUrl}/session/${this.sessionId}`, { method: "DELETE" });
+    await fetch(`${this.baseUrl}/session/${this.sessionId}`, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => undefined);
   }
 }
 
