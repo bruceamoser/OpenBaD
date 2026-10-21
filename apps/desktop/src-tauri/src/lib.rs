@@ -1234,6 +1234,49 @@ fn sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
 }
 
 #[tauri::command]
+fn archived_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .list_archived_sessions(50)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn archive_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    archived: bool,
+) -> Result<(), String> {
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .set_session_archived(session, archived)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .delete_session(session)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn checkpoint_diff(state: State<'_, AppState>, checkpoint_id: String) -> Result<String, String> {
     let checkpoint = {
         let store = state
@@ -3075,6 +3118,9 @@ pub fn run() {
             remove_project,
             rename_session,
             set_session_access_mode,
+            archived_sessions,
+            archive_session,
+            delete_session,
             workspace_index_status,
             refresh_workspace_index,
             workspace_default,

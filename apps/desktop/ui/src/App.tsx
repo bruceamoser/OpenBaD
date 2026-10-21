@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   BookOpen,
   Bot,
   Check,
@@ -33,6 +35,9 @@ import {
 
 import {
   addProject as addStoredProject,
+  archiveSession as archiveStoredSession,
+  deleteSession as deleteStoredSession,
+  loadArchivedSessions as fetchArchivedSessions,
   apiKeyStatus as fetchApiKeyStatus,
   createProject as createStoredProject,
   cancelChat,
@@ -139,6 +144,8 @@ export default function App() {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [archivedSessions, setArchivedSessions] = useState<SessionSummary[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read");
   const [model, setModel] = useState(preferences.model);
@@ -275,6 +282,14 @@ export default function App() {
     }
   }, []);
 
+  const loadArchivedSessions = useCallback(async () => {
+    try {
+      setArchivedSessions(await fetchArchivedSessions());
+    } catch {
+      setArchivedSessions([]);
+    }
+  }, []);
+
   const refreshWorkspaceIndex = useCallback(async () => {
     if (workspacePath.length === 0) {
       return;
@@ -338,6 +353,7 @@ export default function App() {
         .catch(() => setApiKeyStatus(false));
       void loadFoundation();
       void loadSessions();
+      void loadArchivedSessions();
     })();
     return () => {
       active = false;
@@ -348,6 +364,7 @@ export default function App() {
     const query = sessionQuery.trim();
     if (query.length === 0) {
       void loadSessions();
+      void loadArchivedSessions();
       return;
     }
     const timeout = window.setTimeout(() => {
@@ -843,6 +860,7 @@ export default function App() {
       );
       void loadFoundation();
       void loadSessions();
+      void loadArchivedSessions();
       void loadProjects();
       void loadMemories();
       setProjectRevision((value) => value + 1);
@@ -996,6 +1014,42 @@ export default function App() {
     }
   }, [editingSessionId, sessionTitleDraft]);
 
+  const archiveSession = useCallback(
+    async (session: SessionSummary, archived: boolean) => {
+      try {
+        await archiveStoredSession(session.id, archived);
+        if (archived && session.id === sessionId) {
+          newSession();
+        }
+        await Promise.all([loadSessions(), loadArchivedSessions()]);
+        setSessions((items) =>
+          archived ? items.filter((item) => item.id !== session.id) : items,
+        );
+      } catch (cause) {
+        setError(describeError(cause));
+      }
+    },
+    [loadArchivedSessions, loadSessions, newSession, sessionId],
+  );
+
+  const deleteSession = useCallback(
+    async (session: SessionSummary) => {
+      if (!window.confirm(`Delete session "${session.title ?? "Untitled session"}"?`)) {
+        return;
+      }
+      try {
+        await deleteStoredSession(session.id);
+        if (session.id === sessionId) {
+          newSession();
+        }
+        await Promise.all([loadSessions(), loadArchivedSessions()]);
+      } catch (cause) {
+        setError(describeError(cause));
+      }
+    },
+    [loadArchivedSessions, loadSessions, newSession, sessionId],
+  );
+
   const saveProjectName = useCallback(async () => {
     if (activeProject === null) {
       return;
@@ -1096,6 +1150,13 @@ export default function App() {
         (session) => activeProjectId !== null && session.workspace_id === activeProjectId,
       ),
     [activeProjectId, sessions],
+  );
+  const projectArchivedSessions = useMemo(
+    () =>
+      archivedSessions.filter(
+        (session) => activeProjectId !== null && session.workspace_id === activeProjectId,
+      ),
+    [activeProjectId, archivedSessions],
   );
   const visibleSessions = sessionQuery.trim().length > 0 ? sessions : projectSessions;
 
@@ -1484,8 +1545,40 @@ export default function App() {
                           onDraft={setSessionTitleDraft}
                           onCommit={() => void commitRenameSession()}
                           onCancel={() => setEditingSessionId(null)}
+                          onArchive={() => void archiveSession(session, true)}
+                          onDelete={() => void deleteSession(session)}
+                          archived={false}
                         />
                       ))}
+                      {projectArchivedSessions.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowArchived((value) => !value)}
+                          className="mt-1 flex w-full items-center gap-1 rounded px-2 py-1 text-[10px] text-slate-600 hover:text-slate-400"
+                        >
+                          {showArchived ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                          Archived ({projectArchivedSessions.length})
+                        </button>
+                      )}
+                      {showArchived &&
+                        projectArchivedSessions.map((session) => (
+                          <SessionRow
+                            key={session.id}
+                            session={session}
+                            active={false}
+                            editing={false}
+                            draft=""
+                            showProject={false}
+                            onOpen={() => void openSession(session)}
+                            onStartRename={() => undefined}
+                            onDraft={() => undefined}
+                            onCommit={() => undefined}
+                            onCancel={() => undefined}
+                            onArchive={() => void archiveSession(session, false)}
+                            onDelete={() => void deleteSession(session)}
+                            archived
+                          />
+                        ))}
                     </div>
                   )}
                 </div>
@@ -2013,6 +2106,9 @@ function SessionRow({
   onDraft,
   onCommit,
   onCancel,
+  onArchive,
+  onDelete,
+  archived,
 }: {
   session: SessionSummary;
   active: boolean;
@@ -2024,6 +2120,9 @@ function SessionRow({
   onDraft: (value: string) => void;
   onCommit: () => void;
   onCancel: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+  archived: boolean;
 }) {
   if (editing) {
     return (
@@ -2078,6 +2177,30 @@ function SessionRow({
         className="hidden shrink-0 rounded p-0.5 text-slate-600 hover:text-slate-300 group-hover:block"
       >
         <Pencil size={11} />
+      </button>
+      <button
+        type="button"
+        aria-label={archived ? "Restore session" : "Archive session"}
+        title={archived ? "Restore session" : "Archive session"}
+        onClick={(event) => {
+          event.stopPropagation();
+          onArchive();
+        }}
+        className="hidden shrink-0 rounded p-0.5 text-slate-600 hover:text-slate-300 group-hover:block"
+      >
+        {archived ? <ArchiveRestore size={11} /> : <Archive size={11} />}
+      </button>
+      <button
+        type="button"
+        aria-label="Delete session"
+        title="Delete session"
+        onClick={(event) => {
+          event.stopPropagation();
+          onDelete();
+        }}
+        className="hidden shrink-0 rounded p-0.5 text-slate-600 hover:text-rose-300 group-hover:block"
+      >
+        <Trash2 size={11} />
       </button>
     </div>
   );
