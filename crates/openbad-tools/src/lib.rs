@@ -933,6 +933,7 @@ pub struct ToolContext {
     pub allow_writes: bool,
     pub allow_commands: bool,
     pub max_output_bytes: usize,
+    pub model_output_bytes: usize,
     pub search: Option<Arc<dyn WorkspaceSearch>>,
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     pub memory: Option<Arc<dyn MemoryStore>>,
@@ -955,6 +956,7 @@ impl Clone for ToolContext {
             allow_writes: self.allow_writes,
             allow_commands: self.allow_commands,
             max_output_bytes: self.max_output_bytes,
+            model_output_bytes: self.model_output_bytes,
             search: self.search.clone(),
             checkpoints: self.checkpoints.clone(),
             memory: self.memory.clone(),
@@ -985,6 +987,7 @@ impl ToolContext {
             allow_writes: false,
             allow_commands: false,
             max_output_bytes: 256 * 1024,
+            model_output_bytes: 64 * 1024,
             search: None,
             checkpoints: None,
             memory: None,
@@ -1130,6 +1133,7 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(ReadFileTool);
+        registry.register(ReadSpillTool);
         registry.register(StatFileTool);
         registry.register(RequestFilesystemAccessTool);
         registry.register(StatRepoFileTool);
@@ -1295,10 +1299,7 @@ impl ToolRegistry {
                         "unknown tool domain: {domain}"
                     )));
                 }
-                return Ok(ToolResult::ok(truncate(
-                    &self.domain_catalog(domain)?,
-                    context.max_output_bytes,
-                )));
+                return finish_result(Ok(ToolResult::ok(self.domain_catalog(domain)?)), context);
             }
             if let Some(domain) = name.strip_suffix("_run") {
                 let tool_name = arguments
@@ -1319,14 +1320,14 @@ impl ToolRegistry {
                 let tool = self.tools.get(tool_name).ok_or_else(|| {
                     ToolError::InvalidArgument(format!("unknown tool: {tool_name}"))
                 })?;
-                return tool.execute(arguments, context).await;
+                return finish_result(tool.execute(arguments, context).await, context);
             }
         }
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::InvalidArgument(format!("unknown tool: {name}")))?;
-        tool.execute(arguments, context).await
+        finish_result(tool.execute(arguments, context).await, context)
     }
 
     fn domain_catalog(&self, domain: &str) -> Result<String, ToolError> {
@@ -1347,6 +1348,41 @@ impl ToolRegistry {
         serde_json::to_string_pretty(&json!({"domain": domain, "tools": tools}))
             .map_err(|error| ToolError::Failed(error.to_string()))
     }
+}
+
+fn finish_result(
+    result: Result<ToolResult, ToolError>,
+    context: &ToolContext,
+) -> Result<ToolResult, ToolError> {
+    let mut result = result?;
+    if result.content.len() <= context.model_output_bytes {
+        return Ok(result);
+    }
+    let full = result.content.clone();
+    let directory = context.workspace.root().join(".openbad").join("spill");
+    let path = std::fs::create_dir_all(&directory).ok().and_then(|()| {
+        let hash = &blake3::hash(full.as_bytes()).to_hex()[..16];
+        let path = directory.join(format!("spill-{}-{hash}.txt", now_millis()));
+        std::fs::write(&path, &full).ok().map(|()| path)
+    });
+    result.content = head_tail(&full, context.model_output_bytes);
+    match path {
+        Some(path) => {
+            result
+                .content
+                .push_str(&format!("\n[full output saved to {}]", path.display()));
+            let mut metadata = result.metadata;
+            if !metadata.is_object() {
+                metadata = json!({"original_metadata": metadata});
+            }
+            metadata["spilled_path"] = json!(path);
+            result.metadata = metadata;
+        }
+        None => result
+            .content
+            .push_str("\n[output truncated; spill file could not be written]"),
+    }
+    Ok(result)
 }
 
 fn risk_name(risk: RiskLevel) -> &'static str {
@@ -1421,6 +1457,7 @@ fn tool_domain(name: &str) -> &'static str {
     match name {
         "read_file"
         | "read_files"
+        | "read_spill"
         | "stat_file"
         | "list_dir"
         | "glob"
@@ -2244,6 +2281,91 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
     temp.persist(path)
         .map_err(|error| ToolError::Io(error.error))?;
     Ok(())
+}
+
+struct ReadSpillTool;
+
+#[async_trait]
+impl Tool for ReadSpillTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "read_spill",
+            "Read a spilled tool-output file under .openbad/spill. Use offset and max_bytes to page through large output.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0},
+                "max_bytes": {"type": "integer", "minimum": 1}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let requested = string_arg(&arguments, "path")?;
+        let root = context.workspace.root().join(".openbad").join("spill");
+        let root = root
+            .canonicalize()
+            .map_err(|_| ToolError::InvalidArgument("no spill directory exists yet".to_owned()))?;
+        let requested_path = Path::new(&requested);
+        let candidate = if requested_path.is_absolute() {
+            requested_path.to_path_buf()
+        } else if requested.starts_with(".openbad/spill/") {
+            context.workspace.root().join(requested_path)
+        } else {
+            root.join(requested_path)
+        };
+        let path = candidate
+            .canonicalize()
+            .map_err(|error| ToolError::InvalidArgument(format!("spill file: {error}")))?;
+        if !path.starts_with(&root) {
+            return Err(ToolError::InvalidArgument(
+                "spill file must be under .openbad/spill".to_owned(),
+            ));
+        }
+        let bytes = std::fs::read(&path)?;
+        let mut offset = optional_usize(&arguments, "offset")
+            .unwrap_or(0)
+            .min(bytes.len());
+        while offset < bytes.len() && !is_char_boundary(&bytes, offset) {
+            offset += 1;
+        }
+        let limit = optional_usize(&arguments, "max_bytes")
+            .unwrap_or_else(|| context.model_output_bytes.saturating_sub(1024))
+            .max(1);
+        let mut end = (offset + limit).min(bytes.len());
+        while end < bytes.len() && !is_char_boundary(&bytes, end) {
+            end += 1;
+        }
+        let content = String::from_utf8_lossy(&bytes[offset..end]).into_owned();
+        let mut result = ToolResult::ok(if end < bytes.len() {
+            format!(
+                "{content}\n[spill bytes {offset}..{end} of {}; use offset {end}]",
+                bytes.len()
+            )
+        } else {
+            content
+        });
+        result.metadata = json!({
+            "spill_path": path,
+            "offset": offset,
+            "next_offset": end,
+            "total_bytes": bytes.len(),
+        });
+        Ok(result)
+    }
+}
+
+fn is_char_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0 || index >= bytes.len() || (bytes[index] & 0b1100_0000) != 0b1000_0000
 }
 
 struct ReadFileTool;
@@ -17047,6 +17169,36 @@ invariants:
         }
         assert!(definitions.iter().all(|tool| tool.input_schema.is_object()));
         assert!(registry.openai_tools().iter().all(Value::is_object));
+    }
+
+    #[tokio::test]
+    async fn oversized_results_spill_and_can_be_read_back() {
+        let directory = tempdir().expect("tempdir");
+        let body = "spill me ".repeat(40);
+        fs::write(directory.path().join("large.txt"), &body).expect("file");
+        let registry = ToolRegistry::with_builtin_tools();
+        let mut context = context(directory.path());
+        context.model_output_bytes = 128;
+
+        let result = registry
+            .execute("read_file", json!({"path": "large.txt"}), &context)
+            .await
+            .expect("read");
+        let spill = result.metadata["spilled_path"]
+            .as_str()
+            .expect("spilled path");
+        assert!(spill.contains(".openbad/spill/"));
+        assert_eq!(fs::read_to_string(spill).expect("spill body"), body);
+
+        let read_back = registry
+            .execute(
+                "read_spill",
+                json!({"path": spill, "max_bytes": 64}),
+                &context,
+            )
+            .await
+            .expect("read spill");
+        assert!(read_back.content.contains("spill me"));
     }
 
     #[tokio::test]
