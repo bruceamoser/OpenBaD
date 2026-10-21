@@ -295,7 +295,9 @@ Rules:
 - Policy checks run before approval; a denied capability never prompts.
 - The agent resolves the effective risk of `<domain>_run` calls from the inner
   tool and refuses execute, network, or destructive tools before execution
-  unless the session has command access.
+  unless the session has command access. The denial carries
+  `openbad_approval` metadata; the desktop offers a sticky session approval
+  that switches the session to Full access and continues the task.
 - Mutating tools are serialized per workspace.
 - Read-only tools can run concurrently.
 - Every tool has a timeout and a kill-on-drop guard.
