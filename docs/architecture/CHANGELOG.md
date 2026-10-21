@@ -77,3 +77,8 @@ session knows what moved without re-reading every document.
 - **Finished-agent cleanup.** Terminal subagent records are pruned after 60
   seconds (`OPENBAD_SUBAGENT_RETENTION_SECONDS` override), and the Agents panel
   keeps polling after completion so removed workers disappear without a click.
+- **Tool surface consolidation.** `record_claim`/`list_claims`,
+  `record_unknown`/`list_unknowns`, and `record_dead_end`/`list_dead_ends`
+  merged into `ledger`; `snapshot_*` into `snapshot`; `golden_*` into `golden`;
+  `canon_*` and `glossary_*` into `canon`; and the context-rule tools into
+  `context_rules`. The built-in surface is now 113 of the 128-slot cap.

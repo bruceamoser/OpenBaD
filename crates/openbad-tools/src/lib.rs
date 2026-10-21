@@ -1014,6 +1014,7 @@ impl ToolRegistry {
         registry.register(GitStatusTool);
         registry.register(GitDiffTool);
         registry.register(RepoMapTool);
+        registry.register(LedgerTool);
         registry.register(RememberTool);
         registry.register(RecallTool);
         registry.register(ListMemoriesTool);
@@ -1042,8 +1043,6 @@ impl ToolRegistry {
         registry.register(SessionCheckpointTool);
         registry.register(SessionResumeTool);
         registry.register(ReferencesToTool);
-        registry.register(GoldenCompareTool);
-        registry.register(GoldenAcceptTool);
         registry.register(PlanWriteTool);
         registry.register(PlanReadTool);
         registry.register(PlanUpdateStepTool);
@@ -1060,14 +1059,9 @@ impl ToolRegistry {
         registry.register(JobStopTool);
         registry.register(JobListTool);
         registry.register(ContextReportTool);
-        registry.register(RecordClaimTool);
-        registry.register(ListClaimsTool);
-        registry.register(RecordUnknownTool);
-        registry.register(ListUnknownsTool);
+        registry.register(GoldenTool);
+        registry.register(SnapshotTool);
         registry.register(PreviewWriteTool);
-        registry.register(SnapshotCreateTool);
-        registry.register(SnapshotListTool);
-        registry.register(SnapshotRestoreTool);
         registry.register(AssertProjectTool);
         registry.register(GitCommitTool);
         registry.register(GitBranchTool);
@@ -1081,25 +1075,16 @@ impl ToolRegistry {
         registry.register(GitCommitContextTool);
         registry.register(GithubTool);
         registry.register(SubagentTool);
-        registry.register(CanonBanTool);
-        registry.register(CanonAddTool);
-        registry.register(CanonQueryTool);
-        registry.register(CanonLintTool);
-        registry.register(GlossaryAddTool);
-        registry.register(GlossaryLookupTool);
         registry.register(AdrWriteTool);
         registry.register(AdrListTool);
         registry.register(AdrReadTool);
+        registry.register(CanonTool);
         registry.register(YamlQueryTool);
         registry.register(CheckInvariantsTool);
         registry.register(AskQuestionTool);
         registry.register(ListQuestionsTool);
-        registry.register(PinContextTool);
-        registry.register(ExcludeContextTool);
-        registry.register(ListContextRulesTool);
+        registry.register(ContextRulesTool);
         registry.register(ContextMapTool);
-        registry.register(RecordDeadEndTool);
-        registry.register(ListDeadEndsTool);
         registry.register(ReadProjectManifestTool);
         registry.register(ClassifyPathTool);
         registry.register(RunTaskTool);
@@ -12787,6 +12772,230 @@ impl Tool for SubagentTool {
     }
 }
 
+struct LedgerTool;
+
+#[async_trait]
+impl Tool for LedgerTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "ledger",
+            "Read or write the project learning ledger. kind claim records provenance-tagged claims; kind unknown records unresolved gaps; kind dead_end records ruled-out paths. action list returns current entries.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["record", "list"]},
+                "kind": {"type": "string", "enum": ["claim", "unknown", "dead_end"]},
+                "query": {"type": "string"},
+                "claim": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["executed", "read", "inferred", "assumed"]},
+                "evidence": {"type": "array", "items": {"type": "string"}},
+                "how_to_check": {"type": "string"},
+                "question": {"type": "string"},
+                "context": {"type": "string"},
+                "pattern": {"type": "string"},
+                "reason": {"type": "string"},
+                "hypothesis": {"type": "string"}
+            },
+            "required": ["action", "kind"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = required_string(&arguments, "action")?;
+        let kind = required_string(&arguments, "kind")?;
+        match (action.as_str(), kind.as_str()) {
+            ("record", "claim") => RecordClaimTool.execute(arguments, context).await,
+            ("list", "claim") => ListClaimsTool.execute(arguments, context).await,
+            ("record", "unknown") => RecordUnknownTool.execute(arguments, context).await,
+            ("list", "unknown") => ListUnknownsTool.execute(arguments, context).await,
+            ("record", "dead_end") => RecordDeadEndTool.execute(arguments, context).await,
+            ("list", "dead_end") => ListDeadEndsTool.execute(arguments, context).await,
+            (action, kind) => Err(ToolError::InvalidArgument(format!(
+                "unsupported ledger action {action} for kind {kind}"
+            ))),
+        }
+    }
+}
+
+struct SnapshotTool;
+
+#[async_trait]
+impl Tool for SnapshotTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "snapshot",
+            "Create, list, or restore bounded workspace snapshots. Restore requires confirm=true. Extra files are not deleted.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "list", "restore"]},
+                "label": {"type": "string"},
+                "replace": {"type": "boolean"},
+                "confirm": {"type": "boolean"}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        match required_string(&arguments, "action")?.as_str() {
+            "create" => SnapshotCreateTool.execute(arguments, context).await,
+            "list" => SnapshotListTool.execute(arguments, context).await,
+            "restore" => SnapshotRestoreTool.execute(arguments, context).await,
+            action => Err(ToolError::InvalidArgument(format!(
+                "unsupported snapshot action: {action}"
+            ))),
+        }
+    }
+}
+
+struct GoldenTool;
+
+#[async_trait]
+impl Tool for GoldenTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "golden",
+            "Compare a generated file with a committed baseline, or promote it with action accept and confirm=true.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["compare", "accept"]},
+                "path": {"type": "string"},
+                "baseline": {"type": "string"},
+                "confirm": {"type": "boolean"}
+            },
+            "required": ["action", "path", "baseline"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        match required_string(&arguments, "action")?.as_str() {
+            "compare" => GoldenCompareTool.execute(arguments, context).await,
+            "accept" => GoldenAcceptTool.execute(arguments, context).await,
+            action => Err(ToolError::InvalidArgument(format!(
+                "unsupported golden action: {action}"
+            ))),
+        }
+    }
+}
+
+struct CanonTool;
+
+#[async_trait]
+impl Tool for CanonTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "canon",
+            "Work with the project canon and glossary. Actions: query/lint/add/ban operate on .openbad/canon.yaml; glossary_add/glossary_lookup operate on .openbad/glossary.yaml.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["query", "lint", "add", "ban", "glossary_add", "glossary_lookup"]},
+                "query": {"type": "string"},
+                "include_all": {"type": "boolean"},
+                "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 200},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 1000},
+                "id": {"type": "string"},
+                "statement": {"type": "string"},
+                "status": {"type": "string", "enum": ["canonical", "superseded", "disputed", "unknown"]},
+                "superseded_by": {"type": "string"},
+                "evidence": {"type": "array", "items": {"type": "string"}},
+                "phrase": {"type": "string"},
+                "replacement": {"type": "string"},
+                "citation": {"type": "string"},
+                "remove": {"type": "boolean"},
+                "term": {"type": "string"},
+                "definition": {"type": "string"},
+                "expansion": {"type": "string"},
+                "aliases": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        match required_string(&arguments, "action")?.as_str() {
+            "query" => CanonQueryTool.execute(arguments, context).await,
+            "lint" => CanonLintTool.execute(arguments, context).await,
+            "add" => CanonAddTool.execute(arguments, context).await,
+            "ban" => CanonBanTool.execute(arguments, context).await,
+            "glossary_add" => GlossaryAddTool.execute(arguments, context).await,
+            "glossary_lookup" => GlossaryLookupTool.execute(arguments, context).await,
+            action => Err(ToolError::InvalidArgument(format!(
+                "unsupported canon action: {action}"
+            ))),
+        }
+    }
+}
+
+struct ContextRulesTool;
+
+#[async_trait]
+impl Tool for ContextRulesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "context_rules",
+            "List, pin, or exclude workspace context rules in .openbad/context.yaml. Use remove=true to drop a rule.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "pin", "exclude"]},
+                "path": {"type": "string", "description": "Workspace-relative glob"},
+                "note": {"type": "string"},
+                "remove": {"type": "boolean"}
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        match required_string(&arguments, "action")?.as_str() {
+            "list" => ListContextRulesTool.execute(arguments, context).await,
+            "pin" => PinContextTool.execute(arguments, context).await,
+            "exclude" => ExcludeContextTool.execute(arguments, context).await,
+            action => Err(ToolError::InvalidArgument(format!(
+                "unsupported context_rules action: {action}"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -15274,6 +15483,60 @@ invariants:
     }
 
     #[tokio::test]
+    async fn consolidated_tools_route_ledger_canon_context_and_snapshot_actions() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("file.txt"), "hello").expect("file");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        LedgerTool
+            .execute(
+                json!({"action": "record", "kind": "claim", "claim": "works", "confidence": "read"}),
+                &context,
+            )
+            .await
+            .expect("record claim");
+        let claims = LedgerTool
+            .execute(json!({"action": "list", "kind": "claim"}), &context)
+            .await
+            .expect("list claims");
+        assert!(claims.content.contains("works"));
+
+        CanonTool
+            .execute(
+                json!({"action": "add", "id": "C1", "statement": "canonical truth"}),
+                &context,
+            )
+            .await
+            .expect("canon add");
+        let canon = CanonTool
+            .execute(json!({"action": "query"}), &context)
+            .await
+            .expect("canon query");
+        assert!(canon.content.contains("canonical truth"));
+
+        ContextRulesTool
+            .execute(json!({"action": "pin", "path": "file.txt"}), &context)
+            .await
+            .expect("pin");
+        let rules = ContextRulesTool
+            .execute(json!({"action": "list"}), &context)
+            .await
+            .expect("list rules");
+        assert!(rules.content.contains("file.txt"));
+
+        SnapshotTool
+            .execute(json!({"action": "create", "label": "baseline"}), &context)
+            .await
+            .expect("snapshot");
+        let snapshots = SnapshotTool
+            .execute(json!({"action": "list"}), &context)
+            .await
+            .expect("snapshot list");
+        assert!(snapshots.content.contains("baseline"));
+    }
+
+    #[tokio::test]
     async fn every_builtin_has_a_schema() {
         let registry = ToolRegistry::with_builtin_tools();
         let definitions = registry.definitions();
@@ -15288,13 +15551,42 @@ invariants:
             "plugin_call",
             "request_fs_access",
             "subagent",
+            "ledger",
+            "snapshot",
+            "golden",
+            "canon",
+            "context_rules",
         ] {
             assert!(
                 definitions.iter().any(|tool| tool.name == expected),
                 "missing built-in tool {expected}"
             );
         }
-        for removed in ["github_issue", "github_pr", "github_ci"] {
+        for removed in [
+            "github_issue",
+            "github_pr",
+            "github_ci",
+            "record_claim",
+            "list_claims",
+            "record_unknown",
+            "list_unknowns",
+            "record_dead_end",
+            "list_dead_ends",
+            "snapshot_create",
+            "snapshot_list",
+            "snapshot_restore",
+            "golden_compare",
+            "golden_accept",
+            "canon_add",
+            "canon_ban",
+            "canon_query",
+            "canon_lint",
+            "glossary_add",
+            "glossary_lookup",
+            "pin_context",
+            "exclude_context",
+            "list_context_rules",
+        ] {
             assert!(
                 !definitions.iter().any(|tool| tool.name == removed),
                 "deprecated tool still registered: {removed}"
@@ -15516,6 +15808,36 @@ invariants:
             )
             .await;
         assert!(matches!(denied, Err(ToolError::OutsideRoot(_))));
+    }
+
+    #[tokio::test]
+    async fn list_and_stat_honor_outside_access_grants() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        let file = outside.path().join("notes.txt");
+        fs::write(&file, "outside").expect("file");
+        let mut context = context(workspace.path());
+        context.set_outside_grants(vec![OutsideGrant {
+            id: "grant-1".to_owned(),
+            path: outside.path().to_path_buf(),
+            write_access: false,
+            reason: "test".to_owned(),
+        }]);
+
+        let listed = ListDirTool
+            .execute(
+                json!({"path": outside.path().to_string_lossy(), "depth": 1}),
+                &context,
+            )
+            .await
+            .expect("list granted directory");
+        assert!(listed.content.contains("notes.txt"));
+
+        let stat = StatFileTool
+            .execute(json!({"path": file.to_string_lossy()}), &context)
+            .await
+            .expect("stat granted file");
+        assert!(stat.content.contains("bytes"));
     }
 
     #[tokio::test]
