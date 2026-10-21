@@ -747,12 +747,24 @@ export default function App() {
                 case "reasoning":
                   return {
                     ...entry,
-                    reasoning: `${entry.reasoning ?? ""}${event.text}`,
+                    reasoning: appendStepText(
+                      entry.reasoning ?? "",
+                      event.text,
+                      entry.lastReasoningStep,
+                      event.step,
+                    ),
+                    lastReasoningStep: event.step,
                   };
                 case "content":
                   return {
                     ...entry,
-                    text: `${entry.text}${event.text}`,
+                    text: appendStepText(
+                      entry.text,
+                      event.text,
+                      entry.lastContentStep,
+                      event.step,
+                    ),
+                    lastContentStep: event.step,
                     status: "Writing…",
                   };
                 case "tool_call":
@@ -2075,6 +2087,26 @@ function CopyMessageButton({
       {showLabel && <span>{copied ? "Copied" : label}</span>}
     </button>
   );
+}
+
+function appendStepText(
+  current: string,
+  incoming: string,
+  previousStep: number | undefined,
+  step: number,
+): string {
+  if (current.length === 0) {
+    return incoming;
+  }
+  if (previousStep === undefined || previousStep === step) {
+    return `${current}${incoming}`;
+  }
+  const separator = current.endsWith("\n\n")
+    ? ""
+    : current.endsWith("\n")
+      ? "\n"
+      : "\n\n";
+  return `${current}${separator}${incoming}`;
 }
 
 function MessageCard({ entry }: { entry: ChatEntry }) {

@@ -42,6 +42,8 @@ export type ChatEntry = {
   role: "user" | "assistant";
   text: string;
   reasoning?: string;
+  lastContentStep?: number;
+  lastReasoningStep?: number;
   status?: string;
   tools?: string[];
   steering?: boolean;
