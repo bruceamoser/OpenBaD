@@ -258,7 +258,16 @@ let mockProjects: WorkspaceSummary[] = [
     session_count: 0,
   },
 ];
-const mockMessages = new Map<string, { role: string; text: string; reasoning: string | null }[]>();
+const mockMessages = new Map<
+  string,
+  {
+    role: string;
+    text: string;
+    reasoning: string | null;
+    attachments?: string[];
+    duration_ms?: number | null;
+  }[]
+>();
 
 const mockUsage: Usage = {
   input_tokens: 428,
@@ -683,9 +692,14 @@ export async function loadSession(sessionId: string): Promise<SessionView> {
   if (isTauri) {
     return invoke<SessionView>("session_view", { sessionId });
   }
+  const messages = mockMessages.get(sessionId) ?? [];
   return {
     session_id: sessionId,
-    messages: mockMessages.get(sessionId) ?? [],
+    messages,
+    total_duration_ms: messages.reduce(
+      (total, message) => total + (message.duration_ms ?? 0),
+      0,
+    ),
   };
 }
 
@@ -1119,6 +1133,16 @@ export async function previewProjectFile(
   };
 }
 
+export async function revealPath(
+  workspacePath: string,
+  path: string,
+): Promise<string> {
+  if (isTauri) {
+    return invoke<string>("reveal_path", { workspacePath, path });
+  }
+  return path;
+}
+
 export async function quitApp(): Promise<void> {
   if (isTauri) {
     await getCurrentWindow().close();
@@ -1350,6 +1374,7 @@ async function mockChat(
   input: ChatInput,
   onEvent: (event: AgentEvent) => void,
 ): Promise<ChatReply> {
+  const startedAt = Date.now();
   mockCancelled = false;
   if (/subagent|spawn agent/i.test(input.message)) {
     const now = Date.now();
@@ -1517,14 +1542,11 @@ async function mockChat(
       workspace_path: input.workspacePath,
       title: input.message.slice(0, 80),
       status: "active",
+      created_at: startedAt,
       updated_at: Date.now(),
       last_turn: 1,
       access_mode: "read",
     });
-    mockMessages.set(sessionId, [
-      { role: "user", text: input.message, reasoning: null },
-      { role: "assistant", text, reasoning: "The user wants a workspace summary." },
-    ]);
   }
 
   if (mockCheckpoints.length === 0) {
@@ -1537,6 +1559,23 @@ async function mockChat(
     });
   }
 
+  const durationMs = Date.now() - startedAt;
+  const history = mockMessages.get(sessionId) ?? [];
+  history.push(
+    {
+      role: "user",
+      text: input.message,
+      reasoning: null,
+      attachments: attached.map((file) => file.name),
+    },
+    {
+      role: "assistant",
+      text: reply,
+      reasoning: "The user wants a workspace summary.",
+      duration_ms: durationMs,
+    },
+  );
+  mockMessages.set(sessionId, history);
   return {
     session_id: sessionId,
     workspace_id: "mock-workspace",
@@ -1544,6 +1583,12 @@ async function mockChat(
     steps: 2,
     usage: mockUsage,
     tool_trace: ["[workspace] members = [...12 crates...]"],
+    duration_ms: durationMs,
+    attachments: attached.map((file) => ({
+      name: file.name,
+      path: `uploads/${file.name}`,
+      bytes: file.content?.length ?? 0,
+    })),
   };
 }
 

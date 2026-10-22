@@ -363,8 +363,14 @@ test("keeps project knowledge and retrieval in the split workspace", async ({
   await page.getByLabel("Retrieval query").fill("desktop");
   await page.getByRole("button", { name: "Search", exact: true }).click();
 
-  await expect(page.getByText("Product thesis")).toBeVisible();
-  await expect(page.getByText("apps/desktop/ui/src/App.tsx").first()).toBeVisible();
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }).getByText("Product thesis"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }).getByText(
+      "apps/desktop/ui/src/App.tsx",
+    ).first(),
+  ).toBeVisible();
 });
 
 test("downloads knowledge and prepares a printable PDF view", async ({ page }) => {
@@ -408,18 +414,20 @@ test("downloads knowledge and prepares a printable PDF view", async ({ page }) =
     .toContain("Product thesis");
 });
 
-test("opens assistant-presented artifacts beside the chat", async ({ page }) => {
+test("opens assistant-presented artifacts in the preview pane", async ({ page }) => {
   await page.goto("/");
   await page
     .getByPlaceholder("Ask OpenBaD to inspect, explain, or change the workspace…")
     .fill("preview the architecture web page");
   await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(
-    page.getByRole("complementary", { name: "Project workspace" }),
-  ).toBeVisible();
-  await expect(page.getByText("OpenBaD architecture", { exact: true })).toBeVisible();
-  await expect(page.getByTitle("OpenBaD architecture")).toBeVisible();
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("OpenBaD architecture", { exact: true })).toBeVisible();
+  await expect(preview.getByTitle("OpenBaD architecture")).toBeVisible();
+
+  await preview.getByRole("button", { name: "Close preview" }).click();
+  await expect(preview).toHaveCount(0);
 });
 
 test("adds a reference folder with the picker", async ({ page }) => {
@@ -436,12 +444,47 @@ test("adds a reference folder with the picker", async ({ page }) => {
   await expect(page.getByText("reference-library", { exact: true })).toHaveCount(0);
 });
 
-test("opens workspace files in the split pane", async ({ page }) => {
+test("opens workspace files in the preview pane beside the chat", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Workspace" }).first().click();
-  await page.getByRole("button", { name: "apps/desktop/ui/src/App.tsx" }).click();
+  await page
+    .getByRole("button", { name: "apps/desktop/ui/src/App.tsx", exact: true })
+    .click();
 
-  await expect(page.getByText("Mock preview for the browser harness.")).toBeVisible();
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("Mock preview for the browser harness.")).toBeVisible();
+  await expect(
+    preview.getByTitle("Show in file manager: apps/desktop/ui/src/App.tsx"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("complementary", { name: "Project workspace" }),
+  ).toBeVisible();
+});
+
+test("previews memories in the preview pane", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Memory" }).first().click();
+  const workspace = page.getByRole("complementary", { name: "Project workspace" });
+  await workspace.getByRole("button", { name: "Preview memory" }).first().click();
+
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview).toBeVisible();
+  await expect(
+    preview.getByText("Keep the model-visible prompt prefix immutable.").nth(1),
+  ).toBeVisible();
+});
+
+test("shows per-turn and total chat timings", async ({ page }) => {
+  await page.goto("/");
+  await page
+    .getByPlaceholder("Ask OpenBaD to inspect, explain, or change the workspace…")
+    .fill("Summarize the workspace");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.getByTestId("turn-duration")).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId("chat-elapsed")).toHaveText(/^\d{2}:\d{2}$/);
+  await expect(page.getByTestId("chat-total")).toHaveText(/^\d{2}:\d{2}$/);
 });
 
 
@@ -479,7 +522,7 @@ test("refreshes open project areas without switching tabs", async ({ page }) => 
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(
-    page.getByRole("button", { name: "src/generated.rs" }),
+    page.getByRole("button", { name: "src/generated.rs", exact: true }),
   ).toBeVisible({ timeout: 8_000 });
 });
 
@@ -586,6 +629,34 @@ test("attaches a dropped document to the next chat message", async ({ page }) =>
   ).toHaveCount(0);
 });
 
+test("stages any file type in the workspace and links it to the message", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
+
+  await dropDocument(page, composer, "diagram.bin", "\u0000\u0001PNG");
+  await expect(
+    page.getByRole("button", { name: "Remove attachment diagram.bin" }),
+  ).toBeVisible();
+
+  await composer.fill("Inspect this file");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const chip = page.getByRole("button", { name: "diagram.bin" });
+  await expect(chip).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.getByTitle("Show file in file manager: uploads/diagram.bin"),
+  ).toBeVisible();
+
+  await chip.click();
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview).toBeVisible();
+  await expect(
+    preview.getByTitle("Show in file manager: uploads/diagram.bin"),
+  ).toBeVisible();
+});
+
 test("uploads dropped documents to the workspace", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Workspace" }).first().click();
@@ -599,7 +670,9 @@ test("uploads dropped documents to the workspace", async ({ page }) => {
   );
 
   await expect(panel.getByText(/Uploaded 1 file/)).toBeVisible();
-  await expect(panel.getByRole("button", { name: "release-notes.md" })).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: "release-notes.md", exact: true }),
+  ).toBeVisible();
 });
 
 test("uploads dropped documents to references", async ({ page }) => {
@@ -636,7 +709,7 @@ test("uploads dropped documents to knowledge", async ({ page }) => {
 
 test("attaches a document with the file picker", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Attach documents" }).click();
+  await page.getByRole("button", { name: "Attach files" }).click();
 
   await expect(
     page.getByRole("button", { name: /^Remove attachment upload-\d+\.md$/ }),
@@ -651,7 +724,9 @@ test("uploads a document with the workspace picker", async ({ page }) => {
   await panel.getByRole("button", { name: "Upload documents…" }).click();
 
   await expect(panel.getByText(/Uploaded 1 file/)).toBeVisible();
-  await expect(panel.getByRole("button", { name: /upload-\d+\.md/ })).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: /^upload-\d+\.md$/, exact: true }),
+  ).toBeVisible();
 });
 
 test("typing in the composer does not re-render the transcript", async ({ page }) => {
@@ -715,10 +790,16 @@ test("adds, tests, and removes MCP servers from settings", async ({ page }) => {
 
   await expect(settings.getByText("MCP servers", { exact: true })).toBeVisible();
   await expect(settings.getByText("docs", { exact: true })).toBeVisible();
-  await expect(settings.getByRole("button", { name: "Enable docs" })).toBeVisible();
+  await expect(
+    settings.getByRole("button", { name: "Enable docs for this project" }),
+  ).toBeVisible();
 
-  await settings.getByRole("button", { name: "Enable docs" }).click();
-  await expect(settings.getByRole("button", { name: "Disable docs" })).toBeVisible();
+  await settings
+    .getByRole("button", { name: "Enable docs for this project" })
+    .click();
+  await expect(
+    settings.getByRole("button", { name: "Disable docs for this project" }),
+  ).toBeVisible();
 
   await settings.getByRole("button", { name: "Test docs" }).click();
   await expect(settings.getByRole("status").getByText("docs/search_docs")).toBeVisible();

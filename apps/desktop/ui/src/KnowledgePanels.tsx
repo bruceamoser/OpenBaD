@@ -42,7 +42,6 @@ export function KnowledgePanel({
 }: {
   workspacePath: string;
   onOpenArtifact: (artifact: Artifact) => void;
-  onTab: (tab: "artifact" | "memory") => void;
   revision: number;
   onChanged: () => void;
 }) {
@@ -506,7 +505,7 @@ export function RetrievalPanel({
 }: {
   workspacePath: string;
   onOpenArtifact: (artifact: Artifact) => void;
-  onTab: (tab: "artifact" | "memory") => void;
+  onTab: (tab: "memory") => void;
 }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<ProjectHit[] | null>(null);

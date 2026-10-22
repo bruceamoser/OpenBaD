@@ -117,7 +117,7 @@ function ChatComposer({
 
   const attachDocuments = useCallback(async () => {
     try {
-      const chosen = await pickFiles("Attach documents");
+      const chosen = await pickFiles("Attach files");
       mergeAttachments(chosen.map((path) => ({ name: fileName(path), path })));
     } catch (cause) {
       onError(describeError(cause));
@@ -221,7 +221,7 @@ function ChatComposer({
         >
           {drop.active && (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-emerald-400/10 text-[12px] font-medium text-emerald-100">
-              Drop documents to attach
+              Drop files to attach
             </div>
           )}
           {attachments.length > 0 && (
@@ -276,8 +276,8 @@ function ChatComposer({
               type="button"
               onClick={() => void attachDocuments()}
               disabled={workspacePath.length === 0}
-              aria-label="Attach documents"
-              title="Attach documents"
+              aria-label="Attach files"
+              title="Attach files"
               className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04] hover:text-slate-300 disabled:opacity-30"
             >
               <Paperclip size={12} />

@@ -35,19 +35,29 @@ export type ChatReply = {
   steps: number;
   usage: Usage;
   tool_trace: string[];
+  duration_ms: number;
+  attachments: UploadedFile[];
+};
+
+export type ChatAttachment = {
+  name: string;
+  path?: string;
+  bytes?: number;
 };
 
 export type ChatEntry = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  startedAt?: number;
+  durationMs?: number;
   reasoning?: string;
   lastContentStep?: number;
   lastReasoningStep?: number;
   status?: string;
   tools?: string[];
   steering?: boolean;
-  attachments?: string[];
+  attachments?: ChatAttachment[];
   usage?: Usage;
 };
 
@@ -123,6 +133,7 @@ export type SessionSummary = {
   workspace_path: string | null;
   title: string | null;
   status: string;
+  created_at: number;
   updated_at: number;
   last_turn: number;
   access_mode: AccessMode;
@@ -135,7 +146,9 @@ export type SessionView = {
     text: string;
     attachments?: string[];
     reasoning: string | null;
+    duration_ms?: number | null;
   }[];
+  total_duration_ms: number;
 };
 
 export type OutsideAccessGrant = {
@@ -220,7 +233,7 @@ export type ProjectFileView = {
 };
 
 export type Artifact = {
-  kind: "web" | "image" | "markdown" | "diff" | "file";
+  kind: "web" | "image" | "markdown" | "diff" | "file" | "memory";
   title: string;
   uri?: string;
   content?: string;
@@ -358,8 +371,6 @@ export type KnowledgeImportReport = {
   documents: KnowledgeDocumentSummary[];
   skipped: string[];
 };
-
-export type ChatAttachment = UploadSource;
 
 export type McpServer = {
   name: string;
