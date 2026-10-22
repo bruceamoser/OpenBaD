@@ -103,6 +103,18 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Normalize bundle names
+        working-directory: artifacts
+        run: |
+          for file in *; do
+            [ -f "$file" ] || continue
+            normalized="${file// /_}"
+            if [ "$file" != "$normalized" ]; then
+              mv "$file" "$normalized"
+            fi
+          done
+          ls -l
+
       - name: Generate SHA256SUMS
         working-directory: artifacts
         run: |
