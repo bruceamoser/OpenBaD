@@ -47,6 +47,7 @@ export type ChatEntry = {
   status?: string;
   tools?: string[];
   steering?: boolean;
+  attachments?: string[];
   usage?: Usage;
 };
 
@@ -129,7 +130,12 @@ export type SessionSummary = {
 
 export type SessionView = {
   session_id: string;
-  messages: { role: string; text: string; reasoning: string | null }[];
+  messages: {
+    role: string;
+    text: string;
+    attachments?: string[];
+    reasoning: string | null;
+  }[];
 };
 
 export type OutsideAccessGrant = {
@@ -325,3 +331,32 @@ export type ProjectAreaCounts = {
   plan_steps: number;
   plan_open_steps: number;
 };
+
+export type UploadSource = {
+  name: string;
+  path?: string;
+  content?: string;
+};
+
+export type UploadedFile = {
+  name: string;
+  path: string;
+  bytes: number;
+};
+
+export type UploadReport = {
+  files: UploadedFile[];
+  skipped: string[];
+};
+
+export type ReferenceUpload = {
+  repo: ProjectRepo;
+  report: UploadReport;
+};
+
+export type KnowledgeImportReport = {
+  documents: KnowledgeDocumentSummary[];
+  skipped: string[];
+};
+
+export type ChatAttachment = UploadSource;

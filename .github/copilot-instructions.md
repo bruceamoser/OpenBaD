@@ -52,6 +52,22 @@
 - Only pause if you encounter a design decision, ambiguity, or question that requires human input.
 - Repeat from step 2.
 
+### 9. Build the Release Binary
+- After finishing a user-facing change, always rebuild the desktop release binary.
+- Build the frontend first, then the release shell (from `apps/desktop`):
+
+  ```bash
+  (cd ui && pnpm build)
+  ./ui/node_modules/.bin/tauri build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
+  ```
+
+- The release artifact is the Cargo workspace target:
+  `target/release/openbad-desktop`. Do not use `--debug`.
+- Verify the artifact is fresh before reporting completion:
+  `stat -c '%y %s' target/release/openbad-desktop`.
+- Bundles/installers are not produced by default. Do not tag, publish, or attach
+  the binary to a GitHub release unless the human explicitly asks.
+
 ---
 
 ## Project Conventions
@@ -111,6 +127,7 @@
 - Plans: `docs/plans/`
 - ADRs: `docs/adr/`
 - Archived v0: `archive/openbad-v0/`
+- Release binary: `target/release/openbad-desktop`
 
 ### Commit Messages
 - Format: `#<issue>: <imperative verb> <what changed>`.
@@ -123,3 +140,10 @@
   `knowledge`, `autonomic`, `governance`, `desktop`, `mcp`
 - **Priority:** `P0-critical`, `P1-high`, `P2-medium`, `P3-low`
 - **Size:** `size-XS`, `size-S`, `size-M`, `size-L`
+
+<!-- mermaid-ai-skills:start -->
+## Mermaid Diagrams
+
+When the user asks to create, edit, or visualize a diagram, follow the
+instructions in `.github/instructions/mermaid.instructions.md`.
+<!-- mermaid-ai-skills:end -->

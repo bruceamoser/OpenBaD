@@ -503,7 +503,7 @@ impl<T: HttpTransport> Agent<T> {
             };
             let frozen = request.freeze(envelope)?;
 
-            let (assistant, finish_reason, response_usage) = if self.config.stream {
+            let (mut assistant, finish_reason, response_usage) = if self.config.stream {
                 self.stream_step(frozen, observer, step).await?
             } else {
                 let response = self.client.complete(frozen).await?;
@@ -541,6 +541,9 @@ impl<T: HttpTransport> Agent<T> {
                         call.function.name, call.function.arguments
                     );
                 }
+            }
+            if let Some(calls) = assistant.tool_calls.as_mut() {
+                sanitize_tool_arguments(calls);
             }
             messages.push(assistant);
 
@@ -983,6 +986,23 @@ fn emit_full_message(observer: &dyn AgentObserver, step: u32, message: &ChatMess
     }
 }
 
+/// Replace tool-call arguments that are not a JSON object with `{}`.
+///
+/// Models occasionally stream truncated or otherwise malformed JSON when a
+/// tool call hits the output limit. Running such a call already yields a tool
+/// error, but replaying the raw arguments in the next request would fail
+/// request validation and abort the whole turn. History therefore keeps a
+/// valid object while execution still reports the original parse error.
+pub fn sanitize_tool_arguments(calls: &mut [ToolCall]) {
+    for call in calls {
+        let is_object = serde_json::from_str::<Value>(&call.function.arguments)
+            .is_ok_and(|value| value.is_object());
+        if !is_object {
+            call.function.arguments = "{}".to_owned();
+        }
+    }
+}
+
 fn merge_tool_delta(calls: &mut BTreeMap<u32, ToolCall>, delta: ToolCallDelta) {
     let entry = calls.entry(delta.index).or_insert_with(|| ToolCall {
         id: String::new(),
@@ -1110,6 +1130,57 @@ mod tests {
         assert!(audit.contains(r#""tool":"read_file""#));
         assert!(audit.contains(r#""turn":1"#));
         assert!(audit.contains(r#""is_error":false"#));
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_are_repaired_in_history() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\": }"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Recovered."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":4}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+
+        let run = agent
+            .run(vec![ChatMessage::user("read hello.txt")])
+            .await
+            .expect("the turn recovers from a malformed tool call");
+        assert_eq!(run.steps, 2);
+        assert_eq!(run.text, "Recovered.");
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == openbad_llm::chat::ChatRole::Tool
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("invalid arguments"))
+        }));
+        let assistant = run
+            .new_messages
+            .iter()
+            .find(|message| message.role == openbad_llm::chat::ChatRole::Assistant)
+            .expect("assistant message");
+        assert_eq!(
+            assistant.tool_calls.as_ref().expect("tool calls")[0]
+                .function
+                .arguments,
+            "{}"
+        );
     }
 
     #[tokio::test]

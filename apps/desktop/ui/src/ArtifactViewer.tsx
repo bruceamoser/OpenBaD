@@ -92,9 +92,9 @@ export default function ArtifactViewer({
   if (artifact === null) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-4 py-12 text-center">
-        <Layers size={22} className="text-slate-700" />
+        <Layers size={22} className="text-slate-500" />
         <p className="text-[11px] text-slate-500">Nothing open yet.</p>
-        <p className="max-w-[220px] text-[10px] leading-4 text-slate-600">
+        <p className="max-w-[220px] text-[10px] leading-4 text-slate-500">
           Open a file, knowledge document, or retrieval hit. Assistant-presented
           artifacts appear here too.
         </p>
@@ -118,7 +118,7 @@ export default function ArtifactViewer({
     return (
       <div className="flex h-full min-h-[460px] flex-col">
         <div className="mb-2 flex shrink-0 items-center gap-2">
-          <span className="truncate font-mono text-[9px] text-slate-600">
+          <span className="truncate font-mono text-[9px] text-slate-500">
             {artifact.uri}
           </span>
           <a
@@ -158,7 +158,7 @@ export default function ArtifactViewer({
             className="max-h-[70vh] max-w-full object-contain"
           />
         ) : (
-          <p className="text-[10px] text-slate-600">No image data available.</p>
+          <p className="text-[10px] text-slate-500">No image data available.</p>
         )}
       </div>
     );
@@ -187,12 +187,12 @@ export default function ArtifactViewer({
     );
   }
 
-  return <p className="text-[10px] text-slate-600">No preview content available.</p>;
+  return <p className="text-[10px] text-slate-500">No preview content available.</p>;
 }
 
 function DiffView({ content }: { content: string }) {
   if (content.length === 0) {
-    return <p className="text-[10px] text-slate-600">No diff content available.</p>;
+    return <p className="text-[10px] text-slate-500">No diff content available.</p>;
   }
   return (
     <pre className="overflow-x-auto rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[9px] leading-4">

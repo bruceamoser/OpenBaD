@@ -1,4 +1,4 @@
-import { isValidElement, useEffect, useId, useRef, useState } from "react";
+import { isValidElement, memo, useEffect, useId, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
@@ -21,7 +21,7 @@ function loadMermaid(): Promise<typeof import("mermaid").default> {
       theme: "dark",
       fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
       themeVariables: {
-        background: "#0a0d11",
+        background: "#151c25",
         primaryColor: "#13231f",
         primaryTextColor: "#e6edf3",
         primaryBorderColor: "#34d399",
@@ -166,7 +166,7 @@ function MarkdownPre({ children, node: _node, ...props }: MarkdownPreProps) {
   );
 }
 
-export default function MarkdownMessage({ text }: { text: string }) {
+function MarkdownMessage({ text }: { text: string }) {
   return (
     <div className="markdown-body chat-markdown">
       <ReactMarkdown
@@ -207,3 +207,5 @@ export default function MarkdownMessage({ text }: { text: string }) {
     </div>
   );
 }
+
+export default memo(MarkdownMessage);

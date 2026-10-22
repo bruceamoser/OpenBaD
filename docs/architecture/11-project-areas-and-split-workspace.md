@@ -130,6 +130,34 @@ the reference root and the requested path, then requires the requested path to
 stay under the root. References are read-only. Users can remove a reference
 without deleting the directory.
 
+### Uploading documents
+
+Every area that holds documents accepts uploads from the desktop shell: the chat
+composer, Workspace, References, and Knowledge. Each area can receive files
+dropped onto it and also exposes an upload button that opens the native file
+picker, so no upload action is drag-only.
+
+- **Workspace** — files are copied into the workspace root. Name collisions gain
+  a numeric suffix (`-1`, `-2`, …); existing files are never overwritten. The
+  workspace index is refreshed after the copy so the new documents are
+  searchable.
+- **References** — files are copied into a managed `Uploaded documents`
+  reference folder under `~/OpenBaD/references/<project-slug>`, a sibling of the
+  managed workspaces directory. The folder is registered as a read-only
+  reference on first upload, so the agent can read it with `read_repo_file`.
+- **Knowledge** — files are imported like `import_knowledge_file`: they must be
+  UTF-8 and at most 4 MiB, and they are chunked and full-text indexed with the
+  project.
+- **Chat** — attached documents are read when the turn starts and appended to the
+  logged user message inside `<attached_document>` blocks. A message may omit
+  text and carry only attachments. Attachments are capped at 8 documents and
+  1 MiB each; the composed text is the model-visible content, so the session log
+  keeps the exact bytes the model saw.
+
+Workspace and reference copies are capped at 8 MiB per file and 50 files per
+batch. A per-file failure is reported as a skipped entry instead of failing the
+whole batch.
+
 ## 3. Retrieval
 
 `retrieve_project` is the single retrieval entry point used by the UI and the
@@ -233,6 +261,12 @@ their history across restarts is follow-up work.
   containment.
 - **Knowledge import is not UTF-8 or exceeds 4 MiB** — rejected with a clear
   error; no partial document is written.
+- **Chat attachment is not UTF-8 or exceeds 1 MiB** — the turn is rejected before
+  any event is appended, so the session log stays consistent.
+- **Upload names collide** — the copy gains a numeric suffix; the original file
+  is left untouched.
+- **A dropped folder is not a document** — reported as a skipped upload instead
+  of being copied recursively.
 - **Duplicate knowledge content** — returns the existing document.
 - **Web page refuses framing** — the iframe may be blank; the external-open
   link remains available.
@@ -249,10 +283,11 @@ their history across restarts is follow-up work.
 2. Persist artifact history and restore the most recent artifact when a session
    reopens.
 3. Add embedding-backed hybrid retrieval and explainable score breakdowns.
-4. Add a native folder picker for knowledge import.
-5. Add file watching so workspace and reference panels reflect changes without
+4. Add file watching so workspace and reference panels reflect changes without
    a manual index refresh.
-6. Add per-area access policy, especially write access to reference folders.
+5. Add per-area access policy, especially write access to reference folders.
+6. Extract text from PDF and Office documents before import; uploads are
+   currently restricted to UTF-8 text.
 
 ## 8. Verification
 
@@ -261,5 +296,8 @@ their history across restarts is follow-up work.
 - Tool tests cover search, knowledge add, reference-folder reads, path escape
   rejection, source listing, and artifact metadata.
 - Agent tests verify tool metadata reaches the observer.
+- Desktop command tests cover unique upload names, path traversal in supplied
+  names, folder rejection, and bounded chat attachments.
 - Playwright covers project creation, reference folders, project knowledge,
-  retrieval, and assistant-presented artifacts in the split workspace.
+  retrieval, assistant-presented artifacts, and dropped documents in the chat
+  composer, Workspace, References, and Knowledge areas.

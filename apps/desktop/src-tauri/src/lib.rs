@@ -1215,6 +1215,8 @@ pub struct ChatReply {
 pub struct UiMessage {
     pub role: String,
     pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<String>,
     pub reasoning: Option<String>,
 }
 
@@ -1891,6 +1893,364 @@ fn import_knowledge_file(
         .map_err(|error| error.to_string())
 }
 
+const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_UPLOAD_FILES: usize = 50;
+const MAX_KNOWLEDGE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_BYTES: u64 = 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS: usize = 8;
+const UPLOADED_REFERENCES_NAME: &str = "Uploaded documents";
+
+/// One document supplied by the UI, either as a filesystem path or as inline text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadSource {
+    pub name: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedFile {
+    pub name: String,
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadReport {
+    pub files: Vec<UploadedFile>,
+    pub skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceUpload {
+    pub repo: ProjectRepo,
+    pub report: UploadReport,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeImportReport {
+    pub documents: Vec<KnowledgeDocumentSummary>,
+    pub skipped: Vec<String>,
+}
+
+fn safe_upload_name(name: &str) -> Result<String, String> {
+    let leaf = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    let cleaned: String = leaf
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return Err(format!("upload name is not a file name: {name}"));
+    }
+    Ok(cleaned)
+}
+
+fn load_upload(source: &UploadSource, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
+    if let Some(path) = source
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|error| format!("upload source {path}: {error}"))?;
+        let metadata = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err(format!("uploads must be files, not folders: {path}"));
+        }
+        if metadata.len() > max_bytes {
+            return Err(format!(
+                "{} is {} bytes; the maximum upload is {} bytes",
+                canonical.display(),
+                metadata.len(),
+                max_bytes
+            ));
+        }
+        let name = canonical
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("upload");
+        let bytes = std::fs::read(&canonical).map_err(|error| error.to_string())?;
+        return Ok((safe_upload_name(name)?, bytes));
+    }
+    if let Some(content) = &source.content {
+        if content.len() as u64 > max_bytes {
+            return Err(format!(
+                "{} is {} bytes; the maximum upload is {} bytes",
+                source.name,
+                content.len(),
+                max_bytes
+            ));
+        }
+        return Ok((safe_upload_name(&source.name)?, content.as_bytes().to_vec()));
+    }
+    Err(format!("{} has no path or content to upload", source.name))
+}
+
+fn path_is_free(path: &Path) -> bool {
+    // symlink_metadata also reports dangling symlinks, so an upload never
+    // writes through a link planted in the destination directory.
+    std::fs::symlink_metadata(path).is_err()
+}
+
+fn unique_upload_path(directory: &Path, name: &str) -> PathBuf {
+    let candidate = directory.join(name);
+    if path_is_free(&candidate) {
+        return candidate;
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("upload");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for attempt in 1..1_000 {
+        let filename = match extension {
+            Some(extension) => format!("{stem}-{attempt}.{extension}"),
+            None => format!("{stem}-{attempt}"),
+        };
+        let candidate = directory.join(filename);
+        if path_is_free(&candidate) {
+            return candidate;
+        }
+    }
+    directory.join(format!("{stem}-{}.upload", Uuid::now_v7()))
+}
+
+fn write_uploads(directory: &Path, sources: &[UploadSource]) -> Result<UploadReport, String> {
+    if sources.is_empty() {
+        return Err("no documents selected".to_owned());
+    }
+    if sources.len() > MAX_UPLOAD_FILES {
+        return Err(format!(
+            "upload at most {MAX_UPLOAD_FILES} documents at once"
+        ));
+    }
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let mut report = UploadReport::default();
+    for source in sources {
+        let (name, bytes) = match load_upload(source, MAX_UPLOAD_BYTES) {
+            Ok(upload) => upload,
+            Err(error) => {
+                report.skipped.push(error);
+                continue;
+            }
+        };
+        let destination = unique_upload_path(directory, &name);
+        match std::fs::write(&destination, &bytes) {
+            Ok(()) => report.files.push(UploadedFile {
+                name: destination
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&name)
+                    .to_owned(),
+                path: destination.to_string_lossy().into_owned(),
+                bytes: bytes.len() as u64,
+            }),
+            Err(error) => report.skipped.push(format!("{name}: {error}")),
+        }
+    }
+    Ok(report)
+}
+
+fn uploaded_references_directory(workspace_root: &Path) -> Result<PathBuf, String> {
+    let workspaces = default_workspaces_directory()?;
+    let base = match workspaces.parent() {
+        Some(parent) => parent.join("references"),
+        None => workspaces.join("references"),
+    };
+    std::fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+    let slug = project_slug(workspace_name(workspace_root));
+    for attempt in 0..1_000 {
+        let folder = if attempt == 0 {
+            slug.clone()
+        } else {
+            format!("{slug}-{}", attempt + 1)
+        };
+        let candidate = base.join(folder);
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return candidate.canonicalize().map_err(|error| error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if candidate.is_dir()
+                    && std::fs::read_dir(&candidate)
+                        .map_err(|error| error.to_string())?
+                        .next()
+                        .is_none()
+                {
+                    return candidate.canonicalize().map_err(|error| error.to_string());
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("could not find an available reference directory".to_owned())
+}
+
+#[tauri::command]
+fn import_workspace_files(
+    workspace_path: String,
+    files: Vec<UploadSource>,
+) -> Result<UploadReport, String> {
+    let root = PathBuf::from(&workspace_path);
+    if !root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    write_uploads(&root, &files)
+}
+
+#[tauri::command]
+fn import_reference_files(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    files: Vec<UploadSource>,
+) -> Result<ReferenceUpload, String> {
+    let root = PathBuf::from(&workspace_path);
+    if !root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    let existing = store
+        .list_project_repos(workspace)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|repo| repo.name == UPLOADED_REFERENCES_NAME && Path::new(&repo.path).is_dir());
+    let (repo, directory) = match existing {
+        Some(repo) => {
+            let directory = PathBuf::from(&repo.path);
+            (repo, directory)
+        }
+        None => {
+            let directory = uploaded_references_directory(&root)?;
+            let repo = store
+                .add_project_repo(
+                    workspace,
+                    UPLOADED_REFERENCES_NAME,
+                    &directory.to_string_lossy(),
+                )
+                .map_err(|error| error.to_string())?;
+            (repo, directory)
+        }
+    };
+    let report = write_uploads(&directory, &files)?;
+    Ok(ReferenceUpload { repo, report })
+}
+
+fn import_knowledge_source(
+    store: &Store,
+    workspace: WorkspaceId,
+    source: &UploadSource,
+    tags: &[String],
+) -> Result<KnowledgeDocumentSummary, String> {
+    let (name, bytes) = load_upload(source, MAX_KNOWLEDGE_BYTES)?;
+    let content =
+        String::from_utf8(bytes).map_err(|error| format!("{name} must be UTF-8 text: {error}"))?;
+    let source_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    let title = Path::new(&name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Imported document")
+        .to_owned();
+    let kind = Path::new(&name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file")
+        .to_owned();
+    store
+        .add_knowledge_document_with_confidence(
+            workspace,
+            &title,
+            &kind,
+            source.path.as_deref(),
+            tags.to_vec(),
+            &content,
+            "verified",
+            Some(&source_hash),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn import_knowledge_files(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    files: Vec<UploadSource>,
+    tags: Vec<String>,
+) -> Result<KnowledgeImportReport, String> {
+    if files.is_empty() {
+        return Err("no documents selected".to_owned());
+    }
+    if files.len() > MAX_UPLOAD_FILES {
+        return Err(format!(
+            "import at most {MAX_UPLOAD_FILES} documents at once"
+        ));
+    }
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, &workspace_path)?;
+    let mut report = KnowledgeImportReport::default();
+    for source in &files {
+        match import_knowledge_source(&store, workspace, source, &tags) {
+            Ok(document) => report.documents.push(document),
+            Err(error) => report.skipped.push(error),
+        }
+    }
+    Ok(report)
+}
+
+fn compose_chat_message(prompt: &str, attachments: &[UploadSource]) -> Result<String, String> {
+    if attachments.is_empty() {
+        return Ok(prompt.to_owned());
+    }
+    if attachments.len() > MAX_CHAT_ATTACHMENTS {
+        return Err(format!(
+            "attach at most {MAX_CHAT_ATTACHMENTS} documents per message"
+        ));
+    }
+    let mut message = prompt.trim_end().to_owned();
+    if !message.is_empty() {
+        message.push_str("\n\n");
+    }
+    message.push_str("The user attached these documents:\n");
+    for attachment in attachments {
+        let (name, bytes) = load_upload(attachment, MAX_CHAT_ATTACHMENT_BYTES)?;
+        let content = String::from_utf8(bytes)
+            .map_err(|_| format!("{name} is not UTF-8 text and cannot be attached"))?;
+        let name: String = name
+            .chars()
+            .map(|character| match character {
+                '<' | '>' | '"' | '&' => '_',
+                other => other,
+            })
+            .collect();
+        message.push_str(&format!(
+            "\n<attached_document name=\"{name}\">\n{}\n</attached_document>\n",
+            content.trim_end()
+        ));
+    }
+    Ok(message)
+}
+
 #[tauri::command]
 fn delete_knowledge_document(
     state: State<'_, AppState>,
@@ -2144,26 +2504,50 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let history = load_history(&store, session)?;
+    let messages = store
+        .load_messages(session)
+        .map_err(|error| error.to_string())?;
     Ok(SessionView {
         session_id,
-        messages: history
+        messages: messages
             .iter()
-            .filter_map(|message| match message.role {
-                ChatRole::User => Some(UiMessage {
-                    role: "user".to_owned(),
-                    text: message.content.clone().unwrap_or_default(),
-                    reasoning: None,
-                }),
-                ChatRole::Assistant => Some(UiMessage {
-                    role: "assistant".to_owned(),
-                    text: message
-                        .content
-                        .clone()
-                        .filter(|text| !text.is_empty())
-                        .unwrap_or_else(|| "(tool activity)".to_owned()),
-                    reasoning: message.reasoning_content.clone(),
-                }),
+            .filter_map(|message| match message.role.as_str() {
+                "user" => {
+                    let payload = &message.content;
+                    Some(UiMessage {
+                        role: "user".to_owned(),
+                        text: payload
+                            .get("display")
+                            .and_then(Value::as_str)
+                            .or_else(|| payload.get("content").and_then(Value::as_str))
+                            .unwrap_or_default()
+                            .to_owned(),
+                        attachments: payload
+                            .get("attachments")
+                            .and_then(Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        reasoning: None,
+                    })
+                }
+                "assistant" => {
+                    let message = chat_message_from_session(message).ok()?;
+                    Some(UiMessage {
+                        role: "assistant".to_owned(),
+                        text: message
+                            .content
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or_else(|| "(tool activity)".to_owned()),
+                        attachments: Vec::new(),
+                        reasoning: message.reasoning_content,
+                    })
+                }
                 _ => None,
             })
             .collect(),
@@ -2542,6 +2926,8 @@ pub struct ChatInput {
     pub model: Option<String>,
     pub thinking: Option<bool>,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<UploadSource>,
 }
 
 #[tauri::command]
@@ -2573,9 +2959,10 @@ async fn chat(
         model,
         thinking,
         reasoning_effort,
+        attachments,
     } = request;
-    let message = message.trim().to_owned();
-    if message.is_empty() {
+    let prompt = message.trim().to_owned();
+    if prompt.is_empty() && attachments.is_empty() {
         return Err("message must not be empty".to_owned());
     }
     let workspace_path = PathBuf::from(workspace_path);
@@ -2585,6 +2972,12 @@ async fn chat(
             workspace_path.display()
         ));
     }
+    let title_source = if prompt.is_empty() {
+        "Attached documents".to_owned()
+    } else {
+        prompt.clone()
+    };
+    let message = compose_chat_message(&prompt, &attachments)?;
 
     let api_key = resolve_api_key(&state)?;
     let redactions = vec![api_key.clone()];
@@ -2617,7 +3010,7 @@ async fn chat(
                 let workspace = store
                     .ensure_workspace(name, &workspace_path.to_string_lossy())
                     .map_err(|error| error.to_string())?;
-                let title = truncate_title(&message);
+                let title = truncate_title(&title_source);
                 let session = store
                     .create_session(Some(workspace), Some(&title))
                     .map_err(|error| error.to_string())?;
@@ -2654,7 +3047,14 @@ async fn chat(
                 NewEvent::new(SessionEventKind::UserMessage)
                     .with_turn(turn)
                     .with_step(1)
-                    .with_payload(json!({"content": message})),
+                    .with_payload(json!({
+                        "content": message,
+                        "display": prompt,
+                        "attachments": attachments
+                            .iter()
+                            .map(|attachment| attachment.name.clone())
+                            .collect::<Vec<_>>(),
+                    })),
             )
             .map_err(|error| error.to_string())?;
         history.push(ChatMessage::user(message.clone()));
@@ -2975,13 +3375,16 @@ fn chat_message_from_session(message: &SessionMessage) -> Result<ChatMessage, St
                 .unwrap_or_default(),
         )),
         "assistant" => {
-            let tool_calls = payload
+            let mut tool_calls = payload
                 .get("tool_calls")
                 .filter(|value| value.is_array())
                 .cloned()
                 .map(serde_json::from_value::<Vec<ToolCall>>)
                 .transpose()
                 .map_err(|error| format!("invalid tool calls in history: {error}"))?;
+            if let Some(calls) = tool_calls.as_mut() {
+                openbad_agent::sanitize_tool_arguments(calls);
+            }
             Ok(ChatMessage {
                 role: ChatRole::Assistant,
                 content: payload
@@ -3154,6 +3557,9 @@ pub fn run() {
             write_export_file,
             add_knowledge_note,
             import_knowledge_file,
+            import_knowledge_files,
+            import_workspace_files,
+            import_reference_files,
             delete_knowledge_document,
             search_project,
             project_files,
@@ -3384,5 +3790,206 @@ mod tests {
             restored.tool_calls.expect("tool calls")[0].function.name,
             "read_file"
         );
+    }
+
+    #[test]
+    fn stored_history_repairs_invalid_tool_arguments() {
+        let session_message = SessionMessage {
+            session_id: SessionId::new(),
+            seq: 1,
+            turn: Some(1),
+            step: Some(1),
+            role: "assistant".to_owned(),
+            content: json!({
+                "content": null,
+                "reasoning_content": null,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\": }",
+                    },
+                }],
+            }),
+            source: None,
+            created_at: 0,
+        };
+
+        let restored = chat_message_from_session(&session_message).expect("restore");
+        assert_eq!(
+            restored.tool_calls.expect("tool calls")[0]
+                .function
+                .arguments,
+            "{}"
+        );
+    }
+
+    #[test]
+    fn uploads_copy_documents_with_unique_names() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let first = tempfile::tempdir().expect("first");
+        let second = tempfile::tempdir().expect("second");
+        std::fs::write(first.path().join("notes.md"), "first").expect("first file");
+        std::fs::write(second.path().join("notes.md"), "second").expect("second file");
+        let sources = vec![
+            UploadSource {
+                name: "notes.md".to_owned(),
+                path: Some(first.path().join("notes.md").to_string_lossy().into_owned()),
+                content: None,
+            },
+            UploadSource {
+                name: "notes.md".to_owned(),
+                path: Some(
+                    second
+                        .path()
+                        .join("notes.md")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                content: None,
+            },
+            UploadSource {
+                name: "inline.txt".to_owned(),
+                path: None,
+                content: Some("inline body".to_owned()),
+            },
+        ];
+
+        let report = write_uploads(workspace.path(), &sources).expect("upload");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.files.len(), 3);
+        assert_eq!(report.files[0].name, "notes.md");
+        assert_eq!(report.files[1].name, "notes-1.md");
+        assert_eq!(report.files[2].name, "inline.txt");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("notes-1.md")).expect("second"),
+            "second"
+        );
+    }
+
+    #[test]
+    fn uploads_skip_folders_and_escape_attempts() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = tempfile::tempdir().expect("source");
+        let sources = vec![
+            UploadSource {
+                name: "folder".to_owned(),
+                path: Some(source.path().to_string_lossy().into_owned()),
+                content: None,
+            },
+            UploadSource {
+                name: "../../etc/passwd".to_owned(),
+                path: None,
+                content: Some("safe".to_owned()),
+            },
+        ];
+
+        let report = write_uploads(workspace.path(), &sources).expect("upload");
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(report.skipped[0].contains("must be files"));
+        assert_eq!(report.files[0].name, "passwd");
+        assert!(workspace.path().join("passwd").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uploads_do_not_follow_planted_symlinks() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let target = tempfile::tempdir().expect("target");
+        std::os::unix::fs::symlink(
+            target.path().join("escape.md"),
+            workspace.path().join("notes.md"),
+        )
+        .expect("symlink");
+
+        let report = write_uploads(
+            workspace.path(),
+            &[UploadSource {
+                name: "notes.md".to_owned(),
+                path: None,
+                content: Some("safe".to_owned()),
+            }],
+        )
+        .expect("upload");
+
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].name, "notes-1.md");
+        assert!(!target.path().join("escape.md").exists());
+    }
+
+    #[test]
+    fn chat_attachments_are_embedded_and_bounded() {
+        let message = compose_chat_message(
+            "Review this",
+            &[UploadSource {
+                name: "design.md".to_owned(),
+                path: None,
+                content: Some("# Design\nbody".to_owned()),
+            }],
+        )
+        .expect("message");
+        assert!(message.starts_with("Review this\n\n"));
+        assert!(message.contains("<attached_document name=\"design.md\">"));
+        assert!(message.contains("# Design\nbody"));
+        assert_eq!(compose_chat_message("", &[]).expect("plain"), "");
+
+        let oversized = UploadSource {
+            name: "huge.md".to_owned(),
+            path: None,
+            content: Some("x".repeat(MAX_CHAT_ATTACHMENT_BYTES as usize + 1)),
+        };
+        assert!(compose_chat_message("Review", &[oversized]).is_err());
+    }
+
+    #[test]
+    fn knowledge_uploads_require_utf8_and_index_the_document() {
+        let root = tempfile::tempdir().expect("workspace");
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .ensure_workspace("demo", &root.path().to_string_lossy())
+            .expect("workspace");
+
+        let document = import_knowledge_source(
+            &store,
+            workspace,
+            &UploadSource {
+                name: "release-notes.md".to_owned(),
+                path: None,
+                content: Some("# Release\nShip it".to_owned()),
+            },
+            &["docs".to_owned()],
+        )
+        .expect("document");
+        assert_eq!(document.title, "release-notes");
+        assert_eq!(document.kind, "md");
+        assert_eq!(document.tags, vec!["docs".to_owned()]);
+        assert_eq!(document.confidence, "verified");
+        assert!(document.chunks >= 1);
+
+        let binary = tempfile::tempdir().expect("binary");
+        let path = binary.path().join("scan.pdf");
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).expect("binary");
+        let error = import_knowledge_source(
+            &store,
+            workspace,
+            &UploadSource {
+                name: "scan.pdf".to_owned(),
+                path: Some(path.to_string_lossy().into_owned()),
+                content: None,
+            },
+            &[],
+        )
+        .expect_err("binary documents are rejected");
+        assert!(error.contains("UTF-8"));
+    }
+
+    #[test]
+    fn upload_names_only_keep_the_file_component() {
+        assert_eq!(safe_upload_name("a/b/c.txt").expect("name"), "c.txt");
+        assert_eq!(safe_upload_name("..\\..\\c.txt").expect("name"), "c.txt");
+        assert!(safe_upload_name("..").is_err());
+        assert!(safe_upload_name("   ").is_err());
     }
 }

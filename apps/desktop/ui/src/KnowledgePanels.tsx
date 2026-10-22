@@ -9,6 +9,7 @@ import {
   Printer,
   Search,
   Trash2,
+  Upload,
 } from "lucide-react";
 
 import {
@@ -16,17 +17,21 @@ import {
   deleteKnowledgeDocument,
   downloadKnowledgeDocument,
   importKnowledgeFile,
+  importKnowledgeFiles,
   loadKnowledgeDocument,
   loadKnowledgeDocuments,
   loadKnowledgeStaleDocuments,
+  pickFiles,
   searchProject,
 } from "./backend";
+import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
 import MarkdownMessage from "./MarkdownMessage";
 import type {
   Artifact,
   KnowledgeDocument,
   KnowledgeDocumentSummary,
   ProjectHit,
+  UploadSource,
 } from "./types";
 
 export function KnowledgePanel({
@@ -52,6 +57,7 @@ export function KnowledgePanel({
   const [kind, setKind] = useState("note");
   const [importing, setImporting] = useState(false);
   const [importPath, setImportPath] = useState("");
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -178,6 +184,52 @@ export function KnowledgePanel({
     }
   };
 
+  const upload = async (sources: UploadSource[]) => {
+    if (sources.length === 0) {
+      return;
+    }
+    setUploading(true);
+    try {
+      const { documents, skipped } = await importKnowledgeFiles(
+        workspacePath,
+        sources,
+        [],
+      );
+      if (documents.length > 0) {
+        setKnowledge((items) => [...documents, ...items]);
+      }
+      const imported = `Imported ${documents.length} document${
+        documents.length === 1 ? "" : "s"
+      }`;
+      setNotice(
+        skipped.length === 0 ? imported : `${imported} · ${skipped.length} skipped`,
+      );
+      setError(skipped.length === 0 ? null : skipped.join(" · "));
+      if (documents.length > 0) {
+        onChanged();
+        void refresh();
+      }
+    } catch (cause) {
+      setError(describeError(cause));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const choose = async () => {
+    try {
+      const chosen = await pickFiles("Upload documents to knowledge");
+      await upload(chosen.map((path) => ({ name: fileName(path), path })));
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
+  const drop = useFileDropZone(
+    async (payload) => upload(await droppedToUploads(payload)),
+    { disabled: workspacePath.length === 0 },
+  );
+
   const download = async (document: KnowledgeDocumentSummary) => {
     setExportingId(document.id);
     try {
@@ -202,15 +254,25 @@ export function KnowledgePanel({
   };
 
   return (
-    <div className="space-y-2">
-      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-600">
+    <div
+      {...drop.zoneProps}
+      className={`relative min-h-full space-y-2 rounded-lg transition-shadow ${
+        drop.active ? "ring-2 ring-emerald-400/40" : ""
+      }`}
+    >
+      {drop.active && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-emerald-400/10 text-[11px] font-medium text-emerald-100">
+          Drop documents to add them to knowledge
+        </div>
+      )}
+      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-500">
         Knowledge documents: long-form notes, decisions, references, procedures, and
         findings. They are chunked, full-text indexed, and cited by document. Use Memory
         for short atomic snippets.
       </p>
       <SearchField value={query} onChange={setQuery} label="Filter knowledge" />
       {loading && knowledge.length === 0 && (
-        <p className="flex items-center gap-1.5 px-1 py-2 text-[10px] text-slate-600">
+        <p className="flex items-center gap-1.5 px-1 py-2 text-[10px] text-slate-500">
           <Loader2 size={11} className="animate-spin" /> Loading knowledge…
         </p>
       )}
@@ -225,7 +287,7 @@ export function KnowledgePanel({
             className="block w-full text-left"
           >
             <p className="truncate text-[11px] text-slate-200">{document.title}</p>
-            <p className="mt-0.5 truncate font-mono text-[9px] text-slate-600">
+            <p className="mt-0.5 truncate font-mono text-[9px] text-slate-500">
               {document.kind} · {document.chunks} chunk
               {document.chunks === 1 ? "" : "s"} · {formatBytes(document.characters)}
             </p>
@@ -259,7 +321,7 @@ export function KnowledgePanel({
             )}
           </button>
           <div className="mt-1.5 flex items-center justify-between gap-2">
-            <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-slate-700">
+            <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-slate-500">
               {document.source ?? "project note"}
             </span>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -269,7 +331,7 @@ export function KnowledgePanel({
                 title="Download Markdown"
                 onClick={() => void download(document)}
                 disabled={exportingId === document.id}
-                className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-emerald-300 disabled:opacity-40"
+                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-emerald-300 disabled:opacity-40"
               >
                 {exportingId === document.id ? (
                   <Loader2 size={11} className="animate-spin" />
@@ -282,7 +344,7 @@ export function KnowledgePanel({
                 aria-label={`Export ${document.title} as PDF`}
                 title="Print / save as PDF"
                 onClick={() => void print(document)}
-                className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-emerald-300"
+                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-emerald-300"
               >
                 <Printer size={11} />
               </button>
@@ -290,7 +352,7 @@ export function KnowledgePanel({
                 type="button"
                 aria-label={`Delete ${document.title}`}
                 onClick={() => void remove(document)}
-                className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
+                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
               >
                 <Trash2 size={11} />
               </button>
@@ -299,9 +361,9 @@ export function KnowledgePanel({
         </div>
       ))}
       {!loading && visible.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">
+        <p className="px-1 py-2 text-[11px] text-slate-500">
           {knowledge.length === 0
-            ? "No knowledge yet. Add a note or import a file."
+            ? "No knowledge yet. Add a note, upload documents, or import a file."
             : "No matching documents."}
         </p>
       )}
@@ -312,6 +374,19 @@ export function KnowledgePanel({
           className="flex flex-1 items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06]"
         >
           <Plus size={11} /> Note
+        </button>
+        <button
+          type="button"
+          onClick={() => void choose()}
+          disabled={uploading || workspacePath.length === 0}
+          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+        >
+          {uploading ? (
+            <Loader2 size={11} className="animate-spin" />
+          ) : (
+            <Upload size={11} />
+          )}
+          Upload
         </button>
         <button
           type="button"
@@ -495,17 +570,17 @@ export function RetrievalPanel({
           {loading ? "…" : "Search"}
         </button>
       </div>
-      <p className="px-1 text-[10px] leading-4 text-slate-600">
+      <p className="px-1 text-[10px] leading-4 text-slate-500">
         Retrieval fuses knowledge chunks, indexed code, and durable memory. Hits
         carry locators the assistant can cite.
       </p>
       {hits === null && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">
+        <p className="px-1 py-2 text-[11px] text-slate-500">
           Run a query to inspect what the project can retrieve.
         </p>
       )}
       {hits !== null && hits.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">No matches.</p>
+        <p className="px-1 py-2 text-[11px] text-slate-500">No matches.</p>
       )}
       {hits?.map((hit) => (
         <button
@@ -527,14 +602,14 @@ export function RetrievalPanel({
               {hit.source}
             </span>
             {hit.source === "code" ? (
-              <FileCode2 size={10} className="text-slate-600" />
+              <FileCode2 size={10} className="text-slate-500" />
             ) : null}
             <span className="truncate text-[10px] text-slate-300">{hit.title}</span>
           </div>
           <p className="mt-1 line-clamp-3 text-[10px] leading-4 text-slate-500">
             {hit.snippet}
           </p>
-          <p className="mt-1 truncate font-mono text-[8px] text-slate-700">
+          <p className="mt-1 truncate font-mono text-[8px] text-slate-500">
             {hit.locator}
           </p>
         </button>
@@ -555,14 +630,14 @@ function SearchField({
 }) {
   return (
     <label className="flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
-      <Search size={11} className="shrink-0 text-slate-600" />
+      <Search size={11} className="shrink-0 text-slate-500" />
       <input
         type="search"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder="Filter knowledge"
         aria-label={label}
-        className="min-w-0 flex-1 bg-transparent text-[10px] text-slate-300 outline-none placeholder:text-slate-600"
+        className="min-w-0 flex-1 bg-transparent text-[10px] text-slate-300 outline-none placeholder:text-slate-500"
       />
     </label>
   );

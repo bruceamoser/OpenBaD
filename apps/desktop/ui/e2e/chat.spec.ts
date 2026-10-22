@@ -548,3 +548,161 @@ test("shows background agents in the project area", async ({ page }) => {
   await expect(panel.getByText("No subagents yet")).toBeVisible();
   await expect(panel.getByText(/subagent/).first()).toBeVisible();
 });
+
+async function dropDocument(
+  page: import("@playwright/test").Page,
+  target: import("@playwright/test").Locator,
+  name: string,
+  content: string,
+) {
+  const dataTransfer = await page.evaluateHandle(
+    ({ name, content }) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([content], name, { type: "text/markdown" }));
+      return transfer;
+    },
+    { name, content },
+  );
+  await target.dispatchEvent("dragenter", { dataTransfer });
+  await target.dispatchEvent("dragover", { dataTransfer });
+  await target.dispatchEvent("drop", { dataTransfer });
+}
+
+test("attaches a dropped document to the next chat message", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
+
+  await dropDocument(page, composer, "design.md", "# Design notes");
+  await expect(
+    page.getByRole("button", { name: "Remove attachment design.md" }),
+  ).toBeVisible();
+
+  await composer.fill("Summarize the attachment");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.getByText(/Attached documents: design.md/)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove attachment design.md" }),
+  ).toHaveCount(0);
+});
+
+test("uploads dropped documents to the workspace", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  const panel = page.getByRole("complementary", { name: "Project workspace" });
+
+  await dropDocument(
+    page,
+    panel.getByRole("button", { name: "Upload documents…" }),
+    "release-notes.md",
+    "# Release notes",
+  );
+
+  await expect(panel.getByText(/Uploaded 1 file/)).toBeVisible();
+  await expect(panel.getByRole("button", { name: "release-notes.md" })).toBeVisible();
+});
+
+test("uploads dropped documents to references", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "References" }).first().click();
+  const panel = page.getByRole("complementary", { name: "Project workspace" });
+
+  await dropDocument(
+    page,
+    panel.getByRole("button", { name: "Upload documents…" }),
+    "handbook.md",
+    "# Handbook",
+  );
+
+  await expect(panel.getByText("Uploaded documents", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/Uploaded 1 file/)).toBeVisible();
+});
+
+test("uploads dropped documents to knowledge", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Knowledge" }).first().click();
+  const panel = page.getByRole("complementary", { name: "Project workspace" });
+
+  await dropDocument(
+    page,
+    panel.getByRole("button", { name: "Upload", exact: true }),
+    "onboarding.md",
+    "# Onboarding",
+  );
+
+  await expect(panel.getByText(/Imported 1 document/)).toBeVisible();
+  await expect(panel.getByRole("button", { name: /^onboarding/ })).toBeVisible();
+});
+
+test("attaches a document with the file picker", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Attach documents" }).click();
+
+  await expect(
+    page.getByRole("button", { name: /^Remove attachment upload-\d+\.md$/ }),
+  ).toBeVisible();
+});
+
+test("uploads a document with the workspace picker", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  const panel = page.getByRole("complementary", { name: "Project workspace" });
+
+  await panel.getByRole("button", { name: "Upload documents…" }).click();
+
+  await expect(panel.getByText(/Uploaded 1 file/)).toBeVisible();
+  await expect(panel.getByRole("button", { name: /upload-\d+\.md/ })).toBeVisible();
+});
+
+test("typing in the composer does not re-render the transcript", async ({ page }) => {
+  await page.goto("/");
+  await sendPrompt(page, "Show markdown and mermaid");
+  await expect(page.locator(".mermaid-diagram svg")).toBeVisible({ timeout: 15_000 });
+
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-scroll"]');
+    const state = window as unknown as {
+      __transcriptMutations: number;
+      __transcriptObserver: MutationObserver;
+    };
+    state.__transcriptMutations = 0;
+    state.__transcriptObserver = new MutationObserver((records) => {
+      state.__transcriptMutations += records.length;
+    });
+    state.__transcriptObserver.observe(transcript as Node, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+    });
+  });
+
+  await page
+    .getByRole("textbox", { name: /Ask OpenBaD/ })
+    .pressSequentially("drafting a longer prompt to exercise typing", { delay: 10 });
+
+  const mutations = await page.evaluate(() => {
+    const state = window as unknown as {
+      __transcriptMutations: number;
+      __transcriptObserver: MutationObserver;
+    };
+    state.__transcriptObserver.disconnect();
+    return state.__transcriptMutations;
+  });
+  expect(mutations).toBe(0);
+});
+
+test("attaches documents dropped anywhere in the chat column", async ({ page }) => {
+  await page.goto("/");
+
+  await dropDocument(
+    page,
+    page.getByTestId("chat-scroll"),
+    "outside-composer.md",
+    "# Dropped outside the composer",
+  );
+
+  await expect(
+    page.getByRole("button", { name: "Remove attachment outside-composer.md" }),
+  ).toBeVisible();
+});

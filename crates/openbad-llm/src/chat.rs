@@ -245,12 +245,17 @@ impl ChatRequest {
             }
             if let Some(tool_calls) = &message.tool_calls {
                 for call in tool_calls {
-                    let parsed: Value = serde_json::from_str(&call.function.arguments)
-                        .map_err(|error| ProviderError::InvalidRequest(error.to_string()))?;
+                    let parsed: Value =
+                        serde_json::from_str(&call.function.arguments).map_err(|error| {
+                            ProviderError::InvalidRequest(format!(
+                                "tool call {} ({}) has invalid JSON arguments: {error}",
+                                call.id, call.function.name
+                            ))
+                        })?;
                     if !parsed.is_object() {
                         return Err(ProviderError::InvalidRequest(format!(
-                            "tool call {} arguments must be a JSON object",
-                            call.id
+                            "tool call {} ({}) arguments must be a JSON object",
+                            call.id, call.function.name
                         )));
                     }
                 }
@@ -683,7 +688,28 @@ mod tests {
             }],
         );
         let request = ChatRequest::new(crate::deepseek::FLASH_MODEL, vec![message]);
-        assert!(request.validate().is_err());
+        let error = request.validate().expect_err("rejected");
+        assert!(error.to_string().contains("read_file"), "{error}");
+    }
+
+    #[test]
+    fn malformed_tool_arguments_name_the_offending_tool_call() {
+        let message = ChatMessage::assistant_tool_calls(
+            None,
+            None,
+            vec![ToolCall {
+                id: "call-9".to_owned(),
+                kind: "function".to_owned(),
+                function: FunctionCall {
+                    name: "edit_file".to_owned(),
+                    arguments: "{\"path\": }".to_owned(),
+                },
+            }],
+        );
+        let request = ChatRequest::new(crate::deepseek::FLASH_MODEL, vec![message]);
+        let error = request.validate().expect_err("rejected");
+        assert!(error.to_string().contains("call-9"), "{error}");
+        assert!(error.to_string().contains("edit_file"), "{error}");
     }
 
     #[test]

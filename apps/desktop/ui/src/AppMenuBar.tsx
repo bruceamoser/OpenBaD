@@ -46,7 +46,7 @@ export default function AppMenuBar({ menus }: { menus: AppMenu[] }) {
       ref={container}
       role="menubar"
       aria-label="Application menu"
-      className="relative z-40 flex h-8 shrink-0 items-center gap-0.5 border-b border-white/[0.07] bg-[#0b0f14] px-2"
+      className="relative z-40 flex h-8 shrink-0 items-center gap-0.5 border-b border-white/[0.07] bg-[#171f29] px-2"
     >
       <div className="mr-2 flex items-center gap-1.5 px-1">
         <div className="flex h-4 w-4 items-center justify-center rounded bg-emerald-400/15 text-[7px] font-bold text-emerald-300">
@@ -84,7 +84,7 @@ export default function AppMenuBar({ menus }: { menus: AppMenu[] }) {
               <div
                 role="menu"
                 aria-label={`${menu.label} menu`}
-                className="absolute left-0 top-full mt-1 w-64 overflow-hidden rounded-lg border border-white/10 bg-[#11171e] p-1 shadow-2xl shadow-black/50"
+                className="absolute left-0 top-full mt-1 w-64 overflow-hidden rounded-lg border border-white/10 bg-[#242f3c] p-1 shadow-2xl shadow-black/50"
               >
                 {menu.items.map((item, index) =>
                   item.separator === true ? (
@@ -110,7 +110,7 @@ export default function AppMenuBar({ menus }: { menus: AppMenu[] }) {
                       </span>
                       <span className="min-w-0 flex-1 truncate">{item.label}</span>
                       {item.shortcut !== undefined && (
-                        <span className="shrink-0 font-mono text-[9px] text-slate-600">
+                        <span className="shrink-0 font-mono text-[9px] text-slate-500">
                           {item.shortcut}
                         </span>
                       )}
