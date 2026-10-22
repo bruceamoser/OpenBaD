@@ -355,8 +355,11 @@ test("keeps project knowledge and retrieval in the split workspace", async ({
 
   await expect(page.getByText("verified", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Product thesis note/ }).click();
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("Product thesis")).toBeVisible();
   await expect(
-    page.getByText("OpenBaD is a desktop coding harness."),
+    preview.getByText("OpenBaD is a desktop coding harness."),
   ).toBeVisible();
 
   await page.getByRole("button", { name: "Retrieval" }).click();

@@ -2869,15 +2869,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
         .load_messages(session)
         .map_err(|error| error.to_string())?;
     let turns = store.load_turns(session).unwrap_or_default();
-    let mut turn_durations = std::collections::HashMap::new();
-    let mut total_duration_ms = 0_u64;
-    for turn in &turns {
-        if let Some(ended) = turn.ended_at {
-            let duration = u64::try_from(ended.saturating_sub(turn.started_at)).unwrap_or(0);
-            total_duration_ms = total_duration_ms.saturating_add(duration);
-            turn_durations.insert(turn.turn, duration);
-        }
-    }
+    let (turn_durations, total_duration_ms) = summarize_turn_durations(&turns);
     let mut ui_messages: Vec<UiMessage> = Vec::new();
     let mut ui_turns: Vec<Option<u32>> = Vec::new();
     for message in &messages {
@@ -2930,21 +2922,42 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
             ui_turns.push(message.turn);
         }
     }
-    let mut seen_turns = std::collections::HashSet::new();
-    for (ui, turn) in ui_messages.iter_mut().zip(ui_turns.iter()).rev() {
-        let Some(turn) = turn else {
-            continue;
-        };
-        if ui.role == "assistant" && seen_turns.insert(*turn) {
-            continue;
-        }
-        ui.duration_ms = None;
-    }
+    keep_last_assistant_duration_per_turn(&mut ui_messages, &ui_turns);
     Ok(SessionView {
         session_id,
         messages: ui_messages,
         total_duration_ms,
     })
+}
+
+fn summarize_turn_durations(
+    turns: &[openbad_store::types::SessionTurn],
+) -> (std::collections::HashMap<u32, u64>, u64) {
+    let mut durations = std::collections::HashMap::new();
+    let mut total = 0_u64;
+    for turn in turns {
+        if let Some(ended) = turn.ended_at {
+            let duration = u64::try_from(ended.saturating_sub(turn.started_at)).unwrap_or(0);
+            total = total.saturating_add(duration);
+            durations.insert(turn.turn, duration);
+        }
+    }
+    (durations, total)
+}
+
+/// Only the final assistant message of a turn carries the turn duration, so a
+/// turn with tool activity reads as one timed response instead of several.
+fn keep_last_assistant_duration_per_turn(messages: &mut [UiMessage], turns: &[Option<u32>]) {
+    let mut seen_turns = std::collections::HashSet::new();
+    for (message, turn) in messages.iter_mut().zip(turns.iter()).rev() {
+        let Some(turn) = turn else {
+            continue;
+        };
+        if message.role == "assistant" && seen_turns.insert(*turn) {
+            continue;
+        }
+        message.duration_ms = None;
+    }
 }
 
 #[tauri::command]
@@ -4753,6 +4766,58 @@ mod tests {
         assert_eq!(safe_upload_name("..\\..\\c.txt").expect("name"), "c.txt");
         assert!(safe_upload_name("..").is_err());
         assert!(safe_upload_name("   ").is_err());
+    }
+
+    #[test]
+    fn turn_durations_persist_on_the_last_assistant_message() {
+        use openbad_core::SessionId;
+        use openbad_store::types::SessionTurn;
+        use uuid::Uuid;
+
+        let session = SessionId::from(Uuid::nil());
+        let turn = |number: u32, started: i64, ended: Option<i64>| SessionTurn {
+            session_id: session,
+            turn: number,
+            started_at: started,
+            ended_at: ended,
+            reason: None,
+            steps: 1,
+            input_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+        };
+        let (durations, total) = summarize_turn_durations(&[
+            turn(1, 1_000, Some(4_000)),
+            turn(2, 10_000, Some(12_500)),
+            turn(3, 20_000, None),
+        ]);
+        assert_eq!(durations.get(&1), Some(&3_000));
+        assert_eq!(durations.get(&2), Some(&2_500));
+        assert_eq!(durations.get(&3), None);
+        assert_eq!(total, 5_500);
+
+        let message = |role: &str, duration: Option<u64>| UiMessage {
+            role: role.to_owned(),
+            text: String::new(),
+            attachments: Vec::new(),
+            reasoning: None,
+            duration_ms: duration,
+        };
+        let mut messages = vec![
+            message("user", None),
+            message("assistant", Some(3_000)),
+            message("assistant", Some(3_000)),
+            message("user", None),
+            message("assistant", Some(2_500)),
+        ];
+        keep_last_assistant_duration_per_turn(
+            &mut messages,
+            &[Some(1), Some(1), Some(1), Some(2), Some(2)],
+        );
+        assert_eq!(messages[1].duration_ms, None);
+        assert_eq!(messages[2].duration_ms, Some(3_000));
+        assert_eq!(messages[4].duration_ms, Some(2_500));
     }
 
     #[test]
