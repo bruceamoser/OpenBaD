@@ -3562,7 +3562,8 @@ fn update_service() -> openbad_update::UpdateService {
         .ok()
         .filter(|repo| !repo.trim().is_empty())
         .unwrap_or_else(|| openbad_update::DEFAULT_REPO.to_owned());
-    let mut service = openbad_update::UpdateService::new(repo);
+    let mut service = openbad_update::UpdateService::new(repo)
+        .with_self_installable(openbad_update::running_app_image().is_some());
     if let Ok(api_base) = std::env::var("OPENBAD_UPDATE_API") {
         if !api_base.trim().is_empty() {
             service = service.with_api_base(api_base);

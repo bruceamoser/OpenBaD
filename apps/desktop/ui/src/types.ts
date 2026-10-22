@@ -441,5 +441,6 @@ export type UpdateStatus =
 
 export type InstallOutcome =
   | { kind: "app_image_replaced"; path: string }
+  | { kind: "package_installed"; path: string; installer: string }
   | { kind: "installer_launched"; path: string; installer: string }
   | { kind: "installer_saved"; path: string; installer: string };

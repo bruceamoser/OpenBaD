@@ -4,6 +4,16 @@ The assistant loads this file with the project instructions. Add a short entry
 whenever an architecture document or the tool/runtime surface changes, so a new
 session knows what moved without re-reading every document.
 
+## 2026-10-24
+
+- **Linux updates prefer the `.deb` package.** `openbad-update` now ranks
+  `.deb` ahead of `.AppImage` on Linux unless the app is running from an
+  AppImage, in which case the AppImage stays preferred so the running binary is
+  replaced. A selected `.deb` is installed through `pkexec` (`apt-get install
+  -y`, falling back to `dpkg -i`) and reported as a new `package_installed`
+  outcome; if escalation is unavailable the existing save-and-open handoff
+  still applies.
+
 ## v0.1.1
 
 Bundled desktop release: global MCP server management and in-app updates

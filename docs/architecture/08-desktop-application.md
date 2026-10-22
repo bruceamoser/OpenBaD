@@ -340,13 +340,18 @@ number after a disconnect.
 - **Check:** Settings → About (or Help → Check for Updates…) calls
   `check_for_updates`. `openbad-update` reads the latest release, compares
   semantic versions, and selects an asset for the current OS and architecture
-  (AppImage, then `.deb`/`.rpm`; `.msi`/`-setup.exe`; `.dmg`).
+  (`.deb`, then `.AppImage`/`.rpm` on Linux; `.msi`/`-setup.exe`; `.dmg`). A
+  running AppImage is the exception: it prefers the AppImage asset so the
+  binary that is actually executing can be replaced.
 - **Install:** `install_update` re-checks the release, downloads the asset to
   the user's downloads directory, and verifies `SHA256SUMS` when the release
   publishes one. A running AppImage is replaced atomically and the app
-  relaunches. Other installers are saved and opened with the platform handler
-  so the user completes the install. Updates can only be started from the UI;
-  no agent tool can install one.
+  relaunches. A `.deb` is installed through `pkexec` (`apt-get install -y` to
+  resolve dependencies, `dpkg -i` as the fallback), so a package-installed app
+  is upgraded in place; if privilege escalation is unavailable the file is
+  saved and opened with the platform installer instead. Other installers are
+  saved and opened with the platform handler so the user completes the install.
+  Updates can only be started from the UI; no agent tool can install one.
 - **Release contract:** tag releases with a semantic version (for example
   `v0.2.0`), attach the platform bundles, and upload a `SHA256SUMS` asset that
   lists each bundle. Downloads are refused unless they use HTTPS (loopback is
