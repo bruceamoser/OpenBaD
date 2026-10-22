@@ -4,6 +4,12 @@ The assistant loads this file with the project instructions. Add a short entry
 whenever an architecture document or the tool/runtime surface changes, so a new
 session knows what moved without re-reading every document.
 
+## v0.1.1
+
+Bundled desktop release: global MCP server management and in-app updates
+(shipped in v0.1.0) plus the preview pane, reveal-in-file-manager, chat timing,
+project-scoped MCP enablement, and any-file chat attachments described below.
+
 ## 2026-10-23
 
 - **Global MCP definitions, per-project enablement.** Global server definitions
