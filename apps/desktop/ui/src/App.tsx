@@ -72,6 +72,8 @@ import type { AppMenu } from "./AppMenuBar";
 import ChatComposer from "./ChatComposer";
 import type { ChatComposerHandle } from "./ChatComposer";
 import MarkdownMessage from "./MarkdownMessage";
+import McpSettings from "./McpSettings";
+import UpdatePanel from "./UpdatePanel";
 import { droppedToUploads, useFileDropZone } from "./dropzone";
 import ProjectPanel from "./ProjectPanel";
 import type { PanelTab } from "./ProjectPanel";
@@ -100,7 +102,7 @@ type Preferences = {
 };
 
 type PermissionMode = AccessMode;
-type SettingsTab = "model" | "access" | "secrets" | "project" | "about";
+type SettingsTab = "model" | "access" | "secrets" | "mcp" | "project" | "about";
 
 function countSuffix(primary?: number, total?: number): string {
   if (primary === undefined) {
@@ -1335,6 +1337,10 @@ export default function App() {
       label: "Help",
       items: [
         {
+          label: "Check for Updates…",
+          onSelect: () => openSettings("about"),
+        },
+        {
           label: "Keyboard Shortcuts",
           onSelect: () => setShortcutsOpen(true),
         },
@@ -2387,6 +2393,7 @@ function SettingsDialog({
     { id: "model", label: "Model" },
     { id: "access", label: "Access" },
     { id: "secrets", label: "Secrets" },
+    { id: "mcp", label: "MCP" },
     { id: "project", label: "Project" },
     { id: "about", label: "About" },
   ];
@@ -2576,6 +2583,10 @@ function SettingsDialog({
             </div>
           )}
 
+          {tab === "mcp" && (
+            <McpSettings workspacePath={activeProject?.path ?? ""} />
+          )}
+
           {tab === "project" && (
             <div className="max-w-md space-y-4">
               <Section title="Active project" description={activeProject?.path ?? "No project selected."}>
@@ -2629,6 +2640,18 @@ function SettingsDialog({
                   </p>
                 </div>
               </Section>
+              <Section
+                title="Updates"
+                description="Check GitHub releases and install the newest build from the app."
+              >
+                <UpdatePanel
+                  currentVersion={
+                    foundation.kind === "ready"
+                      ? foundation.foundation.app_version
+                      : null
+                  }
+                />
+              </Section>
             </div>
           )}
         </div>
@@ -2660,7 +2683,9 @@ function CommandPalette({
     { label: "Settings: Model", hint: "", run: () => onSettings("model") },
     { label: "Settings: Access", hint: "", run: () => onSettings("access") },
     { label: "Settings: Secrets", hint: "", run: () => onSettings("secrets") },
+    { label: "Settings: MCP servers", hint: "", run: () => onSettings("mcp") },
     { label: "Settings: Project", hint: "", run: () => onSettings("project") },
+    { label: "Check for updates", hint: "", run: () => onSettings("about") },
     { label: "Project: Overview", hint: "", run: () => onContext("overview") },
     { label: "Project: Workspace", hint: "", run: () => onContext("workspace") },
     { label: "Project: Agents", hint: "", run: () => onContext("agents") },

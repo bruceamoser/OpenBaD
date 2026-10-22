@@ -179,7 +179,8 @@ It reads the key from the OpenBaD Desktop keychain entry, or falls back to
 │   ├── openbad-knowledge/  # Library, ingestion, RAG
 │   ├── openbad-autonomic/  # Heartbeat, jobs, schedules, pulse
 │   ├── openbad-governance/ # Policy, approvals, audit, secrets
-│   └── openbad-mcp/        # MCP client
+│   ├── openbad-mcp/        # MCP client and server management
+│   └── openbad-update/     # Release checks and in-app updates
 ├── docs/                   # Architecture, plans, ADRs
 ├── tests/                  # Cross-crate integration tests
 └── archive/                # Archived v0

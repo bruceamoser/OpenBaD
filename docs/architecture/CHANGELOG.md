@@ -4,6 +4,31 @@ The assistant loads this file with the project instructions. Add a short entry
 whenever an architecture document or the tool/runtime surface changes, so a new
 session knows what moved without re-reading every document.
 
+## 2026-10-22
+
+- **MCP server management.** `openbad-mcp` now supports `enabled`, `env`,
+  `cwd`, and `timeout_seconds`, validates configurations, persists changes to
+  `.openbad/mcp.yaml` atomically, restarts only affected server processes, and
+  reloads when another manager writes the file. The desktop caches one manager
+  per workspace and exposes `mcp_servers`, `add_mcp_server`,
+  `update_mcp_server`, `remove_mcp_server`, `set_mcp_server_enabled`, and
+  `test_mcp_server`, plus an MCP settings tab.
+- **MCP tool domain.** `openbad-tools` adds `mcp_servers_list`,
+  `mcp_server_add`, `mcp_server_update`, `mcp_server_remove`, and
+  `mcp_server_test`, and moves `mcp_call`/`tool_search` into a dedicated `mcp`
+  domain. Environment values are never exposed to the model. The registry now
+  has 125 internal tools in 18 domains (36 facade schemas).
+- **MCP catalog at the tail.** The MCP catalog is now appended only to each
+  provider request, after the cached history prefix, instead of being inserted
+  before history. Adding or removing a server changes the volatile tail without
+  rewriting the cached prefix.
+- **In-app updates.** New `openbad-update` crate checks GitHub releases for the
+  current OS and architecture, selects AppImage/deb/rpm/msi/setup.exe/dmg
+  assets, verifies `SHA256SUMS` when published, replaces a running AppImage
+  atomically, and hands other installers to the platform. Settings → About and
+  Help → Check for Updates surface the flow; no agent tool can install an
+  update.
+
 ## 2026-10-21
 
 - **Tool approval prompt.** A risk-gate denial now carries

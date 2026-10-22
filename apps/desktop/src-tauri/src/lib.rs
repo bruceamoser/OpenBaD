@@ -24,9 +24,10 @@ use openbad_store::types::{
 };
 use openbad_tools::{
     CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
-    LspService, McpService, McpToolSummary, MemoryStore, OutsideGrant, ProjectAreas,
-    ProjectRepoRef, SessionEventView, SessionHistory, SessionHistoryHit, SubagentInfo,
-    SubagentRuntime, SubagentSpec, TerminalRead, TerminalService, WorkspaceSearch,
+    LspService, McpServerChange, McpServerSpec, McpServerSummary, McpService, McpToolSummary,
+    MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SessionEventView, SessionHistory,
+    SessionHistoryHit, SubagentInfo, SubagentRuntime, SubagentSpec, TerminalRead, TerminalService,
+    WorkspaceSearch,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,32 @@ pub struct AppState {
     steering: Arc<SteeringInbox>,
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<openbad_terminal::TerminalManager>,
+    mcp: McpManagers,
+}
+
+/// Keeps one MCP manager per workspace so the settings UI, the chat loop, and
+/// subagents observe the same server processes and configuration.
+#[derive(Default)]
+struct McpManagers {
+    managers: Mutex<HashMap<PathBuf, Arc<openbad_mcp::McpManager>>>,
+}
+
+impl McpManagers {
+    fn get(&self, root: &Path) -> Result<Arc<openbad_mcp::McpManager>, String> {
+        let mut managers = self
+            .managers
+            .lock()
+            .map_err(|error| format!("MCP manager lock poisoned: {error}"))?;
+        if let Some(manager) = managers.get(root) {
+            return Ok(Arc::clone(manager));
+        }
+        let manager = Arc::new(
+            openbad_mcp::McpManager::new(root)
+                .map_err(|error| format!("could not load MCP configuration: {error}"))?,
+        );
+        managers.insert(root.to_path_buf(), Arc::clone(&manager));
+        Ok(manager)
+    }
 }
 
 struct StoreSearch {
@@ -605,40 +632,109 @@ impl LspService for DesktopLsp {
 }
 
 struct DesktopMcp {
-    manager: Result<Arc<openbad_mcp::McpManager>, String>,
+    manager: Arc<openbad_mcp::McpManager>,
 }
 
 impl DesktopMcp {
-    fn new(root: PathBuf) -> Self {
-        Self {
-            manager: openbad_mcp::McpManager::new(&root)
-                .map(Arc::new)
-                .map_err(|error| error.to_string()),
-        }
+    fn new(manager: Arc<openbad_mcp::McpManager>) -> Self {
+        Self { manager }
     }
+}
 
-    fn manager(&self) -> Result<Arc<openbad_mcp::McpManager>, String> {
-        self.manager.as_ref().map(Arc::clone).map_err(Clone::clone)
+fn mcp_server_summary(config: &openbad_mcp::McpServerConfig) -> McpServerSummary {
+    McpServerSummary {
+        name: config.name.clone(),
+        transport: match config.transport {
+            openbad_mcp::McpTransport::Stdio => "stdio".to_owned(),
+            openbad_mcp::McpTransport::Http => "http".to_owned(),
+        },
+        command: config.command.clone(),
+        args: config.args.clone(),
+        url: config.url.clone(),
+        enabled: config.enabled,
+        allowed_tools: config.allowed_tools.clone(),
+        env_keys: config.env.keys().cloned().collect(),
+        timeout_seconds: config.timeout_seconds,
+    }
+}
+
+fn mcp_tool_summary(tool: openbad_mcp::McpToolInfo) -> McpToolSummary {
+    McpToolSummary {
+        server: tool.server,
+        name: tool.name,
+        description: tool.description,
+    }
+}
+
+fn mcp_server_config_from_spec(
+    spec: &McpServerSpec,
+    base: Option<openbad_mcp::McpServerConfig>,
+) -> Result<openbad_mcp::McpServerConfig, String> {
+    let creating = base.is_none();
+    let mut config =
+        base.unwrap_or_else(|| openbad_mcp::McpServerConfig::stdio(spec.name.clone(), ""));
+    config.name = spec.name.clone();
+    if let Some(transport) = spec.transport.as_deref() {
+        config.transport = match transport.to_ascii_lowercase().as_str() {
+            "stdio" => openbad_mcp::McpTransport::Stdio,
+            "http" => openbad_mcp::McpTransport::Http,
+            other => return Err(format!("unsupported MCP transport: {other}")),
+        };
+    } else if creating {
+        config.transport = if spec.command.is_none() && spec.url.is_some() {
+            openbad_mcp::McpTransport::Http
+        } else {
+            openbad_mcp::McpTransport::Stdio
+        };
+    }
+    if let Some(command) = &spec.command {
+        config.command = (!command.trim().is_empty()).then(|| command.clone());
+    }
+    if let Some(args) = &spec.args {
+        config.args = args.clone();
+    }
+    if let Some(env) = &spec.env {
+        config.env = env.clone();
+    }
+    if let Some(cwd) = &spec.cwd {
+        config.cwd = (!cwd.trim().is_empty()).then(|| cwd.clone());
+    }
+    if let Some(url) = &spec.url {
+        config.url = (!url.trim().is_empty()).then(|| url.clone());
+    }
+    if let Some(allowed) = &spec.allowed_tools {
+        config.allowed_tools = allowed.clone();
+    }
+    if let Some(enabled) = spec.enabled {
+        config.enabled = enabled;
+    }
+    if let Some(timeout) = spec.timeout_seconds {
+        config.timeout_seconds = (timeout > 0).then_some(timeout);
+    }
+    config
+        .validate()
+        .map_err(|error| format!("invalid MCP server: {error}"))?;
+    Ok(config)
+}
+
+fn probe_mcp_server(
+    manager: &openbad_mcp::McpManager,
+    name: &str,
+) -> (Vec<McpToolSummary>, Option<String>) {
+    match manager.probe(name) {
+        Ok(tools) => (tools.into_iter().map(mcp_tool_summary).collect(), None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
     }
 }
 
 #[async_trait::async_trait]
 impl McpService for DesktopMcp {
     async fn catalog(&self) -> Result<Vec<McpToolSummary>, String> {
-        let manager = self.manager()?;
+        let manager = Arc::clone(&self.manager);
         tauri::async_runtime::spawn_blocking(move || {
             manager
                 .catalog()
-                .map(|tools| {
-                    tools
-                        .into_iter()
-                        .map(|tool| McpToolSummary {
-                            server: tool.server,
-                            name: tool.name,
-                            description: tool.description,
-                        })
-                        .collect()
-                })
+                .map(|tools| tools.into_iter().map(mcp_tool_summary).collect())
                 .map_err(|error| error.to_string())
         })
         .await
@@ -646,12 +742,96 @@ impl McpService for DesktopMcp {
     }
 
     async fn call(&self, server: &str, tool: &str, arguments: Value) -> Result<String, String> {
-        let manager = self.manager()?;
+        let manager = Arc::clone(&self.manager);
         let server = server.to_owned();
         let tool = tool.to_owned();
         tauri::async_runtime::spawn_blocking(move || {
             manager
                 .call(&server, &tool, arguments)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn servers(&self) -> Result<Vec<McpServerSummary>, String> {
+        let manager = Arc::clone(&self.manager);
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .servers()
+                .map(|servers| servers.iter().map(mcp_server_summary).collect())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn add_server(&self, spec: McpServerSpec) -> Result<McpServerChange, String> {
+        let manager = Arc::clone(&self.manager);
+        tauri::async_runtime::spawn_blocking(move || {
+            let config = mcp_server_config_from_spec(&spec, None)?;
+            manager
+                .add_server(config.clone())
+                .map_err(|error| error.to_string())?;
+            let (tools, warning) = probe_mcp_server(&manager, &config.name);
+            Ok(McpServerChange {
+                server: mcp_server_summary(&config),
+                tools,
+                warning,
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn update_server(
+        &self,
+        name: &str,
+        spec: McpServerSpec,
+    ) -> Result<McpServerChange, String> {
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            let current = manager
+                .servers()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|server| server.name == name)
+                .ok_or_else(|| format!("unknown MCP server: {name}"))?;
+            let config = mcp_server_config_from_spec(&spec, Some(current))?;
+            manager
+                .update_server(&name, config.clone())
+                .map_err(|error| error.to_string())?;
+            let (tools, warning) = probe_mcp_server(&manager, &name);
+            Ok(McpServerChange {
+                server: mcp_server_summary(&config),
+                tools,
+                warning,
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn remove_server(&self, name: &str) -> Result<(), String> {
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .remove_server(&name)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn test_server(&self, name: &str) -> Result<Vec<McpToolSummary>, String> {
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            manager
+                .probe(&name)
+                .map(|tools| tools.into_iter().map(mcp_tool_summary).collect())
                 .map_err(|error| error.to_string())
         })
         .await
@@ -736,6 +916,7 @@ struct SubagentSettings {
     user_id: String,
     grants: Vec<OutsideGrant>,
     terminal: Arc<openbad_terminal::TerminalManager>,
+    mcp: Arc<openbad_mcp::McpManager>,
 }
 
 struct SubagentRunner {
@@ -977,7 +1158,7 @@ async fn run_subagent(
         store: Arc::clone(&settings.store),
         workspace_id: settings.workspace_id,
     }))
-    .with_mcp(Arc::new(DesktopMcp::new(settings.workspace_path.clone())))
+    .with_mcp(Arc::new(DesktopMcp::new(Arc::clone(&settings.mcp))))
     .with_terminal(Arc::new(DesktopTerminal {
         manager: Arc::clone(&settings.terminal),
     }))
@@ -2914,6 +3095,306 @@ fn api_key_status(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(stored || std::env::var_os("DEEPSEEK_API_KEY").is_some())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerView {
+    pub name: String,
+    pub transport: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub cwd: Option<String>,
+    pub url: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub enabled: bool,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpToolView {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerChangeView {
+    pub server: McpServerView,
+    pub tools: Vec<McpToolView>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpServerInput {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+fn mcp_server_view(config: &openbad_mcp::McpServerConfig) -> McpServerView {
+    McpServerView {
+        name: config.name.clone(),
+        transport: match config.transport {
+            openbad_mcp::McpTransport::Stdio => "stdio".to_owned(),
+            openbad_mcp::McpTransport::Http => "http".to_owned(),
+        },
+        command: config.command.clone(),
+        args: config.args.clone(),
+        env: config.env.clone(),
+        cwd: config.cwd.clone(),
+        url: config.url.clone(),
+        allowed_tools: config.allowed_tools.clone(),
+        enabled: config.enabled,
+        timeout_seconds: config.timeout_seconds,
+    }
+}
+
+fn mcp_tool_view(tool: openbad_mcp::McpToolInfo) -> McpToolView {
+    McpToolView {
+        server: tool.server,
+        name: tool.name,
+        description: tool.description,
+    }
+}
+
+fn mcp_input_spec(name: String, input: McpServerInput) -> McpServerSpec {
+    McpServerSpec {
+        name,
+        transport: input.transport,
+        command: input.command,
+        args: input.args,
+        env: input.env,
+        cwd: input.cwd,
+        url: input.url,
+        allowed_tools: input.allowed_tools,
+        enabled: input.enabled,
+        timeout_seconds: input.timeout_seconds,
+    }
+}
+
+#[tauri::command]
+fn mcp_servers(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<McpServerView>, String> {
+    let manager = state.mcp.get(Path::new(&workspace_path))?;
+    manager
+        .servers()
+        .map(|servers| servers.iter().map(mcp_server_view).collect())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn add_mcp_server(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    server: McpServerInput,
+) -> Result<McpServerChangeView, String> {
+    let manager = state.mcp.get(Path::new(&workspace_path))?;
+    let name = server.name.trim().to_owned();
+    if name.is_empty() {
+        return Err("server name must not be empty".to_owned());
+    }
+    let spec = mcp_input_spec(name.clone(), server);
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = mcp_server_config_from_spec(&spec, None)?;
+        manager
+            .add_server(config.clone())
+            .map_err(|error| error.to_string())?;
+        let (tools, warning) = probe_mcp_server(&manager, &name);
+        Ok(McpServerChangeView {
+            server: mcp_server_view(&config),
+            tools: tools
+                .into_iter()
+                .map(|tool| McpToolView {
+                    server: tool.server,
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect(),
+            warning,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn update_mcp_server(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    name: String,
+    server: McpServerInput,
+) -> Result<McpServerChangeView, String> {
+    let manager = state.mcp.get(Path::new(&workspace_path))?;
+    let spec = mcp_input_spec(name.clone(), server);
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = manager
+            .servers()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|server| server.name == name)
+            .ok_or_else(|| format!("unknown MCP server: {name}"))?;
+        let config = mcp_server_config_from_spec(&spec, Some(current))?;
+        manager
+            .update_server(&name, config.clone())
+            .map_err(|error| error.to_string())?;
+        let (tools, warning) = probe_mcp_server(&manager, &name);
+        Ok(McpServerChangeView {
+            server: mcp_server_view(&config),
+            tools: tools
+                .into_iter()
+                .map(|tool| McpToolView {
+                    server: tool.server,
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect(),
+            warning,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn remove_mcp_server(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    name: String,
+) -> Result<(), String> {
+    let manager = state.mcp.get(Path::new(&workspace_path))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        manager
+            .remove_server(&name)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn set_mcp_server_enabled(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<McpServerView, String> {
+    let manager = state.mcp.get(Path::new(&workspace_path))?;
+    manager
+        .set_server_enabled(&name, enabled)
+        .map(|server| mcp_server_view(&server))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn test_mcp_server(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    name: String,
+) -> Result<Vec<McpToolView>, String> {
+    let manager = state.mcp.get(Path::new(&workspace_path))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        manager
+            .probe(&name)
+            .map(|tools| tools.into_iter().map(mcp_tool_view).collect())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn update_service() -> openbad_update::UpdateService {
+    let repo = std::env::var("OPENBAD_UPDATE_REPO")
+        .ok()
+        .filter(|repo| !repo.trim().is_empty())
+        .unwrap_or_else(|| openbad_update::DEFAULT_REPO.to_owned());
+    let mut service = openbad_update::UpdateService::new(repo);
+    if let Ok(api_base) = std::env::var("OPENBAD_UPDATE_API") {
+        if !api_base.trim().is_empty() {
+            service = service.with_api_base(api_base);
+        }
+    }
+    service
+}
+
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> Result<openbad_update::UpdateStatus, String> {
+    let current = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        update_service()
+            .check(&current)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    version: String,
+) -> Result<openbad_update::InstallOutcome, String> {
+    let current = app.package_info().version.to_string();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let service = update_service();
+        let status = service.check(&current).map_err(|error| error.to_string())?;
+        let openbad_update::UpdateStatus::Available {
+            latest,
+            release,
+            asset,
+            installer,
+            ..
+        } = status
+        else {
+            return Err("no update is available".to_owned());
+        };
+        if latest != version {
+            return Err("the available update changed; check again".to_owned());
+        }
+        let downloads = openbad_update::downloads_directory();
+        let downloaded = service
+            .download(&release, &asset, &downloads)
+            .map_err(|error| error.to_string())?;
+        let app_image = openbad_update::running_app_image();
+        service
+            .install(
+                &asset,
+                installer,
+                &downloaded,
+                app_image.as_deref(),
+                &downloads,
+            )
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    if let openbad_update::InstallOutcome::AppImageReplaced { path } = &outcome {
+        std::process::Command::new(path)
+            .spawn()
+            .map_err(|error| format!("could not restart the updated app: {error}"))?;
+        app.exit(0);
+    }
+    Ok(outcome)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatInput {
@@ -3089,6 +3570,7 @@ async fn chat(
         client = client.with_reasoning_effort(effort);
     }
     let index_root = workspace_path.clone();
+    let mcp_manager = state.mcp.get(Path::new(&workspace_path))?;
     let mut agent = default_agent(
         client,
         Arc::new(WorkspaceService::new(workspace_path.clone())),
@@ -3134,7 +3616,7 @@ async fn chat(
                 store: Arc::clone(&state.store),
                 workspace_id,
             }))
-            .with_mcp(Arc::new(DesktopMcp::new(workspace_path.clone())))
+            .with_mcp(Arc::new(DesktopMcp::new(Arc::clone(&mcp_manager))))
             .with_terminal(Arc::new(DesktopTerminal {
                 manager: Arc::clone(&state.terminal),
             }))
@@ -3152,6 +3634,7 @@ async fn chat(
                     user_id: user_id.clone(),
                     grants: subagent_grants,
                     terminal: Arc::clone(&state.terminal),
+                    mcp: Arc::clone(&mcp_manager),
                 }),
                 active: Arc::clone(&state.subagent_cancels),
             }));
@@ -3509,6 +3992,7 @@ pub fn run() {
             steering: Arc::new(SteeringInbox::default()),
             subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
+            mcp: McpManagers::default(),
         })
         .invoke_handler(tauri::generate_handler![
             health,
@@ -3534,6 +4018,14 @@ pub fn run() {
             cancel_chat,
             steer_chat,
             api_key_status,
+            mcp_servers,
+            add_mcp_server,
+            update_mcp_server,
+            remove_mcp_server,
+            set_mcp_server_enabled,
+            test_mcp_server,
+            check_for_updates,
+            install_update,
             sessions,
             search_sessions,
             memories,
@@ -3991,5 +4483,62 @@ mod tests {
         assert_eq!(safe_upload_name("..\\..\\c.txt").expect("name"), "c.txt");
         assert!(safe_upload_name("..").is_err());
         assert!(safe_upload_name("   ").is_err());
+    }
+
+    #[test]
+    fn mcp_specs_infer_transport_and_preserve_unspecified_fields() {
+        let spec = McpServerSpec {
+            name: "docs".to_owned(),
+            command: Some("npx".to_owned()),
+            args: Some(vec!["-y".to_owned(), "@example/mcp-docs".to_owned()]),
+            ..McpServerSpec::default()
+        };
+        let config = mcp_server_config_from_spec(&spec, None).expect("stdio config");
+        assert_eq!(config.transport, openbad_mcp::McpTransport::Stdio);
+        assert!(config.enabled);
+        assert_eq!(config.args, vec!["-y", "@example/mcp-docs"]);
+
+        let spec = McpServerSpec {
+            name: "remote".to_owned(),
+            url: Some("https://mcp.example.com/rpc".to_owned()),
+            ..McpServerSpec::default()
+        };
+        let config = mcp_server_config_from_spec(&spec, None).expect("http config");
+        assert_eq!(config.transport, openbad_mcp::McpTransport::Http);
+
+        let existing = openbad_mcp::McpServerConfig::stdio("docs", "npx");
+        let patch = McpServerSpec {
+            name: "docs".to_owned(),
+            enabled: Some(false),
+            timeout_seconds: Some(30),
+            ..McpServerSpec::default()
+        };
+        let updated = mcp_server_config_from_spec(&patch, Some(existing)).expect("patched config");
+        assert_eq!(updated.command.as_deref(), Some("npx"));
+        assert!(!updated.enabled);
+        assert_eq!(updated.timeout_seconds, Some(30));
+    }
+
+    #[test]
+    fn mcp_specs_reject_invalid_servers() {
+        let spec = McpServerSpec {
+            name: "bad name".to_owned(),
+            ..McpServerSpec::default()
+        };
+        assert!(mcp_server_config_from_spec(&spec, None).is_err());
+
+        let spec = McpServerSpec {
+            name: "docs".to_owned(),
+            ..McpServerSpec::default()
+        };
+        assert!(mcp_server_config_from_spec(&spec, None).is_err());
+
+        let spec = McpServerSpec {
+            name: "remote".to_owned(),
+            transport: Some("http".to_owned()),
+            url: Some("ftp://example.com/rpc".to_owned()),
+            ..McpServerSpec::default()
+        };
+        assert!(mcp_server_config_from_spec(&spec, None).is_err());
     }
 }

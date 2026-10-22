@@ -34,6 +34,7 @@ openbad-llm = { path = "../../../crates/openbad-llm" }
 openbad-tools = { path = "../../../crates/openbad-tools" }
 openbad-lsp = { path = "../../../crates/openbad-lsp" }
 openbad-mcp = { path = "../../../crates/openbad-mcp" }
+openbad-update = { path = "../../../crates/openbad-update" }
 openbad-terminal = { path = "../../../crates/openbad-terminal" }
 openbad-workspace = { path = "../../../crates/openbad-workspace" }
 openbad-index = { path = "../../../crates/openbad-index" }
