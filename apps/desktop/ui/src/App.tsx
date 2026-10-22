@@ -719,31 +719,36 @@ export default function App() {
     }
   }, [panelOpen, sidebarOpen]);
 
-  const startPanelResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = panelWidth;
-    const move = (pointer: PointerEvent) => {
-      const available = Math.max(320, window.innerWidth - 380);
-      setPanelWidth(
-        Math.min(available, Math.max(320, startWidth - (pointer.clientX - startX))),
-      );
-    };
-    const stop = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop);
-  }, [panelWidth]);
+  const startPanelResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = panelWidth;
+      const reserved = 380 + (artifact !== null ? previewWidth + 4 : 0);
+      const move = (pointer: PointerEvent) => {
+        const available = Math.max(320, window.innerWidth - reserved);
+        setPanelWidth(
+          Math.min(available, Math.max(320, startWidth - (pointer.clientX - startX))),
+        );
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    },
+    [panelWidth, artifact, previewWidth],
+  );
 
   const startPreviewResize = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       event.preventDefault();
       const startX = event.clientX;
       const startWidth = previewWidth;
+      const reserved = 720 + (panelOpen ? panelWidth + 4 : 0);
       const move = (pointer: PointerEvent) => {
-        const available = Math.max(300, window.innerWidth - 720);
+        const available = Math.max(300, window.innerWidth - reserved);
         setPreviewWidth(
           Math.min(available, Math.max(300, startWidth - (pointer.clientX - startX))),
         );
@@ -755,7 +760,7 @@ export default function App() {
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", stop);
     },
-    [previewWidth],
+    [previewWidth, panelOpen, panelWidth],
   );
 
   const send = useCallback(async (override: string, pending: UploadSource[] = []) => {
@@ -1876,6 +1881,7 @@ export default function App() {
           workspacePath={workspacePath}
           revision={projectRevision}
           width={previewWidth}
+          reserved={720 + (panelOpen ? panelWidth + 4 : 0)}
           onResizeStart={startPreviewResize}
           onClose={() => setArtifact(null)}
         />
@@ -1893,7 +1899,9 @@ export default function App() {
           <div
             className="flex min-h-0 shrink-0 overflow-hidden"
             style={{
-              width: `clamp(320px, ${panelWidth}px, calc(100vw - 380px))`,
+              width: `clamp(320px, ${panelWidth}px, calc(100vw - ${
+                380 + (artifact !== null ? previewWidth + 4 : 0)
+              }px))`,
             }}
           >
             <ProjectPanel

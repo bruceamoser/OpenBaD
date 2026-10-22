@@ -26,6 +26,7 @@ export default function PreviewPane({
   workspacePath,
   revision,
   width,
+  reserved,
   onResizeStart,
   onClose,
 }: {
@@ -33,6 +34,7 @@ export default function PreviewPane({
   workspacePath: string;
   revision: number;
   width: number;
+  reserved: number;
   onResizeStart: (event: React.PointerEvent<HTMLDivElement>) => void;
   onClose: () => void;
 }) {
@@ -57,7 +59,7 @@ export default function PreviewPane({
         data-testid="preview-pane"
         className="flex min-h-0 shrink-0 flex-col border-l border-white/[0.08] bg-[#1b232e]"
         style={{
-          width: `clamp(300px, ${width}px, calc(100vw - 720px))`,
+          width: `clamp(300px, ${width}px, calc(100vw - ${reserved}px))`,
         }}
       >
         <div className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3.5">
