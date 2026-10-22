@@ -948,7 +948,10 @@ Rules:
 
 ### 13.2 MCP
 
-MCP servers are configured in `.openbad/mcp.yaml`:
+MCP servers are defined once, globally, in the application config directory
+resolved by the `directories` crate (`~/.config/openbaddesktop/mcp.yaml` on
+Linux; the equivalent application-config directory on macOS and Windows).
+`OPENBAD_MCP_CONFIG` overrides the path, which tests and headless hosts use:
 
 ```yaml
 servers:
@@ -960,30 +963,45 @@ servers:
       DOCS_TOKEN: "${DOCS_TOKEN}"
     cwd: /path/to/project
     allowed_tools: ["search_docs"]
-    enabled: true
     timeout_seconds: 30
   - name: remote
     transport: http
     url: https://mcp.example.com/rpc
     allowed_tools: []
-    enabled: true
 ```
 
+Each project only records which global servers it enables, in
+`.openbad/mcp.yaml`:
+
+```yaml
+enabled: ["docs", "remote"]
+```
+
+- Definitions are shared by every project; enablement is per project, so no
+  project pays the startup cost of a server it does not use. Removing a server
+  deletes the global definition and drops it from every project enablement.
+- Legacy project files that still contain full `servers:` definitions are
+  migrated into the global config on first load; `enabled: true` entries become
+  project enablements.
 - Transports: line-delimited JSON-RPC over stdio, and request/response JSON-RPC
   over HTTP.
 - Server config: name, transport, command/URL, args, env, cwd, `allowed_tools`,
-  `enabled`, and `timeout_seconds` (1–600, default 60). Empty `allowed_tools`
-  permits every tool; disabled servers are skipped and cannot be called.
+  and `timeout_seconds` (1–600, default 60). Empty `allowed_tools` permits every
+  tool. Servers the project has not enabled are skipped and cannot be called.
 - The mcp domain is the only MCP surface the model sees:
   `mcp_servers_list`, `mcp_server_add`, `mcp_server_update`,
-  `mcp_server_remove`, `mcp_server_test`, `tool_search`, and `mcp_call`.
+  `mcp_server_remove`, `mcp_server_test`, `mcp_server_set_enabled`,
+  `tool_search`, and `mcp_call`.
   Environment values are never returned to the model; only key names appear.
   Model-facing env values must be `${NAME}` references to the host
   environment, so a tool call never logs a secret. The settings UI can also
   store a literal value; both forms are expanded when the server starts.
-- Server management writes `.openbad/mcp.yaml` atomically, updates the live
-  manager, and restarts only the affected server process. Changes made by the
-  settings UI or another process are picked up through a config-stamp reload.
+- Server management writes both files atomically, updates the live manager, and
+  restarts only the affected server process. Changes made by the settings UI or
+  another process are picked up through per-file config-stamp reloads.
+- `mcp_server_add` enables the new server for the current project unless
+  `enabled: false` is passed; `mcp_server_set_enabled` toggles a server for the
+  current project only.
 - `mcp_server_add` and `mcp_server_update` persist first, then probe the server
   and return the discovered tools. A failed probe keeps the config and returns
   a warning, so the user can repair it.

@@ -264,8 +264,9 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
         <div>
           <p className="text-[12px] font-medium text-slate-200">MCP servers</p>
           <p className="mt-0.5 text-[11px] text-slate-500">
-            Workspace-scoped in <code>.openbad/mcp.yaml</code>. The model can add
-            and change servers through the mcp domain.
+            Servers are defined once globally. Each project chooses which ones
+            it enables in <code>.openbad/mcp.yaml</code>. The model can add,
+            change, and toggle servers through the mcp domain.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -297,7 +298,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
 
       {workspacePath.length === 0 && (
         <p role="status" className="text-[11px] text-amber-300">
-          Select a project to configure MCP servers.
+          Open a project to manage which MCP servers it enables.
         </p>
       )}
 
@@ -478,7 +479,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
               checked={form.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
-            Enabled
+            Enable for this project
           </label>
 
           <div className="flex gap-2">
@@ -517,8 +518,8 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
         )}
         {!loading && servers.length === 0 && workspacePath.length > 0 && (
           <p className="rounded-lg border border-dashed border-white/10 px-3 py-4 text-[11px] text-slate-500">
-            No MCP servers are configured yet. Add one here or ask the model to
-            add it with the mcp domain.
+            No MCP servers are defined yet. Add one here or ask the model to add
+            it with the mcp domain; definitions are shared by every project.
           </p>
         )}
         {servers.map((server) => (
@@ -532,6 +533,9 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
                   <span className="truncate">{server.name}</span>
                   <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-400">
                     {server.transport}
+                  </span>
+                  <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-500">
+                    global
                   </span>
                 </p>
                 <p className="mt-0.5 break-all font-mono text-[10px] text-slate-500">
@@ -550,7 +554,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
                     : "bg-white/[0.06] text-slate-500"
                 }`}
               >
-                {server.enabled ? "Enabled" : "Disabled"}
+                {server.enabled ? "Enabled here" : "Not enabled"}
               </span>
             </div>
 
@@ -611,12 +615,13 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
               </button>
               <button
                 type="button"
-                aria-label={`${server.enabled ? "Disable" : "Enable"} ${server.name}`}
+                aria-label={`${server.enabled ? "Disable" : "Enable"} ${server.name} for this project`}
+                title="Enablement applies to the current project only"
                 onClick={() => void toggle(server)}
                 disabled={busy !== null}
                 className={buttonClass}
               >
-                {server.enabled ? "Disable" : "Enable"}
+                {server.enabled ? "Disable here" : "Enable here"}
               </button>
               <button
                 type="button"

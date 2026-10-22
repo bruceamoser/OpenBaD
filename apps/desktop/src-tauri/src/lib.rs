@@ -641,20 +641,20 @@ impl DesktopMcp {
     }
 }
 
-fn mcp_server_summary(config: &openbad_mcp::McpServerConfig) -> McpServerSummary {
+fn mcp_server_summary(state: &openbad_mcp::McpServerState) -> McpServerSummary {
     McpServerSummary {
-        name: config.name.clone(),
-        transport: match config.transport {
+        name: state.config.name.clone(),
+        transport: match state.config.transport {
             openbad_mcp::McpTransport::Stdio => "stdio".to_owned(),
             openbad_mcp::McpTransport::Http => "http".to_owned(),
         },
-        command: config.command.clone(),
-        args: config.args.clone(),
-        url: config.url.clone(),
-        enabled: config.enabled,
-        allowed_tools: config.allowed_tools.clone(),
-        env_keys: config.env.keys().cloned().collect(),
-        timeout_seconds: config.timeout_seconds,
+        command: state.config.command.clone(),
+        args: state.config.args.clone(),
+        url: state.config.url.clone(),
+        enabled: state.enabled,
+        allowed_tools: state.config.allowed_tools.clone(),
+        env_keys: state.config.env.keys().cloned().collect(),
+        timeout_seconds: state.config.timeout_seconds,
     }
 }
 
@@ -704,9 +704,6 @@ fn mcp_server_config_from_spec(
     }
     if let Some(allowed) = &spec.allowed_tools {
         config.allowed_tools = allowed.clone();
-    }
-    if let Some(enabled) = spec.enabled {
-        config.enabled = enabled;
     }
     if let Some(timeout) = spec.timeout_seconds {
         config.timeout_seconds = (timeout > 0).then_some(timeout);
@@ -770,12 +767,12 @@ impl McpService for DesktopMcp {
         let manager = Arc::clone(&self.manager);
         tauri::async_runtime::spawn_blocking(move || {
             let config = mcp_server_config_from_spec(&spec, None)?;
-            manager
-                .add_server(config.clone())
+            let state = manager
+                .add_server(config, spec.enabled.unwrap_or(true))
                 .map_err(|error| error.to_string())?;
-            let (tools, warning) = probe_mcp_server(&manager, &config.name);
+            let (tools, warning) = probe_mcp_server(&manager, &state.config.name);
             Ok(McpServerChange {
-                server: mcp_server_summary(&config),
+                server: mcp_server_summary(&state),
                 tools,
                 warning,
             })
@@ -796,15 +793,26 @@ impl McpService for DesktopMcp {
                 .servers()
                 .map_err(|error| error.to_string())?
                 .into_iter()
-                .find(|server| server.name == name)
+                .find(|server| server.config.name == name)
                 .ok_or_else(|| format!("unknown MCP server: {name}"))?;
-            let config = mcp_server_config_from_spec(&spec, Some(current))?;
+            let config = mcp_server_config_from_spec(&spec, Some(current.config))?;
             manager
-                .update_server(&name, config.clone())
+                .update_server(&name, config)
                 .map_err(|error| error.to_string())?;
+            let state = match spec.enabled {
+                Some(enabled) => manager
+                    .set_server_enabled(&name, enabled)
+                    .map_err(|error| error.to_string())?,
+                None => manager
+                    .servers()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|server| server.config.name == name)
+                    .ok_or_else(|| format!("unknown MCP server: {name}"))?,
+            };
             let (tools, warning) = probe_mcp_server(&manager, &name);
             Ok(McpServerChange {
-                server: mcp_server_summary(&config),
+                server: mcp_server_summary(&state),
                 tools,
                 warning,
             })
@@ -833,6 +841,28 @@ impl McpService for DesktopMcp {
                 .probe(&name)
                 .map(|tools| tools.into_iter().map(mcp_tool_summary).collect())
                 .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn set_server_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<McpServerChange, String> {
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = manager
+                .set_server_enabled(&name, enabled)
+                .map_err(|error| error.to_string())?;
+            let (tools, warning) = probe_mcp_server(&manager, &name);
+            Ok(McpServerChange {
+                server: mcp_server_summary(&state),
+                tools,
+                warning,
+            })
         })
         .await
         .map_err(|error| error.to_string())?
@@ -3147,7 +3177,8 @@ pub struct McpServerInput {
     pub timeout_seconds: Option<u64>,
 }
 
-fn mcp_server_view(config: &openbad_mcp::McpServerConfig) -> McpServerView {
+fn mcp_server_view(state: &openbad_mcp::McpServerState) -> McpServerView {
+    let config = &state.config;
     McpServerView {
         name: config.name.clone(),
         transport: match config.transport {
@@ -3160,7 +3191,7 @@ fn mcp_server_view(config: &openbad_mcp::McpServerConfig) -> McpServerView {
         cwd: config.cwd.clone(),
         url: config.url.clone(),
         allowed_tools: config.allowed_tools.clone(),
-        enabled: config.enabled,
+        enabled: state.enabled,
         timeout_seconds: config.timeout_seconds,
     }
 }
@@ -3214,12 +3245,12 @@ async fn add_mcp_server(
     let spec = mcp_input_spec(name.clone(), server);
     tauri::async_runtime::spawn_blocking(move || {
         let config = mcp_server_config_from_spec(&spec, None)?;
-        manager
-            .add_server(config.clone())
+        let state = manager
+            .add_server(config, spec.enabled.unwrap_or(true))
             .map_err(|error| error.to_string())?;
         let (tools, warning) = probe_mcp_server(&manager, &name);
         Ok(McpServerChangeView {
-            server: mcp_server_view(&config),
+            server: mcp_server_view(&state),
             tools: tools
                 .into_iter()
                 .map(|tool| McpToolView {
@@ -3249,15 +3280,26 @@ async fn update_mcp_server(
             .servers()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .find(|server| server.name == name)
+            .find(|server| server.config.name == name)
             .ok_or_else(|| format!("unknown MCP server: {name}"))?;
-        let config = mcp_server_config_from_spec(&spec, Some(current))?;
+        let config = mcp_server_config_from_spec(&spec, Some(current.config))?;
         manager
-            .update_server(&name, config.clone())
+            .update_server(&name, config)
             .map_err(|error| error.to_string())?;
+        let state = match spec.enabled {
+            Some(enabled) => manager
+                .set_server_enabled(&name, enabled)
+                .map_err(|error| error.to_string())?,
+            None => manager
+                .servers()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|server| server.config.name == name)
+                .ok_or_else(|| format!("unknown MCP server: {name}"))?,
+        };
         let (tools, warning) = probe_mcp_server(&manager, &name);
         Ok(McpServerChangeView {
-            server: mcp_server_view(&config),
+            server: mcp_server_view(&state),
             tools: tools
                 .into_iter()
                 .map(|tool| McpToolView {
@@ -4495,7 +4537,6 @@ mod tests {
         };
         let config = mcp_server_config_from_spec(&spec, None).expect("stdio config");
         assert_eq!(config.transport, openbad_mcp::McpTransport::Stdio);
-        assert!(config.enabled);
         assert_eq!(config.args, vec!["-y", "@example/mcp-docs"]);
 
         let spec = McpServerSpec {
@@ -4515,7 +4556,6 @@ mod tests {
         };
         let updated = mcp_server_config_from_spec(&patch, Some(existing)).expect("patched config");
         assert_eq!(updated.command.as_deref(), Some("npx"));
-        assert!(!updated.enabled);
         assert_eq!(updated.timeout_seconds, Some(30));
     }
 
