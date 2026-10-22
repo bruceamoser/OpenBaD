@@ -237,9 +237,9 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-**Domain facades.** The registry contains 120 internal tools grouped into 17
+**Domain facades.** The registry contains 125 internal tools grouped into 18
 domains: artifacts, collaboration, context, exec, files, git, governance,
-knowledge, memory, orchestration, plan, plugins, repos, search, session,
+knowledge, mcp, memory, orchestration, plan, plugins, repos, search, session,
 snapshots, and web. The model sees two stable tools per domain:
 
 - `<domain>_list` returns the domain's tool names, descriptions, risk levels,
@@ -247,7 +247,7 @@ snapshots, and web. The model sees two stable tools per domain:
 - `<domain>_run` takes `{ "tool": "...", "arguments": { ... } }`, verifies that
   the tool belongs to that domain, and invokes it.
 
-That is **34 schemas against the 128-tool cap**, leaving 94 slots free. Adding a
+That is **36 schemas against the 128-tool cap**, leaving 92 slots free. Adding a
 tool to an existing domain does not change any model-facing schema or the
 tool-schema hash; only adding a new domain does. Internal tool names remain
 executable by the workflow engine and tests, but they are not advertised to the
@@ -655,6 +655,11 @@ Planned:
 | `update_todo` | write | List replacement |
 | `spawn_subagent` | execute | Depth/budget/tool scope |
 | `mcp_call` | varies | Proxy with per-server policy |
+| `mcp_servers_list` | read | List configured servers; env values stay hidden |
+| `mcp_server_add` | execute | Add and persist a server, then probe its tools |
+| `mcp_server_update` | execute | Patch a server; omitted fields keep their values |
+| `mcp_server_remove` | execute | Remove a server and persist the config |
+| `mcp_server_test` | network | Connect and list the server's tools |
 | `skill` | varies | Load and run a skill |
 | `workflow` | varies | Run a deterministic workflow |
 
@@ -951,19 +956,41 @@ servers:
     transport: stdio
     command: npx
     args: ["-y", "@example/mcp-docs"]
+    env:
+      DOCS_TOKEN: "${DOCS_TOKEN}"
+    cwd: /path/to/project
     allowed_tools: ["search_docs"]
+    enabled: true
     timeout_seconds: 30
   - name: remote
     transport: http
     url: https://mcp.example.com/rpc
+    allowed_tools: []
+    enabled: true
 ```
 
 - Transports: line-delimited JSON-RPC over stdio, and request/response JSON-RPC
   over HTTP.
-- Server config: command/URL, args, env, cwd, timeout, and `allowed_tools`.
-- The catalog is fetched at turn start and appended after the stable system
-  prompt and tool schemas, so connecting or removing a server does not change
-  the cached prefix.
+- Server config: name, transport, command/URL, args, env, cwd, `allowed_tools`,
+  `enabled`, and `timeout_seconds` (1–600, default 60). Empty `allowed_tools`
+  permits every tool; disabled servers are skipped and cannot be called.
+- The mcp domain is the only MCP surface the model sees:
+  `mcp_servers_list`, `mcp_server_add`, `mcp_server_update`,
+  `mcp_server_remove`, `mcp_server_test`, `tool_search`, and `mcp_call`.
+  Environment values are never returned to the model; only key names appear.
+  Model-facing env values must be `${NAME}` references to the host
+  environment, so a tool call never logs a secret. The settings UI can also
+  store a literal value; both forms are expanded when the server starts.
+- Server management writes `.openbad/mcp.yaml` atomically, updates the live
+  manager, and restarts only the affected server process. Changes made by the
+  settings UI or another process are picked up through a config-stamp reload.
+- `mcp_server_add` and `mcp_server_update` persist first, then probe the server
+  and return the discovered tools. A failed probe keeps the config and returns
+  a warning, so the user can repair it.
+- The catalog is fetched at turn start and appended as volatile tail context to
+  each request, after the cached history prefix. Connecting or removing a server
+  changes only the tail, not the cached prefix; `run.new_messages` and the
+  session log exclude the catalog.
 - `tool_search` searches the catalog; `mcp_call` invokes a tool by server and
   name. One proxy pair keeps the built-in schema list fixed.
 - Untrusted MCP descriptions and output are explicitly marked; the model is
@@ -971,7 +998,9 @@ servers:
 - The client initializes each server once, reuses the session, and shuts it
   down cleanly. Per-request timeouts are enforced.
 - Resources and prompts are not proxied yet.
-- Credentials live in the OS keychain.
+- Credentials live in the OS keychain or the server's environment; `env` values
+  are redacted from model-visible summaries, and `.openbad/` is gitignored so
+  local values do not reach version control.
 
 ## 14. Evidence gate
 

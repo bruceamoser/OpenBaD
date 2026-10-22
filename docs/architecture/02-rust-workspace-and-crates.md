@@ -49,7 +49,8 @@ OpenBaD/
 │   ├── openbad-knowledge/
 │   ├── openbad-autonomic/
 │   ├── openbad-governance/
-│   └── openbad-mcp/
+│   ├── openbad-mcp/
+│   └── openbad-update/
 ├── tests/
 │   ├── integration/
 │   ├── fixtures/
@@ -75,6 +76,7 @@ OpenBaD/
 | `openbad-autonomic` | Heartbeat, job supervisor, schedules, pulse metrics | Tool execution details |
 | `openbad-governance` | Capability policy, risk classification, approvals, audit, redaction, secrets | Model calls |
 | `openbad-mcp` | MCP server lifecycle, tool/resource/prompt import, auth | Agent loop |
+| `openbad-update` | GitHub release checks, asset selection, checksum-verified downloads, AppImage and installer handoff | UI, session runtime |
 | `openbad-terminal` | Persistent PTY sessions, output buffering, process-group cleanup | Agent loop |
 | `apps/desktop/src-tauri` | Tauri commands, event bridge, window/tray/menu, updater | Domain logic |
 
@@ -112,11 +114,13 @@ flowchart BT
     Auto --> Know
     Mcp[openbad-mcp] --> Core
     Tools --> Mcp
+    Upd[openbad-update]
     Desktop[apps/desktop] --> Harness
     Desktop --> Auto
     Desktop --> Store
     Desktop --> Llm
     Desktop --> Gov
+    Desktop --> Upd
 ```
 
 Rules:
@@ -181,6 +185,7 @@ members = [
     "crates/openbad-autonomic",
     "crates/openbad-governance",
     "crates/openbad-mcp",
+    "crates/openbad-update",
 ]
 
 [workspace.package]

@@ -360,3 +360,75 @@ export type KnowledgeImportReport = {
 };
 
 export type ChatAttachment = UploadSource;
+
+export type McpServer = {
+  name: string;
+  transport: "stdio" | "http" | string;
+  command: string | null;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string | null;
+  url: string | null;
+  allowed_tools: string[];
+  enabled: boolean;
+  timeout_seconds: number | null;
+};
+
+export type McpServerInput = {
+  name: string;
+  transport?: string;
+  command?: string | null;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string | null;
+  url?: string | null;
+  allowed_tools?: string[];
+  enabled?: boolean;
+  timeout_seconds?: number | null;
+};
+
+export type McpTool = {
+  server: string;
+  name: string;
+  description: string;
+};
+
+export type McpServerChange = {
+  server: McpServer;
+  tools: McpTool[];
+  warning: string | null;
+};
+
+export type ReleaseAsset = {
+  name: string;
+  url: string;
+  size: number | null;
+};
+
+export type ReleaseInfo = {
+  tag: string;
+  version: string;
+  name: string;
+  notes: string;
+  html_url: string;
+  published_at: string | null;
+  assets: ReleaseAsset[];
+  checksums: ReleaseAsset | null;
+};
+
+export type UpdateStatus =
+  | { kind: "no_release"; current: string }
+  | { kind: "up_to_date"; current: string; latest: string }
+  | {
+      kind: "available";
+      current: string;
+      latest: string;
+      release: ReleaseInfo;
+      asset: ReleaseAsset;
+      installer: string;
+    };
+
+export type InstallOutcome =
+  | { kind: "app_image_replaced"; path: string }
+  | { kind: "installer_launched"; path: string; installer: string }
+  | { kind: "installer_saved"; path: string; installer: string };

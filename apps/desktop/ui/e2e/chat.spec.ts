@@ -706,3 +706,46 @@ test("attaches documents dropped anywhere in the chat column", async ({ page }) 
     page.getByRole("button", { name: "Remove attachment outside-composer.md" }),
   ).toBeVisible();
 });
+
+test("adds, tests, and removes MCP servers from settings", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page);
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByRole("button", { name: "MCP", exact: true }).click();
+
+  await expect(settings.getByText("MCP servers", { exact: true })).toBeVisible();
+  await expect(settings.getByText("docs", { exact: true })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "Enable docs" })).toBeVisible();
+
+  await settings.getByRole("button", { name: "Enable docs" }).click();
+  await expect(settings.getByRole("button", { name: "Disable docs" })).toBeVisible();
+
+  await settings.getByRole("button", { name: "Test docs" }).click();
+  await expect(settings.getByRole("status").getByText("docs/search_docs")).toBeVisible();
+
+  await settings.getByRole("button", { name: "Add server" }).click();
+  await settings.getByLabel("Server name").fill("remote");
+  await settings.getByLabel("Transport").selectOption("http");
+  await settings.getByLabel("URL").fill("https://mcp.example.com/rpc");
+  await settings.getByRole("button", { name: "Save server" }).click();
+
+  await expect(settings.getByRole("status").getByText("Added remote.")).toBeVisible();
+  await expect(settings.getByText("https://mcp.example.com/rpc")).toBeVisible();
+
+  await settings.getByRole("button", { name: "Delete remote" }).click();
+  await settings.getByRole("button", { name: "Delete remote" }).click();
+  await expect(settings.getByRole("status").getByText("Removed remote.")).toBeVisible();
+});
+
+test("checks for updates from the About settings", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page);
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByRole("button", { name: "About", exact: true }).click();
+
+  await expect(settings.getByText(/Current version:/)).toBeVisible();
+  await settings.getByRole("button", { name: "Check for updates" }).click();
+  await expect(
+    settings.getByText("OpenBaD 0.1.0 is up to date."),
+  ).toBeVisible();
+});

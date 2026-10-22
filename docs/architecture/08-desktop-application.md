@@ -287,6 +287,8 @@ Targets:
 | Git | `git_status`, `git_diff`, `git_commit`, `git_push` |
 | Memory | `search_memory`, `remember`, `forget`, `consolidate` |
 | Knowledge | `knowledge_documents`, `add_knowledge_note`, `import_knowledge_file`, `delete_knowledge_document` |
+| MCP | `mcp_servers`, `add_mcp_server`, `update_mcp_server`, `remove_mcp_server`, `set_mcp_server_enabled`, `test_mcp_server` |
+| Updates | `check_for_updates`, `install_update` |
 | Project areas | `project_overview`, `project_repos`, `add_project_repo`, `remove_project_repo`, `project_files`, `project_file`, `search_project` |
 | Models | `list_routes`, `set_route`, `test_provider`, `refresh_balance` |
 | Governance | `pending_approvals`, `decide_approval`, `audit_verify` |
@@ -315,8 +317,26 @@ number after a disconnect.
 - **Linux:** AppImage and `.deb` (WebKitGTK dependency documented).
 - **macOS:** `.dmg`, universal binary (aarch64 + x86_64).
 - **Windows:** `.msi`/`.exe` via WiX or NSIS.
-- **Signing:** platform code signing; Tauri updater signatures.
-- **Updates:** signed manifest, staged rollout, rollback on startup failure.
+- **Signing:** platform code signing.
+- **Update source:** `bruceamoser/OpenBaD` GitHub releases by default. Override
+  with `OPENBAD_UPDATE_REPO`; point at a compatible API with
+  `OPENBAD_UPDATE_API`.
+- **Check:** Settings → About (or Help → Check for Updates…) calls
+  `check_for_updates`. `openbad-update` reads the latest release, compares
+  semantic versions, and selects an asset for the current OS and architecture
+  (AppImage, then `.deb`/`.rpm`; `.msi`/`-setup.exe`; `.dmg`).
+- **Install:** `install_update` re-checks the release, downloads the asset to
+  the user's downloads directory, and verifies `SHA256SUMS` when the release
+  publishes one. A running AppImage is replaced atomically and the app
+  relaunches. Other installers are saved and opened with the platform handler
+  so the user completes the install. Updates can only be started from the UI;
+  no agent tool can install one.
+- **Release contract:** tag releases with a semantic version (for example
+  `v0.2.0`), attach the platform bundles, and upload a `SHA256SUMS` asset that
+  lists each bundle. Downloads are refused unless they use HTTPS (loopback is
+  allowed for development).
+- **Rollout:** releases are published through GitHub; staged rollout and
+  startup rollback remain future work.
 - **Size:** target < 30 MB shell; embedding model downloaded on demand.
 - **Telemetry:** off by default; opt-in, redacted, local viewer.
 

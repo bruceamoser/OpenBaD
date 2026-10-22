@@ -139,6 +139,7 @@ Rules:
 | Governance | Policy, approvals, audit, redaction | `openbad-governance` |
 | LLM adapters | DeepSeek, OpenAI-compatible, Anthropic, local | `openbad-llm` |
 | MCP client | Server lifecycle, tools/resources/prompts | `openbad-mcp` |
+| Updates | Release checks, download verification, installer handoff | `openbad-update` |
 | Core types | IDs, events, config, errors, clock | `openbad-core` |
 
 ## 5. Runtime topology
@@ -353,7 +354,9 @@ flowchart LR
   read and writes a new generation on next write.
 - The app refuses to open a session written by a newer incompatible version
   rather than corrupting it.
-- Tauri auto-update is signed; the app can run offline for local browsing,
+- Updates are checked against GitHub releases and installed from Settings →
+  About. Checksums are verified when the release publishes them, and a running
+  AppImage is replaced atomically. The app can run offline for local browsing,
   editing, and history, but model-dependent features require DeepSeek
   connectivity.
 

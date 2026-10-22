@@ -9,6 +9,11 @@ import type {
   Foundation,
   FileCheckpointSummary,
   IndexReport,
+  InstallOutcome,
+  McpServer,
+  McpServerChange,
+  McpServerInput,
+  McpTool,
   MemoryRecord,
   OutsideAccessGrant,
   SessionSummary,
@@ -27,6 +32,7 @@ import type {
   ProjectRepo,
   ProjectTodo,
   ReferenceUpload,
+  UpdateStatus,
   UploadReport,
   UploadSource,
   Usage,
@@ -95,6 +101,45 @@ const mockKnowledgeContent = new Map<string, string>([
 ]);
 
 const mockAgents: ProjectAgent[] = [];
+
+let mockMcpServers: McpServer[] = [
+  {
+    name: "docs",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@example/mcp-docs"],
+    env: {},
+    cwd: null,
+    url: null,
+    allowed_tools: [],
+    enabled: false,
+    timeout_seconds: null,
+  },
+];
+
+function mockMcpTools(server: McpServer): McpTool[] {
+  if (server.transport === "http") {
+    return [
+      {
+        server: server.name,
+        name: "fetch",
+        description: "Fetch a document by URL",
+      },
+    ];
+  }
+  return [
+    {
+      server: server.name,
+      name: "search_docs",
+      description: "Search the documentation index",
+    },
+    {
+      server: server.name,
+      name: "read_doc",
+      description: "Read one documentation page",
+    },
+  ];
+}
 
 let mockFiles = [
   "apps/desktop/ui/src/App.tsx",
@@ -1098,6 +1143,170 @@ export async function clearApiKey(): Promise<void> {
     return;
   }
   mockKeyConfigured = false;
+}
+
+export async function loadMcpServers(
+  workspacePath: string,
+): Promise<McpServer[]> {
+  if (isTauri) {
+    return invoke<McpServer[]>("mcp_servers", { workspacePath });
+  }
+  await delay(40);
+  return mockMcpServers.map((server) => ({ ...server }));
+}
+
+export async function addMcpServer(
+  workspacePath: string,
+  server: McpServerInput,
+): Promise<McpServerChange> {
+  if (isTauri) {
+    return invoke<McpServerChange>("add_mcp_server", { workspacePath, server });
+  }
+  await delay(120);
+  const name = server.name.trim();
+  if (name.length === 0) {
+    throw new Error("server name must not be empty");
+  }
+  if (mockMcpServers.some((item) => item.name === name)) {
+    throw new Error(`MCP server already exists: ${name}`);
+  }
+  const transport =
+    server.transport ?? (server.command !== undefined && server.command !== null ? "stdio" : "http");
+  if (transport === "stdio" && (server.command ?? "").trim().length === 0) {
+    throw new Error("stdio server requires a command");
+  }
+  if (transport === "http" && (server.url ?? "").trim().length === 0) {
+    throw new Error("http server requires a url");
+  }
+  const created: McpServer = {
+    name,
+    transport,
+    command: server.command ?? null,
+    args: server.args ?? [],
+    env: server.env ?? {},
+    cwd: server.cwd ?? null,
+    url: server.url ?? null,
+    allowed_tools: server.allowed_tools ?? [],
+    enabled: server.enabled ?? true,
+    timeout_seconds: server.timeout_seconds ?? null,
+  };
+  mockMcpServers = [...mockMcpServers, created];
+  return { server: { ...created }, tools: mockMcpTools(created), warning: null };
+}
+
+export async function updateMcpServer(
+  workspacePath: string,
+  name: string,
+  server: McpServerInput,
+): Promise<McpServerChange> {
+  if (isTauri) {
+    return invoke<McpServerChange>("update_mcp_server", {
+      workspacePath,
+      name,
+      server,
+    });
+  }
+  await delay(120);
+  const index = mockMcpServers.findIndex((item) => item.name === name);
+  if (index < 0) {
+    throw new Error(`unknown MCP server: ${name}`);
+  }
+  const current = mockMcpServers[index];
+  const updated: McpServer = {
+    ...current,
+    transport: server.transport ?? current.transport,
+    command: server.command !== undefined ? server.command : current.command,
+    args: server.args ?? current.args,
+    env: server.env ?? current.env,
+    cwd: server.cwd !== undefined ? server.cwd : current.cwd,
+    url: server.url !== undefined ? server.url : current.url,
+    allowed_tools: server.allowed_tools ?? current.allowed_tools,
+    enabled: server.enabled ?? current.enabled,
+    timeout_seconds:
+      server.timeout_seconds !== undefined
+        ? server.timeout_seconds
+        : current.timeout_seconds,
+  };
+  if (updated.transport === "stdio" && (updated.command ?? "").trim().length === 0) {
+    throw new Error("stdio server requires a command");
+  }
+  if (updated.transport === "http" && (updated.url ?? "").trim().length === 0) {
+    throw new Error("http server requires a url");
+  }
+  mockMcpServers = mockMcpServers.map((item, itemIndex) =>
+    itemIndex === index ? updated : item,
+  );
+  return { server: { ...updated }, tools: mockMcpTools(updated), warning: null };
+}
+
+export async function removeMcpServer(
+  workspacePath: string,
+  name: string,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("remove_mcp_server", { workspacePath, name });
+    return;
+  }
+  await delay(80);
+  const before = mockMcpServers.length;
+  mockMcpServers = mockMcpServers.filter((server) => server.name !== name);
+  if (mockMcpServers.length === before) {
+    throw new Error(`unknown MCP server: ${name}`);
+  }
+}
+
+export async function setMcpServerEnabled(
+  workspacePath: string,
+  name: string,
+  enabled: boolean,
+): Promise<McpServer> {
+  if (isTauri) {
+    return invoke<McpServer>("set_mcp_server_enabled", {
+      workspacePath,
+      name,
+      enabled,
+    });
+  }
+  await delay(80);
+  const server = mockMcpServers.find((item) => item.name === name);
+  if (server === undefined) {
+    throw new Error(`unknown MCP server: ${name}`);
+  }
+  const updated = { ...server, enabled };
+  mockMcpServers = mockMcpServers.map((item) =>
+    item.name === name ? updated : item,
+  );
+  return updated;
+}
+
+export async function testMcpServer(
+  workspacePath: string,
+  name: string,
+): Promise<McpTool[]> {
+  if (isTauri) {
+    return invoke<McpTool[]>("test_mcp_server", { workspacePath, name });
+  }
+  await delay(160);
+  const server = mockMcpServers.find((item) => item.name === name);
+  if (server === undefined) {
+    throw new Error(`unknown MCP server: ${name}`);
+  }
+  return mockMcpTools(server);
+}
+
+export async function checkForUpdates(): Promise<UpdateStatus> {
+  if (isTauri) {
+    return invoke<UpdateStatus>("check_for_updates");
+  }
+  await delay(180);
+  return { kind: "up_to_date", current: "0.1.0", latest: "0.1.0" };
+}
+
+export async function installUpdate(version: string): Promise<InstallOutcome> {
+  if (isTauri) {
+    return invoke<InstallOutcome>("install_update", { version });
+  }
+  throw new Error("updates can only be installed from the desktop app");
 }
 
 export type ChatInput = {
