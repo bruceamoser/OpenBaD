@@ -108,7 +108,13 @@ impl TerminalManager {
         let shell = shell
             .map(str::to_owned)
             .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/bash".to_owned());
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "cmd.exe".to_owned()
+                } else {
+                    "/bin/bash".to_owned()
+                }
+            });
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -126,7 +132,10 @@ impl TerminalManager {
             .map_err(|error| TerminalError::Pty(error.to_string()))?;
         drop(pair.slave);
         let killer = child.clone_killer();
+        #[cfg(unix)]
         let process_group = pair.master.process_group_leader();
+        #[cfg(not(unix))]
+        let process_group = None;
         let mut reader = pair
             .master
             .try_clone_reader()
