@@ -32,6 +32,8 @@ function outcomeMessage(outcome: InstallOutcome): string {
   switch (outcome.kind) {
     case "app_image_replaced":
       return "Update installed. OpenBaD is restarting with the new version.";
+    case "package_installed":
+      return `The ${outcome.installer} package was installed. Restart OpenBaD to use the new version.`;
     case "installer_launched":
       return `The ${outcome.installer} installer was saved to ${outcome.path} and opened.`;
     case "installer_saved":

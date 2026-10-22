@@ -165,6 +165,8 @@ pub enum UpdateStatus {
 pub enum InstallOutcome {
     /// The running AppImage was replaced; restart to use the new version.
     AppImageReplaced { path: PathBuf },
+    /// A system package was installed; restart to use the new version.
+    PackageInstalled { path: PathBuf, installer: AssetKind },
     /// The installer was handed to the operating system.
     InstallerLaunched { path: PathBuf, installer: AssetKind },
     /// The installer was saved but could not be launched automatically.
@@ -177,6 +179,7 @@ pub struct UpdateService {
     api_base: String,
     target: Target,
     timeout: Duration,
+    prefer_self_installable: bool,
 }
 
 impl Default for UpdateService {
@@ -193,6 +196,7 @@ impl UpdateService {
             api_base: DEFAULT_API_BASE.to_owned(),
             target: Target::current(),
             timeout: DEFAULT_TIMEOUT,
+            prefer_self_installable: false,
         }
     }
 
@@ -211,6 +215,15 @@ impl UpdateService {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Prefers the asset that can update the running binary in place. The
+    /// desktop sets this when it runs from an AppImage; deb installs keep the
+    /// package-first default so the system package is upgraded.
+    #[must_use]
+    pub fn with_self_installable(mut self, prefer: bool) -> Self {
+        self.prefer_self_installable = prefer;
         self
     }
 
@@ -247,9 +260,10 @@ impl UpdateService {
             });
         }
         let (asset, installer) =
-            select_asset(&release.assets, self.target).ok_or_else(|| UpdateError::NoAsset {
-                platform: self.target.label(),
-            })?;
+            select_asset_preferring(&release.assets, self.target, self.prefer_self_installable)
+                .ok_or_else(|| UpdateError::NoAsset {
+                    platform: self.target.label(),
+                })?;
         let latest = release.version.clone();
         Ok(UpdateStatus::Available {
             current: current.to_owned(),
@@ -337,6 +351,9 @@ impl UpdateService {
             }
         }
         let path = stage_installer(downloaded, downloads, asset)?;
+        if installer == AssetKind::Deb && install_deb(&path) {
+            return Ok(InstallOutcome::PackageInstalled { path, installer });
+        }
         if launch_installer(&path) {
             Ok(InstallOutcome::InstallerLaunched { path, installer })
         } else {
@@ -495,10 +512,31 @@ impl ReleaseInfo {
 /// Picks the best installer asset for the target platform.
 #[must_use]
 pub fn select_asset(assets: &[ReleaseAsset], target: Target) -> Option<(ReleaseAsset, AssetKind)> {
+    select_asset_preferring(assets, target, false)
+}
+
+/// Picks the best installer asset, optionally favouring the running
+/// self-installable format.
+///
+/// Linux prefers `.deb` by default so a package install is upgraded through
+/// the package manager instead of leaving an unrelated AppImage behind. When
+/// the running app is itself an AppImage, the caller sets `self_installable`
+/// so that binary is replaced atomically.
+#[must_use]
+pub fn select_asset_preferring(
+    assets: &[ReleaseAsset],
+    target: Target,
+    self_installable: bool,
+) -> Option<(ReleaseAsset, AssetKind)> {
     let preferences = match target.os {
-        Os::Linux => vec![
+        Os::Linux if self_installable => vec![
             (".appimage", AssetKind::AppImage),
             (".deb", AssetKind::Deb),
+            (".rpm", AssetKind::Rpm),
+        ],
+        Os::Linux => vec![
+            (".deb", AssetKind::Deb),
+            (".appimage", AssetKind::AppImage),
             (".rpm", AssetKind::Rpm),
         ],
         Os::Windows => vec![(".msi", AssetKind::Msi), (".exe", AssetKind::Exe)],
@@ -684,6 +722,74 @@ fn replace_app_image(downloaded: &Path, app_image: &Path) -> Result<(), UpdateEr
     Ok(())
 }
 
+/// Upgrades the installed package from a staged `.deb`. `apt-get` resolves
+/// dependencies when present; `dpkg` handles the plain case. Either needs a
+/// privileged helper, so this only returns true when the package manager
+/// reported success. Anything else falls back to handing the file to the GUI
+/// installer.
+fn install_deb(path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        for mut command in deb_install_commands(path) {
+            match command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => return true,
+                // 126/127 mean the polkit prompt was declined or no
+                // authentication agent is available; asking again with the
+                // fallback command would just prompt twice.
+                Ok(status) if matches!(status.code(), Some(126 | 127)) => return false,
+                // A package-manager failure can still be resolved by the GUI
+                // installer, which knows how to fetch missing dependencies.
+                Ok(_) | Err(_) => continue,
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn deb_install_commands(path: &Path) -> Vec<std::process::Command> {
+    deb_install_argv(path)
+        .into_iter()
+        .map(|argv| {
+            let mut command = std::process::Command::new(&argv[0]);
+            command.args(&argv[1..]);
+            command
+        })
+        .collect()
+}
+
+/// `apt-get` resolves dependencies for the local package; `dpkg` is the plain
+/// fallback. Both run through `pkexec` so the desktop shows a polkit prompt.
+#[cfg(target_os = "linux")]
+fn deb_install_argv(path: &Path) -> Vec<Vec<std::ffi::OsString>> {
+    use std::ffi::OsString;
+    vec![
+        vec![
+            OsString::from("pkexec"),
+            OsString::from("apt-get"),
+            OsString::from("install"),
+            OsString::from("-y"),
+            OsString::from("--no-install-recommends"),
+            path.as_os_str().to_owned(),
+        ],
+        vec![
+            OsString::from("pkexec"),
+            OsString::from("dpkg"),
+            OsString::from("-i"),
+            path.as_os_str().to_owned(),
+        ],
+    ]
+}
+
 fn launch_installer(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -798,10 +904,89 @@ mod tests {
             panic!("expected an available update");
         };
         assert_eq!(latest, "0.3.0");
-        assert_eq!(asset.name, "OpenBaD_0.3.0_amd64.AppImage");
-        assert_eq!(installer, AssetKind::AppImage);
+        assert_eq!(asset.name, "OpenBaD_0.3.0_amd64.deb");
+        assert_eq!(installer, AssetKind::Deb);
         assert_eq!(release.notes, "Release notes");
         assert_eq!(release.checksums.expect("checksums").name, "SHA256SUMS");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deb_installs_escalate_and_resolve_dependencies() {
+        let path = Path::new("/home/user/Downloads/OpenBaD_Desktop_0.3.0_amd64.deb");
+        let argv = deb_install_argv(path);
+        assert_eq!(argv.len(), 2);
+        assert_eq!(
+            argv[0],
+            vec![
+                "pkexec".into(),
+                "apt-get".into(),
+                "install".into(),
+                "-y".into(),
+                "--no-install-recommends".into(),
+                path.as_os_str().to_owned(),
+            ]
+        );
+        assert_eq!(
+            argv[1],
+            vec![
+                "pkexec".into(),
+                "dpkg".into(),
+                "-i".into(),
+                path.as_os_str().to_owned(),
+            ]
+        );
+        assert_eq!(deb_install_commands(path).len(), 2);
+    }
+
+    #[test]
+    fn linux_prefers_deb_unless_the_running_binary_is_an_appimage() {
+        let assets = vec![
+            ReleaseAsset {
+                name: "OpenBaD_0.3.0_amd64.deb".to_owned(),
+                url: String::new(),
+                size: None,
+            },
+            ReleaseAsset {
+                name: "OpenBaD_0.3.0_amd64.AppImage".to_owned(),
+                url: String::new(),
+                size: None,
+            },
+        ];
+        let (asset, kind) = select_asset(&assets, linux_x64()).expect("linux asset");
+        assert_eq!(asset.name, "OpenBaD_0.3.0_amd64.deb");
+        assert_eq!(kind, AssetKind::Deb);
+
+        let (asset, kind) =
+            select_asset_preferring(&assets, linux_x64(), true).expect("appimage asset");
+        assert_eq!(asset.name, "OpenBaD_0.3.0_amd64.AppImage");
+        assert_eq!(kind, AssetKind::AppImage);
+
+        let service = UpdateService::new(DEFAULT_REPO)
+            .with_target(linux_x64())
+            .with_self_installable(true);
+        let value = release_json(
+            "v0.3.0",
+            &[
+                ("OpenBaD_0.3.0_amd64.deb", 20),
+                ("OpenBaD_0.3.0_amd64.AppImage", 10),
+            ],
+        );
+        let UpdateStatus::Available { installer, .. } =
+            service.check_release_json("0.2.0", &value).expect("check")
+        else {
+            panic!("expected an available update");
+        };
+        assert_eq!(installer, AssetKind::AppImage);
+
+        let deb_only = vec![ReleaseAsset {
+            name: "OpenBaD_0.3.0_amd64.deb".to_owned(),
+            url: String::new(),
+            size: None,
+        }];
+        let (_, kind) =
+            select_asset_preferring(&deb_only, linux_x64(), true).expect("deb fallback");
+        assert_eq!(kind, AssetKind::Deb);
     }
 
     #[test]
