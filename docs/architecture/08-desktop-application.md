@@ -81,6 +81,14 @@ keeps a usable width.
 - Approvals: inline cards with exact command/diff and allow/deny actions.
 - Turn footer: input/output/cache tokens, cost, cache hit %, model, elapsed.
 - Cancel button always visible during a turn.
+- Document attachments: drop files onto the composer or use the paperclip
+  button. Attachments appear as removable chips above the textarea, travel with
+  the next turn as `<attached_document>` blocks, and are listed on the user
+  message. Documents can be sent without any prompt text.
+- Input stays isolated from the transcript: the composer owns its draft and
+  attachment state, and message cards are memoized per entry. Typing therefore
+  never re-parses rendered Markdown, and streamed deltas only re-render the
+  message being written.
 - While a turn is running, the composer offers **Steer** (append to the live
   turn before its next model request) and **Queue** (send automatically when
   the current turn finishes). Enter steers; Shift+Enter inserts a newline.

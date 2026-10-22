@@ -638,6 +638,12 @@ Planned:
   must start with a known prefix (for example, a code fence or JSON shape).
 - **Strict tool schemas** are enabled for built-in tools where the provider
   supports them, reducing malformed arguments.
+- **Malformed tool arguments are never replayed.** When a model emits truncated
+  or otherwise invalid JSON for a tool call, the tool returns an
+  `invalid arguments` error and the assistant message in the working history
+  keeps `{}` instead of the bad payload, so the next request still validates and
+  the turn can recover. Stored history is repaired the same way when a session
+  is reopened, and validation errors name the tool call so the cause is visible.
 - **Balance** is read from the Balance API and displayed in the Pulse/settings
   panel; it is not a model tool.
 

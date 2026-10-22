@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Archive,
@@ -11,12 +11,12 @@ import {
   CircleAlert,
   Copy,
   Database,
+  FileText,
   Folder,
   FolderGit2,
   FolderOpen,
   Gauge,
   KeyRound,
-  ListPlus,
   ListTodo,
   Loader2,
   MessageSquare,
@@ -25,9 +25,7 @@ import {
   Pencil,
   Plus,
   Search,
-  Send,
   Shield,
-  Square,
   Trash2,
   Wrench,
   X,
@@ -71,7 +69,10 @@ import {
 } from "./backend";
 import AppMenuBar from "./AppMenuBar";
 import type { AppMenu } from "./AppMenuBar";
+import ChatComposer from "./ChatComposer";
+import type { ChatComposerHandle } from "./ChatComposer";
 import MarkdownMessage from "./MarkdownMessage";
+import { droppedToUploads, useFileDropZone } from "./dropzone";
 import ProjectPanel from "./ProjectPanel";
 import type { PanelTab } from "./ProjectPanel";
 import type {
@@ -86,6 +87,7 @@ import type {
   ProjectAreaCounts,
   SessionSummary,
   ToolApprovalRequest,
+  UploadSource,
   Usage,
   WorkspaceIndexSummary,
   WorkspaceSummary,
@@ -140,7 +142,6 @@ export default function App() {
   const [projects, setProjects] = useState<WorkspaceSummary[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [workspacePath, setWorkspacePath] = useState("");
-  const [message, setMessage] = useState("");
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -190,12 +191,12 @@ export default function App() {
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRef = useRef<ChatComposerHandle | null>(null);
   const sessionSearchRef = useRef<HTMLInputElement | null>(null);
   const followRef = useRef(true);
   const autoCollapsedSidebar = useRef(false);
-  const sendRef = useRef<(text?: string) => void>(() => undefined);
-  const steerRef = useRef<(text?: string) => void>(() => undefined);
+  const sendRef = useRef<(text: string) => void>(() => undefined);
+  const steerRef = useRef<(text: string) => void>(() => undefined);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -725,22 +726,24 @@ export default function App() {
     window.addEventListener("pointerup", stop);
   }, [panelWidth]);
 
-  const send = useCallback(async (override?: string) => {
-    const text = (override ?? message).trim();
-    if (text.length === 0 || busy || workspacePath.length === 0) {
+  const send = useCallback(async (override: string, pending: UploadSource[] = []) => {
+    const text = override.trim();
+    if ((text.length === 0 && pending.length === 0) || busy || workspacePath.length === 0) {
       return;
     }
     setBusy(true);
     setStopRequested(false);
     setError(null);
-    if (override === undefined) {
-      setMessage("");
-    }
     followRef.current = true;
     const assistantId = nextId();
     setEntries((current) => [
       ...current,
-      { id: nextId(), role: "user", text },
+      {
+        id: nextId(),
+        role: "user",
+        text,
+        attachments: pending.map((attachment) => attachment.name),
+      },
       {
         id: assistantId,
         role: "assistant",
@@ -762,6 +765,7 @@ export default function App() {
           model,
           thinking,
           reasoningEffort,
+          attachments: pending,
         },
         (event) => {
           if (event.type === "tool_result") {
@@ -891,7 +895,6 @@ export default function App() {
     loadMemories,
     loadProjects,
     loadSessions,
-    message,
     model,
     openArtifact,
     permissionMode,
@@ -901,8 +904,8 @@ export default function App() {
     workspacePath,
   ]);
 
-  const steer = useCallback(async (override?: string) => {
-    const text = (override ?? message).trim();
+  const steer = useCallback(async (override: string) => {
+    const text = override.trim();
     if (text.length === 0) {
       return;
     }
@@ -916,13 +919,11 @@ export default function App() {
         ...current,
         { id: nextId(), role: "user", text, steering: true },
       ]);
-      setMessage("");
       followRef.current = true;
     } catch {
       setQueuedMessages((current) => [...current, text]);
-      setMessage("");
     }
-  }, [busy, message, send]);
+  }, [busy, send]);
   sendRef.current = (text) => {
     void send(text);
   };
@@ -930,14 +931,13 @@ export default function App() {
     void steer(text);
   };
 
-  const queue = useCallback(() => {
-    const text = message.trim();
-    if (text.length === 0) {
+  const queue = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
       return;
     }
-    setQueuedMessages((current) => [...current, text]);
-    setMessage("");
-  }, [message]);
+    setQueuedMessages((current) => [...current, trimmed]);
+  }, []);
 
   useEffect(() => {
     if (busy || queuedMessages.length === 0 || workspacePath.length === 0) {
@@ -979,6 +979,7 @@ export default function App() {
             id: nextId(),
             role: item.role === "user" ? "user" : "assistant",
             text: item.text,
+            attachments: item.attachments,
             reasoning: item.reasoning ?? "",
           })),
         );
@@ -1345,12 +1346,38 @@ export default function App() {
     },
   ];
 
+  const composerSend = useCallback(
+    (text: string, files: UploadSource[]) => {
+      void send(text, files);
+    },
+    [send],
+  );
+  const composerSteer = useCallback(
+    (text: string) => {
+      void steer(text);
+    },
+    [steer],
+  );
+  const composerStop = useCallback(() => {
+    void stop();
+  }, [stop]);
+  const composerOpenModel = useCallback(() => openSettings("model"), [openSettings]);
+  const dismissAccessNotice = useCallback(() => setAccessNotice(null), []);
+  const dismissError = useCallback(() => setError(null), []);
+  const composerError = useCallback((message: string) => setError(message), []);
+  const chatDrop = useFileDropZone(
+    async (payload) => {
+      composerRef.current?.addUploads(await droppedToUploads(payload));
+    },
+    { disabled: workspacePath.length === 0 },
+  );
+
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-[#0a0d11] text-slate-100">
+    <div className="flex h-screen flex-col overflow-hidden bg-[#151c25] text-slate-100">
       <AppMenuBar menus={menus} />
-      <main className="flex min-h-0 flex-1 overflow-hidden bg-[#0a0d11] text-slate-100">
+      <main className="flex min-h-0 flex-1 overflow-hidden bg-[#151c25] text-slate-100">
       {sidebarOpen && (
-        <aside className="flex w-[276px] shrink-0 flex-col border-r border-white/[0.07] bg-[#0c1015]">
+        <aside className="flex w-[276px] shrink-0 flex-col border-r border-white/[0.07] bg-[#1b232e]">
           <div className="flex h-14 items-center gap-2 border-b border-white/[0.06] px-3">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-400/15 text-[11px] font-bold text-emerald-300">
               OB
@@ -1378,7 +1405,7 @@ export default function App() {
               <Plus size={14} /> New session
             </button>
             <label className="mt-3 flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
-              <Search size={13} className="shrink-0 text-slate-600" />
+              <Search size={13} className="shrink-0 text-slate-500" />
               <input
                 ref={sessionSearchRef}
                 type="search"
@@ -1386,14 +1413,14 @@ export default function App() {
                 onChange={(event) => setSessionQuery(event.target.value)}
                 placeholder="Search sessions"
                 aria-label="Search sessions"
-                className="min-w-0 flex-1 bg-transparent text-[11px] text-slate-300 outline-none placeholder:text-slate-600"
+                className="min-w-0 flex-1 bg-transparent text-[11px] text-slate-300 outline-none placeholder:text-slate-500"
               />
             </label>
           </div>
 
           <div className="flex-1 overflow-y-auto px-2 pb-3">
             <div className="mb-1 flex items-center justify-between px-2 py-1">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-600">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                 Projects
               </p>
               <button
@@ -1422,7 +1449,7 @@ export default function App() {
                     {isActive ? (
                       <ChevronDown size={13} className="shrink-0 text-slate-500" />
                     ) : (
-                      <ChevronRight size={13} className="shrink-0 text-slate-600" />
+                      <ChevronRight size={13} className="shrink-0 text-slate-500" />
                     )}
                     {isActive ? (
                       <FolderOpen size={14} className="shrink-0 text-emerald-300" />
@@ -1430,7 +1457,7 @@ export default function App() {
                       <Folder size={14} className="shrink-0 text-slate-500" />
                     )}
                     <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                    <span className="font-mono text-[10px] text-slate-600">
+                    <span className="font-mono text-[10px] text-slate-500">
                       {project.session_count}
                     </span>
                   </button>
@@ -1519,7 +1546,7 @@ export default function App() {
                           onClick={() => openPanel("plan")}
                         />
                       </div>
-                      <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-700">
+                      <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                         Sessions
                       </p>
                     </div>
@@ -1528,7 +1555,7 @@ export default function App() {
                   {isActive && (
                     <div className="ml-4 space-y-0.5 border-l border-white/[0.06] pl-2">
                       {visibleSessions.length === 0 && (
-                        <p className="px-2 py-1.5 text-[11px] text-slate-600">
+                        <p className="px-2 py-1.5 text-[11px] text-slate-500">
                           {sessionQuery.trim().length > 0 ? "No matches" : "No sessions"}
                         </p>
                       )}
@@ -1554,7 +1581,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setShowArchived((value) => !value)}
-                          className="mt-1 flex w-full items-center gap-1 rounded px-2 py-1 text-[10px] text-slate-600 hover:text-slate-400"
+                          className="mt-1 flex w-full items-center gap-1 rounded px-2 py-1 text-[10px] text-slate-500 hover:text-slate-400"
                         >
                           {showArchived ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                           Archived ({projectArchivedSessions.length})
@@ -1587,7 +1614,7 @@ export default function App() {
           </div>
 
           <div className="border-t border-white/[0.06] p-2">
-            <div className="flex items-center gap-2 px-2 py-1 text-[10px] text-slate-600">
+            <div className="flex items-center gap-2 px-2 py-1 text-[10px] text-slate-500">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
                   apiKeyStatus ? "bg-emerald-400" : "bg-amber-400"
@@ -1620,8 +1647,8 @@ export default function App() {
               <span className="truncate">{activeProject?.name ?? "No project"}</span>
               {activeProject !== null && (
                 <>
-                  <span className="text-slate-700">/</span>
-                  <span className="truncate font-mono text-[10px] text-slate-600">
+                  <span className="text-slate-500">/</span>
+                  <span className="truncate font-mono text-[10px] text-slate-500">
                     {activeProject.path}
                   </span>
                 </>
@@ -1638,7 +1665,7 @@ export default function App() {
                 {formatCompactTokens(sessionUsage.input_tokens + sessionUsage.cache_read_tokens)} in
                 · {formatCompactTokens(sessionUsage.output_tokens)} out
               </p>
-              <p className="font-mono text-slate-600">
+              <p className="font-mono text-slate-500">
                 ${sessionUsage.cost_usd.toFixed(4)} · {cacheHitShare(sessionUsage).toFixed(0)}%
                 cached
               </p>
@@ -1646,7 +1673,17 @@ export default function App() {
           )}
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          {...chatDrop.zoneProps}
+          className={`relative flex min-h-0 flex-1 flex-col ${
+            chatDrop.active ? "ring-2 ring-inset ring-emerald-400/30" : ""
+          }`}
+        >
+          {chatDrop.active && (
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-start justify-center bg-emerald-400/[0.04] pt-6 text-[12px] font-medium text-emerald-200">
+              Drop documents to attach them to the chat
+            </div>
+          )}
           <div
             ref={scrollRef}
             onScroll={handleChatScroll}
@@ -1687,10 +1724,7 @@ export default function App() {
                         <button
                           key={suggestion}
                           type="button"
-                          onClick={() => {
-                            setMessage(suggestion);
-                            composerRef.current?.focus();
-                          }}
+                          onClick={() => composerRef.current?.setDraft(suggestion)}
                           className="rounded-full border border-white/[0.07] bg-white/[0.02] px-3 py-1.5 text-[11px] text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
                         >
                           {suggestion}
@@ -1714,149 +1748,29 @@ export default function App() {
             </div>
           </div>
 
-          <div className="shrink-0 border-t border-white/[0.06] bg-[#0b0e12]/95 px-4 py-3">
-            <div className="mx-auto max-w-3xl">
-              {accessNotice !== null && (
-                <div className="mb-2 flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-[11px] text-emerald-200">
-                  <Shield size={13} className="mt-0.5 shrink-0" />
-                  <span className="flex-1">{accessNotice}</span>
-                  <button type="button" onClick={() => setAccessNotice(null)}>
-                    <X size={13} />
-                  </button>
-                </div>
-              )}
-              {error !== null && (
-                <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200">
-                  <CircleAlert size={13} className="mt-0.5 shrink-0" />
-                  <span className="flex-1">{error}</span>
-                  <button type="button" onClick={() => setError(null)}>
-                    <X size={13} />
-                  </button>
-                </div>
-              )}
-              {queuedMessages.length > 0 && (
-                <div className="mb-2 rounded-md border border-white/[0.08] bg-white/[0.02] px-2.5 py-2">
-                  <p className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    <ListPlus size={11} /> Queued · {queuedMessages.length}
-                  </p>
-                  <div className="mt-1 space-y-1">
-                    {queuedMessages.map((queued, index) => (
-                      <div
-                        key={`queued-${index}-${queued.slice(0, 24)}`}
-                        className="flex items-start gap-2 rounded bg-black/20 px-2 py-1"
-                      >
-                        <span className="min-w-0 flex-1 whitespace-pre-wrap text-[10px] leading-4 text-slate-400">
-                          {queued}
-                        </span>
-                        <button
-                          type="button"
-                          aria-label={`Remove queued message ${index + 1}`}
-                          onClick={() => removeQueued(index)}
-                          className="rounded p-0.5 text-slate-600 hover:text-amber-300"
-                        >
-                          <X size={10} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div className="rounded-xl border border-white/[0.09] bg-[#10151b] shadow-lg shadow-black/20">
-                <textarea
-                  ref={composerRef}
-                  value={message}
-                  onChange={(event) => setMessage(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      if (busy) {
-                        void steer();
-                      } else {
-                        void send();
-                      }
-                    }
-                  }}
-                  rows={2}
-                  placeholder={
-                    activeProject === null
-                      ? "Add a project to start…"
-                      : "Ask OpenBaD to inspect, explain, or change the workspace…"
-                  }
-                  className="block w-full resize-none bg-transparent px-3.5 pt-3 text-[13px] leading-5 text-slate-100 outline-none placeholder:text-slate-600"
-                />
-                <div className="flex items-center gap-1.5 px-2 pb-2 pt-1">
-                  <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04]">
-                    <Shield size={12} />
-                    <select
-                      value={permissionMode}
-                      onChange={(event) =>
-                        changePermissionMode(event.target.value as PermissionMode)
-                      }
-                      aria-label="Access mode"
-                      className="bg-transparent text-[11px] text-slate-400 outline-none"
-                    >
-                      <option value="read">Read only</option>
-                      <option value="edit">Can edit</option>
-                      <option value="full">Full access</option>
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => openSettings("model")}
-                    className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
-                  >
-                    <Bot size={12} />
-                    <span className="max-w-[150px] truncate">{model}</span>
-                    {thinking && <span className="text-emerald-400/70">thinking</span>}
-                  </button>
-                  <span className="ml-auto text-[10px] text-slate-700">
-                    {busy
-                      ? "Enter to steer · Shift+Enter for a newline"
-                      : "Enter to send · Shift+Enter for a newline"}
-                  </span>
-                  {busy ? (
-                    <>
-                      <button
-                        type="button"
-                        aria-label="Steer current turn"
-                        onClick={() => void steer()}
-                        disabled={message.trim().length === 0}
-                        className="ml-1 flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1.5 text-[11px] text-emerald-200 disabled:opacity-30"
-                      >
-                        <Send size={12} /> Steer
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Queue message"
-                        onClick={queue}
-                        disabled={message.trim().length === 0}
-                        className="flex items-center gap-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-300 disabled:opacity-30"
-                      >
-                        <ListPlus size={12} /> Queue
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void stop()}
-                        disabled={stopRequested}
-                        className="flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-200 disabled:opacity-40"
-                      >
-                        <Square size={12} /> {stopRequested ? "Stopping…" : "Stop"}
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => void send()}
-                      disabled={message.trim().length === 0 || workspacePath.length === 0}
-                      className="ml-1 flex items-center gap-1 rounded-md bg-emerald-400 px-2.5 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-30"
-                    >
-                      <Send size={12} /> Send
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
+          <ChatComposer
+            ref={composerRef}
+            workspacePath={workspacePath}
+            hasProject={activeProject !== null}
+            busy={busy}
+            stopRequested={stopRequested}
+            permissionMode={permissionMode}
+            model={model}
+            thinking={thinking}
+            accessNotice={accessNotice}
+            error={error}
+            queuedMessages={queuedMessages}
+            onPermissionMode={changePermissionMode}
+            onOpenSettings={composerOpenModel}
+            onDismissAccessNotice={dismissAccessNotice}
+            onDismissError={dismissError}
+            onRemoveQueued={removeQueued}
+            onSend={composerSend}
+            onSteer={composerSteer}
+            onQueue={queue}
+            onStop={composerStop}
+            onError={composerError}
+          />
         </div>
       </div>
 
@@ -1991,7 +1905,7 @@ export default function App() {
           aria-label="New project"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
         >
-          <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl">
+          <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-[14px] font-medium">New project</h2>
@@ -2009,7 +1923,7 @@ export default function App() {
                 <X size={15} />
               </button>
             </div>
-            <label className="mt-4 block text-[10px] uppercase tracking-wider text-slate-600">
+            <label className="mt-4 block text-[10px] uppercase tracking-wider text-slate-500">
               Project name
             </label>
             <input
@@ -2026,7 +1940,7 @@ export default function App() {
               className="mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-emerald-400/40"
             />
             <div className="mt-3 rounded-md border border-white/[0.06] bg-black/20 px-2.5 py-2">
-              <p className="text-[9px] uppercase tracking-wider text-slate-600">
+              <p className="text-[9px] uppercase tracking-wider text-slate-500">
                 Workspace location
               </p>
               <p className="mt-1 break-all font-mono text-[10px] leading-4 text-slate-500">
@@ -2156,14 +2070,14 @@ function SessionRow({
       }`}
     >
       <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-        <MessageSquare size={12} className="shrink-0 text-slate-600" />
+        <MessageSquare size={12} className="shrink-0 text-slate-500" />
         <span className="min-w-0 flex-1 truncate">{session.title ?? "Untitled session"}</span>
         {showProject && (
           <span className="max-w-[80px] truncate rounded bg-white/[0.05] px-1 py-0.5 text-[9px] text-slate-500">
             {session.workspace_path?.split("/").filter(Boolean).at(-1) ?? "project"}
           </span>
         )}
-        <span className="shrink-0 font-mono text-[9px] text-slate-700">
+        <span className="shrink-0 font-mono text-[9px] text-slate-500">
           {formatRelativeTime(session.updated_at)}
         </span>
       </button>
@@ -2174,7 +2088,7 @@ function SessionRow({
           event.stopPropagation();
           onStartRename();
         }}
-        className="hidden shrink-0 rounded p-0.5 text-slate-600 hover:text-slate-300 group-hover:block"
+        className="hidden shrink-0 rounded p-0.5 text-slate-500 hover:text-slate-300 group-hover:block"
       >
         <Pencil size={11} />
       </button>
@@ -2186,7 +2100,7 @@ function SessionRow({
           event.stopPropagation();
           onArchive();
         }}
-        className="hidden shrink-0 rounded p-0.5 text-slate-600 hover:text-slate-300 group-hover:block"
+        className="hidden shrink-0 rounded p-0.5 text-slate-500 hover:text-slate-300 group-hover:block"
       >
         {archived ? <ArchiveRestore size={11} /> : <Archive size={11} />}
       </button>
@@ -2198,7 +2112,7 @@ function SessionRow({
           event.stopPropagation();
           onDelete();
         }}
-        className="hidden shrink-0 rounded p-0.5 text-slate-600 hover:text-rose-300 group-hover:block"
+        className="hidden shrink-0 rounded p-0.5 text-slate-500 hover:text-rose-300 group-hover:block"
       >
         <Trash2 size={11} />
       </button>
@@ -2236,7 +2150,7 @@ function CopyMessageButton({
       className={
         showLabel
           ? "inline-flex items-center gap-1 rounded border border-white/[0.06] px-1.5 py-1 text-[10px] text-slate-500 hover:border-white/[0.12] hover:text-slate-300"
-          : "ml-1 rounded p-0.5 text-slate-600 hover:text-slate-300 focus-visible:text-slate-300"
+          : "ml-1 rounded p-0.5 text-slate-500 hover:text-slate-300 focus-visible:text-slate-300"
       }
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -2265,7 +2179,7 @@ function appendStepText(
   return `${current}${separator}${incoming}`;
 }
 
-function MessageCard({ entry }: { entry: ChatEntry }) {
+const MessageCard = memo(function MessageCard({ entry }: { entry: ChatEntry }) {
   if (entry.role === "user") {
     return (
       <div className="flex justify-end">
@@ -2275,10 +2189,25 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
               Steering
             </p>
           )}
-          {entry.text}
-          <div className="mt-2 flex justify-end">
-            <CopyMessageButton text={entry.text} label="Copy message" showLabel />
-          </div>
+          {entry.attachments !== undefined && entry.attachments.length > 0 && (
+            <div className="mb-1 flex flex-wrap justify-end gap-1">
+              {entry.attachments.map((name, index) => (
+                <span
+                  key={`${name}-${index}`}
+                  className="flex items-center gap-1 rounded border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] text-emerald-100"
+                >
+                  <FileText size={10} className="shrink-0" />
+                  {name}
+                </span>
+              ))}
+            </div>
+          )}
+          {entry.text.length > 0 && <span className="whitespace-pre-wrap">{entry.text}</span>}
+          {entry.text.length > 0 && (
+            <div className="mt-2 flex justify-end">
+              <CopyMessageButton text={entry.text} label="Copy message" showLabel />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -2328,7 +2257,7 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
           </details>
         )}
         {entry.usage !== undefined && (
-          <p className="mt-2 font-mono text-[10px] text-slate-700">
+          <p className="mt-2 font-mono text-[10px] text-slate-500">
             {entry.usage.input_tokens.toLocaleString()} in ·{" "}
             {entry.usage.cache_read_tokens.toLocaleString()} cached (
             {cacheHitShare(entry.usage).toFixed(0)}%) · {entry.usage.output_tokens.toLocaleString()}{" "}
@@ -2343,7 +2272,7 @@ function MessageCard({ entry }: { entry: ChatEntry }) {
       </div>
     </div>
   );
-}
+});
 
 function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   const shortcuts = [
@@ -2364,7 +2293,7 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl"
+        className="w-full max-w-sm rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between">
@@ -2468,7 +2397,7 @@ function SettingsDialog({
       aria-label="Settings"
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
     >
-      <div className="flex h-[min(640px,80vh)] w-full max-w-3xl overflow-hidden rounded-xl border border-white/10 bg-[#0f141a] shadow-2xl">
+      <div className="flex h-[min(640px,80vh)] w-full max-w-3xl overflow-hidden rounded-xl border border-white/10 bg-[#1f2833] shadow-2xl">
         <div className="w-[180px] shrink-0 border-r border-white/[0.06] bg-black/10 p-3">
           <div className="flex items-center justify-between px-1">
             <p className="text-[12px] font-medium text-slate-300">Settings</p>
@@ -2565,16 +2494,16 @@ function SettingsDialog({
                   <p className="mt-1 text-[11px] leading-5 text-slate-500">{description}</p>
                 </button>
               ))}
-              <p className="px-1 text-[11px] leading-5 text-slate-600">
+              <p className="px-1 text-[11px] leading-5 text-slate-500">
                 Access mode is remembered per session, so returning to a session restores
                 the mode it last used. New sessions start read-only.
               </p>
               <div className="pt-2">
-                <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+                <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                   Outside workspace
                 </p>
                 {accessGrants.length === 0 ? (
-                  <p className="px-1 text-[11px] leading-5 text-slate-600">
+                  <p className="px-1 text-[11px] leading-5 text-slate-500">
                     No external filesystem grants. The assistant can ask for one when a
                     task needs a path outside this project.
                   </p>
@@ -2589,7 +2518,7 @@ function SettingsDialog({
                           <p className="break-all font-mono text-[10px] text-slate-300">
                             {grant.path}
                           </p>
-                          <p className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">
+                          <p className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-500">
                             {grant.write_access ? "read and write" : "read only"}
                           </p>
                           {grant.reason.length > 0 && (
@@ -2602,7 +2531,7 @@ function SettingsDialog({
                           type="button"
                           aria-label={`Revoke access to ${grant.path}`}
                           onClick={() => onRevokeAccess(grant)}
-                          className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
+                          className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
                         >
                           <Trash2 size={11} />
                         </button>
@@ -2760,7 +2689,7 @@ function CommandPalette({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-[#0f141a] shadow-2xl"
+        className="w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-[#1f2833] shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-2.5">
@@ -2776,15 +2705,15 @@ function CommandPalette({
             }}
             aria-label="Command search"
             placeholder="Type a command…"
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-slate-200 outline-none placeholder:text-slate-600"
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-slate-200 outline-none placeholder:text-slate-500"
           />
-          <span className="rounded border border-white/[0.08] px-1.5 py-0.5 font-mono text-[9px] text-slate-600">
+          <span className="rounded border border-white/[0.08] px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
             esc
           </span>
         </div>
         <div className="max-h-80 overflow-y-auto p-1.5">
           {filtered.length === 0 && (
-            <p className="px-2 py-3 text-[11px] text-slate-600">No matching commands.</p>
+            <p className="px-2 py-3 text-[11px] text-slate-500">No matching commands.</p>
           )}
           {filtered.map((action) => (
             <button
@@ -2795,7 +2724,7 @@ function CommandPalette({
             >
               <span>{action.label}</span>
               {action.hint !== "" && (
-                <span className="font-mono text-[9px] text-slate-600">{action.hint}</span>
+                <span className="font-mono text-[9px] text-slate-500">{action.hint}</span>
               )}
             </button>
           ))}
@@ -2818,7 +2747,7 @@ function Section({
     <section className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
       <h3 className="text-[12px] font-medium text-slate-200">{title}</h3>
       {description !== undefined && (
-        <p className="mt-0.5 text-[11px] leading-5 text-slate-600">{description}</p>
+        <p className="mt-0.5 text-[11px] leading-5 text-slate-500">{description}</p>
       )}
       <div className="mt-3">{children}</div>
     </section>
@@ -2981,7 +2910,7 @@ function ToolApprovalDialog({
       aria-label="Tool approval request"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
         <div className="flex items-start gap-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 text-amber-300">
             <Shield size={16} />
@@ -3036,7 +2965,7 @@ function AccessRequestDialog({
       aria-label="Filesystem access request"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0f141a] p-5 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
         <div className="flex items-start gap-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 text-amber-300">
             <Shield size={16} />

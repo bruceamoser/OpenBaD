@@ -15,6 +15,7 @@ import type {
   SessionView,
   KnowledgeDocument,
   KnowledgeDocumentSummary,
+  KnowledgeImportReport,
   ProjectAgent,
   ProjectAreaCounts,
   ProjectFileView,
@@ -25,6 +26,9 @@ import type {
   ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
+  ReferenceUpload,
+  UploadReport,
+  UploadSource,
   Usage,
   WorkspaceIndexSummary,
   WorkspaceSummary,
@@ -291,6 +295,124 @@ export async function pickDirectory(title: string): Promise<string | null> {
     return typeof selected === "string" ? selected : null;
   }
   return "/mnt/disk4/repos/reference-library";
+}
+
+export async function pickFiles(title: string): Promise<string[]> {
+  if (isTauri) {
+    const selected = await open({
+      directory: false,
+      multiple: true,
+      title,
+    });
+    if (selected === null) {
+      return [];
+    }
+    return Array.isArray(selected) ? selected : [selected];
+  }
+  return [`${mockWorkspacesDirectory}/upload-${mockUploads++}.md`];
+}
+
+let mockUploads = 1;
+
+export async function importWorkspaceFiles(
+  workspacePath: string,
+  files: UploadSource[],
+): Promise<UploadReport> {
+  if (isTauri) {
+    return invoke<UploadReport>("import_workspace_files", { workspacePath, files });
+  }
+  const report: UploadReport = { files: [], skipped: [] };
+  for (const file of files) {
+    const name = uploadName(file);
+    if (mockFiles.includes(name)) {
+      report.skipped.push(`${name} already exists in the workspace`);
+      continue;
+    }
+    mockFiles = [...mockFiles, name].sort();
+    mockIndex = { ...mockIndex, files: mockIndex.files + 1 };
+    report.files.push({
+      name,
+      path: `${workspacePath}/${name}`,
+      bytes: file.content?.length ?? 1024,
+    });
+  }
+  return report;
+}
+
+export async function importReferenceFiles(
+  workspacePath: string,
+  files: UploadSource[],
+): Promise<ReferenceUpload> {
+  if (isTauri) {
+    return invoke<ReferenceUpload>("import_reference_files", { workspacePath, files });
+  }
+  const uploads = files.map((file) => uploadName(file));
+  let repo = mockRepos.find((item) => item.name === "Uploaded documents");
+  if (repo === undefined) {
+    repo = {
+      id: `mock-repo-${mockRepos.length + 1}`,
+      workspace_id: "mock-workspace",
+      name: "Uploaded documents",
+      path: `${mockWorkspacesDirectory}/../references/reference-library`,
+      read_only: true,
+      created_at: Date.now(),
+    };
+    mockRepos = [...mockRepos, repo];
+  }
+  return {
+    repo,
+    report: {
+      files: uploads.map((name) => ({
+        name,
+        path: `${repo.path}/${name}`,
+        bytes: 1024,
+      })),
+      skipped: [],
+    },
+  };
+}
+
+export async function importKnowledgeFiles(
+  workspacePath: string,
+  files: UploadSource[],
+  tags: string[],
+): Promise<KnowledgeImportReport> {
+  if (isTauri) {
+    return invoke<KnowledgeImportReport>("import_knowledge_files", {
+      workspacePath,
+      files,
+      tags,
+    });
+  }
+  const documents = files.map((file, index) => {
+    const summary: KnowledgeDocumentSummary = {
+      id: `mock-knowledge-${mockKnowledge.length + index + 1}`,
+      workspace_id: "mock-workspace",
+      title: uploadName(file).replace(/\.[^.]+$/, ""),
+      kind: "file",
+      source: file.path ?? null,
+      tags,
+      characters: file.content?.length ?? 640,
+      chunks: 1,
+      confidence: "verified",
+      source_hash: null,
+      supersedes: null,
+      review_status: "proposed",
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    };
+    return summary;
+  });
+  mockKnowledge = [...documents, ...mockKnowledge];
+  for (const document of documents) {
+    mockKnowledgeContent.set(document.id, `Imported ${document.title}.`);
+  }
+  return { documents, skipped: [] };
+}
+
+function uploadName(file: UploadSource): string {
+  const parts = (file.path ?? file.name).split(/[\\/]/);
+  return parts.filter(Boolean).at(-1) ?? file.name;
 }
 
 export async function addProject(
@@ -987,6 +1109,7 @@ export type ChatInput = {
   model: string;
   thinking: boolean;
   reasoningEffort: string;
+  attachments: UploadSource[];
 };
 
 export async function chat(
@@ -1006,6 +1129,7 @@ export async function chat(
         model: input.model,
         thinking: input.thinking,
         reasoningEffort: input.reasoningEffort,
+        attachments: input.attachments,
       },
       onEvent: channel,
     });
@@ -1081,6 +1205,10 @@ async function mockChat(
         "[^1]: Footnotes render at the end.",
       ].join("\n")
     : "I read `Cargo.toml`. It is a virtual workspace with twelve `openbad-*` crates plus the Tauri desktop app. The core crates are store, harness, llm, tools, agent, workspace, governance, memory, knowledge, autonomic, and mcp.";
+  const attached = input.attachments ?? [];
+  const reply = attached.length === 0
+    ? text
+    : `${text} Attached documents: ${attached.map((file) => file.name).join(", ")}.`;
 
   onEvent({ type: "step", step: 1 });
   await tick(120);
@@ -1108,7 +1236,7 @@ async function mockChat(
     metadata: {},
   });
   onEvent({ type: "step", step: 2 });
-  for (const chunk of text.match(/.{1,36}/g) ?? [text]) {
+  for (const chunk of reply.match(/.{1,36}/g) ?? [reply]) {
     onEvent({ type: "content", step: 2, text: chunk });
     await tick(45);
   }

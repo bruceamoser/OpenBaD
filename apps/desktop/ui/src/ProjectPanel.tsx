@@ -13,16 +13,20 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 
 import AgentsPanel from "./AgentsPanel";
 import ArtifactViewer from "./ArtifactViewer";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
+import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
 import {
   addProjectRepo,
   answerProjectQuestion,
   approveProjectPlan,
+  importReferenceFiles,
+  importWorkspaceFiles,
   listProjectFiles,
   loadProjectManifest,
   loadProjectPlan,
@@ -31,6 +35,7 @@ import {
   loadProjectRepos,
   loadProjectTodos,
   pickDirectory,
+  pickFiles,
   removeProjectRepo,
 } from "./backend";
 import type {
@@ -44,6 +49,8 @@ import type {
   ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
+  UploadReport,
+  UploadSource,
   WorkspaceIndexSummary,
   WorkspaceSummary,
 } from "./types";
@@ -150,6 +157,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   const [questions, setQuestions] = useState<ProjectQuestion[]>([]);
   const [plan, setPlan] = useState<ProjectPlan | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
+  const [workspaceNotice, setWorkspaceNotice] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const refresh = useCallback(async () => {
     if (workspacePath.length === 0) {
@@ -186,6 +195,44 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     }
   }, [workspacePath]);
 
+  const uploadWorkspaceFiles = useCallback(
+    async (sources: UploadSource[]) => {
+      if (workspacePath.length === 0 || sources.length === 0) {
+        return;
+      }
+      setUploading(true);
+      try {
+        const report = await importWorkspaceFiles(workspacePath, sources);
+        setFiles(await listProjectFiles(workspacePath));
+        setWorkspaceNotice(describeUpload(report));
+        setDataError(report.skipped.length === 0 ? null : report.skipped.join(" · "));
+        onRefreshIndex();
+        onWorkspaceChanged();
+      } catch (cause) {
+        setDataError(describeError(cause));
+      } finally {
+        setUploading(false);
+      }
+    },
+    [workspacePath, onRefreshIndex, onWorkspaceChanged],
+  );
+
+  const chooseWorkspaceFiles = useCallback(async () => {
+    try {
+      const chosen = await pickFiles("Upload documents to the workspace");
+      await uploadWorkspaceFiles(
+        chosen.map((path) => ({ name: fileName(path), path })),
+      );
+    } catch (cause) {
+      setDataError(describeError(cause));
+    }
+  }, [uploadWorkspaceFiles]);
+
+  const workspaceDrop = useFileDropZone(
+    async (payload) => uploadWorkspaceFiles(await droppedToUploads(payload)),
+    { disabled: workspacePath.length === 0 },
+  );
+
   useEffect(() => {
     setOverview(null);
     setRepos([]);
@@ -196,6 +243,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     setPlan(null);
     setFileQuery("");
     setDataError(null);
+    setWorkspaceNotice(null);
     void refresh();
   }, [refresh]);
 
@@ -238,7 +286,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   return (
     <aside
       aria-label="Project workspace"
-      className="flex min-h-0 w-full shrink-0 flex-col border-l border-white/[0.08] bg-[#0c1015]"
+      className="flex min-h-0 w-full shrink-0 flex-col border-l border-white/[0.08] bg-[#1b232e]"
     >
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5">
         <div className="min-w-0">
@@ -250,7 +298,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400/60"
             />
           </div>
-          <p className="truncate text-[10px] text-slate-600">
+          <p className="truncate text-[10px] text-slate-500">
             {project?.name ?? "No project"}
             {overview !== null &&
               ` · ${overview.repos} references · ${overview.knowledge_documents} docs`}
@@ -332,7 +380,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 <BookOpen size={13} className="text-sky-300" /> Project manifest
               </div>
               {manifest === null ? (
-                <p className="mt-2 text-[10px] leading-4 text-slate-600">
+                <p className="mt-2 text-[10px] leading-4 text-slate-500">
                   Add <code className="text-slate-400">.openbad/project.yaml</code> to
                   declare named tasks, verification recipes, validators, scope, and
                   invariants.
@@ -382,18 +430,31 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         )}
 
         {tab === "workspace" && (
-          <div className="space-y-2">
-            <SearchField
-              value={fileQuery}
-              onChange={setFileQuery}
-              placeholder="Filter workspace files"
-              label="Filter files"
-            />
-            <div className="flex items-center justify-between px-1">
-              <p className="text-[10px] text-slate-600">
-                {visibleFiles.length} file{visibleFiles.length === 1 ? "" : "s"} · click
-                to open
-              </p>
+          <div
+            {...workspaceDrop.zoneProps}
+            className={`relative min-h-full space-y-2 rounded-lg transition-shadow ${
+              workspaceDrop.active ? "ring-2 ring-emerald-400/40" : ""
+            }`}
+          >
+            {workspaceDrop.active && (
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-emerald-400/10 text-[11px] font-medium text-emerald-100">
+                Drop documents to add them to the workspace
+              </div>
+            )}
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void chooseWorkspaceFiles()}
+                disabled={uploading || workspacePath.length === 0}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-2.5 py-2 text-[10px] text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.05] hover:text-emerald-200 disabled:opacity-40"
+              >
+                {uploading ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Upload size={12} />
+                )}
+                Upload documents…
+              </button>
               <button
                 type="button"
                 onClick={onRefreshIndex}
@@ -408,6 +469,19 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 Refresh
               </button>
             </div>
+            {workspaceNotice !== null && (
+              <p className="px-1 text-[10px] text-emerald-300">{workspaceNotice}</p>
+            )}
+            <SearchField
+              value={fileQuery}
+              onChange={setFileQuery}
+              placeholder="Filter workspace files"
+              label="Filter files"
+            />
+            <p className="px-1 text-[10px] text-slate-500">
+              {visibleFiles.length} file{visibleFiles.length === 1 ? "" : "s"} · click
+              to open · drop documents to upload
+            </p>
             {visibleFiles.map((path) => (
               <button
                 key={path}
@@ -415,17 +489,17 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 onClick={() => openFile(path)}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-[10px] text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
               >
-                <FileCode2 size={12} className="shrink-0 text-slate-600" />
+                <FileCode2 size={12} className="shrink-0 text-slate-500" />
                 <span className="truncate">{path}</span>
               </button>
             ))}
             {visibleFiles.length === 0 && (
-              <p className="px-1 py-3 text-[11px] text-slate-600">
+              <p className="px-1 py-3 text-[11px] text-slate-500">
                 No files yet. Add or create a file in this workspace.
               </p>
             )}
             {(indexError !== null || indexSummary === null) && (
-              <p className="px-1 text-[10px] text-slate-600">
+              <p className="px-1 text-[10px] text-slate-500">
                 {indexError ?? "The workspace index is empty."}
               </p>
             )}
@@ -554,6 +628,7 @@ function ReferencesPanel({
   onError: (message: string | null) => void;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const add = async () => {
     try {
@@ -571,6 +646,39 @@ function ReferencesPanel({
     }
   };
 
+  const upload = async (sources: UploadSource[]) => {
+    if (sources.length === 0) {
+      return;
+    }
+    setUploading(true);
+    try {
+      const { repo, report } = await importReferenceFiles(workspacePath, sources);
+      onRepos(
+        repos.some((item) => item.id === repo.id)
+          ? repos.map((item) => (item.id === repo.id ? repo : item))
+          : [...repos, repo],
+      );
+      setNotice(`${describeUpload(report)} · ${repo.name}`);
+      onError(report.skipped.length === 0 ? null : report.skipped.join(" · "));
+      onRefresh();
+    } catch (cause) {
+      onError(describeError(cause));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const choose = async () => {
+    try {
+      const chosen = await pickFiles("Upload documents to references");
+      await upload(chosen.map((path) => ({ name: fileName(path), path })));
+    } catch (cause) {
+      onError(describeError(cause));
+    }
+  };
+
+  const drop = useFileDropZone(async (payload) => upload(await droppedToUploads(payload)));
+
   const remove = async (repo: ProjectRepo) => {
     try {
       await removeProjectRepo(workspacePath, repo.id);
@@ -581,7 +689,17 @@ function ReferencesPanel({
   };
 
   return (
-    <div className="space-y-2">
+    <div
+      {...drop.zoneProps}
+      className={`relative min-h-full space-y-2 rounded-lg transition-shadow ${
+        drop.active ? "ring-2 ring-emerald-400/40" : ""
+      }`}
+    >
+      {drop.active && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-emerald-400/10 text-[11px] font-medium text-emerald-100">
+          Drop documents to add them to references
+        </div>
+      )}
       {repos.map((repo) => (
         <div
           key={repo.id}
@@ -591,7 +709,7 @@ function ReferencesPanel({
             <FolderGit2 size={13} className="mt-0.5 shrink-0 text-emerald-300" />
             <div className="min-w-0 flex-1">
               <p className="truncate text-[11px] text-slate-200">{repo.name}</p>
-              <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-slate-600">
+              <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-slate-500">
                 {repo.path}
               </p>
             </div>
@@ -599,22 +717,35 @@ function ReferencesPanel({
               type="button"
               aria-label={`Remove ${repo.name}`}
               onClick={() => void remove(repo)}
-              className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
+              className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
             >
               <Trash2 size={11} />
             </button>
           </div>
-          <p className="mt-1.5 text-[9px] uppercase tracking-wide text-slate-700">
+          <p className="mt-1.5 text-[9px] uppercase tracking-wide text-slate-500">
             {repo.read_only ? "read-only reference" : "editable"}
           </p>
         </div>
       ))}
       {repos.length === 0 && (
-        <p className="px-1 py-2 text-[11px] leading-4 text-slate-600">
+        <p className="px-1 py-2 text-[11px] leading-4 text-slate-500">
           Reference folders are read-only sources the assistant can inspect
           alongside the project workspace.
         </p>
       )}
+      <button
+        type="button"
+        onClick={() => void choose()}
+        disabled={uploading}
+        className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-2.5 py-2 text-[10px] text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.05] hover:text-emerald-200 disabled:opacity-40"
+      >
+        {uploading ? (
+          <Loader2 size={12} className="animate-spin" />
+        ) : (
+          <Upload size={12} />
+        )}
+        Upload documents…
+      </button>
       <button
         type="button"
         onClick={() => void add()}
@@ -638,13 +769,13 @@ function MemoryPanel({
 }) {
   return (
     <div className="space-y-2">
-      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-600">
+      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-500">
         Memory snippets: short durable preferences, gotchas, constraints, and decisions.
         They are full-text indexed and injected when relevant. Use Knowledge for
         documents.
       </p>
       {memories.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">No saved memories yet.</p>
+        <p className="px-1 py-2 text-[11px] text-slate-500">No saved memories yet.</p>
       )}
       {memories.map((memory) => (
         <div
@@ -656,7 +787,7 @@ function MemoryPanel({
             {memory.content}
           </p>
           <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="truncate font-mono text-[9px] text-slate-600">
+            <span className="truncate font-mono text-[9px] text-slate-500">
               {memory.scope} · {memory.author}
               {memory.origin_turn !== null ? ` · turn ${memory.origin_turn}` : ""} ·{" "}
               {memory.tags.length > 0 ? memory.tags.join(", ") : "untagged"}
@@ -664,7 +795,7 @@ function MemoryPanel({
             <button
               type="button"
               onClick={() => onForgetMemory(memory.id)}
-              className="rounded p-1 text-slate-600 hover:bg-white/5 hover:text-amber-300"
+              className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
               aria-label="Forget memory"
             >
               <Trash2 size={11} />
@@ -687,7 +818,7 @@ function PlanPanel({
   const [busy, setBusy] = useState(false);
   if (plan === null) {
     return (
-      <p className="px-1 py-2 text-[11px] text-slate-600">
+      <p className="px-1 py-2 text-[11px] text-slate-500">
         No plan yet. The assistant can draft one with plan_write.
       </p>
     );
@@ -743,7 +874,7 @@ function PlanPanel({
             </span>
           </div>
           {step.verify_with !== null && (
-            <p className="mt-1 font-mono text-[9px] text-slate-600">
+            <p className="mt-1 font-mono text-[9px] text-slate-500">
               verify: {step.verify_with}
             </p>
           )}
@@ -785,7 +916,7 @@ function QuestionsPanel({
 
   if (questions.length === 0) {
     return (
-      <p className="px-1 py-2 text-[11px] text-slate-600">
+      <p className="px-1 py-2 text-[11px] text-slate-500">
         No questions yet. The assistant can queue a decision with ask_question.
       </p>
     );
@@ -873,7 +1004,7 @@ function TodoPanel({ todos }: { todos: ProjectTodo[] }) {
     return (
       <div className="space-y-2 px-1 py-3">
         <p className="text-[11px] text-slate-500">No project todos yet.</p>
-        <p className="text-[10px] leading-4 text-slate-600">
+        <p className="text-[10px] leading-4 text-slate-500">
           The assistant writes durable work state with{" "}
           <code className="text-slate-400">todo_write</code>; it persists in{" "}
           <code className="text-slate-400">.openbad/todos.json</code>.
@@ -907,7 +1038,7 @@ function TodoPanel({ todos }: { todos: ProjectTodo[] }) {
             <div className="min-w-0 flex-1">
               <p className="text-[11px] leading-5 text-slate-300">{todo.text}</p>
               {todo.done_when !== null && (
-                <p className="mt-0.5 text-[9px] leading-4 text-slate-600">
+                <p className="mt-0.5 text-[9px] leading-4 text-slate-500">
                   Done when: {todo.done_when}
                 </p>
               )}
@@ -948,12 +1079,12 @@ function CheckpointsPanel({
   return (
     <div className="space-y-2">
       {sessionId === null && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">
+        <p className="px-1 py-2 text-[11px] text-slate-500">
           Start a session to see file checkpoints.
         </p>
       )}
       {sessionId !== null && checkpoints.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-600">No checkpoints yet.</p>
+        <p className="px-1 py-2 text-[11px] text-slate-500">No checkpoints yet.</p>
       )}
       {checkpoints.map((checkpoint) => (
         <div
@@ -964,7 +1095,7 @@ function CheckpointsPanel({
             {checkpoint.path}
           </p>
           <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="text-[9px] text-slate-600">
+            <span className="text-[9px] text-slate-500">
               {formatBytes(checkpoint.bytes)} · {formatClock(checkpoint.created_at)}
             </span>
             <div className="flex gap-1">
@@ -1022,7 +1153,7 @@ function DiagnosticsPanel({
             className={apiKeyStatus ? "text-emerald-300" : "text-amber-300"}
           />
           DeepSeek key
-          <span className="ml-auto text-[10px] text-slate-600">
+          <span className="ml-auto text-[10px] text-slate-500">
             {apiKeyStatus ? "ready" : "missing"}
           </span>
         </div>
@@ -1064,7 +1195,7 @@ function Stat({
 }) {
   return (
     <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
-      <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-slate-600">
+      <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-slate-500">
         {icon}
         {label}
       </div>
@@ -1088,14 +1219,14 @@ function SearchField({
 }) {
   return (
     <label className="flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
-      <Search size={11} className="shrink-0 text-slate-600" />
+      <Search size={11} className="shrink-0 text-slate-500" />
       <input
         type="search"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         aria-label={label}
-        className="min-w-0 flex-1 bg-transparent text-[10px] text-slate-300 outline-none placeholder:text-slate-600"
+        className="min-w-0 flex-1 bg-transparent text-[10px] text-slate-300 outline-none placeholder:text-slate-500"
       />
     </label>
   );
@@ -1109,6 +1240,13 @@ function describeError(cause: unknown): string {
     return cause;
   }
   return "The project area request failed.";
+}
+
+function describeUpload(report: UploadReport): string {
+  const uploaded = report.files.length;
+  const skipped = report.skipped.length;
+  const partial = skipped === 0 ? "" : `, ${skipped} skipped`;
+  return `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}${partial}`;
 }
 
 function formatBytes(bytes: number): string {
