@@ -103,24 +103,23 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Normalize bundle names
-        working-directory: artifacts
+      - name: Collect bundles
         run: |
-          for file in *; do
-            [ -f "$file" ] || continue
-            normalized="${file// /_}"
-            if [ "$file" != "$normalized" ]; then
-              mv "$file" "$normalized"
-            fi
-          done
-          ls -l
+          mkdir -p release-assets
+          find artifacts -type f \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' \
+               -o -name '*.msi' -o -name '*.exe' \) -print0 \
+            | while IFS= read -r -d '' file; do
+                name="$(basename "$file")"
+                normalized="${name// /_}"
+                cp "$file" "release-assets/$normalized"
+              done
+          ls -l release-assets
 
       - name: Generate SHA256SUMS
-        working-directory: artifacts
+        working-directory: release-assets
         run: |
-          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
-            | sort \
-            | while read -r file; do sha256sum "$file"; done > SHA256SUMS
+          sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish
@@ -130,10 +129,10 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" artifacts/* --clobber
+            gh release upload "$TAG" release-assets/* --clobber
             gh release edit "$TAG" --latest
           else
-            gh release create "$TAG" artifacts/* \
+            gh release create "$TAG" release-assets/* \
               --title "OpenBaD $TAG" \
               --generate-notes \
               --latest
