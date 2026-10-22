@@ -854,8 +854,10 @@ pub struct McpToolSummary {
     pub description: String,
 }
 
-/// A configured MCP server as reported to the model. Secret environment values
-/// are never included; only their key names are exposed.
+/// A configured MCP server as reported to the model. Servers are defined
+/// globally; `enabled` reports whether the current project has enabled it.
+/// Secret environment values are never included; only their key names are
+/// exposed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerSummary {
     pub name: String,
@@ -871,6 +873,7 @@ pub struct McpServerSummary {
 
 /// Create or update payload for a configured MCP server. Omitted fields keep
 /// their current values on update and use transport defaults on create.
+/// `enabled` toggles the server for the current project only.
 #[derive(Debug, Clone, Default)]
 pub struct McpServerSpec {
     pub name: String,
@@ -921,6 +924,14 @@ pub trait McpService: Send + Sync {
     }
 
     async fn test_server(&self, _name: &str) -> Result<Vec<McpToolSummary>, String> {
+        Err("MCP server management is not available".to_owned())
+    }
+
+    async fn set_server_enabled(
+        &self,
+        _name: &str,
+        _enabled: bool,
+    ) -> Result<McpServerChange, String> {
         Err("MCP server management is not available".to_owned())
     }
 }
@@ -1219,6 +1230,7 @@ impl ToolRegistry {
         registry.register(McpServerUpdateTool);
         registry.register(McpServerRemoveTool);
         registry.register(McpServerTestTool);
+        registry.register(McpServerSetEnabledTool);
         registry.register(ToolSearchTool);
         registry.register(TerminalTool);
         registry.register(WorkflowTool);
@@ -1627,8 +1639,14 @@ fn tool_domain(name: &str) -> &'static str {
         }
         "golden" | "snapshot" => "snapshots",
         "ask_question" | "list_questions" | "request_fs_access" => "collaboration",
-        "mcp_call" | "tool_search" | "mcp_servers_list" | "mcp_server_add"
-        | "mcp_server_update" | "mcp_server_remove" | "mcp_server_test" => "mcp",
+        "mcp_call"
+        | "tool_search"
+        | "mcp_servers_list"
+        | "mcp_server_add"
+        | "mcp_server_update"
+        | "mcp_server_remove"
+        | "mcp_server_test"
+        | "mcp_server_set_enabled" => "mcp",
         "registry_lookup" | "web_fetch" => "web",
         "subagent" | "workflow" => "orchestration",
         _ => "general",
@@ -13870,7 +13888,9 @@ impl Tool for McpCallTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let service = context.mcp.as_ref().ok_or_else(|| {
-            ToolError::Failed("MCP is not available; configure .openbad/mcp.yaml".to_owned())
+            ToolError::Failed(
+                "MCP is not available; configure an MCP server with mcp_server_add".to_owned(),
+            )
         })?;
         let server = required_string(&arguments, "server")?;
         let tool = required_string(&arguments, "tool")?;
@@ -13902,7 +13922,7 @@ impl Tool for McpServersTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "mcp_servers_list",
-            "List the MCP servers configured for this workspace with their transport, enabled state, command or URL, and allowed tools. Environment values are never shown.",
+            "List every globally defined MCP server with its transport, whether it is enabled for this project, command or URL, and allowed tools. Servers are defined once globally and enabled per project. Environment values are never shown.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -13943,7 +13963,7 @@ impl Tool for McpServerAddTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "mcp_server_add",
-            "Add an MCP server to this workspace and persist it to .openbad/mcp.yaml. Stdio servers need a command; HTTP servers need a URL. The connection is tested immediately and discovered tools are returned.",
+            "Define a global MCP server and persist it to the application MCP config. Stdio servers need a command; HTTP servers need a URL. The server is enabled for the current project unless enabled is false. The connection is tested immediately and discovered tools are returned.",
             RiskLevel::Execute,
         )
         .with_schema(mcp_server_schema())
@@ -13969,7 +13989,7 @@ impl Tool for McpServerUpdateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "mcp_server_update",
-            "Update a configured MCP server and persist the change to .openbad/mcp.yaml. Only provided fields change; omitted fields keep their current values. Pass an empty args, env, or allowed_tools array to clear it.",
+            "Update a globally defined MCP server. Only provided fields change; omitted fields keep their current values. Pass an empty args, env, or allowed_tools array to clear it. Set enabled to control this project only.",
             RiskLevel::Execute,
         )
         .with_schema(mcp_server_schema())
@@ -13998,7 +14018,7 @@ impl Tool for McpServerRemoveTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "mcp_server_remove",
-            "Remove a configured MCP server from this workspace and from .openbad/mcp.yaml.",
+            "Remove a globally defined MCP server. Use mcp_server_set_enabled to disable it for one project instead of removing it everywhere.",
             RiskLevel::Execute,
         )
         .with_schema(json!({
@@ -14022,6 +14042,47 @@ impl Tool for McpServerRemoveTool {
             .map_err(ToolError::Failed)?;
         Ok(ToolResult::ok(format!("Removed MCP server '{name}'."))
             .with_metadata(json!({"server": name, "removed": true})))
+    }
+}
+
+struct McpServerSetEnabledTool;
+
+#[async_trait]
+impl Tool for McpServerSetEnabledTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "mcp_server_set_enabled",
+            "Enable or disable a globally defined MCP server for the current project. Other projects keep their own enablement. Only enabled servers contribute tools to mcp_call.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Global server name."},
+                "enabled": {"type": "boolean", "description": "True to enable for this project, false to disable."}
+            },
+            "required": ["name", "enabled"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let service = mcp_service(context)?;
+        let name = required_string(&arguments, "name")?;
+        let enabled = arguments
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| ToolError::Failed("enabled must be a boolean".to_owned()))?;
+        let change = service
+            .set_server_enabled(&name, enabled)
+            .await
+            .map_err(ToolError::Failed)?;
+        let action = if enabled { "Enabled" } else { "Disabled" };
+        Ok(render_mcp_change(action, &change))
     }
 }
 
@@ -14082,7 +14143,7 @@ fn mcp_server_schema() -> Value {
         "cwd": {"type": "string", "description": "Working directory for a stdio server; empty string clears it."},
         "url": {"type": "string", "description": "HTTP endpoint for a http server."},
         "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool allowlist; empty allows every tool."},
-        "enabled": {"type": "boolean", "description": "Defaults to true on create; omit to keep the current value on update."},
+        "enabled": {"type": "boolean", "description": "Enable the server for this project. Defaults to true on create; omit to keep the current value on update."},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
     });
     json!({
@@ -14122,7 +14183,9 @@ fn mcp_env_arg(
 
 fn mcp_service(context: &ToolContext) -> Result<&Arc<dyn McpService>, ToolError> {
     context.mcp.as_ref().ok_or_else(|| {
-        ToolError::Failed("MCP is not available; configure .openbad/mcp.yaml".to_owned())
+        ToolError::Failed(
+            "MCP is not available; configure an MCP server with mcp_server_add".to_owned(),
+        )
     })
 }
 
@@ -14143,9 +14206,9 @@ fn mcp_server_spec(arguments: &Value, name: String) -> Result<McpServerSpec, Too
 
 fn render_mcp_server(server: &McpServerSummary) -> String {
     let status = if server.enabled {
-        "enabled"
+        "enabled for this project"
     } else {
-        "disabled"
+        "not enabled for this project"
     };
     let mut line = format!("- {} ({}, {status})", server.name, server.transport);
     match server.transport.as_str() {
@@ -14233,7 +14296,9 @@ impl Tool for ToolSearchTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let service = context.mcp.as_ref().ok_or_else(|| {
-            ToolError::Failed("MCP is not available; configure .openbad/mcp.yaml".to_owned())
+            ToolError::Failed(
+                "MCP is not available; configure an MCP server with mcp_server_add".to_owned(),
+            )
         })?;
         let query = optional_string(&arguments, "query")
             .map(|query| query.to_ascii_lowercase())
@@ -17321,6 +17386,24 @@ invariants:
                 description: "Echo input".to_owned(),
             }])
         }
+
+        async fn set_server_enabled(
+            &self,
+            name: &str,
+            enabled: bool,
+        ) -> Result<McpServerChange, String> {
+            let mut servers = self.servers.lock().expect("servers lock");
+            let server = servers
+                .iter_mut()
+                .find(|server| server.name == name)
+                .ok_or_else(|| format!("unknown MCP server: {name}"))?;
+            server.enabled = enabled;
+            Ok(McpServerChange {
+                server: server.clone(),
+                tools: Vec::new(),
+                warning: None,
+            })
+        }
     }
 
     struct MockTerminal {
@@ -17575,8 +17658,35 @@ invariants:
             )
             .await
             .expect("update");
-        assert!(updated.content.contains("disabled"));
+        assert!(updated.content.contains("not enabled for this project"));
         assert!(updated.content.contains("timeout_seconds=30"));
+
+        assert!(
+            McpServerSetEnabledTool
+                .execute(json!({"name": "docs"}), &context)
+                .await
+                .is_err()
+        );
+        let enabled = McpServerSetEnabledTool
+            .execute(json!({"name": "docs", "enabled": true}), &context)
+            .await
+            .expect("enable");
+        assert!(enabled.content.contains("Enabled MCP server 'docs'"));
+        assert!(enabled.content.contains("enabled for this project"));
+        assert_eq!(enabled.metadata["enabled"], true);
+
+        let disabled = McpServerSetEnabledTool
+            .execute(json!({"name": "docs", "enabled": false}), &context)
+            .await
+            .expect("disable");
+        assert!(disabled.content.contains("Disabled MCP server 'docs'"));
+        assert_eq!(disabled.metadata["enabled"], false);
+        assert!(
+            McpServerSetEnabledTool
+                .execute(json!({"name": "missing", "enabled": true}), &context)
+                .await
+                .is_err()
+        );
 
         let tested = McpServerTestTool
             .execute(json!({"name": "docs"}), &context)

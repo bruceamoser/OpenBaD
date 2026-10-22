@@ -31,6 +31,8 @@ pub enum McpError {
     ToolNotAllowed { server: String, tool: String },
     #[error("unknown MCP server: {0}")]
     UnknownServer(String),
+    #[error("MCP server '{0}' is not enabled for this project")]
+    NotEnabledProject(String),
     #[error("MCP call timed out")]
     Timeout,
 }
@@ -42,6 +44,7 @@ pub enum McpTransport {
     Http,
 }
 
+/// A globally defined MCP server. Project enablement is stored separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub name: String,
@@ -58,14 +61,8 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    #[serde(default = "enabled_by_default")]
-    pub enabled: bool,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
-}
-
-const fn enabled_by_default() -> bool {
-    true
 }
 
 impl McpServerConfig {
@@ -80,7 +77,6 @@ impl McpServerConfig {
             cwd: None,
             url: None,
             allowed_tools: Vec::new(),
-            enabled: true,
             timeout_seconds: None,
         }
     }
@@ -96,7 +92,6 @@ impl McpServerConfig {
             cwd: None,
             url: Some(url.into()),
             allowed_tools: Vec::new(),
-            enabled: true,
             timeout_seconds: None,
         }
     }
@@ -159,6 +154,14 @@ impl McpServerConfig {
     }
 }
 
+/// A global server plus whether the current project has enabled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerState {
+    pub config: McpServerConfig,
+    pub enabled: bool,
+}
+
+/// Global MCP definitions, stored outside any workspace.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpConfig {
     #[serde(default)]
@@ -166,14 +169,17 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    pub fn load(root: &Path) -> Result<Self, McpError> {
-        let path = config_path(root);
+    pub fn load(path: &Path) -> Result<Self, McpError> {
         if !path.is_file() {
             return Ok(Self::default());
         }
-        let content = std::fs::read_to_string(&path)?;
-        let config: Self = serde_yaml::from_str(&content)
-            .map_err(|error| McpError::Protocol(format!("invalid .openbad/mcp.yaml: {error}")))?;
+        let content = std::fs::read_to_string(path)?;
+        let config: Self = serde_yaml::from_str(&content).map_err(|error| {
+            McpError::Protocol(format!(
+                "invalid global MCP config at {}: {error}",
+                path.display()
+            ))
+        })?;
         for server in &config.servers {
             server.validate()?;
         }
@@ -183,23 +189,8 @@ impl McpConfig {
         Ok(config)
     }
 
-    pub fn save(&self, root: &Path) -> Result<(), McpError> {
-        let path = config_path(root);
-        if let Some(directory) = path.parent() {
-            std::fs::create_dir_all(directory)?;
-        }
-        let content = serde_yaml::to_string(self)
-            .map_err(|error| McpError::Protocol(format!("could not encode MCP config: {error}")))?;
-        let temporary = path.with_extension("yaml.tmp");
-        std::fs::write(&temporary, content)?;
-        if std::fs::rename(&temporary, &path).is_err() {
-            // Windows refuses to rename over an existing file.
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-            }
-            std::fs::rename(&temporary, &path)?;
-        }
-        Ok(())
+    pub fn save(&self, path: &Path) -> Result<(), McpError> {
+        save_yaml(path, self, "MCP config")
     }
 
     pub fn server(&self, name: &str) -> Option<&McpServerConfig> {
@@ -211,10 +202,97 @@ impl McpConfig {
     }
 }
 
-/// Absolute path to the workspace-scoped MCP configuration file.
+/// Legacy project entries migrated into the global config on first load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyMcpServerConfig {
+    #[serde(flatten)]
+    pub config: McpServerConfig,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+/// Project-scoped MCP state: the names enabled for this workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpProjectConfig {
+    #[serde(default)]
+    pub enabled: std::collections::BTreeSet<String>,
+    #[serde(default, rename = "servers", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_servers: Vec<LegacyMcpServerConfig>,
+}
+
+impl McpProjectConfig {
+    pub fn load(root: &Path) -> Result<Self, McpError> {
+        let path = project_config_path(root);
+        if !path.is_file() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let project: Self = serde_yaml::from_str(&content)
+            .map_err(|error| McpError::Protocol(format!("invalid .openbad/mcp.yaml: {error}")))?;
+        for server in &project.legacy_servers {
+            server.config.validate()?;
+        }
+        Ok(project)
+    }
+
+    pub fn save(&self, root: &Path) -> Result<(), McpError> {
+        save_yaml(&project_config_path(root), self, "project MCP config")
+    }
+
+    #[must_use]
+    pub fn is_enabled(&self, name: &str) -> bool {
+        self.enabled.contains(name)
+    }
+}
+
+const fn enabled_by_default() -> bool {
+    true
+}
+
+/// Environment override for the global MCP definitions file.
+pub const GLOBAL_CONFIG_ENV: &str = "OPENBAD_MCP_CONFIG";
+
+/// Returns the global MCP definitions path, creating no directories.
+pub fn default_global_config_path() -> Result<PathBuf, McpError> {
+    if let Some(path) = std::env::var_os(GLOBAL_CONFIG_ENV) {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
+    }
+    let directories = directories::ProjectDirs::from("com", "OpenBaD", "OpenBaD Desktop")
+        .ok_or_else(|| {
+            McpError::InvalidConfig("could not resolve the application config directory".to_owned())
+        })?;
+    Ok(directories.config_dir().join("mcp.yaml"))
+}
+
+/// Absolute path to the workspace-scoped MCP enablement file.
 #[must_use]
-pub fn config_path(root: &Path) -> PathBuf {
+pub fn project_config_path(root: &Path) -> PathBuf {
     root.join(".openbad").join("mcp.yaml")
+}
+
+fn save_yaml<T: Serialize>(path: &Path, value: &T, label: &str) -> Result<(), McpError> {
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    let content = serde_yaml::to_string(value)
+        .map_err(|error| McpError::Protocol(format!("could not encode {label}: {error}")))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("mcp.yaml");
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, content)?;
+    if std::fs::rename(&temporary, path).is_err() {
+        // Windows refuses to rename over an existing file.
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        std::fs::rename(&temporary, path)?;
+    }
+    Ok(())
 }
 
 fn first_duplicate(servers: &[McpServerConfig]) -> Option<String> {
@@ -241,8 +319,8 @@ struct ConfigStamp {
     hash: u64,
 }
 
-fn config_stamp(root: &Path) -> Option<ConfigStamp> {
-    let content = std::fs::read(config_path(root)).ok()?;
+fn config_stamp(path: &Path) -> Option<ConfigStamp> {
+    let content = std::fs::read(path).ok()?;
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in &content {
         hash ^= u64::from(*byte);
@@ -254,25 +332,72 @@ fn config_stamp(root: &Path) -> Option<ConfigStamp> {
     })
 }
 
-/// Loads and manages workspace-scoped MCP servers.
+/// Loads globally defined MCP servers and the enablement for one project.
 ///
-/// Management methods persist to `.openbad/mcp.yaml` and apply in memory, so a
-/// server added by the model in one tool call is callable in the next.
+/// Global definitions live in the application config directory so every
+/// project sees the same catalog. Each workspace only stores which servers it
+/// has enabled in `.openbad/mcp.yaml`. Management methods persist and apply in
+/// memory, so a server added by the model in one tool call is callable in the
+/// next.
 pub struct McpManager {
     root: PathBuf,
-    config: RwLock<McpConfig>,
+    global_path: PathBuf,
+    global: RwLock<McpConfig>,
+    project: RwLock<McpProjectConfig>,
     clients: Mutex<HashMap<String, Arc<Mutex<McpClient>>>>,
-    stamp: Mutex<Option<ConfigStamp>>,
+    global_stamp: Mutex<Option<ConfigStamp>>,
+    project_stamp: Mutex<Option<ConfigStamp>>,
 }
 
 impl McpManager {
     pub fn new(root: &Path) -> Result<Self, McpError> {
-        Ok(Self {
+        let global_path = default_global_config_path()?;
+        Self::with_global_path(root, &global_path)
+    }
+
+    /// Builds a manager with an explicit global definitions file.
+    pub fn with_global_path(root: &Path, global_path: &Path) -> Result<Self, McpError> {
+        let mut global = McpConfig::load(global_path)?;
+        let project = McpProjectConfig::load(root)?;
+        let project = Self::migrate_legacy(root, global_path, &mut global, project)?;
+        let manager = Self {
             root: root.to_path_buf(),
-            config: RwLock::new(McpConfig::load(root)?),
+            global_path: global_path.to_path_buf(),
+            global: RwLock::new(global),
+            project: RwLock::new(project),
             clients: Mutex::new(HashMap::new()),
-            stamp: Mutex::new(config_stamp(root)),
-        })
+            global_stamp: Mutex::new(config_stamp(global_path)),
+            project_stamp: Mutex::new(config_stamp(&project_config_path(root))),
+        };
+        Ok(manager)
+    }
+
+    /// Moves project-scoped legacy server definitions into the global config.
+    fn migrate_legacy(
+        root: &Path,
+        global_path: &Path,
+        global: &mut McpConfig,
+        mut project: McpProjectConfig,
+    ) -> Result<McpProjectConfig, McpError> {
+        if project.legacy_servers.is_empty() {
+            return Ok(project);
+        }
+        let mut global_changed = false;
+        for legacy in &project.legacy_servers {
+            if global.server(&legacy.config.name).is_none() {
+                global.servers.push(legacy.config.clone());
+                global_changed = true;
+            }
+            if legacy.enabled {
+                project.enabled.insert(legacy.config.name.clone());
+            }
+        }
+        if global_changed {
+            global.save(global_path)?;
+        }
+        project.legacy_servers.clear();
+        project.save(root)?;
+        Ok(project)
     }
 
     #[must_use]
@@ -280,75 +405,131 @@ impl McpManager {
         &self.root
     }
 
-    /// Reloads the config when the file changed on disk, for example after
-    /// another manager or the settings UI updated it.
+    #[must_use]
+    pub fn global_config_path(&self) -> &Path {
+        &self.global_path
+    }
+
+    #[must_use]
+    pub fn project_config_path(&self) -> PathBuf {
+        project_config_path(&self.root)
+    }
+
+    /// Reloads both files when they changed on disk, for example after another
+    /// manager or the settings UI updated them.
     pub fn reload_if_changed(&self) -> Result<(), McpError> {
-        let current = config_stamp(&self.root);
-        {
-            let stamp = self
-                .stamp
+        let global_stamp = config_stamp(&self.global_path);
+        let project_stamp = config_stamp(&project_config_path(&self.root));
+        let unchanged = {
+            let stored_global = self
+                .global_stamp
                 .lock()
                 .map_err(|_| McpError::Protocol("MCP config stamp lock poisoned".to_owned()))?;
-            if *stamp == current {
-                return Ok(());
-            }
+            let stored_project = self
+                .project_stamp
+                .lock()
+                .map_err(|_| McpError::Protocol("MCP config stamp lock poisoned".to_owned()))?;
+            *stored_global == global_stamp && *stored_project == project_stamp
+        };
+        if unchanged {
+            return Ok(());
         }
         self.reload()
     }
 
     pub fn reload(&self) -> Result<(), McpError> {
-        let loaded = McpConfig::load(&self.root)?;
+        let loaded = McpConfig::load(&self.global_path)?;
+        let loaded_project = McpProjectConfig::load(&self.root)?;
         let changed = {
-            let mut config = self
-                .config
+            let mut global = self
+                .global
                 .write()
                 .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-            let changed = config
+            let mut project = self
+                .project
+                .write()
+                .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
+            let mut changed = loaded
                 .servers
                 .iter()
-                .filter(|server| loaded.server(&server.name) != Some(*server))
+                .filter(|server| global.server(&server.name) != Some(*server))
                 .map(|server| server.name.clone())
                 .collect::<Vec<_>>();
-            *config = loaded;
+            for server in &global.servers {
+                if !loaded.servers.iter().any(|other| other.name == server.name) {
+                    changed.push(server.name.clone());
+                }
+            }
+            for name in project.enabled.iter() {
+                if !loaded_project.is_enabled(name) {
+                    changed.push(name.clone());
+                }
+            }
+            *global = loaded;
+            *project = loaded_project;
             changed
         };
         for name in changed {
             self.stop_client(&name);
         }
-        self.record_stamp();
+        self.record_stamps();
         Ok(())
     }
 
-    pub fn servers(&self) -> Result<Vec<McpServerConfig>, McpError> {
+    /// Lists every global server with the enablement of the current project.
+    pub fn servers(&self) -> Result<Vec<McpServerState>, McpError> {
         self.reload_if_changed()?;
-        let config = self
-            .config
+        let global = self
+            .global
             .read()
             .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-        Ok(config.servers.clone())
+        let project = self
+            .project
+            .read()
+            .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
+        Ok(global
+            .servers
+            .iter()
+            .map(|server| McpServerState {
+                enabled: project.is_enabled(&server.name),
+                config: server.clone(),
+            })
+            .collect())
     }
 
-    pub fn add_server(&self, server: McpServerConfig) -> Result<McpServerConfig, McpError> {
+    /// Adds a global definition and optionally enables it for this project.
+    pub fn add_server(
+        &self,
+        server: McpServerConfig,
+        enable: bool,
+    ) -> Result<McpServerState, McpError> {
         server.validate()?;
         self.reload_if_changed()?;
-        let mut config = self
-            .config
+        let mut global = self
+            .global
             .write()
             .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-        if config.server(&server.name).is_some() {
+        if global.server(&server.name).is_some() {
             return Err(McpError::DuplicateServer(server.name));
         }
-        let mut updated = config.clone();
+        let mut updated = global.clone();
         updated.servers.push(server.clone());
-        self.persist(&updated, &mut config)?;
-        Ok(server)
+        self.persist_global(&updated, &mut global)?;
+        drop(global);
+        if enable {
+            self.set_server_enabled(&server.name, true)?;
+        }
+        Ok(McpServerState {
+            enabled: enable,
+            config: server,
+        })
     }
 
     pub fn update_server(
         &self,
         name: &str,
         server: McpServerConfig,
-    ) -> Result<McpServerConfig, McpError> {
+    ) -> Result<McpServerState, McpError> {
         if server.name != name {
             return Err(McpError::InvalidConfig(
                 "renaming an MCP server is not supported; remove and add it instead".to_owned(),
@@ -356,72 +537,101 @@ impl McpManager {
         }
         server.validate()?;
         self.reload_if_changed()?;
-        let mut config = self
-            .config
+        let mut global = self
+            .global
             .write()
             .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-        let mut updated = config.clone();
+        let mut updated = global.clone();
         let existing = updated
             .server_mut(name)
             .ok_or_else(|| McpError::UnknownServer(name.to_owned()))?;
         *existing = server.clone();
-        self.persist(&updated, &mut config)?;
-        drop(config);
+        self.persist_global(&updated, &mut global)?;
+        drop(global);
         self.stop_client(name);
-        Ok(server)
+        let enabled = self
+            .project
+            .read()
+            .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?
+            .is_enabled(name);
+        Ok(McpServerState {
+            enabled,
+            config: server,
+        })
     }
 
     pub fn remove_server(&self, name: &str) -> Result<(), McpError> {
         self.reload_if_changed()?;
-        let mut config = self
-            .config
+        let mut global = self
+            .global
             .write()
             .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-        let mut updated = config.clone();
+        let mut updated = global.clone();
         let before = updated.servers.len();
         updated.servers.retain(|server| server.name != name);
         if updated.servers.len() == before {
             return Err(McpError::UnknownServer(name.to_owned()));
         }
-        self.persist(&updated, &mut config)?;
-        drop(config);
+        self.persist_global(&updated, &mut global)?;
+        drop(global);
         self.stop_client(name);
+        let mut project = self
+            .project
+            .write()
+            .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
+        if project.enabled.remove(name) {
+            let mut updated = project.clone();
+            updated.legacy_servers.clear();
+            self.persist_project(&updated, &mut project)?;
+        }
         Ok(())
     }
 
+    /// Enables or disables a global server for the current project only.
     pub fn set_server_enabled(
         &self,
         name: &str,
         enabled: bool,
-    ) -> Result<McpServerConfig, McpError> {
+    ) -> Result<McpServerState, McpError> {
         self.reload_if_changed()?;
-        let mut config = self
-            .config
+        let mut project = self
+            .project
             .write()
             .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-        let mut updated = config.clone();
-        let server = updated
-            .server_mut(name)
-            .ok_or_else(|| McpError::UnknownServer(name.to_owned()))?;
-        server.enabled = enabled;
-        let server = server.clone();
-        self.persist(&updated, &mut config)?;
-        drop(config);
+        let config = {
+            let global = self
+                .global
+                .read()
+                .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
+            global
+                .server(name)
+                .cloned()
+                .ok_or_else(|| McpError::UnknownServer(name.to_owned()))?
+        };
+        let mut updated = project.clone();
+        updated.legacy_servers.clear();
+        if enabled {
+            updated.enabled.insert(name.to_owned());
+        } else {
+            updated.enabled.remove(name);
+        }
+        self.persist_project(&updated, &mut project)?;
+        drop(project);
         if !enabled {
             self.stop_client(name);
         }
-        Ok(server)
+        Ok(McpServerState { config, enabled })
     }
 
-    /// Lists every tool exposed by one configured server.
+    /// Lists every tool exposed by one globally defined server.
     pub fn probe(&self, name: &str) -> Result<Vec<McpToolInfo>, McpError> {
         self.reload_if_changed()?;
         let server = {
-            let config = self
-                .config
+            let global = self
+                .global
                 .read()
                 .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-            config
+            global
                 .server(name)
                 .cloned()
                 .ok_or_else(|| McpError::UnknownServer(name.to_owned()))?
@@ -429,23 +639,14 @@ impl McpManager {
         self.list_server_tools(&server)
     }
 
+    /// Lists tools of the servers enabled for this project.
     pub fn catalog(&self) -> Result<Vec<McpToolInfo>, McpError> {
-        self.reload_if_changed()?;
-        let servers = {
-            let config = self
-                .config
-                .read()
-                .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-            config
-                .servers
-                .iter()
-                .filter(|server| server.enabled)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
         let mut tools = Vec::new();
-        for server in servers {
-            if let Ok(mut found) = self.list_server_tools(&server) {
+        for state in self.servers()? {
+            if !state.enabled {
+                continue;
+            }
+            if let Ok(mut found) = self.list_server_tools(&state.config) {
                 tools.append(&mut found);
             }
         }
@@ -459,21 +660,24 @@ impl McpManager {
         arguments: Value,
     ) -> Result<String, McpError> {
         self.reload_if_changed()?;
-        let server = {
-            let config = self
-                .config
+        let (server, enabled) = {
+            let global = self
+                .global
                 .read()
                 .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
-            config
+            let project = self
+                .project
+                .read()
+                .map_err(|_| McpError::Protocol("MCP config lock poisoned".to_owned()))?;
+            let server = global
                 .server(server_name)
                 .cloned()
-                .ok_or_else(|| McpError::UnknownServer(server_name.to_owned()))?
+                .ok_or_else(|| McpError::UnknownServer(server_name.to_owned()))?;
+            let enabled = project.is_enabled(server_name);
+            (server, enabled)
         };
-        if !server.enabled {
-            return Err(McpError::Server(format!(
-                "MCP server '{}' is disabled",
-                server.name
-            )));
+        if !enabled {
+            return Err(McpError::NotEnabledProject(server_name.to_owned()));
         }
         if !server.allowed_tools.is_empty()
             && !server.allowed_tools.iter().any(|allowed| allowed == tool)
@@ -541,19 +745,6 @@ impl McpManager {
         Ok(tools)
     }
 
-    fn persist(&self, updated: &McpConfig, config: &mut McpConfig) -> Result<(), McpError> {
-        updated.save(&self.root)?;
-        *config = updated.clone();
-        self.record_stamp();
-        Ok(())
-    }
-
-    fn record_stamp(&self) {
-        if let Ok(mut stamp) = self.stamp.lock() {
-            *stamp = config_stamp(&self.root);
-        }
-    }
-
     fn stop_client(&self, name: &str) {
         let client = self
             .clients
@@ -611,6 +802,33 @@ impl McpManager {
             return Err(McpError::Server(error.to_string()));
         }
         Ok(value.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    fn persist_global(&self, updated: &McpConfig, global: &mut McpConfig) -> Result<(), McpError> {
+        updated.save(&self.global_path)?;
+        *global = updated.clone();
+        self.record_stamps();
+        Ok(())
+    }
+
+    fn persist_project(
+        &self,
+        updated: &McpProjectConfig,
+        project: &mut McpProjectConfig,
+    ) -> Result<(), McpError> {
+        updated.save(&self.root)?;
+        *project = updated.clone();
+        self.record_stamps();
+        Ok(())
+    }
+
+    fn record_stamps(&self) {
+        if let Ok(mut stamp) = self.global_stamp.lock() {
+            *stamp = config_stamp(&self.global_path);
+        }
+        if let Ok(mut stamp) = self.project_stamp.lock() {
+            *stamp = config_stamp(&project_config_path(&self.root));
+        }
     }
 }
 
@@ -870,13 +1088,18 @@ for line in sys.stdin:
         server
     }
 
+    fn manager(root: &Path) -> McpManager {
+        fs::create_dir_all(root.join(".openbad")).expect("dir");
+        McpManager::with_global_path(root, &root.join("global-mcp.yaml")).expect("manager")
+    }
+
     #[test]
     fn stdio_servers_require_a_command() {
         let server = McpServerConfig::stdio("files", "mcp-files");
         assert_eq!(server.transport, McpTransport::Stdio);
         assert!(server.command.is_some());
         assert!(server.url.is_none());
-        assert!(server.enabled);
+        assert_eq!(server.timeout(), DEFAULT_REQUEST_TIMEOUT);
         server.validate().expect("valid");
     }
 
@@ -906,31 +1129,43 @@ for line in sys.stdin:
     #[test]
     fn config_round_trips_and_preserves_defaults() {
         let root = tempdir().expect("tempdir");
+        let path = root.path().join("mcp.yaml");
         let config = McpConfig {
             servers: vec![
                 McpServerConfig::stdio("docs", "npx"),
                 McpServerConfig::http("remote", "https://example.com/rpc"),
             ],
         };
-        config.save(root.path()).expect("save");
-        let text = fs::read_to_string(config_path(root.path())).expect("read");
+        config.save(&path).expect("save");
+        let text = fs::read_to_string(&path).expect("read");
         assert!(text.contains("docs"));
-        let loaded = McpConfig::load(root.path()).expect("load");
+        assert!(
+            McpConfig::load(&path).expect("load").servers[0]
+                .timeout_seconds
+                .is_none()
+        );
+        let loaded = McpConfig::load(&path).expect("load");
         assert_eq!(loaded, config);
+        assert!(
+            McpConfig::load(&root.path().join("missing.yaml"))
+                .expect("missing")
+                .servers
+                .is_empty()
+        );
     }
 
     #[test]
     fn manager_adds_updates_removes_and_persists_servers() {
         let root = tempdir().expect("tempdir");
-        fs::create_dir_all(root.path().join(".openbad")).expect("dir");
-        let manager = McpManager::new(root.path()).expect("manager");
+        let manager = manager(root.path());
         assert!(manager.servers().expect("servers").is_empty());
 
         let mut server = McpServerConfig::stdio("docs", "npx");
         server.args = vec!["-y".to_owned(), "@example/mcp-docs".to_owned()];
-        manager.add_server(server.clone()).expect("add");
+        let state = manager.add_server(server.clone(), true).expect("add");
+        assert!(state.enabled);
         assert!(matches!(
-            manager.add_server(server.clone()),
+            manager.add_server(server.clone(), false),
             Err(McpError::DuplicateServer(_))
         ));
 
@@ -940,14 +1175,19 @@ for line in sys.stdin:
         manager
             .update_server("docs", updated.clone())
             .expect("update");
-        assert_eq!(manager.servers().expect("servers"), vec![updated.clone()]);
+        let servers = manager.servers().expect("servers");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].config, updated);
+        assert!(servers[0].enabled);
 
         manager.set_server_enabled("docs", false).expect("disable");
         assert!(!manager.servers().expect("servers")[0].enabled);
 
-        let reloaded = McpConfig::load(root.path()).expect("load");
-        assert_eq!(reloaded.servers, manager.servers().expect("servers"));
-        assert_eq!(reloaded.servers[0].timeout(), Duration::from_secs(30));
+        let global = McpConfig::load(manager.global_config_path()).expect("global");
+        assert_eq!(global.servers, vec![updated.clone()]);
+        assert_eq!(global.servers[0].timeout(), Duration::from_secs(30));
+        let project = McpProjectConfig::load(root.path()).expect("project");
+        assert!(!project.is_enabled("docs"));
 
         manager.remove_server("docs").expect("remove");
         assert!(manager.servers().expect("servers").is_empty());
@@ -956,8 +1196,8 @@ for line in sys.stdin:
             Err(McpError::UnknownServer(_))
         ));
         assert!(
-            McpConfig::load(root.path())
-                .expect("load")
+            McpConfig::load(manager.global_config_path())
+                .expect("global")
                 .servers
                 .is_empty()
         );
@@ -966,26 +1206,100 @@ for line in sys.stdin:
     #[test]
     fn manager_reloads_changes_written_by_another_instance() {
         let root = tempdir().expect("tempdir");
-        fs::create_dir_all(root.path().join(".openbad")).expect("dir");
-        let first = McpManager::new(root.path()).expect("first");
-        let second = McpManager::new(root.path()).expect("second");
+        let first = manager(root.path());
+        let second = manager(root.path());
         assert!(second.servers().expect("servers").is_empty());
 
         first
-            .add_server(McpServerConfig::stdio("docs", "npx"))
+            .add_server(McpServerConfig::stdio("docs", "npx"), true)
             .expect("add");
         let servers = second.servers().expect("reload");
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "docs");
+        assert_eq!(servers[0].config.name, "docs");
+
+        first.set_server_enabled("docs", false).expect("disable");
+        assert!(!second.servers().expect("reload")[0].enabled);
+    }
+
+    #[test]
+    fn project_enablement_is_isolated_between_workspaces() {
+        let global_root = tempdir().expect("global");
+        let global_path = global_root.path().join("mcp.yaml");
+        let first_root = tempdir().expect("first");
+        let second_root = tempdir().expect("second");
+        fs::create_dir_all(first_root.path().join(".openbad")).expect("dir");
+        fs::create_dir_all(second_root.path().join(".openbad")).expect("dir");
+
+        let first = McpManager::with_global_path(first_root.path(), &global_path).expect("first");
+        first
+            .add_server(McpServerConfig::stdio("docs", "npx"), true)
+            .expect("add");
+
+        let second =
+            McpManager::with_global_path(second_root.path(), &global_path).expect("second");
+        let servers = second.servers().expect("servers");
+        assert_eq!(servers.len(), 1);
+        assert!(!servers[0].enabled);
+        assert!(matches!(
+            second.call("docs", "search", json!({})),
+            Err(McpError::NotEnabledProject(_))
+        ));
+
+        second.set_server_enabled("docs", true).expect("enable");
+        assert!(second.servers().expect("servers")[0].enabled);
+        assert!(first.servers().expect("servers")[0].enabled);
+    }
+
+    #[test]
+    fn legacy_project_servers_are_migrated_to_the_global_config() {
+        let root = tempdir().expect("tempdir");
+        let global_root = tempdir().expect("global");
+        let global_path = global_root.path().join("mcp.yaml");
+        fs::create_dir_all(root.path().join(".openbad")).expect("dir");
+        fs::write(
+            project_config_path(root.path()),
+            r#"
+servers:
+  - name: docs
+    transport: stdio
+    command: npx
+    enabled: true
+  - name: scratch
+    transport: http
+    url: https://example.com/rpc
+    enabled: false
+"#,
+        )
+        .expect("write legacy");
+
+        let manager = McpManager::with_global_path(root.path(), &global_path).expect("manager");
+        let servers = manager.servers().expect("servers");
+        assert_eq!(servers.len(), 2);
+        assert!(
+            servers
+                .iter()
+                .any(|server| server.config.name == "docs" && server.enabled)
+        );
+        assert!(
+            servers
+                .iter()
+                .any(|server| server.config.name == "scratch" && !server.enabled)
+        );
+
+        let global = McpConfig::load(&global_path).expect("global");
+        assert_eq!(global.servers.len(), 2);
+        let project = McpProjectConfig::load(root.path()).expect("project");
+        assert!(project.legacy_servers.is_empty());
+        assert!(project.is_enabled("docs"));
+        assert!(!project.is_enabled("scratch"));
     }
 
     #[test]
     fn disabled_servers_are_skipped_by_the_catalog() {
         let root = tempdir().expect("tempdir");
-        fs::create_dir_all(root.path().join(".openbad")).expect("dir");
         let script = write_mock_script(root.path());
-        let manager = McpManager::new(root.path()).expect("manager");
-        manager.add_server(mock_server(&script)).expect("add");
+        let manager = manager(root.path());
+        manager.add_server(mock_server(&script), true).expect("add");
         assert_eq!(manager.catalog().expect("catalog").len(), 1);
 
         manager.set_server_enabled("mock", false).expect("disable");
@@ -997,10 +1311,9 @@ for line in sys.stdin:
     #[test]
     fn stdio_client_lists_and_calls_tools() {
         let root = tempdir().expect("tempdir");
-        fs::create_dir_all(root.path().join(".openbad")).expect("dir");
         let script = write_mock_script(root.path());
-        let manager = McpManager::new(root.path()).expect("manager");
-        manager.add_server(mock_server(&script)).expect("add");
+        let manager = manager(root.path());
+        manager.add_server(mock_server(&script), true).expect("add");
 
         let catalog = manager.catalog().expect("catalog");
         assert_eq!(catalog.len(), 1);

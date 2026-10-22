@@ -23,22 +23,24 @@ than a command needs.
 ├─────────────────────────────────────────────────────────────────────┤
 │ Project header: project · path · session · model · access mode      │
 ├──────────┬───────────────────────────────────────┬──────────────────┤
-│ Sidebar  │ Chat / Agent                          │ Project panel    │
-│          │                                       │                  │
-│ Projects │ Messages                              │ Overview         │
-│ Overview │ Composer                              │ Workspace        │
-│ Workspace│                                       │ References       │
-│ References│                                      │ Knowledge        │
-│ Knowledge│                                       │ Retrieval        │
-│ Retrieval│                                       │ Memory / Edits   │
-│ Memory   │                                       │ Artifact         │
-│ Sessions │                                       │ Diagnostics      │
+│ Sidebar  │ Chat / Agent      │ Preview pane     │ Project panel    │
+│          │                   │                  │                  │
+│ Projects │ Messages          │ Active artifact  │ Overview         │
+│ Overview │ Composer          │ (file, doc, web, │ Workspace        │
+│ Workspace│                   │ memory, diff)    │ References       │
+│ Reference│                   │                  │ Knowledge        │
+│ Knowledge│                   │                  │ Retrieval        │
+│ Retrieval│                   │                  │ Memory / Edits   │
+│ Memory   │                   │                  │ Diagnostics      │
+│ Sessions │                   │                  │                  │
 └──────────┴───────────────────────────────────────┴──────────────────┘
 ```
 
-The project panel is resizable and only present when requested. On narrow
-windows the full sidebar collapses while the panel is open so the conversation
-keeps a usable width.
+The preview pane and the project panel are both resizable and independent: the
+preview sits directly beside the conversation, the project panel to its right.
+The preview pane appears only while something is open and does not replace the
+project panel. On narrow windows the full sidebar collapses while the panel is
+open so the conversation keeps a usable width.
 
 ### Navigation
 
@@ -51,14 +53,21 @@ keeps a usable width.
 - **Session sidebar** — grouped by workspace, pinned, recent, archived.
 - **Workspace switcher** — recent folders, open folder, trust state.
 - **Project panel tabs** — overview, workspace, agents, references, knowledge,
-  retrieval, memory, checkpoints, diagnostics, and the active artifact.
+  retrieval, memory, checkpoints, and diagnostics.
   Knowledge is for long-form documents; Memory is for short indexed snippets.
   Agents lists background workers spawned by the assistant, refreshes while a
   worker is running, and opens completed results as Markdown artifacts. The
   sidebar shows a live count for each project area; running subagents add a
   pulse indicator, and counts refresh without opening the panel.
-- **Split artifacts** — assistant-presented web pages, images, Markdown, diffs,
-  and workspace files open beside the conversation.
+- **Preview pane** — clicking a workspace file, knowledge document, retrieval
+  hit, memory, or assistant-presented artifact opens it in a dedicated pane
+  between the chat and the project panel. It has its own close button and
+  resize handle; code files render as monospaced text rather than Markdown.
+- **Reveal in file manager** — file and folder references carry a folder icon
+  that opens the containing folder in the OS file manager (`xdg-open` on Linux,
+  `open -R` on macOS, `explorer /select` on Windows). The backend resolves the
+  target inside the workspace or a registered reference folder and rejects
+  anything outside them.
 - **Bottom panel** — terminal, problems, job output (planned).
 
 ## 3. Views
@@ -76,15 +85,22 @@ keeps a usable width.
 - Mermaid diagrams rendered from fenced `mermaid` blocks, with the source
   available in a disclosure and render errors shown inline.
 - Tool cards: name, status, duration, risk, result summary, expandable output.
+- Timing: the header shows the chat's elapsed wall-clock time and the total
+  time spent running turns, and each assistant message shows how long its turn
+  took. Durations come from the recorded turn start/end events, so they survive
+  reopening a session.
 - Reasoning: collapsible "Thinking" section, hidden by default.
 - Citations: file path + line range; clicking opens the editor at the range.
 - Approvals: inline cards with exact command/diff and allow/deny actions.
 - Turn footer: input/output/cache tokens, cost, cache hit %, model, elapsed.
 - Cancel button always visible during a turn.
-- Document attachments: drop files onto the composer or use the paperclip
-  button. Attachments appear as removable chips above the textarea, travel with
-  the next turn as `<attached_document>` blocks, and are listed on the user
-  message. Documents can be sent without any prompt text.
+- Any-file attachments: drop files onto the composer or use the paperclip
+  button. Attachments appear as removable chips above the textarea and can be
+  sent without any prompt text. On send they are staged in
+  `<workspace>/uploads/`, listed by workspace path in the model-visible
+  message, and inlined as `<attached_document>` blocks only when they are UTF-8
+  text within the inline budget. The user message then links each staged file
+  so it can be previewed or revealed in the file manager.
 - Input stays isolated from the transcript: the composer owns its draft and
   attachment state, and message cards are memoized per entry. Typing therefore
   never re-parses rendered Markdown, and streamed deltas only re-render the
@@ -287,9 +303,9 @@ Targets:
 | Git | `git_status`, `git_diff`, `git_commit`, `git_push` |
 | Memory | `search_memory`, `remember`, `forget`, `consolidate` |
 | Knowledge | `knowledge_documents`, `add_knowledge_note`, `import_knowledge_file`, `delete_knowledge_document` |
-| MCP | `mcp_servers`, `add_mcp_server`, `update_mcp_server`, `remove_mcp_server`, `set_mcp_server_enabled`, `test_mcp_server` |
+| MCP | `mcp_servers`, `add_mcp_server`, `update_mcp_server`, `remove_mcp_server`, `set_mcp_server_enabled`, `test_mcp_server` (definitions are global; enablement is per project) |
 | Updates | `check_for_updates`, `install_update` |
-| Project areas | `project_overview`, `project_repos`, `add_project_repo`, `remove_project_repo`, `project_files`, `project_file`, `search_project` |
+| Project areas | `project_overview`, `project_repos`, `add_project_repo`, `remove_project_repo`, `project_files`, `project_file`, `search_project`, `reveal_path` |
 | Models | `list_routes`, `set_route`, `test_provider`, `refresh_balance` |
 | Governance | `pending_approvals`, `decide_approval`, `audit_verify` |
 | Autonomic | `jobs_list`, `job_cancel`, `schedules_list`, `pulse_snapshot` |

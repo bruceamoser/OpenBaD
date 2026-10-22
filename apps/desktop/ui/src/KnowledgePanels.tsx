@@ -26,6 +26,7 @@ import {
 } from "./backend";
 import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
 import MarkdownMessage from "./MarkdownMessage";
+import RevealButton from "./RevealButton";
 import type {
   Artifact,
   KnowledgeDocument,
@@ -42,7 +43,6 @@ export function KnowledgePanel({
 }: {
   workspacePath: string;
   onOpenArtifact: (artifact: Artifact) => void;
-  onTab: (tab: "artifact" | "memory") => void;
   revision: number;
   onChanged: () => void;
 }) {
@@ -276,15 +276,21 @@ export function KnowledgePanel({
           <Loader2 size={11} className="animate-spin" /> Loading knowledge…
         </p>
       )}
-      {visible.map((document) => (
+      {visible.map((document) => {
+        const sourcePath =
+          document.source !== null && document.source.startsWith(`${workspacePath}/`)
+            ? document.source
+            : null;
+        return (
         <div
           key={document.id}
           className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"
         >
+          <div className="flex items-start gap-1">
           <button
             type="button"
             onClick={() => open(document)}
-            className="block w-full text-left"
+            className="block min-w-0 flex-1 text-left"
           >
             <p className="truncate text-[11px] text-slate-200">{document.title}</p>
             <p className="mt-0.5 truncate font-mono text-[9px] text-slate-500">
@@ -320,6 +326,14 @@ export function KnowledgePanel({
               </p>
             )}
           </button>
+          {sourcePath !== null && (
+            <RevealButton
+              workspacePath={workspacePath}
+              path={sourcePath}
+              label="Show knowledge source"
+            />
+          )}
+          </div>
           <div className="mt-1.5 flex items-center justify-between gap-2">
             <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-slate-500">
               {document.source ?? "project note"}
@@ -359,7 +373,8 @@ export function KnowledgePanel({
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
       {!loading && visible.length === 0 && (
         <p className="px-1 py-2 text-[11px] text-slate-500">
           {knowledge.length === 0
@@ -506,7 +521,7 @@ export function RetrievalPanel({
 }: {
   workspacePath: string;
   onOpenArtifact: (artifact: Artifact) => void;
-  onTab: (tab: "artifact" | "memory") => void;
+  onTab: (tab: "memory") => void;
 }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<ProjectHit[] | null>(null);
@@ -583,11 +598,14 @@ export function RetrievalPanel({
         <p className="px-1 py-2 text-[11px] text-slate-500">No matches.</p>
       )}
       {hits?.map((hit) => (
-        <button
+        <div
           key={`${hit.source}-${hit.locator}`}
+          className="flex items-start gap-1 rounded-lg border border-white/[0.07] bg-white/[0.02] pr-1 hover:border-white/[0.14] hover:bg-white/[0.04]"
+        >
+        <button
           type="button"
           onClick={() => openHit(hit)}
-          className="block w-full rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5 text-left hover:border-white/[0.14] hover:bg-white/[0.04]"
+          className="block min-w-0 flex-1 p-2.5 text-left"
         >
           <div className="flex items-center gap-1.5">
             <span
@@ -613,6 +631,14 @@ export function RetrievalPanel({
             {hit.locator}
           </p>
         </button>
+        {hit.source === "code" && (
+          <RevealButton
+            workspacePath={workspacePath}
+            path={hit.locator.split("#")[0]}
+            label="Show retrieved file"
+          />
+        )}
+        </div>
       ))}
       {error !== null && <p className="text-[10px] text-amber-300">{error}</p>}
     </div>

@@ -168,6 +168,20 @@ export default function ArtifactViewer({
     return <DiffView content={artifact.content ?? markdown ?? ""} />;
   }
 
+  if (artifact.kind === "file" && markdown !== null && !isMarkdownArtifact(artifact)) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-slate-500">
+          <span className="truncate">{file?.path ?? artifact.uri}</span>
+          {artifact.language !== undefined && <span>· {artifact.language}</span>}
+        </div>
+        <pre className="min-h-0 flex-1 overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-4 text-slate-300">
+          {markdown}
+        </pre>
+      </div>
+    );
+  }
+
   if (markdown !== null) {
     return (
       <div className="markdown-body">
@@ -188,6 +202,17 @@ export default function ArtifactViewer({
   }
 
   return <p className="text-[10px] text-slate-500">No preview content available.</p>;
+}
+
+function isMarkdownArtifact(artifact: Artifact): boolean {
+  const uri = artifact.uri ?? "";
+  const extension = uri.slice(uri.lastIndexOf(".") + 1).toLowerCase();
+  return (
+    artifact.kind === "markdown" ||
+    extension === "md" ||
+    extension === "markdown" ||
+    extension === "mdx"
+  );
 }
 
 function DiffView({ content }: { content: string }) {

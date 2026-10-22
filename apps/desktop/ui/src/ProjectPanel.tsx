@@ -18,8 +18,8 @@ import {
 } from "lucide-react";
 
 import AgentsPanel from "./AgentsPanel";
-import ArtifactViewer from "./ArtifactViewer";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
+import RevealButton from "./RevealButton";
 import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
 import {
   addProjectRepo,
@@ -67,8 +67,7 @@ export type PanelTab =
   | "questions"
   | "plan"
   | "checkpoints"
-  | "diagnostics"
-  | "artifact";
+  | "diagnostics";
 
 const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -111,7 +110,6 @@ export type ProjectPanelProps = {
   onOpenSettings: (
     tab: "model" | "access" | "secrets" | "project" | "about",
   ) => void;
-  artifact: Artifact | null;
   onArtifact: (artifact: Artifact | null) => void;
   revision: number;
   onWorkspaceChanged: () => void;
@@ -142,7 +140,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     apiKeyStatus,
     sessionId,
     onOpenSettings,
-    artifact,
     onArtifact,
     revision,
     onWorkspaceChanged,
@@ -270,18 +267,15 @@ export default function ProjectPanel(props: ProjectPanelProps) {
 
   const openFile = (path: string) => {
     onArtifact({ kind: "file", title: path.split("/").at(-1) ?? path, uri: path });
-    onTab("artifact");
   };
 
   const activeTab = panelTabs.find((item) => item.id === tab) ?? panelTabs[0];
   const title =
-    tab === "artifact" && artifact !== null
-      ? artifact.title
-      : tab === "checkpoints"
-        ? "Checkpoints"
-        : tab === "diagnostics"
-          ? "Diagnostics"
-          : activeTab.label;
+    tab === "checkpoints"
+      ? "Checkpoints"
+      : tab === "diagnostics"
+        ? "Diagnostics"
+        : activeTab.label;
 
   return (
     <aside
@@ -329,11 +323,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             {item.label}
           </button>
         ))}
-        {tab === "artifact" && (
-          <span className="shrink-0 rounded-md bg-emerald-400/10 px-2 py-1 text-[10px] text-emerald-200">
-            Artifact
-          </span>
-        )}
       </div>
 
       {dataError !== null && (
@@ -483,15 +472,20 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               to open · drop documents to upload
             </p>
             {visibleFiles.map((path) => (
-              <button
+              <div
                 key={path}
-                type="button"
-                onClick={() => openFile(path)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-[10px] text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
+                className="flex items-center gap-1 rounded-md pr-1 hover:bg-white/[0.04]"
               >
-                <FileCode2 size={12} className="shrink-0 text-slate-500" />
-                <span className="truncate">{path}</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => openFile(path)}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left font-mono text-[10px] text-slate-400 hover:text-slate-200"
+                >
+                  <FileCode2 size={12} className="shrink-0 text-slate-500" />
+                  <span className="truncate">{path}</span>
+                </button>
+                <RevealButton workspacePath={workspacePath} path={path} />
+              </div>
             ))}
             {visibleFiles.length === 0 && (
               <p className="px-1 py-3 text-[11px] text-slate-500">
@@ -533,7 +527,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
           <KnowledgePanel
             workspacePath={workspacePath}
             onOpenArtifact={onArtifact}
-            onTab={onTab}
             revision={revision}
             onChanged={onWorkspaceChanged}
           />
@@ -552,6 +545,16 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             memories={memories}
             memoryError={memoryError}
             onForgetMemory={onForgetMemory}
+            onOpen={(memory) =>
+              onArtifact({
+                kind: "memory",
+                title:
+                  memory.content.length > 48
+                    ? `${memory.content.slice(0, 48)}…`
+                    : memory.content,
+                content: memory.content,
+              })
+            }
           />
         )}
 
@@ -598,14 +601,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             foundation={foundation}
             apiKeyStatus={apiKeyStatus}
             onOpenSettings={onOpenSettings}
-          />
-        )}
-
-        {tab === "artifact" && (
-          <ArtifactViewer
-            artifact={artifact}
-            workspacePath={workspacePath}
-            revision={revision}
           />
         )}
       </div>
@@ -713,6 +708,12 @@ function ReferencesPanel({
                 {repo.path}
               </p>
             </div>
+            <RevealButton
+              workspacePath={workspacePath}
+              path={repo.path}
+              label="Show reference folder"
+              className="p-1 hover:bg-white/5"
+            />
             <button
               type="button"
               aria-label={`Remove ${repo.name}`}
@@ -762,10 +763,12 @@ function MemoryPanel({
   memories,
   memoryError,
   onForgetMemory,
+  onOpen,
 }: {
   memories: MemoryRecord[];
   memoryError: string | null;
   onForgetMemory: (id: string) => void;
+  onOpen: (memory: MemoryRecord) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -780,7 +783,17 @@ function MemoryPanel({
       {memories.map((memory) => (
         <div
           key={memory.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
+          role="button"
+          tabIndex={0}
+          aria-label="Preview memory"
+          onClick={() => onOpen(memory)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onOpen(memory);
+            }
+          }}
+          className="cursor-pointer rounded-lg border border-white/[0.07] bg-white/[0.02] p-3 hover:border-emerald-400/20 hover:bg-white/[0.04]"
         >
           <p className="text-[11px] leading-5 text-slate-300">
             {memory.pinned && <span className="mr-1 text-emerald-300">★</span>}
@@ -794,7 +807,10 @@ function MemoryPanel({
             </span>
             <button
               type="button"
-              onClick={() => onForgetMemory(memory.id)}
+              onClick={(event) => {
+                event.stopPropagation();
+                onForgetMemory(memory.id);
+              }}
               className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
               aria-label="Forget memory"
             >

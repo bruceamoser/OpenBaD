@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  Clock3,
   Copy,
   Database,
   FileText,
@@ -76,6 +77,8 @@ import McpSettings from "./McpSettings";
 import UpdatePanel from "./UpdatePanel";
 import { droppedToUploads, useFileDropZone } from "./dropzone";
 import ProjectPanel from "./ProjectPanel";
+import PreviewPane from "./PreviewPane";
+import RevealButton from "./RevealButton";
 import type { PanelTab } from "./ProjectPanel";
 import type {
   AccessMode,
@@ -174,7 +177,10 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("overview");
   const [panelWidth, setPanelWidth] = useState(460);
+  const [previewWidth, setPreviewWidth] = useState(420);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
+  const [totalDurationMs, setTotalDurationMs] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [projectRevision, setProjectRevision] = useState(0);
   const [areaCounts, setAreaCounts] = useState<ProjectAreaCounts | null>(null);
   const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
@@ -507,6 +513,8 @@ export default function App() {
   const newSession = useCallback(() => {
     setSessionId(null);
     setEntries([]);
+    setTotalDurationMs(0);
+    setArtifact(null);
     setPermissionMode("read");
     setAccessRequest(null);
     setToolApproval(null);
@@ -677,6 +685,11 @@ export default function App() {
     [checkpointDiffId, refreshWorkspaceIndex],
   );
 
+  useEffect(() => {
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   const openPanel = useCallback((tab: PanelTab) => {
     setPanelTab(tab);
     setPanelOpen(true);
@@ -684,10 +697,6 @@ export default function App() {
 
   const openArtifact = useCallback((next: Artifact | null) => {
     setArtifact(next);
-    if (next !== null) {
-      setPanelTab("artifact");
-      setPanelOpen(true);
-    }
   }, []);
 
   useEffect(() => {
@@ -710,23 +719,49 @@ export default function App() {
     }
   }, [panelOpen, sidebarOpen]);
 
-  const startPanelResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = panelWidth;
-    const move = (pointer: PointerEvent) => {
-      const available = Math.max(320, window.innerWidth - 380);
-      setPanelWidth(
-        Math.min(available, Math.max(320, startWidth - (pointer.clientX - startX))),
-      );
-    };
-    const stop = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop);
-  }, [panelWidth]);
+  const startPanelResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = panelWidth;
+      const reserved = 380 + (artifact !== null ? previewWidth + 4 : 0);
+      const move = (pointer: PointerEvent) => {
+        const available = Math.max(320, window.innerWidth - reserved);
+        setPanelWidth(
+          Math.min(available, Math.max(320, startWidth - (pointer.clientX - startX))),
+        );
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    },
+    [panelWidth, artifact, previewWidth],
+  );
+
+  const startPreviewResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = previewWidth;
+      const reserved = 720 + (panelOpen ? panelWidth + 4 : 0);
+      const move = (pointer: PointerEvent) => {
+        const available = Math.max(300, window.innerWidth - reserved);
+        setPreviewWidth(
+          Math.min(available, Math.max(300, startWidth - (pointer.clientX - startX))),
+        );
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+    },
+    [previewWidth, panelOpen, panelWidth],
+  );
 
   const send = useCallback(async (override: string, pending: UploadSource[] = []) => {
     const text = override.trim();
@@ -738,13 +773,14 @@ export default function App() {
     setError(null);
     followRef.current = true;
     const assistantId = nextId();
+    const userId = nextId();
     setEntries((current) => [
       ...current,
       {
-        id: nextId(),
+        id: userId,
         role: "user",
         text,
-        attachments: pending.map((attachment) => attachment.name),
+        attachments: pending.map((attachment) => ({ name: attachment.name })),
       },
       {
         id: assistantId,
@@ -753,6 +789,7 @@ export default function App() {
         reasoning: "",
         status: "Starting…",
         tools: [],
+        startedAt: Date.now(),
       },
     ]);
 
@@ -841,6 +878,7 @@ export default function App() {
         },
       );
       setSessionId(reply.session_id);
+      setTotalDurationMs((current) => current + reply.duration_ms);
       if (sessionId === null) {
         try {
           await persistSessionAccessMode(reply.session_id, permissionMode);
@@ -848,6 +886,20 @@ export default function App() {
           setError(describeError(cause));
         }
       }
+      setEntries((current) =>
+        current.map((entry) =>
+          entry.id === userId
+            ? {
+                ...entry,
+                attachments: reply.attachments.map((file) => ({
+                  name: file.name,
+                  path: file.path,
+                  bytes: file.bytes,
+                })),
+              }
+            : entry,
+        ),
+      );
       setEntries((current) =>
         current.map((entry) =>
           entry.id === assistantId
@@ -859,6 +911,7 @@ export default function App() {
                     ? entry.tools
                     : reply.tool_trace,
                 usage: reply.usage,
+                durationMs: reply.duration_ms,
                 status: `Done · ${reply.steps} step${reply.steps === 1 ? "" : "s"}`,
               }
             : entry,
@@ -976,13 +1029,19 @@ export default function App() {
           }
         }
         followRef.current = true;
+        setTotalDurationMs(view.total_duration_ms);
         setEntries(
           view.messages.map((item) => ({
             id: nextId(),
             role: item.role === "user" ? "user" : "assistant",
             text: item.text,
-            attachments: item.attachments,
+            attachments: (item.attachments ?? []).map((attachment) =>
+              attachment.includes("/") || attachment.includes("\\")
+                ? { name: attachment.split(/[\\/]/).at(-1) ?? attachment, path: attachment }
+                : { name: attachment },
+            ),
             reasoning: item.reasoning ?? "",
+            durationMs: item.duration_ms ?? undefined,
           })),
         );
       } catch (cause) {
@@ -1657,10 +1716,32 @@ export default function App() {
                   <span className="truncate font-mono text-[10px] text-slate-500">
                     {activeProject.path}
                   </span>
+                  <RevealButton
+                    workspacePath={workspacePath}
+                    path={activeProject.path}
+                    label="Show project folder"
+                  />
                 </>
               )}
             </div>
             <h1 className="truncate text-[13px] font-medium text-slate-200">{currentTitle}</h1>
+            {activeSession !== null && (
+              <p
+                className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px] text-slate-500"
+                title="Elapsed time since this chat started, and the total time spent running turns"
+              >
+                <Clock3 size={10} className="shrink-0" />
+                <span data-testid="chat-elapsed">
+                  {formatDuration(Math.max(0, nowMs - activeSession.created_at))}
+                </span>
+                <span className="text-slate-500">elapsed</span>
+                <span className="text-slate-500">·</span>
+                <span data-testid="chat-total">
+                  {formatDuration(totalDurationMs + (busy ? runningMs(entries, nowMs) : 0))}
+                </span>
+                <span className="text-slate-500">total</span>
+              </p>
+            )}
           </div>
           {sessionUsage.input_tokens + sessionUsage.output_tokens > 0 && (
             <div
@@ -1687,7 +1768,7 @@ export default function App() {
         >
           {chatDrop.active && (
             <div className="pointer-events-none absolute inset-0 z-20 flex items-start justify-center bg-emerald-400/[0.04] pt-6 text-[12px] font-medium text-emerald-200">
-              Drop documents to attach them to the chat
+              Drop files to attach them to the chat
             </div>
           )}
           <div
@@ -1741,9 +1822,23 @@ export default function App() {
                 </div>
               )}
 
-              {entries.map((entry) => (
-                <MessageCard key={entry.id} entry={entry} />
-              ))}
+              {entries.map((entry) => {
+                const running =
+                  busy &&
+                  entry.role === "assistant" &&
+                  entry.id ===
+                    [...entries].reverse().find((item) => item.role === "assistant")?.id;
+                return (
+                  <MessageCard
+                    key={entry.id}
+                    entry={entry}
+                    nowMs={running ? nowMs : undefined}
+                    workspacePath={workspacePath}
+                    onOpenAttachment={openArtifact}
+                    running={running}
+                  />
+                );
+              })}
 
               {busy && (
                 <div className="flex items-center gap-2 text-[12px] text-emerald-300">
@@ -1780,6 +1875,18 @@ export default function App() {
         </div>
       </div>
 
+      {artifact !== null && (
+        <PreviewPane
+          artifact={artifact}
+          workspacePath={workspacePath}
+          revision={projectRevision}
+          width={previewWidth}
+          reserved={720 + (panelOpen ? panelWidth + 4 : 0)}
+          onResizeStart={startPreviewResize}
+          onClose={() => setArtifact(null)}
+        />
+      )}
+
       {panelOpen && (
         <>
           <div
@@ -1792,7 +1899,9 @@ export default function App() {
           <div
             className="flex min-h-0 shrink-0 overflow-hidden"
             style={{
-              width: `clamp(320px, ${panelWidth}px, calc(100vw - 380px))`,
+              width: `clamp(320px, ${panelWidth}px, calc(100vw - ${
+                380 + (artifact !== null ? previewWidth + 4 : 0)
+              }px))`,
             }}
           >
             <ProjectPanel
@@ -1819,7 +1928,6 @@ export default function App() {
               apiKeyStatus={apiKeyStatus}
               sessionId={sessionId}
               onOpenSettings={openSettings}
-              artifact={artifact}
               onArtifact={openArtifact}
               revision={projectRevision}
               onWorkspaceChanged={() => setProjectRevision((value) => value + 1)}
@@ -2185,7 +2293,19 @@ function appendStepText(
   return `${current}${separator}${incoming}`;
 }
 
-const MessageCard = memo(function MessageCard({ entry }: { entry: ChatEntry }) {
+const MessageCard = memo(function MessageCard({
+  entry,
+  nowMs,
+  running = false,
+  workspacePath,
+  onOpenAttachment,
+}: {
+  entry: ChatEntry;
+  nowMs?: number;
+  running?: boolean;
+  workspacePath?: string;
+  onOpenAttachment?: (artifact: Artifact) => void;
+}) {
   if (entry.role === "user") {
     return (
       <div className="flex justify-end">
@@ -2197,13 +2317,41 @@ const MessageCard = memo(function MessageCard({ entry }: { entry: ChatEntry }) {
           )}
           {entry.attachments !== undefined && entry.attachments.length > 0 && (
             <div className="mb-1 flex flex-wrap justify-end gap-1">
-              {entry.attachments.map((name, index) => (
+              {entry.attachments.map((attachment, index) => (
                 <span
-                  key={`${name}-${index}`}
+                  key={`${attachment.name}-${index}`}
                   className="flex items-center gap-1 rounded border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] text-emerald-100"
                 >
-                  <FileText size={10} className="shrink-0" />
-                  {name}
+                  <button
+                    type="button"
+                    title={
+                      attachment.path === undefined
+                        ? attachment.name
+                        : `Preview ${attachment.path}`
+                    }
+                    disabled={attachment.path === undefined || onOpenAttachment === undefined}
+                    onClick={() =>
+                      attachment.path !== undefined &&
+                      onOpenAttachment?.({
+                        kind: "file",
+                        title: attachment.name,
+                        uri: attachment.path,
+                      })
+                    }
+                    className="flex min-w-0 items-center gap-1 disabled:cursor-default"
+                  >
+                    <FileText size={10} className="shrink-0" />
+                    <span className="max-w-[180px] truncate">{attachment.name}</span>
+                  </button>
+                  {attachment.path !== undefined &&
+                    workspacePath !== undefined &&
+                    workspacePath.length > 0 && (
+                      <RevealButton
+                        workspacePath={workspacePath}
+                        path={attachment.path}
+                        label="Show file in file manager"
+                      />
+                    )}
                 </span>
               ))}
             </div>
@@ -2227,6 +2375,16 @@ const MessageCard = memo(function MessageCard({ entry }: { entry: ChatEntry }) {
         <div className="flex items-center gap-2 text-[10px] text-slate-500">
           <span className="font-medium text-slate-400">OpenBaD</span>
           {entry.status !== undefined && <span>· {entry.status}</span>}
+          {running && entry.startedAt !== undefined && nowMs !== undefined && (
+            <span className="font-mono text-slate-500" data-testid="turn-running">
+              · {formatDuration(Math.max(0, nowMs - entry.startedAt))}
+            </span>
+          )}
+          {!running && entry.durationMs !== undefined && (
+            <span className="font-mono text-slate-500" data-testid="turn-duration">
+              · {formatDuration(entry.durationMs)}
+            </span>
+          )}
           {entry.text.length > 0 && (
             <CopyMessageButton text={entry.text} label="Copy response" />
           )}
@@ -2852,6 +3010,25 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+}
+
+function runningMs(entries: ChatEntry[], nowMs: number): number {
+  const last = [...entries].reverse().find((entry) => entry.role === "assistant");
+  if (last === undefined || last.startedAt === undefined || last.durationMs !== undefined) {
+    return 0;
+  }
+  return Math.max(0, nowMs - last.startedAt);
+}
 
 function artifactFromMetadata(metadata: unknown): Artifact | null {
   if (typeof metadata !== "object" || metadata === null) {

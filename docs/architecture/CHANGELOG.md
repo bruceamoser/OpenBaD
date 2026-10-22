@@ -4,6 +4,26 @@ The assistant loads this file with the project instructions. Add a short entry
 whenever an architecture document or the tool/runtime surface changes, so a new
 session knows what moved without re-reading every document.
 
+## 2026-10-23
+
+- **Global MCP definitions, per-project enablement.** Global server definitions
+  move to the application config file (`OPENBAD_MCP_CONFIG` overrides it); each
+  workspace stores only `enabled: [names]` in `.openbad/mcp.yaml`. Legacy
+  project-scoped definitions migrate on first load. The model gains
+  `mcp_server_set_enabled`, and `mcp_server_add` enables the new server for the
+  current project by default.
+- **Preview pane.** Workspace files, knowledge documents, retrieval hits,
+  memories, and assistant artifacts open in a resizable pane between the chat
+  and the project panel instead of replacing the project panel.
+- **Reveal in file manager.** `reveal_path` resolves a path inside the
+  workspace or a reference folder and opens it in the OS file manager.
+- **Chat timing.** `ChatReply.duration_ms`, per-message `duration_ms`, and
+  `SessionView.total_duration_ms` back the elapsed/total header timers and the
+  per-turn duration beside each response.
+- **Any-file chat attachments.** Attachments are staged under
+  `<workspace>/uploads/`, referenced by workspace path, and inlined only when
+  they are UTF-8 text within budget.
+
 ## 2026-10-22
 
 - **MCP server management.** `openbad-mcp` now supports `enabled`, `env`,

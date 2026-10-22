@@ -641,20 +641,20 @@ impl DesktopMcp {
     }
 }
 
-fn mcp_server_summary(config: &openbad_mcp::McpServerConfig) -> McpServerSummary {
+fn mcp_server_summary(state: &openbad_mcp::McpServerState) -> McpServerSummary {
     McpServerSummary {
-        name: config.name.clone(),
-        transport: match config.transport {
+        name: state.config.name.clone(),
+        transport: match state.config.transport {
             openbad_mcp::McpTransport::Stdio => "stdio".to_owned(),
             openbad_mcp::McpTransport::Http => "http".to_owned(),
         },
-        command: config.command.clone(),
-        args: config.args.clone(),
-        url: config.url.clone(),
-        enabled: config.enabled,
-        allowed_tools: config.allowed_tools.clone(),
-        env_keys: config.env.keys().cloned().collect(),
-        timeout_seconds: config.timeout_seconds,
+        command: state.config.command.clone(),
+        args: state.config.args.clone(),
+        url: state.config.url.clone(),
+        enabled: state.enabled,
+        allowed_tools: state.config.allowed_tools.clone(),
+        env_keys: state.config.env.keys().cloned().collect(),
+        timeout_seconds: state.config.timeout_seconds,
     }
 }
 
@@ -704,9 +704,6 @@ fn mcp_server_config_from_spec(
     }
     if let Some(allowed) = &spec.allowed_tools {
         config.allowed_tools = allowed.clone();
-    }
-    if let Some(enabled) = spec.enabled {
-        config.enabled = enabled;
     }
     if let Some(timeout) = spec.timeout_seconds {
         config.timeout_seconds = (timeout > 0).then_some(timeout);
@@ -770,12 +767,12 @@ impl McpService for DesktopMcp {
         let manager = Arc::clone(&self.manager);
         tauri::async_runtime::spawn_blocking(move || {
             let config = mcp_server_config_from_spec(&spec, None)?;
-            manager
-                .add_server(config.clone())
+            let state = manager
+                .add_server(config, spec.enabled.unwrap_or(true))
                 .map_err(|error| error.to_string())?;
-            let (tools, warning) = probe_mcp_server(&manager, &config.name);
+            let (tools, warning) = probe_mcp_server(&manager, &state.config.name);
             Ok(McpServerChange {
-                server: mcp_server_summary(&config),
+                server: mcp_server_summary(&state),
                 tools,
                 warning,
             })
@@ -796,15 +793,26 @@ impl McpService for DesktopMcp {
                 .servers()
                 .map_err(|error| error.to_string())?
                 .into_iter()
-                .find(|server| server.name == name)
+                .find(|server| server.config.name == name)
                 .ok_or_else(|| format!("unknown MCP server: {name}"))?;
-            let config = mcp_server_config_from_spec(&spec, Some(current))?;
+            let config = mcp_server_config_from_spec(&spec, Some(current.config))?;
             manager
-                .update_server(&name, config.clone())
+                .update_server(&name, config)
                 .map_err(|error| error.to_string())?;
+            let state = match spec.enabled {
+                Some(enabled) => manager
+                    .set_server_enabled(&name, enabled)
+                    .map_err(|error| error.to_string())?,
+                None => manager
+                    .servers()
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|server| server.config.name == name)
+                    .ok_or_else(|| format!("unknown MCP server: {name}"))?,
+            };
             let (tools, warning) = probe_mcp_server(&manager, &name);
             Ok(McpServerChange {
-                server: mcp_server_summary(&config),
+                server: mcp_server_summary(&state),
                 tools,
                 warning,
             })
@@ -833,6 +841,28 @@ impl McpService for DesktopMcp {
                 .probe(&name)
                 .map(|tools| tools.into_iter().map(mcp_tool_summary).collect())
                 .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn set_server_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<McpServerChange, String> {
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = manager
+                .set_server_enabled(&name, enabled)
+                .map_err(|error| error.to_string())?;
+            let (tools, warning) = probe_mcp_server(&manager, &name);
+            Ok(McpServerChange {
+                server: mcp_server_summary(&state),
+                tools,
+                warning,
+            })
         })
         .await
         .map_err(|error| error.to_string())?
@@ -1390,6 +1420,10 @@ pub struct ChatReply {
     pub steps: u32,
     pub usage: UsageTotals,
     pub tool_trace: Vec<String>,
+    /// Wall-clock time the turn took, in milliseconds.
+    pub duration_ms: u64,
+    /// Files staged inside the workspace for this turn.
+    pub attachments: Vec<UploadedFile>,
 }
 
 #[derive(Serialize)]
@@ -1399,12 +1433,16 @@ pub struct UiMessage {
     #[serde(default)]
     pub attachments: Vec<String>,
     pub reasoning: Option<String>,
+    /// Set on the last assistant message of a completed turn.
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
 pub struct SessionView {
     pub session_id: String,
     pub messages: Vec<UiMessage>,
+    /// Sum of every completed turn duration, in milliseconds.
+    pub total_duration_ms: u64,
 }
 
 #[tauri::command]
@@ -2077,7 +2115,7 @@ fn import_knowledge_file(
 const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_UPLOAD_FILES: usize = 50;
 const MAX_KNOWLEDGE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_CHAT_ATTACHMENT_BYTES: u64 = 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_INLINE_BYTES: usize = 256 * 1024;
 const MAX_CHAT_ATTACHMENTS: usize = 8;
 const UPLOADED_REFERENCES_NAME: &str = "Uploaded documents";
 
@@ -2092,7 +2130,7 @@ pub struct UploadSource {
     pub content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadedFile {
     pub name: String,
@@ -2399,37 +2437,65 @@ fn import_knowledge_files(
     Ok(report)
 }
 
-fn compose_chat_message(prompt: &str, attachments: &[UploadSource]) -> Result<String, String> {
+/// Stages chat attachments in `<workspace>/uploads` so any file type is kept in
+/// the workspace, then builds the model-visible message. Text files are inlined
+/// within a bounded budget; everything else is referenced by workspace path and
+/// stays available to the file tools.
+fn compose_chat_message(
+    workspace_root: &Path,
+    prompt: &str,
+    attachments: &[UploadSource],
+) -> Result<(String, Vec<UploadedFile>), String> {
     if attachments.is_empty() {
-        return Ok(prompt.to_owned());
+        return Ok((prompt.to_owned(), Vec::new()));
     }
     if attachments.len() > MAX_CHAT_ATTACHMENTS {
         return Err(format!(
-            "attach at most {MAX_CHAT_ATTACHMENTS} documents per message"
+            "attach at most {MAX_CHAT_ATTACHMENTS} files per message"
         ));
+    }
+    let report = write_uploads(&workspace_root.join("uploads"), attachments)?;
+    if report.files.is_empty() {
+        return Err(if report.skipped.is_empty() {
+            "no files could be attached".to_owned()
+        } else {
+            report.skipped.join("; ")
+        });
     }
     let mut message = prompt.trim_end().to_owned();
     if !message.is_empty() {
         message.push_str("\n\n");
     }
-    message.push_str("The user attached these documents:\n");
-    for attachment in attachments {
-        let (name, bytes) = load_upload(attachment, MAX_CHAT_ATTACHMENT_BYTES)?;
-        let content = String::from_utf8(bytes)
-            .map_err(|_| format!("{name} is not UTF-8 text and cannot be attached"))?;
-        let name: String = name
-            .chars()
-            .map(|character| match character {
-                '<' | '>' | '"' | '&' => '_',
-                other => other,
-            })
-            .collect();
+    message.push_str(
+        "The user attached these files. They are saved inside the workspace and can be read with the file tools:\n",
+    );
+    let mut inline_budget = MAX_CHAT_ATTACHMENT_INLINE_BYTES;
+    let mut inline = Vec::new();
+    for file in &report.files {
+        let relative = Path::new(&file.path)
+            .strip_prefix(workspace_root)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| file.path.clone());
+        message.push_str(&format!("- {relative} ({} bytes)\n", file.bytes));
+        if usize::try_from(file.bytes).unwrap_or(usize::MAX) > inline_budget {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&file.path) else {
+            continue;
+        };
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        inline_budget = inline_budget.saturating_sub(content.len());
+        inline.push((relative, content));
+    }
+    for (name, content) in inline {
         message.push_str(&format!(
             "\n<attached_document name=\"{name}\">\n{}\n</attached_document>\n",
             content.trim_end()
         ));
     }
-    Ok(message)
+    Ok((message, report.files))
 }
 
 #[tauri::command]
@@ -2561,6 +2627,120 @@ fn project_file(workspace_path: String, path: String) -> Result<ProjectFileView,
     })
 }
 
+/// Resolves a UI reference to an existing path inside the workspace or one of
+/// its registered reference folders.
+fn resolve_reveal_target(
+    workspace_root: &Path,
+    reference_roots: &[PathBuf],
+    path: &str,
+) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("path must not be empty".to_owned());
+    }
+    let candidate = Path::new(trimmed);
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace_root.join(candidate)
+    };
+    let target = candidate
+        .canonicalize()
+        .map_err(|error| format!("path is not available: {error}"))?;
+    let mut roots = Vec::with_capacity(reference_roots.len() + 1);
+    if let Ok(root) = workspace_root.canonicalize() {
+        roots.push(root);
+    }
+    for reference in reference_roots {
+        if let Ok(root) = reference.canonicalize() {
+            roots.push(root);
+        }
+    }
+    if !roots.iter().any(|root| target.starts_with(root)) {
+        return Err("path is outside this project".to_owned());
+    }
+    Ok(target)
+}
+
+fn open_in_file_manager(target: &Path) -> Result<(), String> {
+    let containing = if target.is_dir() {
+        target.to_path_buf()
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| target.to_path_buf())
+    };
+    let mut command = reveal_command(target, &containing);
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not open the file manager: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_command(target: &Path, containing: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("open");
+    if target.is_dir() {
+        command.arg(containing);
+    } else {
+        command.arg("-R").arg(target);
+    }
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_command(target: &Path, containing: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("explorer");
+    if target.is_dir() {
+        command.arg(containing);
+    } else {
+        command.arg(format!("/select,{}", target.display()));
+    }
+    command
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_command(_target: &Path, containing: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(containing);
+    command
+}
+
+/// Opens the OS file manager at a workspace or reference-folder path.
+#[tauri::command]
+fn reveal_path(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    path: String,
+) -> Result<String, String> {
+    let raw_root = PathBuf::from(&workspace_path);
+    if !raw_root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let references: Vec<PathBuf> = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let workspace = project_workspace(&store, &workspace_path)?;
+        store
+            .list_project_repos(workspace)
+            .map(|repos| {
+                repos
+                    .into_iter()
+                    .map(|repo| PathBuf::from(repo.path))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let target = resolve_reveal_target(&raw_root, &references, &path)?;
+    open_in_file_manager(&target)?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn memories(
     state: State<'_, AppState>,
@@ -2688,51 +2868,96 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
     let messages = store
         .load_messages(session)
         .map_err(|error| error.to_string())?;
+    let turns = store.load_turns(session).unwrap_or_default();
+    let (turn_durations, total_duration_ms) = summarize_turn_durations(&turns);
+    let mut ui_messages: Vec<UiMessage> = Vec::new();
+    let mut ui_turns: Vec<Option<u32>> = Vec::new();
+    for message in &messages {
+        let ui = match message.role.as_str() {
+            "user" => {
+                let payload = &message.content;
+                Some(UiMessage {
+                    role: "user".to_owned(),
+                    text: payload
+                        .get("display")
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("content").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_owned(),
+                    attachments: payload
+                        .get("attachments")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    reasoning: None,
+                    duration_ms: None,
+                })
+            }
+            "assistant" => {
+                let turn = message.turn;
+                let Some(chat) = chat_message_from_session(message).ok() else {
+                    continue;
+                };
+                Some(UiMessage {
+                    role: "assistant".to_owned(),
+                    text: chat
+                        .content
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or_else(|| "(tool activity)".to_owned()),
+                    attachments: Vec::new(),
+                    reasoning: chat.reasoning_content,
+                    duration_ms: turn.and_then(|turn| turn_durations.get(&turn).copied()),
+                })
+            }
+            _ => None,
+        };
+        if let Some(ui) = ui {
+            ui_messages.push(ui);
+            ui_turns.push(message.turn);
+        }
+    }
+    keep_last_assistant_duration_per_turn(&mut ui_messages, &ui_turns);
     Ok(SessionView {
         session_id,
-        messages: messages
-            .iter()
-            .filter_map(|message| match message.role.as_str() {
-                "user" => {
-                    let payload = &message.content;
-                    Some(UiMessage {
-                        role: "user".to_owned(),
-                        text: payload
-                            .get("display")
-                            .and_then(Value::as_str)
-                            .or_else(|| payload.get("content").and_then(Value::as_str))
-                            .unwrap_or_default()
-                            .to_owned(),
-                        attachments: payload
-                            .get("attachments")
-                            .and_then(Value::as_array)
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(Value::as_str)
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        reasoning: None,
-                    })
-                }
-                "assistant" => {
-                    let message = chat_message_from_session(message).ok()?;
-                    Some(UiMessage {
-                        role: "assistant".to_owned(),
-                        text: message
-                            .content
-                            .filter(|text| !text.is_empty())
-                            .unwrap_or_else(|| "(tool activity)".to_owned()),
-                        attachments: Vec::new(),
-                        reasoning: message.reasoning_content,
-                    })
-                }
-                _ => None,
-            })
-            .collect(),
+        messages: ui_messages,
+        total_duration_ms,
     })
+}
+
+fn summarize_turn_durations(
+    turns: &[openbad_store::types::SessionTurn],
+) -> (std::collections::HashMap<u32, u64>, u64) {
+    let mut durations = std::collections::HashMap::new();
+    let mut total = 0_u64;
+    for turn in turns {
+        if let Some(ended) = turn.ended_at {
+            let duration = u64::try_from(ended.saturating_sub(turn.started_at)).unwrap_or(0);
+            total = total.saturating_add(duration);
+            durations.insert(turn.turn, duration);
+        }
+    }
+    (durations, total)
+}
+
+/// Only the final assistant message of a turn carries the turn duration, so a
+/// turn with tool activity reads as one timed response instead of several.
+fn keep_last_assistant_duration_per_turn(messages: &mut [UiMessage], turns: &[Option<u32>]) {
+    let mut seen_turns = std::collections::HashSet::new();
+    for (message, turn) in messages.iter_mut().zip(turns.iter()).rev() {
+        let Some(turn) = turn else {
+            continue;
+        };
+        if message.role == "assistant" && seen_turns.insert(*turn) {
+            continue;
+        }
+        message.duration_ms = None;
+    }
 }
 
 #[tauri::command]
@@ -3147,7 +3372,8 @@ pub struct McpServerInput {
     pub timeout_seconds: Option<u64>,
 }
 
-fn mcp_server_view(config: &openbad_mcp::McpServerConfig) -> McpServerView {
+fn mcp_server_view(state: &openbad_mcp::McpServerState) -> McpServerView {
+    let config = &state.config;
     McpServerView {
         name: config.name.clone(),
         transport: match config.transport {
@@ -3160,7 +3386,7 @@ fn mcp_server_view(config: &openbad_mcp::McpServerConfig) -> McpServerView {
         cwd: config.cwd.clone(),
         url: config.url.clone(),
         allowed_tools: config.allowed_tools.clone(),
-        enabled: config.enabled,
+        enabled: state.enabled,
         timeout_seconds: config.timeout_seconds,
     }
 }
@@ -3214,12 +3440,12 @@ async fn add_mcp_server(
     let spec = mcp_input_spec(name.clone(), server);
     tauri::async_runtime::spawn_blocking(move || {
         let config = mcp_server_config_from_spec(&spec, None)?;
-        manager
-            .add_server(config.clone())
+        let state = manager
+            .add_server(config, spec.enabled.unwrap_or(true))
             .map_err(|error| error.to_string())?;
         let (tools, warning) = probe_mcp_server(&manager, &name);
         Ok(McpServerChangeView {
-            server: mcp_server_view(&config),
+            server: mcp_server_view(&state),
             tools: tools
                 .into_iter()
                 .map(|tool| McpToolView {
@@ -3249,15 +3475,26 @@ async fn update_mcp_server(
             .servers()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .find(|server| server.name == name)
+            .find(|server| server.config.name == name)
             .ok_or_else(|| format!("unknown MCP server: {name}"))?;
-        let config = mcp_server_config_from_spec(&spec, Some(current))?;
+        let config = mcp_server_config_from_spec(&spec, Some(current.config))?;
         manager
-            .update_server(&name, config.clone())
+            .update_server(&name, config)
             .map_err(|error| error.to_string())?;
+        let state = match spec.enabled {
+            Some(enabled) => manager
+                .set_server_enabled(&name, enabled)
+                .map_err(|error| error.to_string())?,
+            None => manager
+                .servers()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|server| server.config.name == name)
+                .ok_or_else(|| format!("unknown MCP server: {name}"))?,
+        };
         let (tools, warning) = probe_mcp_server(&manager, &name);
         Ok(McpServerChangeView {
-            server: mcp_server_view(&config),
+            server: mcp_server_view(&state),
             tools: tools
                 .into_iter()
                 .map(|tool| McpToolView {
@@ -3446,6 +3683,7 @@ async fn chat(
     if prompt.is_empty() && attachments.is_empty() {
         return Err("message must not be empty".to_owned());
     }
+    let started = std::time::Instant::now();
     let workspace_path = PathBuf::from(workspace_path);
     if !workspace_path.is_dir() {
         return Err(format!(
@@ -3458,7 +3696,8 @@ async fn chat(
     } else {
         prompt.clone()
     };
-    let message = compose_chat_message(&prompt, &attachments)?;
+    let (message, staged_attachments) =
+        compose_chat_message(&workspace_path, &prompt, &attachments)?;
 
     let api_key = resolve_api_key(&state)?;
     let redactions = vec![api_key.clone()];
@@ -3531,9 +3770,14 @@ async fn chat(
                     .with_payload(json!({
                         "content": message,
                         "display": prompt,
-                        "attachments": attachments
+                        "attachments": staged_attachments
                             .iter()
-                            .map(|attachment| attachment.name.clone())
+                            .map(|attachment| {
+                                Path::new(&attachment.path)
+                                    .strip_prefix(&workspace_path)
+                                    .map(|path| path.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|_| attachment.name.clone())
+                            })
                             .collect::<Vec<_>>(),
                     })),
             )
@@ -3804,6 +4048,8 @@ async fn chat(
         steps: run.steps,
         usage: run.usage,
         tool_trace,
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        attachments: staged_attachments,
     })
 }
 
@@ -4056,6 +4302,7 @@ pub fn run() {
             search_project,
             project_files,
             project_file,
+            reveal_path,
             forget_memory,
             checkpoints,
             checkpoint_diff,
@@ -4412,8 +4659,10 @@ mod tests {
     }
 
     #[test]
-    fn chat_attachments_are_embedded_and_bounded() {
-        let message = compose_chat_message(
+    fn chat_attachments_are_staged_in_the_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (message, files) = compose_chat_message(
+            workspace.path(),
             "Review this",
             &[UploadSource {
                 name: "design.md".to_owned(),
@@ -4423,16 +4672,50 @@ mod tests {
         )
         .expect("message");
         assert!(message.starts_with("Review this\n\n"));
-        assert!(message.contains("<attached_document name=\"design.md\">"));
+        assert!(message.contains("- uploads/design.md (13 bytes)"));
+        assert!(message.contains("<attached_document name=\"uploads/design.md\">"));
         assert!(message.contains("# Design\nbody"));
-        assert_eq!(compose_chat_message("", &[]).expect("plain"), "");
+        assert_eq!(files.len(), 1);
+        assert!(workspace.path().join("uploads/design.md").is_file());
+        assert_eq!(
+            compose_chat_message(workspace.path(), "", &[])
+                .expect("plain")
+                .0,
+            ""
+        );
 
-        let oversized = UploadSource {
-            name: "huge.md".to_owned(),
-            path: None,
-            content: Some("x".repeat(MAX_CHAT_ATTACHMENT_BYTES as usize + 1)),
-        };
-        assert!(compose_chat_message("Review", &[oversized]).is_err());
+        let too_many = (0..=MAX_CHAT_ATTACHMENTS)
+            .map(|index| UploadSource {
+                name: format!("note-{index}.md"),
+                path: None,
+                content: Some("x".to_owned()),
+            })
+            .collect::<Vec<_>>();
+        assert!(compose_chat_message(workspace.path(), "Review", &too_many).is_err());
+    }
+
+    #[test]
+    fn binary_chat_attachments_are_staged_but_not_inlined() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = workspace.path().join("diagram.png");
+        std::fs::write(&source, [0x89, b'P', b'N', b'G', 0x00, 0xff]).expect("png");
+        let (message, files) = compose_chat_message(
+            workspace.path(),
+            "Look at this",
+            &[UploadSource {
+                name: "diagram.png".to_owned(),
+                path: Some(source.to_string_lossy().into_owned()),
+                content: None,
+            }],
+        )
+        .expect("message");
+        assert!(message.contains("- uploads/diagram.png (6 bytes)"));
+        assert!(!message.contains("<attached_document"));
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::fs::read(workspace.path().join("uploads/diagram.png")).expect("staged"),
+            vec![0x89, b'P', b'N', b'G', 0x00, 0xff]
+        );
     }
 
     #[test]
@@ -4486,6 +4769,92 @@ mod tests {
     }
 
     #[test]
+    fn turn_durations_persist_on_the_last_assistant_message() {
+        use openbad_core::SessionId;
+        use openbad_store::types::SessionTurn;
+        use uuid::Uuid;
+
+        let session = SessionId::from(Uuid::nil());
+        let turn = |number: u32, started: i64, ended: Option<i64>| SessionTurn {
+            session_id: session,
+            turn: number,
+            started_at: started,
+            ended_at: ended,
+            reason: None,
+            steps: 1,
+            input_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+        };
+        let (durations, total) = summarize_turn_durations(&[
+            turn(1, 1_000, Some(4_000)),
+            turn(2, 10_000, Some(12_500)),
+            turn(3, 20_000, None),
+        ]);
+        assert_eq!(durations.get(&1), Some(&3_000));
+        assert_eq!(durations.get(&2), Some(&2_500));
+        assert_eq!(durations.get(&3), None);
+        assert_eq!(total, 5_500);
+
+        let message = |role: &str, duration: Option<u64>| UiMessage {
+            role: role.to_owned(),
+            text: String::new(),
+            attachments: Vec::new(),
+            reasoning: None,
+            duration_ms: duration,
+        };
+        let mut messages = vec![
+            message("user", None),
+            message("assistant", Some(3_000)),
+            message("assistant", Some(3_000)),
+            message("user", None),
+            message("assistant", Some(2_500)),
+        ];
+        keep_last_assistant_duration_per_turn(
+            &mut messages,
+            &[Some(1), Some(1), Some(1), Some(2), Some(2)],
+        );
+        assert_eq!(messages[1].duration_ms, None);
+        assert_eq!(messages[2].duration_ms, Some(3_000));
+        assert_eq!(messages[4].duration_ms, Some(2_500));
+    }
+
+    #[test]
+    fn reveal_targets_stay_inside_the_project() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(workspace.path().join("src")).expect("src");
+        std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}").expect("file");
+        let reference = tempfile::tempdir().expect("reference");
+        std::fs::write(reference.path().join("README.md"), "# ref").expect("ref file");
+
+        let root = workspace.path().canonicalize().expect("root");
+        let inside = resolve_reveal_target(&root, &[], "src/main.rs").expect("inside");
+        assert!(inside.ends_with("src/main.rs"));
+        assert!(
+            resolve_reveal_target(&root, &[], "src")
+                .expect("dir")
+                .is_dir()
+        );
+        assert!(
+            resolve_reveal_target(&root, &[reference.path().to_path_buf()], "README.md").is_err(),
+            "reference files are resolved against the workspace only"
+        );
+        let absolute = reference
+            .path()
+            .join("README.md")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            resolve_reveal_target(&root, &[], &absolute).is_err(),
+            "absolute paths outside the project are rejected"
+        );
+        assert!(resolve_reveal_target(&root, &[reference.path().to_path_buf()], &absolute).is_ok());
+        assert!(resolve_reveal_target(&root, &[], "missing.txt").is_err());
+        assert!(resolve_reveal_target(&root, &[], "  ").is_err());
+    }
+
+    #[test]
     fn mcp_specs_infer_transport_and_preserve_unspecified_fields() {
         let spec = McpServerSpec {
             name: "docs".to_owned(),
@@ -4495,7 +4864,6 @@ mod tests {
         };
         let config = mcp_server_config_from_spec(&spec, None).expect("stdio config");
         assert_eq!(config.transport, openbad_mcp::McpTransport::Stdio);
-        assert!(config.enabled);
         assert_eq!(config.args, vec!["-y", "@example/mcp-docs"]);
 
         let spec = McpServerSpec {
@@ -4515,7 +4883,6 @@ mod tests {
         };
         let updated = mcp_server_config_from_spec(&patch, Some(existing)).expect("patched config");
         assert_eq!(updated.command.as_deref(), Some("npx"));
-        assert!(!updated.enabled);
         assert_eq!(updated.timeout_seconds, Some(30));
     }
 
