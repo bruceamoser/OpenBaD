@@ -33,7 +33,8 @@
     "shortDescription": "DeepSeek-first AI coding harness",
     "longDescription": "OpenBaD Desktop is a DeepSeek-first, cache-first AI coding harness.",
     "icon": [
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.ico"
     ]
   }
 }
