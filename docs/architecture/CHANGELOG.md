@@ -9,6 +9,11 @@ session knows what moved without re-reading every document.
 Bundled desktop release containing the Linux `.deb` auto-update behavior below
 on top of v0.1.1.
 
+## v0.1.3
+
+Bundled desktop release containing the rich file previews described below on top
+of v0.1.2.
+
 ## 2026-10-25
 
 - **Rich file previews.** `apps/desktop/src-tauri/src/preview.rs` classifies
