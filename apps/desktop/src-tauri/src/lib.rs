@@ -2114,7 +2114,7 @@ fn import_knowledge_file(
         .map_err(|error| error.to_string())
 }
 
-const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_UPLOAD_FILES: usize = 50;
 const MAX_KNOWLEDGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_INLINE_BYTES: usize = 256 * 1024;
@@ -2253,6 +2253,40 @@ fn unique_upload_path(directory: &Path, name: &str) -> PathBuf {
     directory.join(format!("{stem}-{}.upload", Uuid::now_v7()))
 }
 
+fn stream_path_upload(directory: &Path, path: &str) -> Result<UploadedFile, String> {
+    let canonical =
+        std::fs::canonicalize(path).map_err(|error| format!("upload source {path}: {error}"))?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("uploads must be files, not folders: {path}"));
+    }
+    if metadata.len() > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "{} is {} bytes; the maximum upload is {} bytes",
+            canonical.display(),
+            metadata.len(),
+            MAX_UPLOAD_BYTES
+        ));
+    }
+    let name = safe_upload_name(
+        canonical
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("upload"),
+    )?;
+    let destination = unique_upload_path(directory, &name);
+    std::fs::copy(&canonical, &destination).map_err(|error| format!("{name}: {error}"))?;
+    Ok(UploadedFile {
+        name: destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&name)
+            .to_owned(),
+        path: destination.to_string_lossy().into_owned(),
+        bytes: metadata.len(),
+    })
+}
+
 fn write_uploads(directory: &Path, sources: &[UploadSource]) -> Result<UploadReport, String> {
     if sources.is_empty() {
         return Err("no documents selected".to_owned());
@@ -2265,6 +2299,20 @@ fn write_uploads(directory: &Path, sources: &[UploadSource]) -> Result<UploadRep
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let mut report = UploadReport::default();
     for source in sources {
+        if let Some(path) = source
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            // Copy from disk instead of buffering the whole file so large media
+            // uploads do not need to fit in memory.
+            match stream_path_upload(directory, path) {
+                Ok(file) => report.files.push(file),
+                Err(error) => report.skipped.push(error),
+            }
+            continue;
+        }
         let (name, bytes) = match load_upload(source, MAX_UPLOAD_BYTES) {
             Ok(upload) => upload,
             Err(error) => {
@@ -4662,6 +4710,30 @@ mod tests {
         assert_eq!(report.files.len(), 1);
         assert_eq!(report.files[0].name, "notes-1.md");
         assert!(!target.path().join("escape.md").exists());
+    }
+
+    #[test]
+    fn large_path_uploads_are_streamed_into_the_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_dir = tempfile::tempdir().expect("source");
+        let source = source_dir.path().join("clip.mov");
+        let file = std::fs::File::create(&source).expect("movie");
+        file.set_len(9 * 1024 * 1024).expect("sparse movie");
+        drop(file);
+        let report = write_uploads(
+            &workspace.path().join("uploads"),
+            &[UploadSource {
+                name: "clip.mov".to_owned(),
+                path: Some(source.to_string_lossy().into_owned()),
+                content: None,
+            }],
+        )
+        .expect("upload");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].name, "clip.mov");
+        assert_eq!(report.files[0].bytes, 9 * 1024 * 1024);
+        assert!(workspace.path().join("uploads/clip.mov").is_file());
     }
 
     #[test]

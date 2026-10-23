@@ -63,12 +63,15 @@ open so the conversation keeps a usable width.
   hit, memory, or assistant-presented artifact opens it in a dedicated pane
   between the chat and the project panel. It has its own close button and
   resize handle; code files render as monospaced text rather than Markdown.
-  Previews cover images (PNG/JPEG/GIF/WebP/BMP/ICO/SVG/AVIF), PDFs (extracted
-  text), CSV/TSV and Excel/ODS workbooks (tables per sheet), Word/PowerPoint
-  documents (extracted text), audio and video (native players), and any other
-  file falls back to a size summary. Binary, PDF, Office, media, and unknown
-  files expose **Open in system viewer** (`open_path`), which launches the OS
-  default handler after the same workspace/reference containment check.
+  Previews cover images (PNG/JPEG/GIF/WebP/BMP/ICO/SVG/AVIF), PDFs (pages
+  rendered with `pdfjs-dist`, with an extracted-text fallback), CSV/TSV and
+  Excel/ODS workbooks (tables per sheet), Word/PowerPoint documents (extracted
+  text), HTML (sandboxed iframe with a Rendered/Source toggle, scripts
+  disabled), code files (line-number gutter plus highlight.js highlighting),
+  audio and video (native players), and any other file falls back to a size
+  summary. Binary, PDF, Office, media, and unknown files expose **Open in
+  system viewer** (`open_path`), which launches the OS default handler after the
+  same workspace/reference containment check.
 - **Reveal in file manager** — file and folder references carry a folder icon
   that opens the containing folder in the OS file manager (`xdg-open` on Linux,
   `open -R` on macOS, `explorer /select` on Windows). The backend resolves the
@@ -106,7 +109,9 @@ open so the conversation keeps a usable width.
   `<workspace>/uploads/`, listed by workspace path in the model-visible
   message, and inlined as `<attached_document>` blocks only when they are UTF-8
   text within the inline budget. The user message then links each staged file
-  so it can be previewed or revealed in the file manager.
+  so it can be previewed or revealed in the file manager. Workspace and
+  reference uploads accept files up to 256 MB; filesystem sources are streamed
+  to the destination rather than buffered in memory.
 - Input stays isolated from the transcript: the composer owns its draft and
   attachment state, and message cards are memoized per entry. Typing therefore
   never re-parses rendered Markdown, and streamed deltas only re-render the

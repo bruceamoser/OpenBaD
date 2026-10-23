@@ -488,6 +488,48 @@ test("renders spreadsheets as tables in the preview pane", async ({ page }) => {
   await expect(preview.getByText("58")).toBeVisible();
 });
 
+test("shows line numbers for code files", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await page
+    .getByRole("button", { name: "apps/desktop/ui/src/App.tsx", exact: true })
+    .click();
+
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview.getByTestId("line-numbers")).toContainText("1");
+  await expect(preview.getByTestId("line-numbers")).toContainText("2");
+  await expect(preview.getByRole("code")).toContainText(
+    "Mock preview for the browser harness.",
+  );
+});
+
+test("renders HTML files in a sandboxed frame", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await page.getByRole("button", { name: "docs/index.html", exact: true }).click();
+
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  const frame = preview.frameLocator('[data-testid="html-preview"]');
+  await expect(frame.getByRole("heading", { name: "Rendered HTML" })).toBeVisible();
+
+  await preview.getByRole("button", { name: "source" }).click();
+  await expect(preview.getByTestId("line-numbers")).toBeVisible();
+  await expect(preview.getByRole("code")).toContainText("<!doctype html>");
+});
+
+test("renders PDF pages on a canvas", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await page.getByRole("button", { name: "docs/report.pdf", exact: true }).click();
+
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview.getByTestId("pdf-pages").locator("canvas")).toHaveCount(1, {
+    timeout: 20_000,
+  });
+  await preview.getByRole("button", { name: "Text" }).click();
+  await expect(preview.getByText("OpenBaD report")).toBeVisible();
+});
+
 test("previews memories in the preview pane", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Memory" }).first().click();

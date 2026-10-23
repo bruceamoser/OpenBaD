@@ -4,6 +4,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { loadKnowledgeDocument, previewProjectFile } from "./backend";
+import CodeView from "./CodeView";
+import HtmlPreview from "./HtmlPreview";
+import PdfViewer from "./PdfViewer";
 import type { Artifact, ProjectFileView, SheetPreview } from "./types";
 
 export default function ArtifactViewer({
@@ -171,7 +174,11 @@ export default function ArtifactViewer({
     return <DiffView content={artifact.content ?? markdown ?? ""} />;
   }
 
-  if (previewKind === "pdf" || previewKind === "doc") {
+  if (previewKind === "pdf") {
+    return <PdfPreview file={file} title={artifact.title} />;
+  }
+
+  if (previewKind === "doc") {
     const extracted = file?.content ?? "";
     return (
       <div className="flex h-full min-h-0 flex-col">
@@ -181,13 +188,7 @@ export default function ArtifactViewer({
           {file?.truncated === true && <span>· truncated</span>}
         </div>
         {extracted.trim().length === 0 ? (
-          <EmptyPreview
-            message={
-              previewKind === "pdf"
-                ? "This PDF has no extractable text; it may be a scanned document."
-                : "No text could be extracted from this document."
-            }
-          />
+          <EmptyPreview message="No text could be extracted from this document." />
         ) : (
           <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-5 text-slate-300">
             {extracted}
@@ -234,16 +235,25 @@ export default function ArtifactViewer({
     );
   }
 
+  if (artifact.kind === "file" && markdown !== null && isHtmlArtifact(artifact)) {
+    return (
+      <HtmlPreview
+        content={markdown}
+        title={artifact.title}
+        path={file?.path ?? artifact.uri}
+      />
+    );
+  }
+
   if (artifact.kind === "file" && markdown !== null && !isMarkdownArtifact(artifact)) {
     return (
       <div className="flex h-full min-h-0 flex-col">
         <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-slate-500">
           <span className="truncate">{file?.path ?? artifact.uri}</span>
-          {artifact.language !== undefined && <span>· {artifact.language}</span>}
+          <span>· {formatFileSize(file?.size ?? 0)}</span>
+          {file?.truncated === true && <span>· truncated</span>}
         </div>
-        <pre className="min-h-0 flex-1 overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-4 text-slate-300">
-          {markdown}
-        </pre>
+        <CodeView code={markdown} path={file?.path ?? artifact.uri} />
       </div>
     );
   }
@@ -268,6 +278,67 @@ export default function ArtifactViewer({
   }
 
   return <p className="text-[10px] text-slate-500">No preview content available.</p>;
+}
+
+function PdfPreview({
+  file,
+  title,
+}: {
+  file: ProjectFileView | null;
+  title: string;
+}) {
+  const [mode, setMode] = useState<"rendered" | "text">(
+    file?.data_url ? "rendered" : "text",
+  );
+  const extracted = file?.content ?? "";
+  const canRender = typeof file?.data_url === "string";
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          disabled={!canRender}
+          onClick={() => setMode("rendered")}
+          className={`rounded px-2 py-1 text-[10px] ${
+            mode === "rendered"
+              ? "bg-emerald-400/15 text-emerald-200"
+              : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08] disabled:opacity-40"
+          }`}
+        >
+          Rendered
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("text")}
+          className={`rounded px-2 py-1 text-[10px] ${
+            mode === "text"
+              ? "bg-emerald-400/15 text-emerald-200"
+              : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]"
+          }`}
+        >
+          Text
+        </button>
+        <span className="ml-auto font-mono text-[9px] text-slate-500">
+          {formatFileSize(file?.size ?? 0)}
+        </span>
+      </div>
+      {mode === "rendered" && canRender ? (
+        <PdfViewer dataUrl={file.data_url ?? ""} title={title} />
+      ) : extracted.trim().length === 0 ? (
+        <EmptyPreview message="This PDF has no extractable text; it may be a scanned document. Use Open in system viewer." />
+      ) : (
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-5 text-slate-300">
+          {extracted}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function isHtmlArtifact(artifact: Artifact): boolean {
+  const uri = artifact.uri ?? "";
+  const extension = uri.slice(uri.lastIndexOf(".") + 1).toLowerCase();
+  return extension === "html" || extension === "htm";
 }
 
 function EmptyPreview({ message }: { message: string }) {

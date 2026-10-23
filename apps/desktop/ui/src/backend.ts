@@ -149,10 +149,14 @@ let mockFiles = [
   "crates/openbad-store/src/store.rs",
   "data/releases.csv",
   "docs/architecture/00-vision-and-feature-set.md",
+  "docs/index.html",
+  "docs/report.pdf",
 ];
 
 const MOCK_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+const MOCK_PDF =
+  "data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAzMDAgMjAwXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA0NSA+PgpzdHJlYW0KQlQgL0YxIDE4IFRmIDIwIDEwMCBUZCAoT3BlbkJhRCByZXBvcnQpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDI0MSAwMDAwMCBuIAowMDAwMDAwMzM2IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNDA2CiUlRU9GCg==";
 let mockPlan: ProjectPlan = {
   goal: "Ship the project intelligence tranche",
   status: "draft",
@@ -1141,6 +1145,26 @@ export async function previewProjectFile(
   };
   if (path.toLowerCase().endsWith(".png")) {
     return { ...base, kind: "image", data_url: MOCK_PNG, mime: "image/png", size: 68 };
+  }
+  if (path.toLowerCase().endsWith(".pdf")) {
+    return {
+      ...base,
+      kind: "pdf",
+      content: "OpenBaD report",
+      data_url: MOCK_PDF,
+      mime: "application/pdf",
+      size: 470,
+    };
+  }
+  if (path.toLowerCase().endsWith(".html") || path.toLowerCase().endsWith(".htm")) {
+    return {
+      ...base,
+      kind: "text",
+      content:
+        "<!doctype html><html><head><style>body{font-family:sans-serif;padding:24px;background:#fff;color:#123}</style></head><body><h1>Rendered HTML</h1><p>This file is rendered, not shown as source.</p></body></html>",
+      mime: "text/html",
+      size: 200,
+    };
   }
   if (path.toLowerCase().endsWith(".csv")) {
     return {

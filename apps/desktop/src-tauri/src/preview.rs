@@ -166,11 +166,16 @@ pub fn preview_file(resolved: &Path, relative: String) -> Result<ProjectFileView
             ))
         }
         PreviewKind::Pdf => {
-            check_size(size, MAX_DOCUMENT_BYTES, "PDF")?;
+            let bytes = read_bounded(resolved, size, MAX_DOCUMENT_BYTES, "PDF")?;
+            let mut view = data_url_view(relative, "pdf", size, "application/pdf", &bytes);
+            // Text extraction is only a fallback for viewers that cannot
+            // render PDF pages; a failure must not hide the document.
             let text = guarded(move || {
                 pdf_extract::extract_text(resolved).map_err(|error| error.to_string())
-            })??;
-            let mut view = ProjectFileView::new(relative, "pdf", size);
+            })
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
             let clipped = clip(&text);
             view.truncated = clipped.len() < text.len();
             view.content = Some(clipped);
@@ -496,6 +501,8 @@ mod tests {
         assert_eq!(classify("xlsx"), PreviewKind::Sheet);
         assert_eq!(classify("csv"), PreviewKind::Sheet);
         assert_eq!(classify("docx"), PreviewKind::Doc);
+        assert_eq!(classify("html"), PreviewKind::Text);
+        assert_eq!(classify("cs"), PreviewKind::Text);
         assert_eq!(classify("mp3"), PreviewKind::Audio);
         assert_eq!(classify("mp4"), PreviewKind::Video);
         assert_eq!(classify("rs"), PreviewKind::Text);
@@ -587,6 +594,12 @@ mod tests {
         assert!(
             view.content.unwrap_or_default().contains("Hello PDF"),
             "pdf text should be extracted"
+        );
+        assert!(
+            view.data_url
+                .expect("pdf data url")
+                .starts_with("data:application/pdf;base64,"),
+            "pdf bytes should be available for rendering"
         );
     }
 

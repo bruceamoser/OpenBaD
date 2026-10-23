@@ -14,6 +14,15 @@ on top of v0.1.1.
 Bundled desktop release containing the rich file previews described below on top
 of v0.1.2.
 
+## 2026-10-26
+
+- **Preview follow-ups.** `/project_file` now returns PDF bytes as a bounded
+  data URL for `pdfjs-dist` canvas rendering (extracted text remains as a
+  fallback), HTML previews render in a sandboxed iframe with a source toggle,
+  and code files render in a line-numbered highlight.js view. Workspace and
+  reference uploads stream from disk and accept up to 256 MB, so video files
+  like `.mov` can be added; chat attachment staging uses the same path.
+
 ## 2026-10-25
 
 - **Rich file previews.** `apps/desktop/src-tauri/src/preview.rs` classifies
