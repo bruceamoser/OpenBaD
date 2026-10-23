@@ -9,6 +9,17 @@ session knows what moved without re-reading every document.
 Bundled desktop release containing the Linux `.deb` auto-update behavior below
 on top of v0.1.1.
 
+## 2026-10-25
+
+- **Rich file previews.** `apps/desktop/src-tauri/src/preview.rs` classifies
+  workspace files and returns inline text, bounded data URLs for images and
+  media, tables for CSV/TSV and Excel/ODS workbooks (`calamine`), and extracted
+  text for PDF (`pdf-extract`) and DOCX/PPTX (`zip` + `quick-xml`). Unknown
+  binaries return a size summary instead of a UTF-8 error. Parsers run inside
+  `catch_unwind` with per-type size caps. New `open_path` command opens a
+  workspace/reference file with the OS default handler; the preview header and
+  the fallback states expose it.
+
 ## 2026-10-24
 
 - **Linux updates prefer the `.deb` package.** `openbad-update` now ranks

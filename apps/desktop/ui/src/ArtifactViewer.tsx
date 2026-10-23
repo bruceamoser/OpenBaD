@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { loadKnowledgeDocument, previewProjectFile } from "./backend";
-import type { Artifact, ProjectFileView } from "./types";
+import type { Artifact, ProjectFileView, SheetPreview } from "./types";
 
 export default function ArtifactViewer({
   artifact,
@@ -143,7 +143,10 @@ export default function ArtifactViewer({
     );
   }
 
-  if (artifact.kind === "image") {
+  const previewKind: ProjectFileView["kind"] | "artifact-image" | null =
+    artifact.kind === "image" ? "artifact-image" : (file?.kind ?? null);
+
+  if (previewKind === "artifact-image" || previewKind === "image") {
     const source =
       file?.data_url ??
       (artifact.uri?.startsWith("http") || artifact.uri?.startsWith("data:")
@@ -166,6 +169,69 @@ export default function ArtifactViewer({
 
   if (artifact.kind === "diff") {
     return <DiffView content={artifact.content ?? markdown ?? ""} />;
+  }
+
+  if (previewKind === "pdf" || previewKind === "doc") {
+    const extracted = file?.content ?? "";
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-slate-500">
+          <span>Extracted text</span>
+          <span>· {formatFileSize(file?.size ?? 0)}</span>
+          {file?.truncated === true && <span>· truncated</span>}
+        </div>
+        {extracted.trim().length === 0 ? (
+          <EmptyPreview
+            message={
+              previewKind === "pdf"
+                ? "This PDF has no extractable text; it may be a scanned document."
+                : "No text could be extracted from this document."
+            }
+          />
+        ) : (
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-5 text-slate-300">
+            {extracted}
+          </pre>
+        )}
+      </div>
+    );
+  }
+
+  if (previewKind === "sheet") {
+    return <SheetTable sheets={file?.sheets ?? []} truncated={file?.truncated ?? false} />;
+  }
+
+  if (previewKind === "audio" || previewKind === "video") {
+    const source = file?.data_url ?? null;
+    if (source === null) {
+      return <EmptyPreview message="No inline media data is available." />;
+    }
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.06] bg-black/30 p-3">
+        {previewKind === "audio" ? (
+          <audio controls src={source} className="w-full">
+            <track kind="captions" />
+          </audio>
+        ) : (
+          <video controls src={source} className="max-h-[70vh] w-full">
+            <track kind="captions" />
+          </video>
+        )}
+        <p className="font-mono text-[9px] text-slate-500">
+          {file?.mime} · {formatFileSize(file?.size ?? 0)}
+        </p>
+      </div>
+    );
+  }
+
+  if (previewKind === "binary") {
+    return (
+      <EmptyPreview
+        message={`No inline preview for this file type (${formatFileSize(
+          file?.size ?? 0,
+        )}). Use "Open in system viewer" for the full file.`}
+      />
+    );
   }
 
   if (artifact.kind === "file" && markdown !== null && !isMarkdownArtifact(artifact)) {
@@ -202,6 +268,99 @@ export default function ArtifactViewer({
   }
 
   return <p className="text-[10px] text-slate-500">No preview content available.</p>;
+}
+
+function EmptyPreview({ message }: { message: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-white/[0.08] px-4 py-12 text-center">
+      <Layers size={20} className="text-slate-500" />
+      <p className="max-w-[260px] text-[10px] leading-4 text-slate-500">{message}</p>
+    </div>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function SheetTable({
+  sheets,
+  truncated,
+}: {
+  sheets: SheetPreview[];
+  truncated: boolean;
+}) {
+  const [active, setActive] = useState(0);
+  if (sheets.length === 0) {
+    return <EmptyPreview message="This spreadsheet has no readable sheets." />;
+  }
+  const sheet = sheets[Math.min(active, sheets.length - 1)];
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      {sheets.length > 1 && (
+        <div className="flex shrink-0 flex-wrap gap-1">
+          {sheets.map((item, index) => (
+            <button
+              key={`${item.name}-${index}`}
+              type="button"
+              onClick={() => setActive(index)}
+              className={`rounded px-2 py-1 text-[10px] ${
+                index === active
+                  ? "bg-emerald-400/15 text-emerald-200"
+                  : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]"
+              }`}
+            >
+              {item.name}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-white/[0.06]">
+        <table className="min-w-full border-collapse text-[10px]">
+          <tbody>
+            {sheet.rows.map((row, rowIndex) => (
+              <tr
+                key={`${sheet.name}-row-${rowIndex}`}
+                className={
+                  rowIndex === 0
+                    ? "bg-white/[0.06] text-slate-200"
+                    : "text-slate-400 odd:bg-white/[0.02]"
+                }
+              >
+                <th className="sticky left-0 z-[1] border-b border-white/[0.06] bg-[#1b232e] px-2 py-1 text-right font-mono text-[9px] font-normal text-slate-500">
+                  {rowIndex + 1}
+                </th>
+                {row.map((cell, cellIndex) => (
+                  <td
+                    key={`${sheet.name}-${rowIndex}-${cellIndex}`}
+                    className="max-w-[280px] truncate border-b border-white/[0.04] px-2 py-1 font-mono"
+                  >
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {(truncated || sheet.truncated) && (
+        <p className="shrink-0 text-[9px] text-amber-300">
+          Preview truncated to the first rows and columns. Open in system viewer for
+          the full sheet.
+        </p>
+      )}
+    </div>
+  );
 }
 
 function isMarkdownArtifact(artifact: Artifact): boolean {

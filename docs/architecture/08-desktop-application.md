@@ -63,6 +63,12 @@ open so the conversation keeps a usable width.
   hit, memory, or assistant-presented artifact opens it in a dedicated pane
   between the chat and the project panel. It has its own close button and
   resize handle; code files render as monospaced text rather than Markdown.
+  Previews cover images (PNG/JPEG/GIF/WebP/BMP/ICO/SVG/AVIF), PDFs (extracted
+  text), CSV/TSV and Excel/ODS workbooks (tables per sheet), Word/PowerPoint
+  documents (extracted text), audio and video (native players), and any other
+  file falls back to a size summary. Binary, PDF, Office, media, and unknown
+  files expose **Open in system viewer** (`open_path`), which launches the OS
+  default handler after the same workspace/reference containment check.
 - **Reveal in file manager** — file and folder references carry a folder icon
   that opens the containing folder in the OS file manager (`xdg-open` on Linux,
   `open -R` on macOS, `explorer /select` on Windows). The backend resolves the
@@ -305,7 +311,7 @@ Targets:
 | Knowledge | `knowledge_documents`, `add_knowledge_note`, `import_knowledge_file`, `delete_knowledge_document` |
 | MCP | `mcp_servers`, `add_mcp_server`, `update_mcp_server`, `remove_mcp_server`, `set_mcp_server_enabled`, `test_mcp_server` (definitions are global; enablement is per project) |
 | Updates | `check_for_updates`, `install_update` |
-| Project areas | `project_overview`, `project_repos`, `add_project_repo`, `remove_project_repo`, `project_files`, `project_file`, `search_project`, `reveal_path` |
+| Project areas | `project_overview`, `project_repos`, `add_project_repo`, `remove_project_repo`, `project_files`, `project_file`, `search_project`, `reveal_path`, `open_path` |
 | Models | `list_routes`, `set_route`, `test_provider`, `refresh_balance` |
 | Governance | `pending_approvals`, `decide_approval`, `audit_verify` |
 | Autonomic | `jobs_list`, `job_cancel`, `schedules_list`, `pulse_snapshot` |

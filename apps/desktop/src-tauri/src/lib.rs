@@ -1,3 +1,5 @@
+mod preview;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2559,72 +2561,18 @@ fn search_project(
         .map_err(|error| error.to_string())
 }
 
-#[derive(Serialize)]
-pub struct ProjectFileView {
-    pub path: String,
-    pub kind: String,
-    pub content: Option<String>,
-    pub data_url: Option<String>,
-}
-
 #[tauri::command]
-fn project_file(workspace_path: String, path: String) -> Result<ProjectFileView, String> {
-    const MAX_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
+fn project_file(workspace_path: String, path: String) -> Result<preview::ProjectFileView, String> {
     let workspace = WorkspaceService::new(PathBuf::from(&workspace_path));
     let resolved = workspace
         .resolve(Path::new(&path))
         .map_err(|error| error.to_string())?;
-    let metadata = std::fs::metadata(&resolved).map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Err("preview path is not a file".to_owned());
-    }
-    if metadata.len() > MAX_PREVIEW_BYTES {
-        return Err(format!(
-            "file is too large to preview ({} bytes, maximum {MAX_PREVIEW_BYTES})",
-            metadata.len()
-        ));
-    }
-    let extension = resolved
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
     let relative = resolved
         .strip_prefix(workspace.root())
         .unwrap_or(&resolved)
         .to_string_lossy()
         .into_owned();
-    if matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico"
-    ) {
-        let bytes = std::fs::read(&resolved).map_err(|error| error.to_string())?;
-        use base64::Engine as _;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let mime = match extension.as_str() {
-            "svg" => "image/svg+xml",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            "ico" => "image/x-icon",
-            _ => "image/png",
-        };
-        return Ok(ProjectFileView {
-            path: relative,
-            kind: "image".to_owned(),
-            content: None,
-            data_url: Some(format!("data:{mime};base64,{encoded}")),
-        });
-    }
-    let content = std::fs::read_to_string(&resolved)
-        .map_err(|error| format!("file is not UTF-8 text: {error}"))?;
-    Ok(ProjectFileView {
-        path: relative,
-        kind: "text".to_owned(),
-        content: Some(content.chars().take(400_000).collect()),
-        data_url: None,
-    })
+    preview::preview_file(&resolved, relative)
 }
 
 /// Resolves a UI reference to an existing path inside the workspace or one of
@@ -2660,6 +2608,26 @@ fn resolve_reveal_target(
         return Err("path is outside this project".to_owned());
     }
     Ok(target)
+}
+
+fn reference_roots(
+    state: &State<'_, AppState>,
+    workspace_path: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = project_workspace(&store, workspace_path)?;
+    Ok(store
+        .list_project_repos(workspace)
+        .map(|repos| {
+            repos
+                .into_iter()
+                .map(|repo| PathBuf::from(repo.path))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 fn open_in_file_manager(target: &Path) -> Result<(), String> {
@@ -2709,6 +2677,37 @@ fn reveal_command(_target: &Path, containing: &Path) -> std::process::Command {
     command
 }
 
+fn open_with_system(target: &Path) -> Result<(), String> {
+    let mut command = open_command(target);
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not open the file: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_command(target: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("open");
+    command.arg(target);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn open_command(target: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "start", ""]).arg(target);
+    command
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_command(target: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(target);
+    command
+}
+
 /// Opens the OS file manager at a workspace or reference-folder path.
 #[tauri::command]
 fn reveal_path(
@@ -2720,24 +2719,29 @@ fn reveal_path(
     if !raw_root.is_dir() {
         return Err(format!("workspace is not a directory: {workspace_path}"));
     }
-    let references: Vec<PathBuf> = {
-        let store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let workspace = project_workspace(&store, &workspace_path)?;
-        store
-            .list_project_repos(workspace)
-            .map(|repos| {
-                repos
-                    .into_iter()
-                    .map(|repo| PathBuf::from(repo.path))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    let references = reference_roots(&state, &workspace_path)?;
     let target = resolve_reveal_target(&raw_root, &references, &path)?;
     open_in_file_manager(&target)?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+/// Opens a workspace or reference-file with the OS default application.
+#[tauri::command]
+fn open_path(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    path: String,
+) -> Result<String, String> {
+    let raw_root = PathBuf::from(&workspace_path);
+    if !raw_root.is_dir() {
+        return Err(format!("workspace is not a directory: {workspace_path}"));
+    }
+    let references = reference_roots(&state, &workspace_path)?;
+    let target = resolve_reveal_target(&raw_root, &references, &path)?;
+    if !target.is_file() {
+        return Err("only files can be opened with the system handler".to_owned());
+    }
+    open_with_system(&target)?;
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -4304,6 +4308,7 @@ pub fn run() {
             project_files,
             project_file,
             reveal_path,
+            open_path,
             forget_memory,
             checkpoints,
             checkpoint_diff,
