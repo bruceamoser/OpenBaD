@@ -14,6 +14,11 @@ on top of v0.1.1.
 Bundled desktop release containing the rich file previews described below on top
 of v0.1.2.
 
+## v0.1.4
+
+Bundled desktop release containing the preview follow-ups below on top of
+v0.1.3.
+
 ## 2026-10-26
 
 - **Preview follow-ups.** `/project_file` now returns PDF bytes as a bounded
