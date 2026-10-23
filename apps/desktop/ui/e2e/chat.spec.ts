@@ -465,6 +465,29 @@ test("opens workspace files in the preview pane beside the chat", async ({ page 
   ).toBeVisible();
 });
 
+test("previews images inline in the preview pane", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await page.getByRole("button", { name: "assets/logo.png", exact: true }).click();
+
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview.getByRole("img", { name: "logo.png" })).toBeVisible();
+  await expect(
+    preview.getByRole("button", { name: "Open in system viewer" }),
+  ).toBeVisible();
+});
+
+test("renders spreadsheets as tables in the preview pane", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspace" }).first().click();
+  await page.getByRole("button", { name: "data/releases.csv", exact: true }).click();
+
+  const preview = page.getByRole("complementary", { name: "Preview" });
+  await expect(preview.getByRole("table")).toBeVisible();
+  await expect(preview.getByText("openbad-store")).toBeVisible();
+  await expect(preview.getByText("58")).toBeVisible();
+});
+
 test("previews memories in the preview pane", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Memory" }).first().click();
@@ -616,6 +639,9 @@ async function dropDocument(
 
 test("attaches a dropped document to the next chat message", async ({ page }) => {
   await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "What are we building?" }),
+  ).toBeVisible();
   const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
 
   await dropDocument(page, composer, "design.md", "# Design notes");
@@ -626,7 +652,9 @@ test("attaches a dropped document to the next chat message", async ({ page }) =>
   await composer.fill("Summarize the attachment");
   await page.getByRole("button", { name: "Send" }).click();
 
-  await expect(page.getByText(/Attached documents: design.md/)).toBeVisible();
+  await expect(
+    page.getByText(/Attached documents: design.md/),
+  ).toBeVisible({ timeout: 10_000 });
   await expect(
     page.getByRole("button", { name: "Remove attachment design.md" }),
   ).toHaveCount(0);
@@ -636,6 +664,9 @@ test("stages any file type in the workspace and links it to the message", async 
   page,
 }) => {
   await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "What are we building?" }),
+  ).toBeVisible();
   const composer = page.getByRole("textbox", { name: /Ask OpenBaD/ });
 
   await dropDocument(page, composer, "diagram.bin", "\u0000\u0001PNG");

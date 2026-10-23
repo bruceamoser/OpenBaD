@@ -1,6 +1,7 @@
 import { FileCode2, Image, Layers, Sparkles, X, Globe } from "lucide-react";
 
 import ArtifactViewer from "./ArtifactViewer";
+import OpenExternalButton from "./OpenExternalButton";
 import RevealButton from "./RevealButton";
 import type { Artifact } from "./types";
 
@@ -76,11 +77,18 @@ export default function PreviewPane({
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {revealable && artifact.uri !== undefined && (
-              <RevealButton
-                workspacePath={workspacePath}
-                path={artifact.uri}
-                className="p-1.5 hover:bg-white/10"
-              />
+              <>
+                <OpenExternalButton
+                  workspacePath={workspacePath}
+                  path={artifact.uri}
+                  className="p-1.5 hover:bg-white/10"
+                />
+                <RevealButton
+                  workspacePath={workspacePath}
+                  path={artifact.uri}
+                  className="p-1.5 hover:bg-white/10"
+                />
+              </>
             )}
             <button
               type="button"

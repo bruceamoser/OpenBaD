@@ -225,11 +225,21 @@ export type ProjectOverview = {
   index: WorkspaceIndexSummary;
 };
 
+export type SheetPreview = {
+  name: string;
+  rows: string[][];
+  truncated: boolean;
+};
+
 export type ProjectFileView = {
   path: string;
-  kind: "text" | "image";
+  kind: "text" | "image" | "pdf" | "sheet" | "doc" | "audio" | "video" | "binary";
   content: string | null;
   data_url: string | null;
+  mime: string | null;
+  size: number;
+  sheets: SheetPreview[];
+  truncated: boolean;
 };
 
 export type Artifact = {

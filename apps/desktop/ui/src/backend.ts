@@ -144,10 +144,15 @@ function mockMcpTools(server: McpServer): McpTool[] {
 let mockFiles = [
   "apps/desktop/ui/src/App.tsx",
   "apps/desktop/ui/src/backend.ts",
+  "assets/logo.png",
   "crates/openbad-agent/src/lib.rs",
   "crates/openbad-store/src/store.rs",
+  "data/releases.csv",
   "docs/architecture/00-vision-and-feature-set.md",
 ];
+
+const MOCK_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
 let mockPlan: ProjectPlan = {
   goal: "Ship the project intelligence tranche",
   status: "draft",
@@ -1125,12 +1130,51 @@ export async function previewProjectFile(
   if (isTauri) {
     return invoke<ProjectFileView>("project_file", { workspacePath, path });
   }
-  return {
+  const base = {
     path,
+    content: null,
+    data_url: null,
+    mime: null,
+    size: 0,
+    sheets: [],
+    truncated: false,
+  };
+  if (path.toLowerCase().endsWith(".png")) {
+    return { ...base, kind: "image", data_url: MOCK_PNG, mime: "image/png", size: 68 };
+  }
+  if (path.toLowerCase().endsWith(".csv")) {
+    return {
+      ...base,
+      kind: "sheet",
+      sheets: [
+        {
+          name: "CSV",
+          rows: [
+            ["crate", "tests"],
+            ["openbad-store", "42"],
+            ["openbad-tools", "58"],
+          ],
+          truncated: false,
+        },
+      ],
+    };
+  }
+  return {
+    ...base,
     kind: "text",
     content: `// ${path}\n// Mock preview for the browser harness.\n`,
-    data_url: null,
+    size: 64,
   };
+}
+
+export async function openPath(
+  workspacePath: string,
+  path: string,
+): Promise<string> {
+  if (isTauri) {
+    return invoke<string>("open_path", { workspacePath, path });
+  }
+  return path;
 }
 
 export async function revealPath(
