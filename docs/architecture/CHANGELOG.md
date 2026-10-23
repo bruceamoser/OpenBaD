@@ -4,6 +4,11 @@ The assistant loads this file with the project instructions. Add a short entry
 whenever an architecture document or the tool/runtime surface changes, so a new
 session knows what moved without re-reading every document.
 
+## v0.1.2
+
+Bundled desktop release containing the Linux `.deb` auto-update behavior below
+on top of v0.1.1.
+
 ## 2026-10-24
 
 - **Linux updates prefer the `.deb` package.** `openbad-update` now ranks
