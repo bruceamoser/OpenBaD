@@ -19,6 +19,11 @@ of v0.1.2.
 Bundled desktop release containing the preview follow-ups below on top of
 v0.1.3.
 
+## v0.1.5
+
+Bundled desktop release containing the project export/import described below on
+top of v0.1.4.
+
 ## 2026-10-27
 
 - **Project export/import.** New `openbad-transfer` crate packs a project into a
