@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   AccessMode,
@@ -28,6 +28,8 @@ import type {
   ProjectManifest,
   ProjectOverview,
   ProjectPlan,
+  ProjectExportReport,
+  ProjectImportReport,
   ProjectQuestion,
   ProjectRepo,
   ProjectTodo,
@@ -346,6 +348,120 @@ export async function createProject(name: string): Promise<WorkspaceSummary> {
   };
   mockProjects = [project, ...mockProjects];
   return project;
+}
+
+export async function pickSaveFile(
+  title: string,
+  defaultPath: string,
+): Promise<string | null> {
+  if (isTauri) {
+    return save({
+      title,
+      defaultPath,
+      filters: [{ name: "OpenBaD project", extensions: ["openbad-project"] }],
+    });
+  }
+  return `${mockWorkspacesDirectory}/${defaultPath.split("/").at(-1) ?? "project.openbad-project"}`;
+}
+
+export async function pickImportBundle(): Promise<string | null> {
+  if (isTauri) {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title: "Import OpenBaD project",
+      filters: [{ name: "OpenBaD project", extensions: ["openbad-project"] }],
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return `${mockWorkspacesDirectory}/OpenBaD.openbad-project`;
+}
+
+export async function exportProject(
+  workspacePath: string,
+  destination: string,
+): Promise<ProjectExportReport> {
+  if (isTauri) {
+    return invoke<ProjectExportReport>("export_project", { workspacePath, destination });
+  }
+  return {
+    path: destination,
+    project_name: "OpenBaD",
+    files: 128,
+    bytes: 18_450_000,
+    sessions: 4,
+    memories: 7,
+    knowledge_documents: 3,
+    checkpoints: 12,
+    warnings: [
+      "Reference folders are not included; re-add them on the new machine.",
+      "The model API key is not included; enter it in Settings after importing.",
+    ],
+  };
+}
+
+export async function importProject(
+  bundlePath: string,
+  destinationParent: string,
+): Promise<ProjectImportReport> {
+  if (isTauri) {
+    return invoke<ProjectImportReport>("import_project", {
+      bundlePath,
+      destinationParent,
+    });
+  }
+  const path = `${destinationParent}/OpenBaD`;
+  if (!mockProjects.some((project) => project.path === path)) {
+    mockProjects = [
+      {
+        id: `mock-project-${mockProjects.length + 1}`,
+        name: "OpenBaD",
+        path,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        session_count: 4,
+      },
+      ...mockProjects,
+    ];
+  }
+  return {
+    path,
+    project_name: "OpenBaD",
+    files: 128,
+    sessions: 4,
+    memories: 7,
+    knowledge_documents: 3,
+    checkpoints: 12,
+    warnings: [
+      "Reference folders are not part of the bundle; re-add them for this machine.",
+      "The model API key is not part of the bundle; enter it in Settings.",
+    ],
+  };
+}
+
+export async function importProjectInto(
+  workspacePath: string,
+  bundlePath: string,
+): Promise<ProjectImportReport> {
+  if (isTauri) {
+    return invoke<ProjectImportReport>("import_project_into", {
+      workspacePath,
+      bundlePath,
+    });
+  }
+  return {
+    path: workspacePath,
+    project_name: "OpenBaD",
+    files: 128,
+    sessions: 2,
+    memories: 7,
+    knowledge_documents: 3,
+    checkpoints: 5,
+    warnings: [
+      "Reference folders are not part of the bundle; re-add them for this machine.",
+      "The model API key is not part of the bundle; enter it in Settings.",
+    ],
+  };
 }
 
 export async function pickDirectory(title: string): Promise<string | null> {

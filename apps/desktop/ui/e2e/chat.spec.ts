@@ -594,6 +594,46 @@ test("refreshes open project areas without switching tabs", async ({ page }) => 
   ).toBeVisible({ timeout: 8_000 });
 });
 
+test("exports a project bundle from the Project menu", async ({ page }) => {
+  await page.goto("/");
+  await clickMenu(page, "Project", "Export Project…");
+
+  const dialog = page.getByRole("dialog", { name: "Export complete" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(/128 files/)).toBeVisible();
+  await expect(dialog.getByText(/Reference folders are not included/)).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
+test("imports a project bundle as a new project", async ({ page }) => {
+  await page.goto("/");
+  await clickMenu(page, "Project", "Import Project…");
+
+  const dialog = page.getByRole("dialog", { name: "Import complete" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(/128 files/)).toBeVisible();
+  await expect(dialog.getByText(/API key is not part of the bundle/)).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByText("/mnt/disk4/repos/reference-library/OpenBaD")).toBeVisible();
+});
+
+test("merges a bundle into the current project from the panel", async ({ page }) => {
+  await page.goto("/");
+  await clickMenu(page, "View", "Overview");
+  await page.getByRole("button", { name: "Import project bundle" }).click();
+
+  const confirm = page.getByRole("dialog", { name: "Merge project bundle" });
+  await expect(confirm).toBeVisible();
+  await expect(confirm.getByText(/Files that exist in both places are overwritten/)).toBeVisible();
+  await confirm.getByRole("button", { name: "Merge bundle" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Merge complete" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(/2 chats/)).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+});
+
 test("shows durable project todos in the split panel", async ({ page }) => {
   await page.goto("/");
   await clickMenu(page, "View", "Todos");

@@ -339,7 +339,40 @@ Targets:
 Events are batched and ordered. The UI can request a replay from a sequence
 number after a disconnect.
 
-## 10. Packaging and updates
+## 10. Project transfer
+
+Projects travel as a single `.openbad-project` zip bundle:
+
+- `openbad-project.json` — format version, app version, project name, export
+  time, counts, and warnings.
+- `state/workspace.json` — sessions (events, message projections, turns),
+  memories, knowledge documents and chunks, and file checkpoints, scoped to the
+  project.
+- `workspace/...` — the workspace tree, including `.git` and `.openbad`.
+  Rebuildable output (`node_modules`, `target`, virtualenvs, caches, coverage)
+  and `.gitignore`d paths are skipped; symlinks are skipped with a warning.
+
+Reference folders are never bundled because their absolute paths are
+machine-specific. Secrets stay in the OS keychain: the API key must be entered
+again on the target machine, and global MCP definitions are not part of a
+project (only `.openbad/mcp.yaml` enablement names travel). The DeepSeek model
+route is not exported; the target uses its own routing.
+
+- **Project → Export Project…** packs the active project to a chosen file via
+  `export_project`. The archive is written next to the destination and renamed
+  into place.
+- **Project → Import Project…** imports into a new directory under a chosen
+  parent (`import_project`) and switches to it.
+- **Import icon in the project panel** merges a bundle into the current project
+  (`import_project_into`): conflicting files are overwritten, local-only files
+  are kept, chats append as new sessions (a session already copied from the
+  same bundle is not copied a second time), and knowledge/memories/checkpoints
+  are upserted by id, so re-importing the same bundle is idempotent.
+- Extraction rejects absolute paths, `..`, and backslash-separated entries;
+  manifests with a future format version are refused with an upgrade message.
+  Parsers cap manifest and state payloads (1 MB and 512 MB).
+
+## 11. Packaging and updates
 
 - **Linux:** AppImage and `.deb` (WebKitGTK dependency documented).
 - **macOS:** `.dmg`, universal binary (aarch64 + x86_64).
@@ -372,7 +405,7 @@ number after a disconnect.
 - **Size:** target < 30 MB shell; embedding model downloaded on demand.
 - **Telemetry:** off by default; opt-in, redacted, local viewer.
 
-## 11. Error surfaces
+## 12. Error surfaces
 
 | Error | UI |
 | --- | --- |
@@ -386,7 +419,7 @@ number after a disconnect.
 | DB issue | Diagnostics panel with backup/restore |
 | Crash | Restart prompt with session recovery |
 
-## 12. Testing
+## 13. Testing
 
 | Layer | Tool | What |
 | --- | --- | --- |

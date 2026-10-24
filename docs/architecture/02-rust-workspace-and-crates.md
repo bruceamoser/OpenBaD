@@ -50,7 +50,8 @@ OpenBaD/
 │   ├── openbad-autonomic/
 │   ├── openbad-governance/
 │   ├── openbad-mcp/
-│   └── openbad-update/
+│   ├── openbad-update/
+│   └── openbad-transfer/
 ├── tests/
 │   ├── integration/
 │   ├── fixtures/
@@ -77,6 +78,7 @@ OpenBaD/
 | `openbad-governance` | Capability policy, risk classification, approvals, audit, redaction, secrets | Model calls |
 | `openbad-mcp` | MCP server lifecycle, tool/resource/prompt import, auth | Agent loop |
 | `openbad-update` | GitHub release checks, asset selection, checksum-verified downloads, AppImage and installer handoff | UI, session runtime |
+| `openbad-transfer` | Portable project bundles: workspace packing with rebuildable-output exclusions, project state export/import | Agent loop, tools |
 | `openbad-terminal` | Persistent PTY sessions, output buffering, process-group cleanup | Agent loop |
 | `apps/desktop/src-tauri` | Tauri commands, event bridge, window/tray/menu, updater | Domain logic |
 
@@ -115,12 +117,14 @@ flowchart BT
     Mcp[openbad-mcp] --> Core
     Tools --> Mcp
     Upd[openbad-update]
+    Transfer[openbad-transfer] --> Store
     Desktop[apps/desktop] --> Harness
     Desktop --> Auto
     Desktop --> Store
     Desktop --> Llm
     Desktop --> Gov
     Desktop --> Upd
+    Desktop --> Transfer
 ```
 
 Rules:

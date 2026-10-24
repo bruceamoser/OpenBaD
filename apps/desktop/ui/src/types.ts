@@ -39,6 +39,29 @@ export type ChatReply = {
   attachments: UploadedFile[];
 };
 
+export type ProjectExportReport = {
+  path: string;
+  project_name: string;
+  files: number;
+  bytes: number;
+  sessions: number;
+  memories: number;
+  knowledge_documents: number;
+  checkpoints: number;
+  warnings: string[];
+};
+
+export type ProjectImportReport = {
+  path: string;
+  project_name: string;
+  files: number;
+  sessions: number;
+  memories: number;
+  knowledge_documents: number;
+  checkpoints: number;
+  warnings: string[];
+};
+
 export type ChatAttachment = {
   name: string;
   path?: string;

@@ -5,6 +5,7 @@ pub mod error;
 pub mod migrations;
 pub mod projections;
 pub mod store;
+pub mod transfer;
 pub mod types;
 
 pub use error::StoreError;
