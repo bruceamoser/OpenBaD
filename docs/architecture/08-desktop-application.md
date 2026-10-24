@@ -343,8 +343,8 @@ number after a disconnect.
 
 Projects travel as a single `.openbad-project` zip bundle:
 
-- `openbad-project.json` — format version, app version, project name, export
-  time, counts, and warnings.
+- `openbad-project.json` — format version, app version, project name and
+  original path (informational), export time, counts, and warnings.
 - `state/workspace.json` — sessions (events, message projections, turns),
   memories, knowledge documents and chunks, and file checkpoints, scoped to the
   project.

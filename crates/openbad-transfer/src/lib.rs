@@ -60,6 +60,10 @@ pub struct BundleManifest {
     pub format_version: u32,
     pub app_version: String,
     pub project_name: String,
+    /// The exporting machine's workspace path. Informational only; imports
+    /// always use the destination chosen on this machine.
+    #[serde(default)]
+    pub source_path: String,
     pub exported_at: i64,
     #[serde(default)]
     pub counts: BundleCounts,
@@ -149,6 +153,7 @@ pub fn export_project(
         format_version: BUNDLE_FORMAT_VERSION,
         app_version: app_version.to_owned(),
         project_name: workspace.name.clone(),
+        source_path: workspace.path.clone(),
         exported_at: now_millis(),
         counts: counts.clone(),
         warnings: warnings.clone(),
@@ -693,6 +698,10 @@ mod tests {
         assert!(!names.iter().any(|name| name.contains("node_modules")));
         assert!(!names.iter().any(|name| name.contains("target/")));
         assert!(!names.iter().any(|name| name.contains("generated")));
+
+        let manifest = bundle_manifest(&bundle).expect("manifest");
+        assert_eq!(manifest.format_version, BUNDLE_FORMAT_VERSION);
+        assert_eq!(manifest.source_path, path_string(root.path()));
     }
 
     #[test]
