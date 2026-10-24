@@ -1604,6 +1604,123 @@ fn project_todos(workspace_path: String) -> Result<Vec<ProjectTodo>, String> {
     serde_json::from_str(&content).map_err(|error| format!("invalid .openbad/todos.json: {error}"))
 }
 
+/// Warns when an imported project enables MCP servers this machine has not
+/// defined globally.
+fn mcp_transfer_warnings(state: &AppState, workspace_root: &Path) -> Vec<String> {
+    let Ok(project) = openbad_mcp::McpProjectConfig::load(workspace_root) else {
+        return Vec::new();
+    };
+    if project.enabled.is_empty() {
+        return Vec::new();
+    }
+    let Ok(manager) = state.mcp.get(workspace_root) else {
+        return Vec::new();
+    };
+    let Ok(servers) = manager.servers() else {
+        return Vec::new();
+    };
+    let defined = servers
+        .iter()
+        .map(|server| server.config.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let missing = project
+        .enabled
+        .iter()
+        .filter(|name| !defined.contains(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "Enabled MCP servers missing on this machine: {}",
+            missing.join(", ")
+        )]
+    }
+}
+
+/// Packs a project into a portable bundle for another machine.
+#[tauri::command]
+async fn export_project(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    workspace_path: String,
+    destination: String,
+) -> Result<openbad_transfer::ExportReport, String> {
+    let store = Arc::clone(&state.store);
+    let version = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let workspace = project_workspace(&store, &workspace_path)?;
+        openbad_transfer::export_project(&store, workspace, Path::new(&destination), &version)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Imports a bundle into a new project directory under `destination_parent`.
+#[tauri::command]
+async fn import_project(
+    state: State<'_, AppState>,
+    bundle_path: String,
+    destination_parent: String,
+) -> Result<openbad_transfer::ImportReport, String> {
+    let manifest = openbad_transfer::bundle_manifest(Path::new(&bundle_path))
+        .map_err(|error| error.to_string())?;
+    let destination = PathBuf::from(&destination_parent).join(
+        openbad_transfer::safe_project_directory_name(&manifest.project_name),
+    );
+    let store = Arc::clone(&state.store);
+    let bundle_for_import = bundle_path.clone();
+    let destination_for_import = destination.clone();
+    let mut report = tauri::async_runtime::spawn_blocking(move || {
+        let store = store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        openbad_transfer::import_project(
+            &store,
+            Path::new(&bundle_for_import),
+            &destination_for_import,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    report
+        .warnings
+        .extend(mcp_transfer_warnings(&state, &destination));
+    Ok(report)
+}
+
+/// Merges a bundle into an existing project: files overwrite, extras stay,
+/// and chats append.
+#[tauri::command]
+async fn import_project_into(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    bundle_path: String,
+) -> Result<openbad_transfer::ImportReport, String> {
+    let store = Arc::clone(&state.store);
+    let workspace_for_import = workspace_path.clone();
+    let mut report = tauri::async_runtime::spawn_blocking(move || {
+        let store = store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let workspace = project_workspace(&store, &workspace_for_import)?;
+        openbad_transfer::import_project_merge(&store, workspace, Path::new(&bundle_path))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    report
+        .warnings
+        .extend(mcp_transfer_warnings(&state, Path::new(&workspace_path)));
+    Ok(report)
+}
+
 #[tauri::command]
 fn project_overview(
     state: State<'_, AppState>,
@@ -4299,6 +4416,9 @@ pub fn run() {
             list_projects,
             add_project,
             create_project,
+            export_project,
+            import_project,
+            import_project_into,
             workspaces_directory,
             rename_project,
             remove_project,

@@ -2873,6 +2873,7 @@ dependencies = [
  "openbad-store",
  "openbad-terminal",
  "openbad-tools",
+ "openbad-transfer",
  "openbad-update",
  "openbad-workspace",
  "pdf-extract",
@@ -2991,6 +2992,7 @@ dependencies = [
 name = "openbad-store"
 version = "0.1.4"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "directories",
  "openbad-core",
@@ -3036,6 +3038,20 @@ dependencies = [
  "tokio",
  "wait-timeout",
  "zip 2.6.1",
+]
+
+[[package]]
+name = "openbad-transfer"
+version = "0.1.4"
+dependencies = [
+ "ignore",
+ "openbad-core",
+ "openbad-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zip 7.3.0",
 ]
 
 [[package]]

@@ -8,8 +8,10 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CheckCircle2,
   CircleAlert,
   Clock3,
+  PackageOpen,
   Copy,
   Database,
   FileText,
@@ -49,6 +51,9 @@ import {
   revokeOutsideAccess as revokeFilesystemAccess,
   listProjects as fetchProjects,
   loadCheckpoints as fetchCheckpoints,
+  exportProject as exportProjectBundle,
+  importProject as importProjectBundle,
+  importProjectInto as importProjectIntoBundle,
   loadProjectAreaCounts,
   loadFoundation as fetchFoundation,
   loadMemories as fetchMemories,
@@ -61,6 +66,9 @@ import {
   restoreCheckpoint as restoreStoredCheckpoint,
   saveApiKey as persistApiKey,
   quitApp,
+  pickDirectory,
+  pickImportBundle,
+  pickSaveFile,
   searchSessions as searchStoredSessions,
   setSessionAccessMode as persistSessionAccessMode,
   steerChat as steerRunningTurn,
@@ -90,6 +98,8 @@ import type {
   OutsideAccessGrant,
   OutsideAccessRequest,
   ProjectAreaCounts,
+  ProjectExportReport,
+  ProjectImportReport,
   SessionSummary,
   ToolApprovalRequest,
   UploadSource,
@@ -180,6 +190,8 @@ export default function App() {
   const [previewWidth, setPreviewWidth] = useState(420);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [totalDurationMs, setTotalDurationMs] = useState(0);
+  const [transfer, setTransfer] = useState<TransferState | null>(null);
+  const [mergeBundle, setMergeBundle] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [projectRevision, setProjectRevision] = useState(0);
   const [areaCounts, setAreaCounts] = useState<ProjectAreaCounts | null>(null);
@@ -261,9 +273,12 @@ export default function App() {
 
   const loadProjects = useCallback(async () => {
     try {
-      setProjects(await fetchProjects());
+      const next = await fetchProjects();
+      setProjects(next);
+      return next;
     } catch (cause) {
       setError(describeError(cause));
+      return [];
     }
   }, []);
 
@@ -509,6 +524,112 @@ export default function App() {
     setError(null);
     followRef.current = true;
   }, []);
+
+  const exportProjectFlow = useCallback(async () => {
+    if (activeProject === null || workspacePath.length === 0) {
+      return;
+    }
+    try {
+      const destination = await pickSaveFile(
+        "Export project",
+        `${activeProject.name}.openbad-project`,
+      );
+      if (destination === null) {
+        return;
+      }
+      setTransfer({
+        phase: "running",
+        label: `Packing ${activeProject.name}…`,
+      });
+      const report = await exportProjectBundle(workspacePath, destination);
+      setTransfer({ phase: "done", title: "Export complete", report });
+    } catch (cause) {
+      setTransfer({
+        phase: "error",
+        title: "Export failed",
+        message: describeError(cause),
+      });
+    }
+  }, [activeProject, workspacePath]);
+
+  const importProjectFlow = useCallback(async () => {
+    try {
+      const bundle = await pickImportBundle();
+      if (bundle === null) {
+        return;
+      }
+      const parent = await pickDirectory("Choose where to create the imported project");
+      if (parent === null) {
+        return;
+      }
+      setTransfer({ phase: "running", label: "Importing project…" });
+      const report = await importProjectBundle(bundle, parent);
+      const next = await loadProjects();
+      const imported = next.find((project) => project.path === report.path);
+      if (imported !== undefined) {
+        selectProject(imported);
+      }
+      setTransfer({ phase: "done", title: "Import complete", report });
+      void loadSessions();
+      void loadArchivedSessions();
+      void loadFoundation();
+    } catch (cause) {
+      setTransfer({
+        phase: "error",
+        title: "Import failed",
+        message: describeError(cause),
+      });
+    }
+  }, [loadArchivedSessions, loadFoundation, loadProjects, loadSessions, selectProject]);
+
+  const startMergeImport = useCallback(async () => {
+    if (activeProject === null) {
+      return;
+    }
+    try {
+      const bundle = await pickImportBundle();
+      if (bundle === null) {
+        return;
+      }
+      setMergeBundle(bundle);
+    } catch (cause) {
+      setTransfer({
+        phase: "error",
+        title: "Import failed",
+        message: describeError(cause),
+      });
+    }
+  }, [activeProject]);
+
+  const confirmMergeImport = useCallback(async () => {
+    if (mergeBundle === null || activeProject === null || workspacePath.length === 0) {
+      return;
+    }
+    const bundle = mergeBundle;
+    setMergeBundle(null);
+    try {
+      setTransfer({ phase: "running", label: `Merging into ${activeProject.name}…` });
+      const report = await importProjectIntoBundle(workspacePath, bundle);
+      setTransfer({ phase: "done", title: "Merge complete", report });
+      setProjectRevision((value) => value + 1);
+      void loadSessions();
+      void loadArchivedSessions();
+      void loadFoundation();
+    } catch (cause) {
+      setTransfer({
+        phase: "error",
+        title: "Import failed",
+        message: describeError(cause),
+      });
+    }
+  }, [
+    activeProject,
+    loadArchivedSessions,
+    loadFoundation,
+    loadSessions,
+    mergeBundle,
+    workspacePath,
+  ]);
 
   const newSession = useCallback(() => {
     setSessionId(null);
@@ -1390,6 +1511,16 @@ export default function App() {
           disabled: activeProject === null,
           onSelect: () => openPanel("knowledge"),
         },
+        { label: "separator", separator: true },
+        {
+          label: "Export Project…",
+          disabled: activeProject === null,
+          onSelect: () => void exportProjectFlow(),
+        },
+        {
+          label: "Import Project…",
+          onSelect: () => void importProjectFlow(),
+        },
       ],
     },
     {
@@ -1929,6 +2060,7 @@ export default function App() {
               sessionId={sessionId}
               onOpenSettings={openSettings}
               onArtifact={openArtifact}
+              onImportBundle={() => void startMergeImport()}
               revision={projectRevision}
               onWorkspaceChanged={() => setProjectRevision((value) => value + 1)}
             />
@@ -2009,7 +2141,58 @@ export default function App() {
             setCommandOpen(false);
             setSidebarOpen((open) => !open);
           }}
+          onExportProject={() => {
+            setCommandOpen(false);
+            void exportProjectFlow();
+          }}
+          onImportProject={() => {
+            setCommandOpen(false);
+            void importProjectFlow();
+          }}
         />
+      )}
+
+      {transfer !== null && (
+        <TransferDialog state={transfer} onClose={() => setTransfer(null)} />
+      )}
+
+      {mergeBundle !== null && activeProject !== null && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Merge project bundle"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
+            <h2 className="text-[14px] font-medium text-slate-100">
+              Merge this bundle into {activeProject.name}?
+            </h2>
+            <p className="mt-2 text-[11px] leading-5 text-slate-400">
+              Files that exist in both places are overwritten, files that only
+              exist locally are kept, and imported chats are appended as new
+              sessions.
+            </p>
+            <p className="mt-2 break-all font-mono text-[9px] text-slate-500">
+              {mergeBundle}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setMergeBundle(null)}
+                className="rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmMergeImport()}
+                className="rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300"
+              >
+                Merge bundle
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {projectDialogOpen && (
@@ -2291,6 +2474,87 @@ function appendStepText(
       ? "\n"
       : "\n\n";
   return `${current}${separator}${incoming}`;
+}
+
+type TransferState =
+  | { phase: "running"; label: string }
+  | {
+      phase: "done";
+      title: string;
+      report: ProjectExportReport | ProjectImportReport;
+    }
+  | { phase: "error"; title: string; message: string };
+
+function TransferDialog({
+  state,
+  onClose,
+}: {
+  state: TransferState;
+  onClose: () => void;
+}) {
+  const done = state.phase === "done";
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={done ? state.title : "Project transfer"}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+    >
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
+        <div className="flex items-start gap-2">
+          {state.phase === "running" && (
+            <Loader2 size={16} className="mt-0.5 shrink-0 animate-spin text-emerald-300" />
+          )}
+          {state.phase === "done" && (
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-300" />
+          )}
+          {state.phase === "error" && (
+            <CircleAlert size={16} className="mt-0.5 shrink-0 text-rose-300" />
+          )}
+          <div className="min-w-0">
+            <h2 className="text-[14px] font-medium text-slate-100">
+              {state.phase === "running" ? "Project transfer" : state.title}
+            </h2>
+            <p className="mt-1 text-[11px] leading-5 text-slate-400">
+              {state.phase === "running" && state.label}
+              {state.phase === "error" && state.message}
+              {state.phase === "done" && (
+                <>
+                  {state.report.files} files · {state.report.sessions} chats ·{" "}
+                  {state.report.knowledge_documents} knowledge docs ·{" "}
+                  {state.report.memories} memories ·{" "}
+                  {state.report.checkpoints} checkpoints
+                </>
+              )}
+            </p>
+            {done && state.report.warnings.length > 0 && (
+              <ul className="mt-2 space-y-1 text-[10px] leading-4 text-amber-300/90">
+                {state.report.warnings.map((warning) => (
+                  <li key={warning}>• {warning}</li>
+                ))}
+              </ul>
+            )}
+            {done && (
+              <p className="mt-2 break-all font-mono text-[9px] text-slate-500">
+                {state.report.path}
+              </p>
+            )}
+          </div>
+        </div>
+        {state.phase !== "running" && (
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+            >
+              Close
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 const MessageCard = memo(function MessageCard({
@@ -2825,6 +3089,8 @@ function CommandPalette({
   onSettings,
   onContext,
   onToggleSidebar,
+  onExportProject,
+  onImportProject,
 }: {
   onClose: () => void;
   onNewSession: () => void;
@@ -2832,12 +3098,16 @@ function CommandPalette({
   onSettings: (tab: SettingsTab) => void;
   onContext: (tab: PanelTab) => void;
   onToggleSidebar: () => void;
+  onExportProject: () => void;
+  onImportProject: () => void;
 }) {
   const [query, setQuery] = useState("");
   const actions = [
     { label: "New session", hint: "Ctrl N", run: onNewSession },
     { label: "New project", hint: "", run: onAddProject },
     { label: "Toggle sidebar", hint: "", run: onToggleSidebar },
+    { label: "Export project", hint: "", run: onExportProject },
+    { label: "Import project", hint: "", run: onImportProject },
     { label: "Settings: Model", hint: "", run: () => onSettings("model") },
     { label: "Settings: Access", hint: "", run: () => onSettings("access") },
     { label: "Settings: Secrets", hint: "", run: () => onSettings("secrets") },

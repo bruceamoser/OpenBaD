@@ -10,6 +10,7 @@ import {
   KeyRound,
   Layers,
   Loader2,
+  PackageOpen,
   RefreshCw,
   Search,
   Trash2,
@@ -111,6 +112,7 @@ export type ProjectPanelProps = {
     tab: "model" | "access" | "secrets" | "project" | "about",
   ) => void;
   onArtifact: (artifact: Artifact | null) => void;
+  onImportBundle: () => void;
   revision: number;
   onWorkspaceChanged: () => void;
 };
@@ -141,6 +143,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     sessionId,
     onOpenSettings,
     onArtifact,
+    onImportBundle,
     revision,
     onWorkspaceChanged,
   } = props;
@@ -298,14 +301,25 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               ` · ${overview.repos} references · ${overview.knowledge_documents} docs`}
           </p>
         </div>
-        <button
-          type="button"
-          aria-label="Close project panel"
-          onClick={onClose}
-          className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
-        >
-          <X size={15} />
-        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            aria-label="Import project bundle"
+            title="Merge an OpenBaD project bundle into this project"
+            onClick={onImportBundle}
+            className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-emerald-300"
+          >
+            <PackageOpen size={14} />
+          </button>
+          <button
+            type="button"
+            aria-label="Close project panel"
+            onClick={onClose}
+            className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+          >
+            <X size={15} />
+          </button>
+        </div>
       </div>
 
       <div className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-white/[0.06] px-2 py-1.5">

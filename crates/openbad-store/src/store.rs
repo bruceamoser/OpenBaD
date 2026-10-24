@@ -201,6 +201,11 @@ enum WriteCommand {
         document_id: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
+    ImportWorkspaceState {
+        workspace_id: WorkspaceId,
+        state: Box<crate::transfer::WorkspaceState>,
+        reply: SyncSender<Result<crate::transfer::ImportCounts, StoreError>>,
+    },
     CreateSubagent {
         record: SubagentRecord,
         reply: SyncSender<Result<SubagentRecord, StoreError>>,
@@ -941,6 +946,29 @@ impl Store {
         self.write(|reply| WriteCommand::AppendEvent {
             session_id,
             draft,
+            reply,
+        })
+    }
+
+    /// Reads all project-scoped state for a transfer bundle.
+    pub fn export_workspace_state(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<crate::transfer::WorkspaceState, StoreError> {
+        let connection = self.reader()?;
+        crate::transfer::export_workspace_state(&connection, workspace_id)
+    }
+
+    /// Restores a transfer bundle's state into a workspace. Rows are upserted
+    /// by id, so re-importing the same bundle is idempotent.
+    pub fn import_workspace_state(
+        &self,
+        workspace_id: WorkspaceId,
+        state: crate::transfer::WorkspaceState,
+    ) -> Result<crate::transfer::ImportCounts, StoreError> {
+        self.write(|reply| WriteCommand::ImportWorkspaceState {
+            workspace_id,
+            state: Box::new(state),
             reply,
         })
     }
@@ -2836,6 +2864,17 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 reply,
             } => {
                 let _ = reply.send(append_event(&mut connection, session_id, draft));
+            }
+            WriteCommand::ImportWorkspaceState {
+                workspace_id,
+                state,
+                reply,
+            } => {
+                let _ = reply.send(crate::transfer::import_workspace_state(
+                    &mut connection,
+                    workspace_id,
+                    &state,
+                ));
             }
             WriteCommand::CreateWorkspace { workspace, reply } => {
                 let _ = reply.send(create_workspace(&connection, workspace));

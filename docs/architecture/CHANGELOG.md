@@ -19,6 +19,19 @@ of v0.1.2.
 Bundled desktop release containing the preview follow-ups below on top of
 v0.1.3.
 
+## 2026-10-27
+
+- **Project export/import.** New `openbad-transfer` crate packs a project into a
+  single `.openbad-project` zip: workspace files (including `.git` and
+  `.openbad`, excluding rebuildable output and `.gitignore`d paths) plus
+  sessions/events/messages/turns, memories, knowledge chunks, and file
+  checkpoints. Reference folders, secrets, and global MCP definitions are
+  excluded by design. `openbad-store` gains `export_workspace_state` /
+  `import_workspace_state` with idempotent upserts. Desktop adds
+  `export_project`, `import_project` (new project), and `import_project_into`
+  (merge/overwrite) plus Project-menu and project-panel UI. Extraction rejects
+  unsafe archive paths and future format versions.
+
 ## 2026-10-26
 
 - **Preview follow-ups.** `/project_file` now returns PDF bytes as a bounded
