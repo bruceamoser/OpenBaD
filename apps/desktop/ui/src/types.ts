@@ -66,6 +66,7 @@ export type ChatAttachment = {
   name: string;
   path?: string;
   bytes?: number;
+  previewUrl?: string;
 };
 
 export type ChatEntry = {
@@ -382,6 +383,79 @@ export type UploadSource = {
   name: string;
   path?: string;
   content?: string;
+  /** Base64 bytes for clipboard images and other path-less files. */
+  contentBase64?: string;
+  mime?: string;
+  /** Local-only object URL used to preview images in the composer. */
+  previewUrl?: string;
+};
+
+export type ServiceStatus = {
+  id: string;
+  name: string;
+  description: string;
+  kind: string;
+  url: string | null;
+  envVar: string | null;
+  status: string;
+  detail: string;
+  installHint: string;
+};
+
+export type GitFileChange = {
+  path: string;
+  oldPath: string | null;
+  indexStatus: string;
+  worktreeStatus: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+};
+
+export type GitBranch = {
+  name: string;
+  current: boolean;
+  remote: boolean;
+  upstream: string | null;
+};
+
+export type GitRemote = {
+  name: string;
+  url: string;
+};
+
+export type GitCommit = {
+  hash: string;
+  shortHash: string;
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+  refs: string;
+};
+
+export type GitRepoStatus = {
+  path: string;
+  name: string;
+  isRepo: boolean;
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  hasCommits: boolean;
+  files: GitFileChange[];
+  branches: GitBranch[];
+  remotes: GitRemote[];
+  lastCommit: GitCommit | null;
+  operation: string | null;
+  error: string | null;
+};
+
+export type GitCommandResult = {
+  ok: boolean;
+  message: string;
+  status: GitRepoStatus | null;
 };
 
 export type UploadedFile = {

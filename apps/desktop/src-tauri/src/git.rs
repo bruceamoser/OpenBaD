@@ -1,0 +1,794 @@
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde::Serialize;
+use tauri::State;
+
+use crate::AppState;
+
+const GIT_TIMEOUT_SECS: u64 = 120;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileChange {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub index_status: String,
+    pub worktree_status: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+    pub remote: bool,
+    pub upstream: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRemote {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub email: String,
+    pub date: String,
+    pub subject: String,
+    pub refs: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepoStatus {
+    pub path: String,
+    pub name: String,
+    pub is_repo: bool,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub has_commits: bool,
+    pub files: Vec<GitFileChange>,
+    pub branches: Vec<GitBranch>,
+    pub remotes: Vec<GitRemote>,
+    pub last_commit: Option<GitCommit>,
+    pub operation: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommandResult {
+    pub ok: bool,
+    pub message: String,
+    pub status: Option<GitRepoStatus>,
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut child = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed().as_secs() < GIT_TIMEOUT_SECS => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("git {} timed out", args.join(" ")));
+            }
+            Err(error) => return Err(format!("git process failed: {error}")),
+        }
+    }
+    child
+        .wait_with_output()
+        .map_err(|error| format!("git output failed: {error}"))
+}
+
+fn text(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).trim().to_owned()
+}
+
+fn is_repo(repo: &Path) -> bool {
+    git(repo, &["rev-parse", "--is-inside-work-tree"])
+        .map(|output| output.status.success() && text(&output) == "true")
+        .unwrap_or(false)
+}
+
+fn branch_name(repo: &Path) -> (Option<String>, bool) {
+    if let Ok(output) = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]) {
+        if output.status.success() {
+            let name = text(&output);
+            if !name.is_empty() {
+                return (Some(name), false);
+            }
+        }
+    }
+    if let Ok(output) = git(repo, &["rev-parse", "--short", "HEAD"]) {
+        if output.status.success() {
+            let name = text(&output);
+            if !name.is_empty() {
+                return (Some(name), true);
+            }
+        }
+    }
+    (None, false)
+}
+
+fn upstream(repo: &Path) -> Option<String> {
+    git(
+        repo,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| text(&output))
+    .filter(|value| !value.is_empty())
+}
+
+fn ahead_behind(repo: &Path, upstream: Option<&str>) -> (u32, u32) {
+    let Some(upstream) = upstream else {
+        return (0, 0);
+    };
+    let range = format!("{upstream}...HEAD");
+    let Ok(output) = git(repo, &["rev-list", "--left-right", "--count", &range]) else {
+        return (0, 0);
+    };
+    if !output.status.success() {
+        return (0, 0);
+    }
+    let value = text(&output);
+    let mut parts = value.split_whitespace();
+    let behind = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ahead = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    (ahead, behind)
+}
+
+fn parse_files(repo: &Path) -> Vec<GitFileChange> {
+    let Ok(output) = git(repo, &["status", "--porcelain=v1", "-z"]) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut parts = raw.split('\0');
+    let mut files = Vec::new();
+    while let Some(entry) = parts.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let index_status = entry[0..1].to_owned();
+        let worktree_status = entry[1..2].to_owned();
+        let path = entry[3..].to_owned();
+        let old_path = if index_status == "R" || index_status == "C" {
+            parts.next().map(str::to_owned)
+        } else {
+            None
+        };
+        let untracked = index_status == "?" && worktree_status == "?";
+        files.push(GitFileChange {
+            path,
+            old_path,
+            staged: !untracked && index_status != " ",
+            unstaged: !untracked && worktree_status != " ",
+            untracked,
+            index_status,
+            worktree_status,
+        });
+    }
+    files
+}
+
+fn parse_branches(repo: &Path) -> Vec<GitBranch> {
+    let mut branches = Vec::new();
+    for (kind, current_marker) in [("refs/heads", true), ("refs/remotes", false)] {
+        let Ok(output) = git(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)",
+                kind,
+            ],
+        ) else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        for line in text(&output).lines() {
+            let mut fields = line.split('\0');
+            let Some(name) = fields.next().filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            let marker = fields.next().unwrap_or_default();
+            let upstream = fields.next().unwrap_or_default();
+            let remote = !current_marker;
+            branches.push(GitBranch {
+                name: name.to_owned(),
+                current: marker == "*",
+                remote,
+                upstream: if upstream.is_empty() {
+                    None
+                } else {
+                    Some(upstream.to_owned())
+                },
+            });
+        }
+    }
+    branches.sort_by(|left, right| {
+        right
+            .current
+            .cmp(&left.current)
+            .then_with(|| left.remote.cmp(&right.remote))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    branches
+}
+
+fn parse_remotes(repo: &Path) -> Vec<GitRemote> {
+    let Ok(output) = git(repo, &["remote", "-v"]) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut remotes: Vec<GitRemote> = Vec::new();
+    for line in text(&output).lines() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else { continue };
+        let Some(url) = fields.next() else { continue };
+        if fields.next() != Some("(fetch)") {
+            continue;
+        }
+        if let Some(existing) = remotes.iter_mut().find(|remote| remote.name == name) {
+            existing.url = url.to_owned();
+        } else {
+            remotes.push(GitRemote {
+                name: name.to_owned(),
+                url: url.to_owned(),
+            });
+        }
+    }
+    remotes
+}
+
+fn last_commit(repo: &Path) -> Option<GitCommit> {
+    let output = git(
+        repo,
+        &[
+            "log",
+            "-1",
+            "--format=%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%D",
+        ],
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = text(&output);
+    let mut fields = value.split('\0');
+    Some(GitCommit {
+        hash: fields.next()?.to_owned(),
+        short_hash: fields.next()?.to_owned(),
+        author: fields.next()?.to_owned(),
+        email: fields.next()?.to_owned(),
+        date: fields.next()?.to_owned(),
+        subject: fields.next()?.to_owned(),
+        refs: fields.next().unwrap_or_default().to_owned(),
+    })
+}
+
+fn operation(repo: &Path) -> Option<String> {
+    let git_dir = git(repo, &["rev-parse", "--git-dir"]).ok()?;
+    if !git_dir.status.success() {
+        return None;
+    }
+    let git_dir_text = text(&git_dir);
+    let path = Path::new(&git_dir_text);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo.join(path)
+    };
+    for (name, label) in [
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ] {
+        if path.join(name).exists() {
+            return Some(label.to_owned());
+        }
+    }
+    None
+}
+
+pub fn status_for(repo: &Path) -> GitRepoStatus {
+    let mut status = GitRepoStatus {
+        path: repo.to_string_lossy().into_owned(),
+        name: repo
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository")
+            .to_owned(),
+        is_repo: false,
+        branch: None,
+        detached: false,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        has_commits: false,
+        files: Vec::new(),
+        branches: Vec::new(),
+        remotes: Vec::new(),
+        last_commit: None,
+        operation: None,
+        error: None,
+    };
+    if !is_repo(repo) {
+        return status;
+    }
+    status.is_repo = true;
+    let (branch, detached) = branch_name(repo);
+    status.branch = branch;
+    status.detached = detached;
+    status.upstream = upstream(repo);
+    let (ahead, behind) = ahead_behind(repo, status.upstream.as_deref());
+    status.ahead = ahead;
+    status.behind = behind;
+    status.has_commits = git(repo, &["rev-parse", "--verify", "HEAD"])
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    status.files = parse_files(repo);
+    status.branches = parse_branches(repo);
+    status.remotes = parse_remotes(repo);
+    status.last_commit = last_commit(repo);
+    status.operation = operation(repo);
+    status
+}
+
+fn canonical(path: &str) -> Result<PathBuf, String> {
+    std::fs::canonicalize(path).map_err(|error| format!("{path}: {error}"))
+}
+
+/// Only allow operations on the project workspace or a registered reference.
+fn checked_repo(
+    state: &AppState,
+    workspace_path: &str,
+    repo_path: &str,
+) -> Result<PathBuf, String> {
+    let workspace = canonical(workspace_path)?;
+    let repo = canonical(repo_path)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let Some(workspace) = store
+        .list_workspaces()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|candidate| canonical(&candidate.path).ok().as_deref() == Some(workspace.as_path()))
+    else {
+        return Err(format!(
+            "{} is not a registered project",
+            workspace_path
+        ));
+    };
+    if repo == Path::new(&workspace.path) {
+        return Ok(repo);
+    }
+    let references = store
+        .list_project_repos(workspace.id)
+        .map_err(|error| error.to_string())?;
+    if references.iter().any(|reference| {
+        canonical(&reference.path).ok().as_deref() == Some(repo.as_path())
+    }) {
+        Ok(repo)
+    } else {
+        Err(format!(
+            "{} is not the workspace or a registered reference",
+            repo_path
+        ))
+    }
+}
+
+fn validate_branch(branch: &str) -> Result<(), String> {
+    if branch.is_empty() || branch.len() > 240 || branch.starts_with('-') {
+        return Err("invalid branch name".to_owned());
+    }
+    if branch.chars().any(|character| {
+        character.is_control() || matches!(character, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    }) {
+        return Err("invalid branch name".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_paths(paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("select at least one file".to_owned());
+    }
+    for path in paths {
+        let candidate = Path::new(path);
+        if path.is_empty()
+            || candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(format!("invalid path: {path}"));
+        }
+    }
+    Ok(())
+}
+
+fn action(
+    state: &AppState,
+    workspace_path: &str,
+    repo_path: &str,
+    args: &[&str],
+) -> Result<GitCommandResult, String> {
+    let repo = checked_repo(state, workspace_path, repo_path)?;
+    let output = git(&repo, args)?;
+    let mut message = text(&output);
+    let error = stderr(&output);
+    if !message.is_empty() && !error.is_empty() {
+        message.push('\n');
+    }
+    message.push_str(&error);
+    Ok(GitCommandResult {
+        ok: output.status.success(),
+        message,
+        status: Some(status_for(&repo)),
+    })
+}
+
+#[tauri::command]
+pub fn git_repo_status(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+) -> Result<GitRepoStatus, String> {
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    Ok(status_for(&repo))
+}
+
+#[tauri::command]
+pub fn git_init(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+) -> Result<GitCommandResult, String> {
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    if is_repo(&repo) {
+        return Ok(GitCommandResult {
+            ok: true,
+            message: "already a git repository".to_owned(),
+            status: Some(status_for(&repo)),
+        });
+    }
+    let output = git(&repo, &["init", "-b", "main"])?;
+    let mut message = text(&output);
+    let error = stderr(&output);
+    if !message.is_empty() && !error.is_empty() {
+        message.push('\n');
+    }
+    message.push_str(&error);
+    Ok(GitCommandResult {
+        ok: output.status.success(),
+        message,
+        status: Some(status_for(&repo)),
+    })
+}
+
+#[tauri::command]
+pub fn git_checkout(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    branch: String,
+    create: bool,
+) -> Result<GitCommandResult, String> {
+    validate_branch(&branch)?;
+    let args = if create {
+        vec!["switch", "-c", branch.as_str()]
+    } else {
+        vec!["switch", branch.as_str()]
+    };
+    action(&state, &workspace_path, &repo_path, &args)
+}
+
+#[tauri::command]
+pub fn git_fetch(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    remote: Option<String>,
+) -> Result<GitCommandResult, String> {
+    let mut args = vec!["fetch", "--prune"];
+    if let Some(remote) = remote.as_deref() {
+        validate_branch(remote)?;
+        args.push(remote);
+    }
+    action(&state, &workspace_path, &repo_path, &args)
+}
+
+#[tauri::command]
+pub fn git_pull(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    mode: Option<String>,
+) -> Result<GitCommandResult, String> {
+    let mut args = vec!["pull"];
+    match mode.as_deref().unwrap_or("ff-only") {
+        "merge" => args.push("--no-rebase"),
+        "rebase" => args.push("--rebase"),
+        _ => args.push("--ff-only"),
+    }
+    action(&state, &workspace_path, &repo_path, &args)
+}
+
+#[tauri::command]
+pub fn git_push(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    remote: Option<String>,
+    branch: Option<String>,
+    set_upstream: bool,
+) -> Result<GitCommandResult, String> {
+    let mut args = vec!["push"];
+    if set_upstream {
+        args.push("--set-upstream");
+    }
+    if let Some(remote) = remote.as_deref() {
+        validate_branch(remote)?;
+        args.push(remote);
+    }
+    if let Some(branch) = branch.as_deref() {
+        validate_branch(branch)?;
+        args.push(branch);
+    }
+    action(&state, &workspace_path, &repo_path, &args)
+}
+
+#[tauri::command]
+pub fn git_stage(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    paths: Vec<String>,
+) -> Result<GitCommandResult, String> {
+    validate_paths(&paths)?;
+    let mut args = vec!["add", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    action(&state, &workspace_path, &repo_path, &args)
+}
+
+#[tauri::command]
+pub fn git_unstage(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    paths: Vec<String>,
+) -> Result<GitCommandResult, String> {
+    validate_paths(&paths)?;
+    let mut args = vec!["restore", "--staged", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    action(&state, &workspace_path, &repo_path, &args)
+}
+
+#[tauri::command]
+pub fn git_commit(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    message: String,
+    stage_all: bool,
+) -> Result<GitCommandResult, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("commit message is required".to_owned());
+    }
+    if message.len() > 20_000 {
+        return Err("commit message is too long".to_owned());
+    }
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    if stage_all {
+        let output = git(&repo, &["add", "-A"])?;
+        if !output.status.success() {
+            return Ok(GitCommandResult {
+                ok: false,
+                message: stderr(&output),
+                status: Some(status_for(&repo)),
+            });
+        }
+    }
+    let output = git(&repo, &["commit", "-m", message])?;
+    let mut result = text(&output);
+    let error = stderr(&output);
+    if !result.is_empty() && !error.is_empty() {
+        result.push('\n');
+    }
+    result.push_str(&error);
+    Ok(GitCommandResult {
+        ok: output.status.success(),
+        message: result,
+        status: Some(status_for(&repo)),
+    })
+}
+
+#[tauri::command]
+pub fn git_diff(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    path: Option<String>,
+    staged: bool,
+    context_lines: Option<u32>,
+) -> Result<String, String> {
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    let context = format!("-U{}", context_lines.unwrap_or(3).min(20));
+    let mut args = vec!["diff", "--no-color", context.as_str()];
+    if staged {
+        args.push("--staged");
+    }
+    if let Some(path) = path.as_deref() {
+        validate_paths(&[path.to_owned()])?;
+        args.push("--");
+        args.push(path);
+    }
+    let output = git(&repo, &args)?;
+    if !output.status.success() {
+        return Err(stderr(&output));
+    }
+    let mut diff = String::from_utf8_lossy(&output.stdout).into_owned();
+    const MAX_DIFF_BYTES: usize = 256 * 1024;
+    if diff.len() > MAX_DIFF_BYTES {
+        diff.truncate(MAX_DIFF_BYTES);
+        diff.push_str("\n… diff truncated");
+    }
+    Ok(diff)
+}
+
+#[tauri::command]
+pub fn git_log(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_path: String,
+    limit: Option<u32>,
+) -> Result<Vec<GitCommit>, String> {
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    let limit = format!("-{}", limit.unwrap_or(20).clamp(1, 100));
+    let output = git(
+        &repo,
+        &[
+            "log",
+            limit.as_str(),
+            "--format=%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%D",
+        ],
+    )?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\0');
+            Some(GitCommit {
+                hash: fields.next()?.to_owned(),
+                short_hash: fields.next()?.to_owned(),
+                author: fields.next()?.to_owned(),
+                email: fields.next()?.to_owned(),
+                date: fields.next()?.to_owned(),
+                subject: fields.next()?.to_owned(),
+                refs: fields.next().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_repo() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let repo = directory.path();
+        let output = git(repo, &["init", "-b", "main"]).expect("git init");
+        assert!(output.status.success());
+        for (key, value) in [
+            ("user.name", "OpenBaD Test"),
+            ("user.email", "test@openbad.local"),
+        ] {
+            let output = git(repo, &["config", key, value]).expect("git config");
+            assert!(output.status.success());
+        }
+        directory
+    }
+
+    fn commit_file(repo: &Path, name: &str, content: &str) {
+        std::fs::write(repo.join(name), content).expect("write file");
+        let output = git(repo, &["add", name]).expect("git add");
+        assert!(output.status.success());
+        let output = git(repo, &["commit", "-m", "initial"]).expect("git commit");
+        assert!(output.status.success(), "{}", stderr(&output));
+    }
+
+    #[test]
+    fn status_reports_branch_commit_and_changes() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "README.md", "initial\n");
+        std::fs::write(repo.join("README.md"), "changed\n").expect("update file");
+        std::fs::write(repo.join("new.txt"), "new\n").expect("new file");
+
+        let status = status_for(repo);
+        assert!(status.is_repo);
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert!(!status.detached);
+        assert!(status.has_commits);
+        assert!(status.last_commit.is_some());
+        assert!(status.files.iter().any(|file| file.path == "README.md" && file.unstaged));
+        assert!(status.files.iter().any(|file| file.path == "new.txt" && file.untracked));
+    }
+
+    #[test]
+    fn branch_and_path_validation_rejects_injection() {
+        assert!(validate_branch("feature/git-panel").is_ok());
+        assert!(validate_branch("main").is_ok());
+        assert!(validate_branch("-danger").is_err());
+        assert!(validate_branch("bad branch").is_err());
+        assert!(validate_paths(&["src/main.rs".to_owned()]).is_ok());
+        assert!(validate_paths(&["/etc/passwd".to_owned()]).is_err());
+        assert!(validate_paths(&["../outside".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn stage_commit_and_diff_round_trip() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "a.txt", "one\n");
+        std::fs::write(repo.join("a.txt"), "two\n").expect("update");
+        let output = git(repo, &["add", "a.txt"]).expect("add");
+        assert!(output.status.success());
+        let diff = git(repo, &["diff", "--staged", "--no-color"]).expect("diff");
+        assert!(text(&diff).contains("-one"));
+        assert!(text(&diff).contains("+two"));
+        let output = git(repo, &["commit", "-m", "update"]).expect("commit");
+        assert!(output.status.success());
+        let status = status_for(repo);
+        assert!(status.files.is_empty());
+    }
+}

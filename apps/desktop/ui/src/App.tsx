@@ -18,9 +18,9 @@ import {
   Folder,
   FolderGit2,
   FolderOpen,
+  GitBranch,
   Gauge,
   KeyRound,
-  ListTodo,
   Loader2,
   MessageSquare,
   PanelLeftClose,
@@ -82,6 +82,7 @@ import ChatComposer from "./ChatComposer";
 import type { ChatComposerHandle } from "./ChatComposer";
 import MarkdownMessage from "./MarkdownMessage";
 import McpSettings from "./McpSettings";
+import ServicesSettings from "./ServicesSettings";
 import UpdatePanel from "./UpdatePanel";
 import { droppedToUploads, useFileDropZone } from "./dropzone";
 import ProjectPanel from "./ProjectPanel";
@@ -90,6 +91,7 @@ import RevealButton from "./RevealButton";
 import type { PanelTab } from "./ProjectPanel";
 import type {
   AccessMode,
+  AgentEvent,
   Artifact,
   ChatEntry,
   FileCheckpointSummary,
@@ -115,7 +117,7 @@ type Preferences = {
 };
 
 type PermissionMode = AccessMode;
-type SettingsTab = "model" | "access" | "secrets" | "mcp" | "project" | "about";
+type SettingsTab = "model" | "access" | "secrets" | "mcp" | "project" | "services" | "about";
 
 function countSuffix(primary?: number, total?: number): string {
   if (primary === undefined) {
@@ -149,6 +151,63 @@ function loadPreferences(): Preferences {
     // Ignore unavailable or malformed storage.
   }
   return defaultPreferences;
+}
+
+type BackgroundRun = {
+  id: string;
+  projectId: string | null;
+  projectName: string;
+  workspacePath: string;
+  sessionId: string | null;
+  permissionMode: PermissionMode;
+  entries: ChatEntry[];
+  busy: boolean;
+  pendingToolApproval: ToolApprovalRequest | null;
+  pendingAccessRequest: OutsideAccessRequest | null;
+  pendingArtifact: Artifact | null;
+  error: string | null;
+};
+
+function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
+  switch (event.type) {
+    case "step":
+      return { ...entry, status: `Step ${event.step}` };
+    case "reasoning":
+      return {
+        ...entry,
+        reasoning: appendStepText(
+          entry.reasoning ?? "",
+          event.text,
+          entry.lastReasoningStep,
+          event.step,
+        ),
+        lastReasoningStep: event.step,
+      };
+    case "content":
+      return {
+        ...entry,
+        text: appendStepText(entry.text, event.text, entry.lastContentStep, event.step),
+        lastContentStep: event.step,
+        status: "Writing…",
+      };
+    case "tool_call":
+      return {
+        ...entry,
+        status: `Calling ${event.name}…`,
+        tools: [...(entry.tools ?? []), `→ ${event.name}(${event.arguments})`],
+      };
+    case "tool_result":
+      return {
+        ...entry,
+        status: `${event.name} finished`,
+        tools: [
+          ...(entry.tools ?? []),
+          `${event.is_error ? "✗" : "✓"} ${event.name}: ${event.content}`,
+        ],
+      };
+    case "usage":
+      return { ...entry, usage: event.usage };
+  }
 }
 
 export default function App() {
@@ -217,6 +276,10 @@ export default function App() {
   const autoCollapsedSidebar = useRef(false);
   const sendRef = useRef<(text: string) => void>(() => undefined);
   const steerRef = useRef<(text: string) => void>(() => undefined);
+  const runsRef = useRef<Map<string, BackgroundRun>>(new Map());
+  const visibleRunRef = useRef<string | null>(null);
+  const workspacePathRef = useRef(workspacePath);
+  workspacePathRef.current = workspacePath;
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -511,17 +574,22 @@ export default function App() {
   }, []);
 
   const selectProject = useCallback((project: WorkspaceSummary) => {
+    const run = runsRef.current.get(project.path);
+    visibleRunRef.current = run === undefined ? null : project.path;
     setActiveProjectId(project.id);
     setWorkspacePath(project.path);
     setProjectNameDraft(project.name);
     rememberProjectPath(project.path);
-    setSessionId(null);
-    setEntries([]);
-    setPermissionMode("read");
-    setAccessRequest(null);
-    setToolApproval(null);
+    setSessionId(run?.sessionId ?? null);
+    setEntries(run === undefined ? [] : [...run.entries]);
+    setPermissionMode(run?.permissionMode ?? "read");
+    setAccessRequest(run?.pendingAccessRequest ?? null);
+    setToolApproval(run?.pendingToolApproval ?? null);
+    setArtifact(run?.pendingArtifact ?? null);
+    setBusy(run?.busy ?? false);
+    setStopRequested(false);
     setQueuedMessages([]);
-    setError(null);
+    setError(run?.error ?? null);
     followRef.current = true;
   }, []);
 
@@ -632,6 +700,7 @@ export default function App() {
   ]);
 
   const newSession = useCallback(() => {
+    visibleRunRef.current = null;
     setSessionId(null);
     setEntries([]);
     setTotalDurationMs(0);
@@ -639,6 +708,8 @@ export default function App() {
     setPermissionMode("read");
     setAccessRequest(null);
     setToolApproval(null);
+    setBusy(false);
+    setStopRequested(false);
     setQueuedMessages([]);
     setError(null);
     followRef.current = true;
@@ -698,11 +769,20 @@ export default function App() {
       return;
     }
     changePermissionMode("full");
+    const run = visibleRunRef.current === null
+      ? undefined
+      : runsRef.current.get(visibleRunRef.current);
+    if (run !== undefined) {
+      run.permissionMode = "full";
+      run.pendingToolApproval = null;
+    }
     setToolApproval(null);
     setAccessNotice(`Tool access approved. This session is now in Full access.`);
     const continuation = `Approved ${toolApproval.tool}. Continue and retry the action.`;
     if (busy) {
-      steerRef.current(continuation);
+      // The running turn captured its permission mode when it started. Queue the
+      // retry so it runs as a new turn with Full access once this one finishes.
+      setQueuedMessages((current) => [...current, continuation]);
     } else {
       sendRef.current(continuation);
     }
@@ -886,7 +966,19 @@ export default function App() {
 
   const send = useCallback(async (override: string, pending: UploadSource[] = []) => {
     const text = override.trim();
-    if ((text.length === 0 && pending.length === 0) || busy || workspacePath.length === 0) {
+    if ((text.length === 0 && pending.length === 0) || workspacePath.length === 0) {
+      return;
+    }
+    const activeRun = [...runsRef.current.values()].find((run) => run.busy);
+    if (activeRun !== undefined) {
+      setError(
+        activeRun.workspacePath === workspacePath
+          ? "This session is already running. Wait for it to finish or stop it."
+          : `A session is still running in ${activeRun.projectName}. Switch back to that project to follow it or stop it.`,
+      );
+      return;
+    }
+    if (busy) {
       return;
     }
     setBusy(true);
@@ -895,24 +987,39 @@ export default function App() {
     followRef.current = true;
     const assistantId = nextId();
     const userId = nextId();
-    setEntries((current) => [
-      ...current,
-      {
-        id: userId,
-        role: "user",
-        text,
-        attachments: pending.map((attachment) => ({ name: attachment.name })),
-      },
-      {
-        id: assistantId,
-        role: "assistant",
-        text: "",
-        reasoning: "",
-        status: "Starting…",
-        tools: [],
-        startedAt: Date.now(),
-      },
-    ]);
+    const userEntry: ChatEntry = {
+      id: userId,
+      role: "user",
+      text,
+      attachments: pending.map((attachment) => ({ name: attachment.name })),
+    };
+    const assistantEntry: ChatEntry = {
+      id: assistantId,
+      role: "assistant",
+      text: "",
+      reasoning: "",
+      status: "Starting…",
+      tools: [],
+      startedAt: Date.now(),
+    };
+    const runKey = workspacePath;
+    const run: BackgroundRun = {
+      id: nextId(),
+      projectId: activeProjectId,
+      projectName: activeProject?.name ?? "another project",
+      workspacePath,
+      sessionId,
+      permissionMode,
+      entries: [userEntry, assistantEntry],
+      busy: true,
+      pendingToolApproval: null,
+      pendingAccessRequest: null,
+      pendingArtifact: null,
+      error: null,
+    };
+    runsRef.current.set(runKey, run);
+    visibleRunRef.current = runKey;
+    setEntries([...run.entries]);
 
     try {
       const reply = await sendChat(
@@ -928,78 +1035,42 @@ export default function App() {
           attachments: pending,
         },
         (event) => {
+          const current = runsRef.current.get(runKey);
+          if (current === undefined) {
+            return;
+          }
           if (event.type === "tool_result") {
             const nextArtifact = artifactFromMetadata(event.metadata);
-            if (nextArtifact !== null) {
-              openArtifact(nextArtifact);
-            }
             const nextAccessRequest = accessRequestFromMetadata(event.metadata);
-            if (nextAccessRequest !== null) {
-              setAccessRequest(nextAccessRequest);
-            }
             const nextToolApproval = toolApprovalFromMetadata(event.metadata);
+            if (nextArtifact !== null) {
+              current.pendingArtifact = nextArtifact;
+              if (visibleRunRef.current === runKey) {
+                openArtifact(nextArtifact);
+              }
+            }
+            if (nextAccessRequest !== null) {
+              current.pendingAccessRequest = nextAccessRequest;
+              if (visibleRunRef.current === runKey) {
+                setAccessRequest(nextAccessRequest);
+              }
+            }
             if (nextToolApproval !== null) {
-              setToolApproval(nextToolApproval);
+              current.pendingToolApproval = nextToolApproval;
+              if (visibleRunRef.current === runKey) {
+                setToolApproval(nextToolApproval);
+              }
             }
           }
-          setEntries((current) =>
-            current.map((entry) => {
-              if (entry.id !== assistantId) {
-                return entry;
-              }
-              switch (event.type) {
-                case "step":
-                  return { ...entry, status: `Step ${event.step}` };
-                case "reasoning":
-                  return {
-                    ...entry,
-                    reasoning: appendStepText(
-                      entry.reasoning ?? "",
-                      event.text,
-                      entry.lastReasoningStep,
-                      event.step,
-                    ),
-                    lastReasoningStep: event.step,
-                  };
-                case "content":
-                  return {
-                    ...entry,
-                    text: appendStepText(
-                      entry.text,
-                      event.text,
-                      entry.lastContentStep,
-                      event.step,
-                    ),
-                    lastContentStep: event.step,
-                    status: "Writing…",
-                  };
-                case "tool_call":
-                  return {
-                    ...entry,
-                    status: `Calling ${event.name}…`,
-                    tools: [
-                      ...(entry.tools ?? []),
-                      `→ ${event.name}(${event.arguments})`,
-                    ],
-                  };
-                case "tool_result":
-                  return {
-                    ...entry,
-                    status: `${event.name} finished`,
-                    tools: [
-                      ...(entry.tools ?? []),
-                      `${event.is_error ? "✗" : "✓"} ${event.name}: ${event.content}`,
-                    ],
-                  };
-                case "usage":
-                  return { ...entry, usage: event.usage };
-              }
-            }),
+          current.entries = current.entries.map((entry) =>
+            entry.id === assistantId ? applyAgentEvent(entry, event) : entry,
           );
+          if (visibleRunRef.current === runKey) {
+            setEntries([...current.entries]);
+          }
         },
       );
-      setSessionId(reply.session_id);
-      setTotalDurationMs((current) => current + reply.duration_ms);
+      run.sessionId = reply.session_id;
       if (sessionId === null) {
         try {
           await persistSessionAccessMode(reply.session_id, permissionMode);
@@ -1007,37 +1078,38 @@ export default function App() {
           setError(describeError(cause));
         }
       }
-      setEntries((current) =>
-        current.map((entry) =>
-          entry.id === userId
-            ? {
-                ...entry,
-                attachments: reply.attachments.map((file) => ({
-                  name: file.name,
-                  path: file.path,
-                  bytes: file.bytes,
-                })),
-              }
-            : entry,
-        ),
+      run.entries = run.entries.map((entry) =>
+        entry.id === userId
+          ? {
+              ...entry,
+              attachments: reply.attachments.map((file) => ({
+                name: file.name,
+                path: file.path,
+                bytes: file.bytes,
+              })),
+            }
+          : entry,
       );
-      setEntries((current) =>
-        current.map((entry) =>
-          entry.id === assistantId
-            ? {
-                ...entry,
-                text: reply.text || entry.text || "(no text returned)",
-                tools:
-                  entry.tools !== undefined && entry.tools.length > 0
-                    ? entry.tools
-                    : reply.tool_trace,
-                usage: reply.usage,
-                durationMs: reply.duration_ms,
-                status: `Done · ${reply.steps} step${reply.steps === 1 ? "" : "s"}`,
-              }
-            : entry,
-        ),
+      run.entries = run.entries.map((entry) =>
+        entry.id === assistantId
+          ? {
+              ...entry,
+              text: reply.text || entry.text || "(no text returned)",
+              tools:
+                entry.tools !== undefined && entry.tools.length > 0
+                  ? entry.tools
+                  : reply.tool_trace,
+              usage: reply.usage,
+              durationMs: reply.duration_ms,
+              status: `Done · ${reply.steps} step${reply.steps === 1 ? "" : "s"}`,
+            }
+          : entry,
       );
+      if (visibleRunRef.current === runKey) {
+        setSessionId(reply.session_id);
+        setEntries([...run.entries]);
+        setTotalDurationMs((current) => current + reply.duration_ms);
+      }
       void loadFoundation();
       void loadSessions();
       void loadArchivedSessions();
@@ -1047,23 +1119,30 @@ export default function App() {
       window.setTimeout(() => setProjectRevision((value) => value + 1), 1_500);
     } catch (cause) {
       const message = describeError(cause);
-      setError(message);
-      setEntries((current) =>
-        current.map((entry) =>
-          entry.id === assistantId
-            ? {
-                ...entry,
-                status: "Failed",
-                text: entry.text || "(request failed)",
-              }
-            : entry,
-        ),
+      run.error = message;
+      run.entries = run.entries.map((entry) =>
+        entry.id === assistantId
+          ? {
+              ...entry,
+              status: "Failed",
+              text: entry.text || "(request failed)",
+            }
+          : entry,
       );
+      if (visibleRunRef.current === runKey) {
+        setError(message);
+        setEntries([...run.entries]);
+      }
     } finally {
-      setBusy(false);
-      setStopRequested(false);
+      run.busy = false;
+      if (visibleRunRef.current === runKey) {
+        setBusy(false);
+        setStopRequested(false);
+      }
     }
   }, [
+    activeProject,
+    activeProjectId,
     allowCommands,
     allowWrites,
     busy,
@@ -1083,6 +1162,10 @@ export default function App() {
   const steer = useCallback(async (override: string) => {
     const text = override.trim();
     if (text.length === 0) {
+      return;
+    }
+    if (visibleRunRef.current !== workspacePath) {
+      setError("No running session is visible in this project. Switch back to its project first.");
       return;
     }
     if (!busy) {
@@ -1135,41 +1218,59 @@ export default function App() {
       setError(null);
       try {
         const view = await fetchSession(session.id);
-        setSessionId(view.session_id);
-        setPermissionMode(session.access_mode);
-        setAccessRequest(null);
-        setQueuedMessages([]);
-        if (session.workspace_id !== null) {
-          const project = projects.find((item) => item.id === session.workspace_id);
-          if (project !== undefined) {
-            setActiveProjectId(project.id);
-            setWorkspacePath(project.path);
-            rememberProjectPath(project.path);
-          } else if (session.workspace_path !== null) {
-            setWorkspacePath(session.workspace_path);
-          }
+        const project =
+          session.workspace_id === null
+            ? undefined
+            : projects.find((item) => item.id === session.workspace_id);
+        const targetPath = project?.path ?? session.workspace_path ?? workspacePath;
+        const run =
+          targetPath.length === 0 ? undefined : runsRef.current.get(targetPath);
+        const showRun =
+          run !== undefined &&
+          (run.sessionId === view.session_id || run.sessionId === null);
+        if (project !== undefined) {
+          setActiveProjectId(project.id);
+          setWorkspacePath(project.path);
+          rememberProjectPath(project.path);
+        } else if (session.workspace_path !== null) {
+          setWorkspacePath(session.workspace_path);
         }
+        visibleRunRef.current = showRun ? targetPath : null;
+        setSessionId(view.session_id);
+        setPermissionMode(showRun ? run.permissionMode : session.access_mode);
+        setAccessRequest(showRun ? run.pendingAccessRequest : null);
+        setToolApproval(showRun ? run.pendingToolApproval : null);
+        setArtifact(showRun ? run.pendingArtifact : null);
+        setBusy(showRun ? run.busy : false);
+        setStopRequested(false);
+        setQueuedMessages([]);
+        setError(showRun ? run.error : null);
         followRef.current = true;
         setTotalDurationMs(view.total_duration_ms);
         setEntries(
-          view.messages.map((item) => ({
-            id: nextId(),
-            role: item.role === "user" ? "user" : "assistant",
-            text: item.text,
-            attachments: (item.attachments ?? []).map((attachment) =>
-              attachment.includes("/") || attachment.includes("\\")
-                ? { name: attachment.split(/[\\/]/).at(-1) ?? attachment, path: attachment }
-                : { name: attachment },
-            ),
-            reasoning: item.reasoning ?? "",
-            durationMs: item.duration_ms ?? undefined,
-          })),
+          showRun
+            ? [...run.entries]
+            : view.messages.map((item) => ({
+                id: nextId(),
+                role: item.role === "user" ? "user" : "assistant",
+                text: item.text,
+                attachments: (item.attachments ?? []).map((attachment) =>
+                  attachment.includes("/") || attachment.includes("\\")
+                    ? {
+                        name: attachment.split(/[\\/]/).at(-1) ?? attachment,
+                        path: attachment,
+                      }
+                    : { name: attachment },
+                ),
+                reasoning: item.reasoning ?? "",
+                durationMs: item.duration_ms ?? undefined,
+              })),
         );
       } catch (cause) {
         setError(describeError(cause));
       }
     },
-    [projects],
+    [projects, workspacePath],
   );
 
   const beginRenameSession = useCallback((session: SessionSummary) => {
@@ -1458,22 +1559,10 @@ export default function App() {
           onSelect: () => openPanel("memory"),
         },
         {
-          label: "Todos",
-          checked: panelOpen && panelTab === "todos",
+          label: "Source Control",
+          checked: panelOpen && panelTab === "git",
           disabled: activeProject === null,
-          onSelect: () => openPanel("todos"),
-        },
-        {
-          label: "Questions",
-          checked: panelOpen && panelTab === "questions",
-          disabled: activeProject === null,
-          onSelect: () => openPanel("questions"),
-        },
-        {
-          label: "Plan",
-          checked: panelOpen && panelTab === "plan",
-          disabled: activeProject === null,
-          onSelect: () => openPanel("plan"),
+          onSelect: () => openPanel("git"),
         },
         {
           label: "Checkpoints",
@@ -1709,37 +1798,10 @@ export default function App() {
                           onClick={() => openPanel("memory")}
                         />
                         <ProjectAreaButton
-                          icon={<ListTodo size={12} />}
-                          label={`Todos${countSuffix(
-                            areaCounts === null
-                              ? undefined
-                              : areaCounts.todos_open,
-                            areaCounts?.todos_total,
-                          )}`}
-                          active={panelOpen && panelTab === "todos"}
-                          onClick={() => openPanel("todos")}
-                        />
-                        <ProjectAreaButton
-                          icon={<MessageSquare size={12} />}
-                          label={`Questions${countSuffix(
-                            areaCounts === null
-                              ? undefined
-                              : areaCounts.questions_open,
-                            areaCounts?.questions_total,
-                          )}`}
-                          active={panelOpen && panelTab === "questions"}
-                          onClick={() => openPanel("questions")}
-                        />
-                        <ProjectAreaButton
-                          icon={<ListTodo size={12} />}
-                          label={`Plan${countSuffix(
-                            areaCounts === null
-                              ? undefined
-                              : areaCounts.plan_open_steps,
-                            areaCounts?.plan_steps,
-                          )}`}
-                          active={panelOpen && panelTab === "plan"}
-                          onClick={() => openPanel("plan")}
+                          icon={<GitBranch size={12} />}
+                          label="Source Control"
+                          active={panelOpen && panelTab === "git"}
+                          onClick={() => openPanel("git")}
                         />
                       </div>
                       <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
@@ -2817,6 +2879,7 @@ function SettingsDialog({
     { id: "secrets", label: "Secrets" },
     { id: "mcp", label: "MCP" },
     { id: "project", label: "Project" },
+    { id: "services", label: "Services" },
     { id: "about", label: "About" },
   ];
   return (
@@ -3005,6 +3068,7 @@ function SettingsDialog({
             </div>
           )}
 
+          {tab === "services" && <ServicesSettings />}
           {tab === "mcp" && (
             <McpSettings workspacePath={activeProject?.path ?? ""} />
           )}
@@ -3121,9 +3185,7 @@ function CommandPalette({
     { label: "Project: Knowledge", hint: "", run: () => onContext("knowledge") },
     { label: "Project: Retrieval", hint: "", run: () => onContext("retrieval") },
     { label: "Project: Memory", hint: "", run: () => onContext("memory") },
-    { label: "Project: Todos", hint: "", run: () => onContext("todos") },
-    { label: "Project: Questions", hint: "", run: () => onContext("questions") },
-    { label: "Project: Plan", hint: "", run: () => onContext("plan") },
+    { label: "Project: Source Control", hint: "", run: () => onContext("git") },
     { label: "Project: Checkpoints", hint: "", run: () => onContext("checkpoints") },
     { label: "Project: Diagnostics", hint: "", run: () => onContext("diagnostics") },
   ];

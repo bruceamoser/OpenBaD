@@ -56,6 +56,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0013_session_fts",
         include_str!("../migrations/0013_session_fts.sql"),
     ),
+    (
+        "0014_reference_access",
+        include_str!("../migrations/0014_reference_access.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

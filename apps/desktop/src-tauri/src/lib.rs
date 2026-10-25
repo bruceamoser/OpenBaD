@@ -1,4 +1,6 @@
+mod git;
 mod preview;
+mod services;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -6,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use openbad_agent::{AgentConfig, AgentError, AgentObserver, SteeringInbox, default_agent};
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
@@ -1886,6 +1889,21 @@ fn add_project_repo(
 }
 
 #[tauri::command]
+fn set_project_repo_read_only(
+    state: State<'_, AppState>,
+    repo_id: String,
+    read_only: bool,
+) -> Result<(), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .set_project_repo_read_only(&repo_id, read_only)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn outside_access_grants(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -2235,7 +2253,10 @@ const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_UPLOAD_FILES: usize = 50;
 const MAX_KNOWLEDGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_INLINE_BYTES: usize = 256 * 1024;
+const MAX_CHAT_EXTRACTED_BYTES: usize = 192 * 1024;
 const MAX_CHAT_ATTACHMENTS: usize = 8;
+const MAX_OCR_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_PDF_BYTES: u64 = 25 * 1024 * 1024;
 const UPLOADED_REFERENCES_NAME: &str = "Uploaded documents";
 
 /// One document supplied by the UI, either as a filesystem path or as inline text.
@@ -2247,6 +2268,12 @@ pub struct UploadSource {
     pub path: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    /// Base64-encoded bytes for clipboard images and other binary paste/drop
+    /// payloads that do not have a filesystem path.
+    #[serde(default)]
+    pub content_base64: Option<String>,
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2298,6 +2325,30 @@ fn safe_upload_name(name: &str) -> Result<String, String> {
     Ok(cleaned)
 }
 
+fn upload_name_with_extension(name: &str, mime: Option<&str>) -> String {
+    let path = Path::new(name);
+    if path.extension().is_some() {
+        return name.to_owned();
+    }
+    let extension = match mime.unwrap_or_default() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        "image/svg+xml" => Some("svg"),
+        "application/pdf" => Some("pdf"),
+        "text/plain" => Some("txt"),
+        "text/markdown" => Some("md"),
+        "application/json" => Some("json"),
+        _ => None,
+    };
+    match extension {
+        Some(extension) => format!("{name}.{extension}"),
+        None => name.to_owned(),
+    }
+}
+
 fn load_upload(source: &UploadSource, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
     if let Some(path) = source
         .path
@@ -2337,7 +2388,25 @@ fn load_upload(source: &UploadSource, max_bytes: u64) -> Result<(String, Vec<u8>
         }
         return Ok((safe_upload_name(&source.name)?, content.as_bytes().to_vec()));
     }
-    Err(format!("{} has no path or content to upload", source.name))
+    if let Some(encoded) = &source.content_base64 {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .map_err(|error| format!("{} is not valid base64: {error}", source.name))?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(format!(
+                "{} is {} bytes; the maximum upload is {} bytes",
+                source.name,
+                bytes.len(),
+                max_bytes
+            ));
+        }
+        let name = upload_name_with_extension(&source.name, source.mime.as_deref());
+        return Ok((safe_upload_name(&name)?, bytes));
+    }
+    Err(format!(
+        "{} has no path, text content, or base64 content to upload",
+        source.name
+    ))
 }
 
 fn path_is_free(path: &Path) -> bool {
@@ -2604,6 +2673,66 @@ fn import_knowledge_files(
     Ok(report)
 }
 
+fn xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+}
+
+fn truncate_chars(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+fn ocr_image(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("tesseract")
+        .arg(path)
+        .arg("stdout")
+        .arg("-l")
+        .arg("eng")
+        .arg("--psm")
+        .arg("3")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(&text, 64 * 1024))
+    }
+}
+
+fn pdf_text(path: &Path) -> Option<String> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text(path)
+    }))
+    .ok()?
+    .ok()?;
+    let text = result.trim().to_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(&text, 96 * 1024))
+    }
+}
+
+fn attachment_extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 /// Stages chat attachments in `<workspace>/uploads` so any file type is kept in
 /// the workspace, then builds the model-visible message. Text files are inlined
 /// within a bounded budget; everything else is referenced by workspace path and
@@ -2631,36 +2760,95 @@ fn compose_chat_message(
     }
     let mut message = prompt.trim_end().to_owned();
     if !message.is_empty() {
-        message.push_str("\n\n");
+        message.push_str("
+
+");
     }
     message.push_str(
-        "The user attached these files. They are saved inside the workspace and can be read with the file tools:\n",
+        "The user attached these files. They are saved inside the workspace and can be read with the file tools:
+",
     );
     let mut inline_budget = MAX_CHAT_ATTACHMENT_INLINE_BYTES;
-    let mut inline = Vec::new();
+    let mut extracted_budget = MAX_CHAT_EXTRACTED_BYTES;
+    let mut blocks = Vec::new();
     for file in &report.files {
-        let relative = Path::new(&file.path)
+        let path = Path::new(&file.path);
+        let relative = path
             .strip_prefix(workspace_root)
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|_| file.path.clone());
-        message.push_str(&format!("- {relative} ({} bytes)\n", file.bytes));
-        if usize::try_from(file.bytes).unwrap_or(usize::MAX) > inline_budget {
+        message.push_str(&format!("- {relative} ({} bytes)
+", file.bytes));
+        let extension = attachment_extension(path);
+        let is_image = matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg"
+        );
+        let is_pdf = extension == "pdf";
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if is_image {
+            let ocr = if file.bytes <= MAX_OCR_IMAGE_BYTES {
+                ocr_image(path)
+            } else {
+                None
+            };
+            let body = match ocr {
+                Some(text) if extracted_budget > 0 => {
+                    let text = truncate_chars(&text, extracted_budget);
+                    extracted_budget = extracted_budget.saturating_sub(text.len());
+                    text
+                }
+                _ => "[image attached; no text was extracted]".to_owned(),
+            };
+            blocks.push(format!(
+                "\n<attached_image name=\"{}\">\n{}\n</attached_image>\n",
+                xml_attr(&relative),
+                body
+            ));
             continue;
         }
-        let Ok(bytes) = std::fs::read(&file.path) else {
+        if is_pdf {
+            let extracted = if file.bytes <= MAX_PDF_BYTES {
+                pdf_text(path)
+            } else {
+                None
+            };
+            let body = match extracted {
+                Some(text) if extracted_budget > 0 => {
+                    let text = truncate_chars(&text, extracted_budget);
+                    extracted_budget = extracted_budget.saturating_sub(text.len());
+                    text
+                }
+                _ => "[PDF attached; no text could be extracted]".to_owned(),
+            };
+            blocks.push(format!(
+                "\n<attached_pdf name=\"{}\">\n{}\n</attached_pdf>\n",
+                xml_attr(&relative),
+                body
+            ));
             continue;
-        };
+        }
         let Ok(content) = String::from_utf8(bytes) else {
+            blocks.push(format!(
+                "\n<attached_binary name=\"{}\">binary attachment; use the file tools to inspect it</attached_binary>\n",
+                xml_attr(&relative)
+            ));
             continue;
         };
+        if content.len() > inline_budget {
+            continue;
+        }
         inline_budget = inline_budget.saturating_sub(content.len());
-        inline.push((relative, content));
-    }
-    for (name, content) in inline {
-        message.push_str(&format!(
-            "\n<attached_document name=\"{name}\">\n{}\n</attached_document>\n",
+        blocks.push(format!(
+            "\n<attached_document name=\"{}\">\n{}\n</attached_document>\n",
+            xml_attr(&relative),
             content.trim_end()
         ));
+    }
+    for block in blocks {
+        message.push_str(&block);
     }
     Ok((message, report.files))
 }
@@ -4459,6 +4647,20 @@ pub fn run() {
             project_repos,
             add_project_repo,
             remove_project_repo,
+            set_project_repo_read_only,
+            git::git_repo_status,
+            git::git_init,
+            git::git_checkout,
+            git::git_fetch,
+            git::git_pull,
+            git::git_push,
+            git::git_stage,
+            git::git_unstage,
+            git::git_commit,
+            git::git_diff,
+            git::git_log,
+            services::services_status,
+            services::open_service_url,
             outside_access_grants,
             grant_outside_access,
             revoke_outside_access,
@@ -4528,7 +4730,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0013_session_fts");
+        assert_eq!(payload.doctor.schema_version, "0014_reference_access");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);
@@ -4750,6 +4952,8 @@ mod tests {
                 name: "notes.md".to_owned(),
                 path: Some(first.path().join("notes.md").to_string_lossy().into_owned()),
                 content: None,
+                content_base64: None,
+                mime: None,
             },
             UploadSource {
                 name: "notes.md".to_owned(),
@@ -4761,11 +4965,15 @@ mod tests {
                         .into_owned(),
                 ),
                 content: None,
+                content_base64: None,
+                mime: None,
             },
             UploadSource {
                 name: "inline.txt".to_owned(),
                 path: None,
                 content: Some("inline body".to_owned()),
+                content_base64: None,
+                mime: None,
             },
         ];
 
@@ -4790,11 +4998,15 @@ mod tests {
                 name: "folder".to_owned(),
                 path: Some(source.path().to_string_lossy().into_owned()),
                 content: None,
+                content_base64: None,
+                mime: None,
             },
             UploadSource {
                 name: "../../etc/passwd".to_owned(),
                 path: None,
                 content: Some("safe".to_owned()),
+                content_base64: None,
+                mime: None,
             },
         ];
 
@@ -4823,6 +5035,8 @@ mod tests {
                 name: "notes.md".to_owned(),
                 path: None,
                 content: Some("safe".to_owned()),
+                content_base64: None,
+                mime: None,
             }],
         )
         .expect("upload");
@@ -4846,6 +5060,8 @@ mod tests {
                 name: "clip.mov".to_owned(),
                 path: Some(source.to_string_lossy().into_owned()),
                 content: None,
+                content_base64: None,
+                mime: None,
             }],
         )
         .expect("upload");
@@ -4866,6 +5082,8 @@ mod tests {
                 name: "design.md".to_owned(),
                 path: None,
                 content: Some("# Design\nbody".to_owned()),
+                content_base64: None,
+                mime: None,
             }],
         )
         .expect("message");
@@ -4887,6 +5105,8 @@ mod tests {
                 name: format!("note-{index}.md"),
                 path: None,
                 content: Some("x".to_owned()),
+                content_base64: None,
+                mime: None,
             })
             .collect::<Vec<_>>();
         assert!(compose_chat_message(workspace.path(), "Review", &too_many).is_err());
@@ -4904,6 +5124,8 @@ mod tests {
                 name: "diagram.png".to_owned(),
                 path: Some(source.to_string_lossy().into_owned()),
                 content: None,
+                content_base64: None,
+                mime: None,
             }],
         )
         .expect("message");
@@ -4931,6 +5153,8 @@ mod tests {
                 name: "release-notes.md".to_owned(),
                 path: None,
                 content: Some("# Release\nShip it".to_owned()),
+                content_base64: None,
+                mime: None,
             },
             &["docs".to_owned()],
         )
@@ -4951,6 +5175,8 @@ mod tests {
                 name: "scan.pdf".to_owned(),
                 path: Some(path.to_string_lossy().into_owned()),
                 content: None,
+                content_base64: None,
+                mime: None,
             },
             &[],
         )

@@ -2,7 +2,9 @@ import {
   forwardRef,
   memo,
   useCallback,
+  useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -10,6 +12,7 @@ import {
   Bot,
   CircleAlert,
   FileText,
+  Image as ImageIcon,
   ListPlus,
   Paperclip,
   Send,
@@ -19,8 +22,9 @@ import {
 } from "lucide-react";
 
 import { pickFiles } from "./backend";
-import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
+import { droppedToUploads, fileName, filesToUploads, useFileDropZone } from "./dropzone";
 import type { AccessMode, UploadSource } from "./types";
+import { useDraftHistory } from "./useDraftHistory";
 
 export type ChatComposerHandle = {
   addUploads: (sources: UploadSource[]) => void;
@@ -55,6 +59,45 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+// Match the textarea's `leading-5` and `pt-3` classes. The composer grows from
+// one line up to ten lines and then scrolls internally.
+const TEXTAREA_LINE_HEIGHT_PX = 20;
+const TEXTAREA_PADDING_TOP_PX = 12;
+const TEXTAREA_MAX_ROWS = 10;
+const TEXTAREA_MIN_HEIGHT_PX = TEXTAREA_LINE_HEIGHT_PX + TEXTAREA_PADDING_TOP_PX;
+const TEXTAREA_MAX_HEIGHT_PX =
+  TEXTAREA_LINE_HEIGHT_PX * TEXTAREA_MAX_ROWS + TEXTAREA_PADDING_TOP_PX;
+
+// ^\s*(\d+)\.\s, with the indentation captured so it can be reused.
+const ORDERED_LIST_PREFIX = /^([ \t]*)(\d+)\.\s/;
+
+type OrderedListInsertion = {
+  value: string;
+  caret: number;
+};
+
+function orderedListInsertion(
+  textarea: HTMLTextAreaElement,
+): OrderedListInsertion | null {
+  const { selectionStart, selectionEnd, value } = textarea;
+  const lineStart =
+    selectionStart === 0 ? 0 : value.lastIndexOf("\n", selectionStart - 1) + 1;
+  const match = ORDERED_LIST_PREFIX.exec(value.slice(lineStart, selectionStart));
+  if (match === null) {
+    return null;
+  }
+  const current = Number.parseInt(match[2] ?? "", 10);
+  const next = current + 1;
+  if (!Number.isSafeInteger(current) || !Number.isSafeInteger(next)) {
+    return null;
+  }
+  const insertion = `\n${match[1] ?? ""}${next}. `;
+  return {
+    value: `${value.slice(0, selectionStart)}${insertion}${value.slice(selectionEnd)}`,
+    caret: selectionStart + insertion.length,
+  };
+}
+
 function ChatComposer({
   workspacePath,
   hasProject,
@@ -77,18 +120,81 @@ function ChatComposer({
   onStop,
   onError,
 }: ChatComposerProps, ref: React.Ref<ChatComposerHandle>) {
-  const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<UploadSource[]>([]);
+  const attachmentsRef = useRef<UploadSource[]>([]);
+  attachmentsRef.current = attachments;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const {
+    value: draft,
+    handleChange: handleDraftChange,
+    handleCompositionStart: handleDraftCompositionStart,
+    handleCompositionEnd: handleDraftCompositionEnd,
+    handleKeyDown: handleDraftKeyDown,
+    handleSelect: handleDraftSelect,
+    setValue: setDraftValue,
+    reset: resetDraft,
+  } = useDraftHistory(textareaRef);
+
+  const resizeTextarea = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (textarea === null) {
+      return;
+    }
+    const wasAtBottom =
+      textarea.scrollHeight - textarea.scrollTop - textarea.clientHeight <= 4;
+    textarea.style.height = "0px";
+    const contentHeight = textarea.scrollHeight;
+    const height = Math.min(
+      Math.max(contentHeight, TEXTAREA_MIN_HEIGHT_PX),
+      TEXTAREA_MAX_HEIGHT_PX,
+    );
+    textarea.style.height = `${height}px`;
+    textarea.style.overflowY =
+      contentHeight > TEXTAREA_MAX_HEIGHT_PX ? "auto" : "hidden";
+    if (wasAtBottom) {
+      textarea.scrollTop = textarea.scrollHeight;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeTextarea();
+  }, [draft, resizeTextarea]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea === null) {
+      return;
+    }
+    // Re-measure when the available width changes (window resize, sidebar, or
+    // preview pane) because that changes how the draft wraps. Height changes
+    // are ignored to avoid a resize loop.
+    let width = textarea.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth !== width) {
+        width = textarea.clientWidth;
+        resizeTextarea();
+      }
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [resizeTextarea]);
 
   const mergeAttachments = useCallback((incoming: UploadSource[]) => {
     setAttachments((current) => {
       const next = [...current];
       for (const attachment of incoming) {
-        const key = attachment.path ?? `${attachment.name}:${attachment.content?.length ?? 0}`;
+        const key =
+          attachment.path ??
+          `${attachment.name}:${attachment.mime ?? ""}:${
+            attachment.content?.length ?? attachment.contentBase64?.length ?? 0
+          }`;
         if (
           next.some(
-            (item) => (item.path ?? `${item.name}:${item.content?.length ?? 0}`) === key,
+            (item) =>
+              (item.path ??
+                `${item.name}:${item.mime ?? ""}:${
+                  item.content?.length ?? item.contentBase64?.length ?? 0
+                }`) === key,
           )
         ) {
           continue;
@@ -102,17 +208,63 @@ function ChatComposer({
     });
   }, []);
 
+  const revokePreviews = useCallback((sources: UploadSource[]) => {
+    for (const source of sources) {
+      if (source.previewUrl !== undefined) {
+        URL.revokeObjectURL(source.previewUrl);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const attachment of attachmentsRef.current) {
+        if (attachment.previewUrl !== undefined) {
+          URL.revokeObjectURL(attachment.previewUrl);
+        }
+      }
+    };
+  }, []);
+
+  const handlePaste = useCallback(
+    async (event: React.ClipboardEvent<HTMLDivElement>) => {
+      const files = Array.from(event.clipboardData.files);
+      if (files.length === 0) {
+        for (const item of Array.from(event.clipboardData.items)) {
+          if (item.kind !== "file") {
+            continue;
+          }
+          const file = item.getAsFile();
+          if (file !== null) {
+            files.push(file);
+          }
+        }
+      }
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      try {
+        mergeAttachments(await filesToUploads(files, { pasted: true }));
+        textareaRef.current?.focus();
+      } catch (cause) {
+        onError(describeError(cause));
+      }
+    },
+    [mergeAttachments, onError],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
       addUploads: mergeAttachments,
       focus: () => textareaRef.current?.focus(),
       setDraft: (text: string) => {
-        setDraft(text);
+        setDraftValue(text, text.length);
         textareaRef.current?.focus();
       },
     }),
-    [mergeAttachments],
+    [mergeAttachments, setDraftValue],
   );
 
   const attachDocuments = useCallback(async () => {
@@ -141,7 +293,8 @@ function ChatComposer({
       return;
     }
     onSend(text, attachments);
-    setDraft("");
+    resetDraft("");
+    revokePreviews(attachments);
     setAttachments([]);
   };
 
@@ -151,7 +304,7 @@ function ChatComposer({
       return;
     }
     onSteer(text);
-    setDraft("");
+    resetDraft("");
   };
 
   const queue = () => {
@@ -160,7 +313,7 @@ function ChatComposer({
       return;
     }
     onQueue(text);
-    setDraft("");
+    resetDraft("");
   };
 
   return (
@@ -213,6 +366,7 @@ function ChatComposer({
         )}
         <div
           {...drop.zoneProps}
+          onPaste={handlePaste}
           className={`relative rounded-xl border bg-[#212b37] shadow-lg shadow-black/20 transition-colors ${
             drop.active
               ? "border-emerald-400/60 ring-2 ring-emerald-400/20"
@@ -231,16 +385,27 @@ function ChatComposer({
                   key={`${attachment.path ?? attachment.name}-${index}`}
                   className="flex max-w-full items-center gap-1 rounded border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] text-emerald-100"
                 >
-                  <FileText size={10} className="shrink-0" />
+                  {attachment.previewUrl !== undefined ? (
+                    <img
+                      src={attachment.previewUrl}
+                      alt=""
+                      className="h-5 w-5 shrink-0 rounded object-cover"
+                    />
+                  ) : attachment.mime?.startsWith("image/") === true ? (
+                    <ImageIcon size={10} className="shrink-0" />
+                  ) : (
+                    <FileText size={10} className="shrink-0" />
+                  )}
                   <span className="max-w-[220px] truncate">{attachment.name}</span>
                   <button
                     type="button"
                     aria-label={`Remove attachment ${attachment.name}`}
-                    onClick={() =>
+                    onClick={() => {
+                      revokePreviews([attachment]);
                       setAttachments((current) =>
                         current.filter((_, position) => position !== index),
-                      )
-                    }
+                      );
+                    }}
                     className="rounded p-0.5 text-emerald-300/70 hover:text-emerald-100"
                   >
                     <X size={9} />
@@ -252,21 +417,40 @@ function ChatComposer({
           <textarea
             ref={textareaRef}
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={handleDraftChange}
+            onCompositionStart={handleDraftCompositionStart}
+            onCompositionEnd={handleDraftCompositionEnd}
+            onSelect={handleDraftSelect}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                if (busy) {
-                  steer();
-                } else {
-                  send();
+              if (handleDraftKeyDown(event)) {
+                return;
+              }
+              if (event.key !== "Enter") {
+                return;
+              }
+              const native = event.nativeEvent;
+              if (native.isComposing || native.keyCode === 229) {
+                return;
+              }
+              if (event.shiftKey) {
+                const insertion = orderedListInsertion(event.currentTarget);
+                if (insertion !== null) {
+                  event.preventDefault();
+                  setDraftValue(insertion.value, insertion.caret);
                 }
+                return;
+              }
+              event.preventDefault();
+              if (busy) {
+                steer();
+              } else {
+                send();
               }
             }}
-            rows={2}
+            rows={1}
             placeholder={
               hasProject
-                ? "Ask OpenBaD to inspect, explain, or change the workspace…"
+                ? "Ask OpenBaD, or paste files and images…"
                 : "Add a project to start…"
             }
             className="block w-full resize-none bg-transparent px-3.5 pt-3 text-[13px] leading-5 text-slate-100 outline-none placeholder:text-slate-500"

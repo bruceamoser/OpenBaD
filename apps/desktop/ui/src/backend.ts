@@ -8,6 +8,10 @@ import type {
   ChatReply,
   Foundation,
   FileCheckpointSummary,
+  GitCommandResult,
+  GitCommit,
+  GitRepoStatus,
+  ServiceStatus,
   IndexReport,
   InstallOutcome,
   McpServer,
@@ -1036,6 +1040,166 @@ export async function removeProjectRepo(
     return;
   }
   mockRepos = mockRepos.filter((repo) => repo.id !== repoId);
+}
+
+export async function setProjectRepoReadOnly(
+  repoId: string,
+  readOnly: boolean,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("set_project_repo_read_only", { repoId, readOnly });
+    return;
+  }
+  mockRepos = mockRepos.map((repo) =>
+    repo.id === repoId ? { ...repo, read_only: readOnly } : repo,
+  );
+}
+
+export async function servicesStatus(): Promise<ServiceStatus[]> {
+  if (!isTauri) {
+    return [];
+  }
+  return invoke<ServiceStatus[]>("services_status");
+}
+
+export async function openServiceUrl(url: string): Promise<void> {
+  if (!isTauri) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  return invoke("open_service_url", { url });
+}
+
+export async function gitRepoStatus(
+  workspacePath: string,
+  repoPath: string,
+): Promise<GitRepoStatus> {
+  if (isTauri) {
+    return invoke<GitRepoStatus>("git_repo_status", { workspacePath, repoPath });
+  }
+  return mockGitStatus(repoPath);
+}
+
+function mockGitStatus(repoPath: string): GitRepoStatus {
+  return {
+    path: repoPath,
+    name: repoPath.split("/").filter(Boolean).at(-1) ?? "repository",
+    isRepo: true,
+    branch: "main",
+    detached: false,
+    upstream: "origin/main",
+    ahead: 0,
+    behind: 0,
+    hasCommits: true,
+    files: [],
+    branches: [],
+    remotes: [{ name: "origin", url: "https://github.com/example/repo.git" }],
+    lastCommit: null,
+    operation: null,
+    error: null,
+  };
+}
+
+export async function gitInit(
+  workspacePath: string,
+  repoPath: string,
+): Promise<GitCommandResult> {
+  return runGitCommand("git_init", { workspacePath, repoPath });
+}
+
+export async function gitCheckout(
+  workspacePath: string,
+  repoPath: string,
+  branch: string,
+  create = false,
+): Promise<GitCommandResult> {
+  return runGitCommand("git_checkout", { workspacePath, repoPath, branch, create });
+}
+
+export async function gitFetch(
+  workspacePath: string,
+  repoPath: string,
+  remote?: string,
+): Promise<GitCommandResult> {
+  return runGitCommand("git_fetch", { workspacePath, repoPath, remote });
+}
+
+export async function gitPull(
+  workspacePath: string,
+  repoPath: string,
+  mode: "ff-only" | "merge" | "rebase" = "ff-only",
+): Promise<GitCommandResult> {
+  return runGitCommand("git_pull", { workspacePath, repoPath, mode });
+}
+
+export async function gitPush(
+  workspacePath: string,
+  repoPath: string,
+  input: { remote?: string; branch?: string; setUpstream?: boolean } = {},
+): Promise<GitCommandResult> {
+  return runGitCommand("git_push", { workspacePath, repoPath, ...input });
+}
+
+export async function gitStage(
+  workspacePath: string,
+  repoPath: string,
+  paths: string[],
+): Promise<GitCommandResult> {
+  return runGitCommand("git_stage", { workspacePath, repoPath, paths });
+}
+
+export async function gitUnstage(
+  workspacePath: string,
+  repoPath: string,
+  paths: string[],
+): Promise<GitCommandResult> {
+  return runGitCommand("git_unstage", { workspacePath, repoPath, paths });
+}
+
+export async function gitCommit(
+  workspacePath: string,
+  repoPath: string,
+  message: string,
+  stageAll = false,
+): Promise<GitCommandResult> {
+  return runGitCommand("git_commit", { workspacePath, repoPath, message, stageAll });
+}
+
+export async function gitDiff(
+  workspacePath: string,
+  repoPath: string,
+  path?: string,
+  staged = false,
+): Promise<string> {
+  if (!isTauri) {
+    return "";
+  }
+  return invoke<string>("git_diff", { workspacePath, repoPath, path, staged });
+}
+
+export async function gitLog(
+  workspacePath: string,
+  repoPath: string,
+  limit = 20,
+): Promise<GitCommit[]> {
+  if (!isTauri) {
+    return [];
+  }
+  return invoke<GitCommit[]>("git_log", { workspacePath, repoPath, limit });
+}
+
+async function runGitCommand(
+  command: string,
+  args: Record<string, unknown>,
+): Promise<GitCommandResult> {
+  if (!isTauri) {
+    return {
+      ok: false,
+      message: "Git actions are unavailable outside the desktop app.",
+      status: null,
+    };
+  }
+  return invoke<GitCommandResult>(command, args);
 }
 
 export async function loadKnowledgeDocuments(

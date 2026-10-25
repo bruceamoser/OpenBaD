@@ -23,6 +23,8 @@ use crate::types::{
     WorkspaceSummary,
 };
 
+const REFERENCE_GRANT_REASON: &str = "reference folder (automatic)";
+
 enum WriteCommand {
     AppendEvent {
         session_id: SessionId,
@@ -165,6 +167,11 @@ enum WriteCommand {
     },
     RemoveProjectRepo {
         repo_id: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    SetProjectRepoReadOnly {
+        repo_id: String,
+        read_only: bool,
         reply: SyncSender<Result<(), StoreError>>,
     },
     AddKnowledgeDocument {
@@ -568,6 +575,18 @@ impl Store {
     pub fn remove_project_repo(&self, repo_id: &str) -> Result<(), StoreError> {
         self.write(|reply| WriteCommand::RemoveProjectRepo {
             repo_id: repo_id.to_owned(),
+            reply,
+        })
+    }
+
+    pub fn set_project_repo_read_only(
+        &self,
+        repo_id: &str,
+        read_only: bool,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::SetProjectRepoReadOnly {
+            repo_id: repo_id.to_owned(),
+            read_only,
             reply,
         })
     }
@@ -2315,6 +2334,21 @@ fn add_project_repo(
             repo.created_at
         ],
     )?;
+    // Reference folders are part of the project by definition. Grant read
+    // access to the assistant in the same transaction so it can inspect them
+    // without a second manual approval step.
+    connection.execute(
+        "INSERT OR IGNORE INTO outside_access_grants
+             (id, workspace_id, path, write_access, reason, created_at)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+        params![
+            Uuid::now_v7().to_string(),
+            workspace_id.to_string(),
+            path,
+            REFERENCE_GRANT_REASON,
+            now_millis()
+        ],
+    )?;
     Ok(repo)
 }
 
@@ -3217,6 +3251,50 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     .map_err(StoreError::from);
                 let _ = reply.send(result);
             }
+            WriteCommand::SetProjectRepoReadOnly {
+                repo_id,
+                read_only,
+                reply,
+            } => {
+                let result = (|| -> Result<(), StoreError> {
+                    let repository: Option<(String, String)> = connection
+                        .query_row(
+                            "SELECT workspace_id, path FROM project_repos WHERE id = ?1",
+                            [&repo_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    let Some((workspace_id, path)) = repository else {
+                        return Ok(());
+                    };
+                    connection.execute(
+                        "UPDATE project_repos SET read_only = ?1 WHERE id = ?2",
+                        rusqlite::params![read_only, repo_id],
+                    )?;
+                    connection.execute(
+                        "INSERT INTO outside_access_grants
+                             (id, workspace_id, path, write_access, reason, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(workspace_id, path) DO UPDATE SET
+                             write_access = excluded.write_access,
+                             reason = excluded.reason",
+                        rusqlite::params![
+                            Uuid::now_v7().to_string(),
+                            workspace_id,
+                            path,
+                            if read_only { 0 } else { 1 },
+                            if read_only {
+                                REFERENCE_GRANT_REASON
+                            } else {
+                                "reference folder (editable)"
+                            },
+                            now_millis()
+                        ],
+                    )?;
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
             WriteCommand::AddKnowledgeDocument {
                 workspace_id,
                 title,
@@ -3578,7 +3656,7 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(store.schema_version().expect("version"), "0013_session_fts");
+        assert_eq!(store.schema_version().expect("version"), "0014_reference_access");
     }
 
     #[test]
