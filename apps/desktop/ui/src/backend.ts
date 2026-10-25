@@ -6,6 +6,7 @@ import type {
   AccessMode,
   AgentEvent,
   ChatReply,
+  ClipboardImage,
   Foundation,
   FileCheckpointSummary,
   GitCommandResult,
@@ -51,7 +52,7 @@ const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 let mockKeyConfigured = false;
-let mockCancelled = false;
+const mockCancelledRuns = new Set<string>();
 let mockSessionCounter = 1;
 let mockCheckpoints: FileCheckpointSummary[] = [];
 let mockMemories: MemoryRecord[] = [
@@ -833,9 +834,9 @@ export async function loadSession(sessionId: string): Promise<SessionView> {
   };
 }
 
-export async function steerChat(message: string): Promise<void> {
+export async function steerChat(runId: string, message: string): Promise<void> {
   if (isTauri) {
-    await invoke("steer_chat", { message });
+    await invoke("steer_chat", { runId, message });
     return;
   }
   if (message.trim().length === 0) {
@@ -843,12 +844,19 @@ export async function steerChat(message: string): Promise<void> {
   }
 }
 
-export async function cancelChat(): Promise<void> {
+export async function cancelChat(runId: string): Promise<void> {
   if (isTauri) {
-    await invoke("cancel_chat");
+    await invoke("cancel_chat", { runId });
     return;
   }
-  mockCancelled = true;
+  mockCancelledRuns.add(runId);
+}
+
+export async function readClipboardImage(): Promise<ClipboardImage | null> {
+  if (!isTauri) {
+    return null;
+  }
+  return invoke<ClipboardImage | null>("read_clipboard_image");
 }
 
 export async function workspaceIndexStatus(
@@ -1719,6 +1727,8 @@ export async function installUpdate(version: string): Promise<InstallOutcome> {
 }
 
 export type ChatInput = {
+  /** UI-generated id that scopes cancellation and steering to one turn. */
+  runId: string;
   sessionId: string | null;
   workspacePath: string;
   message: string;
@@ -1739,6 +1749,7 @@ export async function chat(
     channel.onmessage = onEvent;
     return invoke<ChatReply>("chat", {
       request: {
+        runId: input.runId,
         sessionId: input.sessionId,
         workspacePath: input.workspacePath,
         message: input.message,
@@ -1760,7 +1771,7 @@ async function mockChat(
   onEvent: (event: AgentEvent) => void,
 ): Promise<ChatReply> {
   const startedAt = Date.now();
-  mockCancelled = false;
+  mockCancelledRuns.delete(input.runId);
   if (/subagent|spawn agent/i.test(input.message)) {
     const now = Date.now();
     mockAgents.push({
@@ -1781,7 +1792,7 @@ async function mockChat(
     });
   }
   if (/slow/i.test(input.message)) {
-    await tick(1_400);
+    await tick(1_400, input.runId);
   }
   const sessionId = input.sessionId ?? `mock-session-${mockSessionCounter++}`;
   const text = /markdown|mermaid/i.test(input.message)
@@ -1830,14 +1841,14 @@ async function mockChat(
     : `${text} Attached documents: ${attached.map((file) => file.name).join(", ")}.`;
 
   onEvent({ type: "step", step: 1 });
-  await tick(120);
+  await tick(120, input.runId);
   for (const chunk of [
     "The user wants a workspace summary. ",
     "I should read Cargo.toml first. ",
     "Then I can group the crates by role.",
   ]) {
     onEvent({ type: "reasoning", step: 1, text: chunk });
-    await tick(90);
+    await tick(90, input.runId);
   }
   onEvent({
     type: "tool_call",
@@ -1845,7 +1856,7 @@ async function mockChat(
     name: "read_file",
     arguments: '{"path":"Cargo.toml"}',
   });
-  await tick(140);
+  await tick(140, input.runId);
   onEvent({
     type: "tool_result",
     step: 1,
@@ -1857,7 +1868,7 @@ async function mockChat(
   onEvent({ type: "step", step: 2 });
   for (const chunk of reply.match(/.{1,36}/g) ?? [reply]) {
     onEvent({ type: "content", step: 2, text: chunk });
-    await tick(45);
+    await tick(45, input.runId);
   }
   if (/preview|artifact|web page/i.test(input.message)) {
     onEvent({
@@ -1866,7 +1877,7 @@ async function mockChat(
       name: "present_artifact",
       arguments: '{"kind":"web","title":"OpenBaD architecture","uri":"https://example.com"}',
     });
-    await tick(80);
+    await tick(80, input.runId);
     onEvent({
       type: "tool_result",
       step: 2,
@@ -1890,7 +1901,7 @@ async function mockChat(
       arguments:
         '{"path":"/home/you/other-project","write":false,"reason":"Compare the implementation"}',
     });
-    await tick(80);
+    await tick(80, input.runId);
     onEvent({
       type: "tool_result",
       step: 2,
@@ -1981,9 +1992,9 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function tick(milliseconds: number): Promise<void> {
+async function tick(milliseconds: number, runId: string): Promise<void> {
   await delay(milliseconds);
-  if (mockCancelled) {
+  if (mockCancelledRuns.has(runId)) {
     throw new Error("agent turn was cancelled");
   }
 }

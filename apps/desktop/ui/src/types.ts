@@ -400,6 +400,12 @@ export type UploadSource = {
   previewUrl?: string;
 };
 
+export type ClipboardImage = {
+  dataBase64: string;
+  mime: string;
+  bytes: number;
+};
+
 export type ServiceStatus = {
   id: string;
   name: string;
