@@ -49,5 +49,12 @@ pdf-extract = "0.12.1"
 quick-xml = "0.39"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
+# In-process clipboard access for the native image paste fallback. The default
+# `image-data` feature provides `get_image`; `wayland-data-control` reads the
+# clipboard through the compositor instead of shelling out to wl-paste/xclip.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.7", features = ["wayland-data-control"] }
+png = "0.18"
+
 [dev-dependencies]
 tempfile = "3"
