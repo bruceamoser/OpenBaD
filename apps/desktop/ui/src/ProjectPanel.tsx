@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   BookOpen,
@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 
 import AgentsPanel from "./AgentsPanel";
-import GitPanel from "./GitPanel";
+import GitRepoList from "./GitRepoList";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import RevealButton from "./RevealButton";
 import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
@@ -103,6 +103,7 @@ export type ProjectPanelProps = {
     tab: "model" | "access" | "secrets" | "project" | "about",
   ) => void;
   onArtifact: (artifact: Artifact | null) => void;
+  onOpenGit: (repoPath: string, repoName: string) => void;
   onImportBundle: () => void;
   revision: number;
   onWorkspaceChanged: () => void;
@@ -134,6 +135,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     sessionId,
     onOpenSettings,
     onArtifact,
+    onOpenGit,
     onImportBundle,
     revision,
     onWorkspaceChanged,
@@ -147,6 +149,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   const [dataError, setDataError] = useState<string | null>(null);
   const [workspaceNotice, setWorkspaceNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+  const didMountRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (workspacePath.length === 0) {
@@ -164,6 +168,18 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       setRepos(nextRepos);
       setFiles(nextFiles);
       setManifest(nextManifest);
+      setDataError(null);
+    } catch (cause) {
+      setDataError(describeError(cause));
+    }
+  }, [workspacePath]);
+
+  const refreshRepos = useCallback(async () => {
+    if (workspacePath.length === 0) {
+      return;
+    }
+    try {
+      setRepos(await loadProjectRepos(workspacePath));
       setDataError(null);
     } catch (cause) {
       setDataError(describeError(cause));
@@ -220,16 +236,50 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   }, [refresh]);
 
   useEffect(() => {
-    if (
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    if (tab === "git") {
+      void refreshRepos();
+    } else if (
       tab === "overview" ||
       tab === "repos" ||
       tab === "knowledge" ||
-      tab === "workspace" ||
-      tab === "git"
+      tab === "workspace"
     ) {
       void refresh();
     }
-  }, [refresh, revision, tab]);
+  }, [refresh, refreshRepos, revision, tab]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      if (tab === "git") {
+        void refreshRepos();
+      } else {
+        void refresh();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [refresh, refreshRepos, tab]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      activeTabRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [tab]);
 
   const visibleFiles = useMemo(() => {
     const needle = fileQuery.trim().toLowerCase();
@@ -260,9 +310,9 @@ export default function ProjectPanel(props: ProjectPanelProps) {
           <div className="flex items-center gap-1.5">
             <p className="truncate text-[12px] font-medium text-slate-200">{title}</p>
             <span
-              aria-label="Project areas refresh automatically"
-              title="Refreshes automatically"
-              className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400/60"
+              aria-label="Refreshes when the window regains focus and after actions"
+              title="Refreshes on focus and after actions"
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-500/50"
             />
           </div>
           <p className="truncate text-[10px] text-slate-500">
@@ -292,22 +342,27 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         </div>
       </div>
 
-      <div className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-white/[0.06] px-2 py-1.5">
-        {panelTabs.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => onTab(item.id)}
-            className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[10px] ${
-              tab === item.id
-                ? "bg-white/[0.08] text-slate-200"
-                : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
-            }`}
-          >
-            {item.id === "git" && <GitBranch size={10} />}
-            {item.label}
-          </button>
-        ))}
+      <div className="panel-tab-strip">
+        <div className="panel-tab-row" role="tablist" aria-label="Project areas">
+          {panelTabs.map((item) => (
+            <button
+              key={item.id}
+              ref={tab === item.id ? activeTabRef : undefined}
+              type="button"
+              role="tab"
+              aria-selected={tab === item.id}
+              onClick={() => onTab(item.id)}
+              className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[10px] ${
+                tab === item.id
+                  ? "bg-white/[0.08] text-slate-200"
+                  : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+              }`}
+            >
+              {item.id === "git" && <GitBranch size={10} />}
+              {item.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {dataError !== null && (
@@ -544,13 +599,11 @@ export default function ProjectPanel(props: ProjectPanelProps) {
         )}
 
         {tab === "git" && (
-          <GitPanel
+          <GitRepoList
             project={project}
             repos={repos}
             revision={revision}
-            onArtifact={onArtifact}
-            onError={setDataError}
-            onWorkspaceChanged={onWorkspaceChanged}
+            onOpen={onOpenGit}
           />
         )}
 

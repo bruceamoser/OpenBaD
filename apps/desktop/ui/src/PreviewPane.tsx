@@ -1,9 +1,10 @@
-import { FileCode2, Image, Layers, Sparkles, X, Globe } from "lucide-react";
+import { FileCode2, GitBranch, Globe, Image, Layers, Sparkles, X } from "lucide-react";
 
 import ArtifactViewer from "./ArtifactViewer";
+import GitRepoScreen from "./GitRepoScreen";
 import OpenExternalButton from "./OpenExternalButton";
 import RevealButton from "./RevealButton";
-import type { Artifact } from "./types";
+import type { Artifact, PreviewTarget } from "./types";
 
 function kindIcon(kind: Artifact["kind"]) {
   switch (kind) {
@@ -23,23 +24,35 @@ function kindIcon(kind: Artifact["kind"]) {
 }
 
 export default function PreviewPane({
-  artifact,
+  target,
   workspacePath,
   revision,
   width,
   reserved,
   onResizeStart,
   onClose,
+  onArtifact,
+  onWorkspaceChanged,
 }: {
-  artifact: Artifact;
+  target: PreviewTarget;
   workspacePath: string;
   revision: number;
   width: number;
   reserved: number;
   onResizeStart: (event: React.PointerEvent<HTMLDivElement>) => void;
   onClose: () => void;
+  onArtifact: (artifact: Artifact | null) => void;
+  onWorkspaceChanged: () => void;
 }) {
+  const artifact = target.kind === "artifact" ? target.artifact : null;
+  const title =
+    target.kind === "artifact" ? target.artifact.title : target.repoName;
+  const subtitle =
+    target.kind === "artifact"
+      ? (target.artifact.uri ?? target.artifact.kind)
+      : `source control · ${target.repoPath}`;
   const revealable =
+    artifact !== null &&
     artifact.kind === "file" &&
     artifact.uri !== undefined &&
     !artifact.uri.startsWith("http://") &&
@@ -58,6 +71,7 @@ export default function PreviewPane({
       <aside
         aria-label="Preview"
         data-testid="preview-pane"
+        data-preview-kind={target.kind}
         className="flex min-h-0 shrink-0 flex-col border-l border-white/[0.08] bg-[#1b232e]"
         style={{
           width: `clamp(300px, ${width}px, calc(100vw - ${reserved}px))`,
@@ -65,18 +79,20 @@ export default function PreviewPane({
       >
         <div className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3.5">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-slate-500">{kindIcon(artifact.kind)}</span>
+            <span className="shrink-0 text-slate-500">
+              {artifact === null ? <GitBranch size={12} /> : kindIcon(artifact.kind)}
+            </span>
             <div className="min-w-0">
               <p className="truncate text-[12px] font-medium text-slate-200">
-                {artifact.title}
+                {title}
               </p>
               <p className="truncate font-mono text-[9px] text-slate-500">
-                {artifact.uri ?? artifact.kind}
+                {subtitle}
               </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {revealable && artifact.uri !== undefined && (
+            {revealable && artifact !== null && artifact.uri !== undefined && (
               <>
                 <OpenExternalButton
                   workspacePath={workspacePath}
@@ -101,11 +117,21 @@ export default function PreviewPane({
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-3">
-          <ArtifactViewer
-            artifact={artifact}
-            workspacePath={workspacePath}
-            revision={revision}
-          />
+          {target.kind === "artifact" ? (
+            <ArtifactViewer
+              artifact={target.artifact}
+              workspacePath={workspacePath}
+              revision={revision}
+            />
+          ) : (
+            <GitRepoScreen
+              workspacePath={target.workspacePath}
+              repoPath={target.repoPath}
+              repoName={target.repoName}
+              onArtifact={onArtifact}
+              onWorkspaceChanged={onWorkspaceChanged}
+            />
+          )}
         </div>
       </aside>
     </>

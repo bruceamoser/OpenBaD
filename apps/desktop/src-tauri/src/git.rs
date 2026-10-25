@@ -70,6 +70,21 @@ pub struct GitRepoStatus {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitRepoSummary {
+    pub path: String,
+    pub name: String,
+    pub is_repo: bool,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitCommandResult {
     pub ok: bool,
     pub message: String,
@@ -376,6 +391,58 @@ pub fn status_for(repo: &Path) -> GitRepoStatus {
     status
 }
 
+fn repo_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repository")
+        .to_owned()
+}
+
+/// A cheap status summary for the Source Control repo list. Unlike
+/// [`status_for`], it does not collect branches, remotes, or the last commit.
+pub fn summary_for(repo: &Path) -> GitRepoSummary {
+    let mut summary = GitRepoSummary {
+        path: repo.to_string_lossy().into_owned(),
+        name: repo_name(repo),
+        is_repo: false,
+        branch: None,
+        detached: false,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        dirty: 0,
+        error: None,
+    };
+    if !is_repo(repo) {
+        return summary;
+    }
+    summary.is_repo = true;
+    let (branch, detached) = branch_name(repo);
+    summary.branch = branch;
+    summary.detached = detached;
+    summary.upstream = upstream(repo);
+    let (ahead, behind) = ahead_behind(repo, summary.upstream.as_deref());
+    summary.ahead = ahead;
+    summary.behind = behind;
+    summary.dirty = parse_files(repo).len() as u32;
+    summary
+}
+
+fn unavailable_summary(path: &str, error: &str) -> GitRepoSummary {
+    GitRepoSummary {
+        path: path.to_owned(),
+        name: repo_name(Path::new(path)),
+        is_repo: false,
+        branch: None,
+        detached: false,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        dirty: 0,
+        error: Some(error.to_owned()),
+    }
+}
+
 fn canonical(path: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(path).map_err(|error| format!("{path}: {error}"))
 }
@@ -480,6 +547,33 @@ pub fn git_repo_status(
 ) -> Result<GitRepoStatus, String> {
     let repo = checked_repo(&state, &workspace_path, &repo_path)?;
     Ok(status_for(&repo))
+}
+
+#[tauri::command]
+pub fn git_project_repos(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    repo_paths: Vec<String>,
+) -> Result<Vec<GitRepoSummary>, String> {
+    const MAX_REPOS: usize = 256;
+    if repo_paths.len() > MAX_REPOS {
+        return Err(format!("at most {MAX_REPOS} repositories can be summarized"));
+    }
+    let mut ordered = Vec::with_capacity(repo_paths.len() + 1);
+    ordered.push(workspace_path.clone());
+    ordered.extend(repo_paths.into_iter().filter(|path| path != &workspace_path));
+    let mut seen = std::collections::HashSet::new();
+    let mut summaries = Vec::with_capacity(ordered.len());
+    for path in ordered {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        match checked_repo(&state, &workspace_path, &path) {
+            Ok(repo) => summaries.push(summary_for(&repo)),
+            Err(error) => summaries.push(unavailable_summary(&path, &error)),
+        }
+    }
+    Ok(summaries)
 }
 
 #[tauri::command]
@@ -762,6 +856,32 @@ mod tests {
         assert!(status.last_commit.is_some());
         assert!(status.files.iter().any(|file| file.path == "README.md" && file.unstaged));
         assert!(status.files.iter().any(|file| file.path == "new.txt" && file.untracked));
+    }
+
+    #[test]
+    fn summary_reports_branch_and_dirty_count() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "README.md", "initial\n");
+        std::fs::write(repo.join("README.md"), "changed\n").expect("update file");
+        std::fs::write(repo.join("new.txt"), "new\n").expect("new file");
+
+        let summary = summary_for(repo);
+        assert!(summary.is_repo);
+        assert_eq!(summary.name, repo.file_name().unwrap().to_string_lossy());
+        assert_eq!(summary.branch.as_deref(), Some("main"));
+        assert!(!summary.detached);
+        assert_eq!(summary.dirty, 2);
+        assert!(summary.error.is_none());
+    }
+
+    #[test]
+    fn summary_marks_non_repositories() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let summary = summary_for(directory.path());
+        assert!(!summary.is_repo);
+        assert_eq!(summary.dirty, 0);
+        assert!(summary.branch.is_none());
     }
 
     #[test]

@@ -11,6 +11,7 @@ import type {
   GitCommandResult,
   GitCommit,
   GitRepoStatus,
+  GitRepoSummary,
   ServiceStatus,
   IndexReport,
   InstallOutcome,
@@ -1078,6 +1079,42 @@ export async function gitRepoStatus(
     return invoke<GitRepoStatus>("git_repo_status", { workspacePath, repoPath });
   }
   return mockGitStatus(repoPath);
+}
+
+export async function gitProjectRepos(
+  workspacePath: string,
+  repoPaths: string[],
+): Promise<GitRepoSummary[]> {
+  if (isTauri) {
+    return invoke<GitRepoSummary[]>("git_project_repos", {
+      workspacePath,
+      repoPaths,
+    });
+  }
+  const seen = new Set<string>();
+  return [workspacePath, ...repoPaths]
+    .filter((path) => {
+      if (path.length === 0 || seen.has(path)) {
+        return false;
+      }
+      seen.add(path);
+      return true;
+    })
+    .map((path) => {
+      const status = mockGitStatus(path);
+      return {
+        path,
+        name: status.name,
+        isRepo: status.isRepo,
+        branch: status.branch,
+        detached: status.detached,
+        upstream: status.upstream,
+        ahead: status.ahead,
+        behind: status.behind,
+        dirty: status.files.length,
+        error: status.error,
+      };
+    });
 }
 
 function mockGitStatus(repoPath: string): GitRepoStatus {

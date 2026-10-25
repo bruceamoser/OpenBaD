@@ -4649,6 +4649,7 @@ pub fn run() {
             remove_project_repo,
             set_project_repo_read_only,
             git::git_repo_status,
+            git::git_project_repos,
             git::git_init,
             git::git_checkout,
             git::git_fetch,

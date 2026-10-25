@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
   Check,
-  ChevronDown,
   CircleAlert,
   CircleCheck,
   FileCode2,
@@ -33,127 +32,145 @@ import type {
   GitCommandResult,
   GitFileChange,
   GitRepoStatus,
-  ProjectRepo,
-  WorkspaceSummary,
 } from "./types";
 
-export type GitPanelProps = {
-  project: WorkspaceSummary | null;
-  repos: ProjectRepo[];
-  revision: number;
+export type GitRepoScreenProps = {
+  workspacePath: string;
+  repoPath: string;
+  repoName: string;
   onArtifact: (artifact: Artifact | null) => void;
-  onError: (message: string | null) => void;
   onWorkspaceChanged: () => void;
 };
 
-export default function GitPanel({
-  project,
-  repos,
-  revision,
+export default function GitRepoScreen({
+  workspacePath,
+  repoPath,
+  repoName,
   onArtifact,
-  onError,
   onWorkspaceChanged,
-}: GitPanelProps) {
-  const workspacePath = project?.path ?? "";
-  const [repoPath, setRepoPath] = useState(workspacePath);
+}: GitRepoScreenProps) {
   const [status, setStatus] = useState<GitRepoStatus | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [branchChoice, setBranchChoice] = useState("");
   const [newBranch, setNewBranch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [stageAll, setStageAll] = useState(false);
-
-  useEffect(() => {
-    setRepoPath(workspacePath);
-  }, [workspacePath]);
-
-  useEffect(() => {
-    if (repoPath === workspacePath) {
-      return;
-    }
-    if (!repos.some((repo) => repo.path === repoPath)) {
-      setRepoPath(workspacePath);
-    }
-  }, [repos, repoPath, workspacePath]);
+  const request = useRef(0);
 
   useEffect(() => {
     setStatus(null);
     setNotice(null);
+    setError(null);
     setDiffPath(null);
     setBranchChoice("");
     setNewBranch("");
     setCommitMessage("");
     setStageAll(false);
-    onError(null);
-  }, [workspacePath, repoPath, onError]);
+  }, [workspacePath, repoPath]);
 
-  const refresh = useCallback(async () => {
-    if (workspacePath.length === 0 || repoPath.length === 0) {
-      setStatus(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const next = await gitRepoStatus(workspacePath, repoPath);
-      setStatus(next);
-      onError(next.error);
-    } catch (cause) {
-      setStatus(null);
-      onError(errorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [workspacePath, repoPath, onError]);
+  const refresh = useCallback(
+    async (quiet = false) => {
+      if (workspacePath.length === 0 || repoPath.length === 0) {
+        setStatus(null);
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
+      if (quiet) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+      const sequence = request.current + 1;
+      request.current = sequence;
+      try {
+        const next = await gitRepoStatus(workspacePath, repoPath);
+        if (request.current !== sequence) {
+          return;
+        }
+        setStatus(next);
+        setError(next.error);
+      } catch (cause) {
+        if (request.current === sequence) {
+          setStatus(null);
+          setError(errorMessage(cause));
+        }
+      } finally {
+        if (request.current === sequence) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    },
+    [workspacePath, repoPath],
+  );
 
   useEffect(() => {
-    void refresh();
-  }, [refresh, revision]);
+    void refresh(false);
+  }, [refresh]);
 
-  const applyResult = useCallback(
-    (result: GitCommandResult): boolean => {
-      if (result.status !== null) {
-        setStatus(result.status);
+  useEffect(() => {
+    const onFocus = () => {
+      if (document.visibilityState === "visible") {
+        void refresh(true);
       }
-      if (result.ok) {
-        setNotice(result.message.trim() || "Done.");
-        onError(null);
-        return true;
-      }
-      setNotice(null);
-      onError(result.message.trim() || "The git command failed.");
-      return false;
-    },
-    [onError],
-  );
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [refresh]);
+
+  const applyResult = useCallback((result: GitCommandResult): boolean => {
+    if (result.status !== null) {
+      setStatus(result.status);
+    }
+    if (result.ok) {
+      setNotice(result.message.trim() || "Done.");
+      setError(null);
+      return true;
+    }
+    setNotice(null);
+    setError(result.message.trim() || "The git command failed.");
+    return false;
+  }, []);
 
   const run = useCallback(
     async (
       key: string,
       action: () => Promise<GitCommandResult>,
     ): Promise<boolean> => {
+      request.current += 1;
+      setLoading(false);
+      setRefreshing(false);
       setBusy(key);
       setNotice(null);
-      onError(null);
+      setError(null);
       try {
-        return applyResult(await action());
+        const applied = applyResult(await action());
+        if (applied) {
+          onWorkspaceChanged();
+        }
+        return applied;
       } catch (cause) {
-        onError(errorMessage(cause));
+        setError(errorMessage(cause));
         return false;
       } finally {
         setBusy(null);
       }
     },
-    [applyResult, onError],
+    [applyResult, onWorkspaceChanged],
   );
 
   const initializeRepo = async () => {
-    if (await run("init", () => gitInit(workspacePath, repoPath))) {
-      onWorkspaceChanged();
-    }
+    await run("init", () => gitInit(workspacePath, repoPath));
   };
 
   const currentBranch = status?.branch ?? "";
@@ -178,7 +195,6 @@ export default function GitPanel({
       )
     ) {
       setBranchChoice("");
-      onWorkspaceChanged();
     }
   };
 
@@ -194,7 +210,6 @@ export default function GitPanel({
     ) {
       setNewBranch("");
       setBranchChoice("");
-      onWorkspaceChanged();
     }
   };
 
@@ -203,9 +218,7 @@ export default function GitPanel({
   };
 
   const pullRemote = async () => {
-    if (await run("pull", () => gitPull(workspacePath, repoPath, "ff-only"))) {
-      onWorkspaceChanged();
-    }
+    await run("pull", () => gitPull(workspacePath, repoPath, "ff-only"));
   };
 
   const pushBranch = async () => {
@@ -248,14 +261,13 @@ export default function GitPanel({
     ) {
       setCommitMessage("");
       setStageAll(false);
-      onWorkspaceChanged();
     }
   };
 
   const openDiff = async (file: GitFileChange, staged: boolean) => {
     const key = `${staged ? "staged" : "worktree"}:${file.path}`;
     setDiffPath(key);
-    onError(null);
+    setError(null);
     try {
       const diff = await gitDiff(workspacePath, repoPath, file.path, staged);
       const content =
@@ -270,7 +282,7 @@ export default function GitPanel({
         content,
       });
     } catch (cause) {
-      onError(errorMessage(cause));
+      setError(errorMessage(cause));
     } finally {
       setDiffPath(null);
     }
@@ -280,7 +292,6 @@ export default function GitPanel({
   const stagedFiles = files.filter((file) => file.staged);
   const changedFiles = files.filter((file) => file.unstaged || file.untracked);
   const isBusy = busy !== null || loading;
-  const currentRepo = repos.find((repo) => repo.path === repoPath);
   const hasUpstream = status !== null && status.upstream !== null;
   const hasRemotes = status !== null && status.remotes.length > 0;
   const operation = status?.operation ?? null;
@@ -299,54 +310,40 @@ export default function GitPanel({
   return (
     <div className="space-y-2.5">
       <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <label
-            htmlFor="git-repository"
-            className="text-[9px] uppercase tracking-wide text-slate-500"
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <FolderGit2 size={12} className="shrink-0 text-emerald-300" />
+              <p className="truncate text-[11px] font-medium text-slate-200">
+                {repoName}
+              </p>
+            </div>
+            <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-slate-500">
+              {repoPath}
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Refresh repository status"
+            title="Refresh repository status"
+            onClick={() => void refresh(true)}
+            disabled={loading || busy !== null}
+            className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
           >
-            Repository
-          </label>
-          {currentRepo !== undefined && (
-            <span className="rounded bg-white/[0.05] px-1 py-0.5 text-[8px] uppercase tracking-wide text-slate-500">
-              reference
-              {currentRepo.read_only ? " · read-only" : ""}
-            </span>
-          )}
+            <RefreshCw
+              size={13}
+              className={loading || refreshing ? "animate-spin" : ""}
+            />
+          </button>
         </div>
-        <div className="relative mt-1">
-          <FolderGit2
-            size={12}
-            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-emerald-300"
-          />
-          <select
-            id="git-repository"
-            value={repoPath}
-            onChange={(event) => setRepoPath(event.target.value)}
-            disabled={isBusy}
-            className="w-full appearance-none rounded-md border border-white/[0.08] bg-black/20 py-1.5 pl-7 pr-7 text-[10px] text-slate-300 outline-none focus:border-emerald-400/40 disabled:opacity-40"
-          >
-            <option value={workspacePath} className="bg-[#1b232e]">
-              {project?.name ?? "Workspace"} — workspace
-            </option>
-            {repos.map((repo) => (
-              <option
-                key={repo.id}
-                value={repo.path}
-                className="bg-[#1b232e]"
-              >
-                {repo.name} — reference
-              </option>
-            ))}
-          </select>
-          <ChevronDown
-            size={12}
-            className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-500"
-          />
-        </div>
-        <p className="mt-1 break-all font-mono text-[9px] leading-4 text-slate-500">
-          {repoPath}
-        </p>
       </div>
+
+      {error !== null && (
+        <div className="flex items-start gap-1.5 rounded-lg border border-amber-400/20 bg-amber-400/[0.06] px-2.5 py-2 text-[10px] leading-4 text-amber-200">
+          <CircleAlert size={12} className="mt-0.5 shrink-0" />
+          <p className="min-w-0 flex-1 break-words">{error}</p>
+        </div>
+      )}
 
       {notice !== null && (
         <div className="flex items-start gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.06] px-2.5 py-2 text-[10px] leading-4 text-emerald-200">
@@ -359,7 +356,7 @@ export default function GitPanel({
 
       {status === null && (
         <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-4 text-center">
-          {loading ? (
+          {loading || refreshing || error === null ? (
             <div className="flex items-center justify-center gap-2 text-[10px] text-slate-500">
               <Loader2 size={13} className="animate-spin" /> Reading repository…
             </div>
@@ -375,7 +372,7 @@ export default function GitPanel({
               </p>
               <button
                 type="button"
-                onClick={() => void refresh()}
+                onClick={() => void refresh(false)}
                 disabled={loading}
                 className="mt-2 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
               >
@@ -444,19 +441,6 @@ export default function GitPanel({
                     : "no upstream configured"}
                 </p>
               </div>
-              <button
-                type="button"
-                aria-label="Refresh repository status"
-                title="Refresh repository status"
-                onClick={() => void refresh()}
-                disabled={loading || isBusy}
-                className="rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
-              >
-                <RefreshCw
-                  size={13}
-                  className={loading ? "animate-spin" : ""}
-                />
-              </button>
             </div>
 
             <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[9px]">

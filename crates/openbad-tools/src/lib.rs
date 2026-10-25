@@ -6109,15 +6109,15 @@ impl Tool for PresentArtifactTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "present_artifact",
-            "Open an artifact beside the conversation: a web page, image, markdown note, diff, or workspace file. Use this when visual inspection helps more than prose.",
+            "Open an artifact beside the conversation: a web page, image, markdown note, diff, workspace file, or a repository source control screen. Use this when visual inspection helps more than prose.",
             RiskLevel::Read,
         )
         .with_schema(json!({
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["web", "image", "markdown", "diff", "file"]},
+                "kind": {"type": "string", "enum": ["web", "image", "markdown", "diff", "file", "git"]},
                 "title": {"type": "string"},
-                "uri": {"type": "string", "description": "URL, workspace-relative path, or knowledge:<document_id>"},
+                "uri": {"type": "string", "description": "URL, workspace-relative path, knowledge:<document_id>, or a repository name/path for git"},
                 "content": {"type": "string", "description": "Inline markdown or diff content"},
                 "language": {"type": "string"}
             },
@@ -6129,12 +6129,12 @@ impl Tool for PresentArtifactTool {
     async fn execute(
         &self,
         arguments: Value,
-        _context: &ToolContext,
+        context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let kind = string_arg(&arguments, "kind")?;
         if !matches!(
             kind.as_str(),
-            "web" | "image" | "markdown" | "diff" | "file"
+            "web" | "image" | "markdown" | "diff" | "file" | "git"
         ) {
             return Err(ToolError::InvalidArgument(format!(
                 "unsupported artifact kind: {kind}"
@@ -6143,7 +6143,7 @@ impl Tool for PresentArtifactTool {
         let title = string_arg(&arguments, "title")?;
         let uri = optional_string(&arguments, "uri");
         let content = optional_string(&arguments, "content");
-        if uri.is_none() && content.is_none() {
+        if kind != "git" && uri.is_none() && content.is_none() {
             return Err(ToolError::InvalidArgument(
                 "uri or content is required".to_owned(),
             ));
@@ -6158,11 +6158,20 @@ impl Tool for PresentArtifactTool {
                 ));
             }
         }
+        let artifact_uri = if kind == "git" {
+            Some(
+                preview_repo_path(context, uri.as_deref())?
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        } else {
+            uri
+        };
         let language = optional_string(&arguments, "language");
         let artifact = json!({
             "kind": kind,
             "title": title,
-            "uri": uri,
+            "uri": artifact_uri,
             "content": content,
             "language": language,
         });
@@ -6171,6 +6180,31 @@ impl Tool for PresentArtifactTool {
         ))
         .with_metadata(json!({"openbad_artifact": artifact})))
     }
+}
+
+fn preview_repo_path(
+    context: &ToolContext,
+    requested: Option<&str>,
+) -> Result<PathBuf, ToolError> {
+    let root = context.workspace.root().to_path_buf();
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(root);
+    };
+    if let Some(project) = &context.project {
+        if let Ok(repos) = project.list_repos() {
+            if let Some(repo) = repos
+                .iter()
+                .find(|repo| repo.name == requested || repo.id == requested || repo.path == requested)
+            {
+                return Ok(PathBuf::from(&repo.path));
+            }
+        }
+    }
+    let path = Path::new(requested);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(root.join(path))
 }
 
 fn sh_quote(value: &str) -> String {
@@ -15751,9 +15785,10 @@ invariants:
             "one\n"
         );
 
+        let secret = format!("sk-{}", "123456789012345678901234");
         let blocked = WriteFileTool
             .execute(
-                json!({"path": "secret.txt", "content": "sk-123456789012345678901234"}),
+                json!({"path": "secret.txt", "content": secret}),
                 &context,
             )
             .await
@@ -17199,6 +17234,43 @@ invariants:
             .await
             .expect("artifact");
         assert_eq!(artifact.metadata["openbad_artifact"]["kind"], json!("web"));
+
+        let git_artifact = PresentArtifactTool
+            .execute(
+                json!({"kind": "git", "title": "Workspace source control"}),
+                &context,
+            )
+            .await
+            .expect("git artifact");
+        assert_eq!(
+            git_artifact.metadata["openbad_artifact"]["kind"],
+            json!("git")
+        );
+        assert_eq!(
+            git_artifact.metadata["openbad_artifact"]["uri"],
+            json!(context.workspace.root().to_string_lossy())
+        );
+
+        let reference_artifact = PresentArtifactTool
+            .execute(
+                json!({"kind": "git", "title": "Reference source control", "uri": "repo-1"}),
+                &context,
+            )
+            .await
+            .expect("reference git artifact");
+        let expected_reference = context
+            .project
+            .as_ref()
+            .expect("project")
+            .list_repos()
+            .expect("repos")
+            .into_iter()
+            .find(|repo| repo.id == "repo-1")
+            .expect("repo-1");
+        assert_eq!(
+            reference_artifact.metadata["openbad_artifact"]["uri"],
+            json!(expected_reference.path)
+        );
     }
 
     #[tokio::test]
