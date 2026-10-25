@@ -7,7 +7,6 @@ import {
   FolderGit2,
   FolderPlus,
   Gauge,
-  GitBranch,
   KeyRound,
   Layers,
   Loader2,
@@ -20,7 +19,6 @@ import {
 } from "lucide-react";
 
 import AgentsPanel from "./AgentsPanel";
-import GitRepoList from "./GitRepoList";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import RevealButton from "./RevealButton";
 import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
@@ -59,7 +57,6 @@ export type PanelTab =
   | "knowledge"
   | "retrieval"
   | "memory"
-  | "git"
   | "checkpoints"
   | "diagnostics";
 
@@ -71,7 +68,6 @@ const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "knowledge", label: "Knowledge" },
   { id: "retrieval", label: "Retrieval" },
   { id: "memory", label: "Memory" },
-  { id: "git", label: "Source Control" },
   { id: "checkpoints", label: "Edits" },
   { id: "diagnostics", label: "Diag" },
 ];
@@ -103,7 +99,6 @@ export type ProjectPanelProps = {
     tab: "model" | "access" | "secrets" | "project" | "about",
   ) => void;
   onArtifact: (artifact: Artifact | null) => void;
-  onOpenGit: (repoPath: string, repoName: string) => void;
   onImportBundle: () => void;
   revision: number;
   onWorkspaceChanged: () => void;
@@ -135,7 +130,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     sessionId,
     onOpenSettings,
     onArtifact,
-    onOpenGit,
     onImportBundle,
     revision,
     onWorkspaceChanged,
@@ -168,18 +162,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       setRepos(nextRepos);
       setFiles(nextFiles);
       setManifest(nextManifest);
-      setDataError(null);
-    } catch (cause) {
-      setDataError(describeError(cause));
-    }
-  }, [workspacePath]);
-
-  const refreshRepos = useCallback(async () => {
-    if (workspacePath.length === 0) {
-      return;
-    }
-    try {
-      setRepos(await loadProjectRepos(workspacePath));
       setDataError(null);
     } catch (cause) {
       setDataError(describeError(cause));
@@ -240,9 +222,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       didMountRef.current = true;
       return;
     }
-    if (tab === "git") {
-      void refreshRepos();
-    } else if (
+    if (
       tab === "overview" ||
       tab === "repos" ||
       tab === "knowledge" ||
@@ -250,18 +230,14 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     ) {
       void refresh();
     }
-  }, [refresh, refreshRepos, revision, tab]);
+  }, [refresh, revision, tab]);
 
   useEffect(() => {
     const onFocus = () => {
       if (document.visibilityState !== "visible") {
         return;
       }
-      if (tab === "git") {
-        void refreshRepos();
-      } else {
-        void refresh();
-      }
+      void refresh();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);
@@ -269,7 +245,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [refresh, refreshRepos, tab]);
+  }, [refresh]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -358,7 +334,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                   : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
               }`}
             >
-              {item.id === "git" && <GitBranch size={10} />}
               {item.label}
             </button>
           ))}
@@ -595,15 +570,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 content: memory.content,
               })
             }
-          />
-        )}
-
-        {tab === "git" && (
-          <GitRepoList
-            project={project}
-            repos={repos}
-            revision={revision}
-            onOpen={onOpenGit}
           />
         )}
 

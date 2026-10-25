@@ -28,7 +28,6 @@ import {
   Folder,
   FolderGit2,
   FolderOpen,
-  GitBranch,
   Gauge,
   KeyRound,
   Loader2,
@@ -95,6 +94,7 @@ import McpSettings from "./McpSettings";
 import ServicesSettings from "./ServicesSettings";
 import UpdatePanel from "./UpdatePanel";
 import { droppedToUploads, useFileDropZone } from "./dropzone";
+import GitRepoList from "./GitRepoList";
 import ProjectPanel from "./ProjectPanel";
 import PreviewPane from "./PreviewPane";
 import RevealButton from "./RevealButton";
@@ -1784,12 +1784,6 @@ export default function App() {
           onSelect: () => openPanel("memory"),
         },
         {
-          label: "Source Control",
-          checked: panelOpen && panelTab === "git",
-          disabled: activeProject === null,
-          onSelect: () => openPanel("git"),
-        },
-        {
           label: "Checkpoints",
           checked: panelOpen && panelTab === "checkpoints",
           onSelect: () => openPanel("checkpoints"),
@@ -2022,11 +2016,11 @@ export default function App() {
                           active={panelOpen && panelTab === "memory"}
                           onClick={() => openPanel("memory")}
                         />
-                        <ProjectAreaButton
-                          icon={<GitBranch size={12} />}
-                          label="Source Control"
-                          active={panelOpen && panelTab === "git"}
-                          onClick={() => openPanel("git")}
+                        <GitRepoList
+                          workspacePath={project.path}
+                          projectName={project.name}
+                          revision={projectRevision}
+                          onOpen={openGitRepo}
                         />
                       </div>
                       <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
@@ -2365,7 +2359,6 @@ export default function App() {
               sessionId={sessionId}
               onOpenSettings={openSettings}
               onArtifact={openArtifact}
-              onOpenGit={openGitRepo}
               onImportBundle={() => void startMergeImport()}
               revision={projectRevision}
               onWorkspaceChanged={markWorkspaceChanged}
@@ -3443,7 +3436,6 @@ function CommandPalette({
     { label: "Project: Knowledge", hint: "", run: () => onContext("knowledge") },
     { label: "Project: Retrieval", hint: "", run: () => onContext("retrieval") },
     { label: "Project: Memory", hint: "", run: () => onContext("memory") },
-    { label: "Project: Source Control", hint: "", run: () => onContext("git") },
     { label: "Project: Checkpoints", hint: "", run: () => onContext("checkpoints") },
     { label: "Project: Diagnostics", hint: "", run: () => onContext("diagnostics") },
   ];

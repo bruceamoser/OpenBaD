@@ -460,25 +460,28 @@ code {
   }
 }
 
-/* Keep the project tab strip's horizontal scrollbar out of the tab labels. */
+/* Keep the project tab strip's horizontal scrollbar out of the tab labels.
+   The bottom padding reserves room for the 8px scrollbar plus a visible gap
+   at narrow panel widths, where the strip always overflows. */
 .panel-tab-strip {
   flex-shrink: 0;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+  scrollbar-color: rgba(148, 163, 184, 0.4) rgba(255, 255, 255, 0.04);
   overscroll-behavior-x: contain;
-  padding: 6px 8px 8px;
+  padding: 6px 8px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .panel-tab-strip::-webkit-scrollbar {
-  height: 6px;
+  height: 8px;
 }
 
 .panel-tab-strip::-webkit-scrollbar-track {
-  background: transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .panel-tab-strip::-webkit-scrollbar-thumb {
