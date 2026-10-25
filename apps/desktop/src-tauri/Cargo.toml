@@ -47,6 +47,7 @@ calamine = "0.35.0"
 zip = { version = "7.3.0", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.1"
 quick-xml = "0.39"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

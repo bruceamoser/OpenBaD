@@ -1264,6 +1264,7 @@ impl ToolRegistry {
         registry.register(GlobRepoTool);
         registry.register(GrepRepoTool);
         registry.register(WebFetchTool);
+        registry.register(WebSearchTool);
         registry.register(PresentArtifactTool);
         registry.register(UndoLastTool);
         registry.register(InstructionsForTool);
@@ -1569,7 +1570,7 @@ fn domain_description(domain: &str) -> String {
         "session" => "session checkpoints, resume, handoff, and history search",
         "mcp" => "MCP server configuration, tool discovery, and proxy calls",
         "snapshots" => "workspace snapshots and golden comparisons",
-        "web" => "web fetch and package registry lookup",
+        "web" => "web search, fetch, and package registry lookup",
         _ => "general-purpose tools",
     };
     format!(
@@ -1647,7 +1648,7 @@ fn tool_domain(name: &str) -> &'static str {
         | "mcp_server_remove"
         | "mcp_server_test"
         | "mcp_server_set_enabled" => "mcp",
-        "registry_lookup" | "web_fetch" => "web",
+        "registry_lookup" | "web_fetch" | "web_search" => "web",
         "subagent" | "workflow" => "orchestration",
         _ => "general",
     }
@@ -5584,6 +5585,8 @@ struct WebCacheEntry {
     title: Option<String>,
     content_type: Option<String>,
     final_url: String,
+    #[serde(default)]
+    via: Option<String>,
 }
 
 fn web_cache_dir(context: &ToolContext) -> std::path::PathBuf {
@@ -5650,6 +5653,53 @@ fn html_title(html: &str) -> Option<String> {
         .filter(|title| !title.is_empty())
 }
 
+fn jina_reader_base() -> Option<String> {
+    let configured = std::env::var("OPENBAD_JINA_READER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned());
+    let configured = configured.trim().trim_end_matches('/').to_owned();
+    if configured.is_empty()
+        || matches!(
+            configured.to_ascii_lowercase().as_str(),
+            "off" | "none" | "disabled" | "direct"
+        )
+    {
+        None
+    } else {
+        Some(configured)
+    }
+}
+
+fn jina_reader_url(base: &str, target: &str) -> String {
+    if base.contains("{url}") {
+        base.replace("{url}", target)
+    } else {
+        format!("{base}/{target}")
+    }
+}
+
+fn parse_jina_response(raw: &str) -> (Option<String>, Option<String>, String) {
+    let mut title = None;
+    let mut source = None;
+    for line in raw.lines().take(8) {
+        if let Some(value) = line.strip_prefix("Title:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                title = Some(value.to_owned());
+            }
+        } else if let Some(value) = line.strip_prefix("URL Source:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                source = Some(value.to_owned());
+            }
+        }
+    }
+    let body = raw
+        .find("Markdown Content:")
+        .map(|index| raw[index + "Markdown Content:".len()..].trim_start().to_owned())
+        .unwrap_or_else(|| raw.trim().to_owned());
+    (title, source, body)
+}
+
 struct WebFetchTool;
 
 #[async_trait]
@@ -5666,6 +5716,7 @@ impl Tool for WebFetchTool {
             "properties": {
                 "url": {"type": "string"},
                 "format": {"type": "string", "enum": ["text", "html"], "description": "Return readable text (default) or raw HTML"},
+                "reader": {"type": "string", "enum": ["auto", "jina", "direct"], "description": "Text extraction: Jina Reader with direct HTTP fallback (auto), Jina only, or direct only"},
                 "prefer_cache": {"type": "boolean", "description": "Reuse a cached fetch when younger than max_age_hours (default true)"},
                 "max_age_hours": {"type": "integer", "minimum": 1, "maximum": 720},
                 "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
@@ -5705,6 +5756,7 @@ impl Tool for WebFetchTool {
             }
         }
         let format = optional_string(&arguments, "format").unwrap_or_else(|| "text".to_owned());
+        let reader = optional_string(&arguments, "reader").unwrap_or_else(|| "auto".to_owned());
         let prefer_cache = optional_bool(&arguments, "prefer_cache").unwrap_or(true);
         let max_age_hours = optional_usize(&arguments, "max_age_hours")
             .unwrap_or(24)
@@ -5724,7 +5776,7 @@ impl Tool for WebFetchTool {
                 if age <= (max_age_hours as i64) * 3_600_000 {
                     let path = web_cache_dir(context).join(format!("{}.txt", entry.hash));
                     if let Ok(body) = std::fs::read_to_string(path) {
-                        let body = if format == "html" {
+                        let body = if format == "html" || entry.via.as_deref() == Some("jina") {
                             body
                         } else {
                             html_to_text(&body)
@@ -5742,6 +5794,7 @@ impl Tool for WebFetchTool {
                             "hash": entry.hash,
                             "fetched_at": entry.fetched_at,
                             "cached": true,
+                            "via": entry.via.clone(),
                             "max_bytes": max_bytes,
                             "max_tokens": max_bytes / 4
                         })));
@@ -5755,6 +5808,70 @@ impl Tool for WebFetchTool {
             .user_agent("OpenBaD/0.1 (+https://github.com/bruceamoser/OpenBaD)")
             .build()
             .map_err(|error| ToolError::Failed(error.to_string()))?;
+
+        if format != "html" && reader != "direct" {
+            if let Some(base) = jina_reader_base() {
+                let jina_url = jina_reader_url(&base, &raw);
+                let jina = client
+                    .get(&jina_url)
+                    .timeout(Duration::from_secs(12))
+                    .header(reqwest::header::ACCEPT, "text/plain")
+                    .send()
+                    .await;
+                if let Ok(response) = jina {
+                    if response.status().is_success() {
+                        if let Ok(bytes) = response.bytes().await {
+                            let raw_jina = String::from_utf8_lossy(&bytes).into_owned();
+                            if !raw_jina.trim().is_empty() {
+                                let (title, source, text) = parse_jina_response(&raw_jina);
+                                let final_url = source.unwrap_or_else(|| raw.clone());
+                                let hash = blake3::hash(bytes.as_ref()).to_hex().to_string();
+                                let fetched_at = now_millis();
+                                let entry = WebCacheEntry {
+                                    hash: hash.clone(),
+                                    fetched_at,
+                                    title: title.clone(),
+                                    content_type: Some("text/markdown".to_owned()),
+                                    final_url: final_url.clone(),
+                                    via: Some("jina".to_owned()),
+                                };
+                                save_web_cache(context, &raw, &raw_jina, &entry)?;
+                                let heading = title.clone().unwrap_or_else(|| raw.clone());
+                                return Ok(ToolResult::ok(truncate(
+                                    &format!("{heading}
+{final_url}
+
+{text}"),
+                                    max_bytes,
+                                ))
+                                .with_metadata(json!({
+                                    "url": raw,
+                                    "final_url": final_url,
+                                    "title": title,
+                                    "content_type": "text/markdown",
+                                    "hash": hash,
+                                    "fetched_at": fetched_at,
+                                    "cached": false,
+                                    "via": "jina",
+                                    "max_bytes": max_bytes,
+                                    "max_tokens": max_bytes / 4
+                                })));
+                            }
+                        }
+                    }
+                }
+                if reader == "jina" {
+                    return Err(ToolError::Failed(
+                        "Jina Reader did not return readable content".to_owned(),
+                    ));
+                }
+            } else if reader == "jina" {
+                return Err(ToolError::Failed(
+                    "Jina Reader is not configured".to_owned(),
+                ));
+            }
+        }
+
         let response = client
             .get(url)
             .send()
@@ -5806,6 +5923,7 @@ impl Tool for WebFetchTool {
             title: title.clone(),
             content_type: content_type.clone(),
             final_url: final_url.clone(),
+            via: Some("direct".to_owned()),
         };
         save_web_cache(context, &raw, &raw_body, &entry)?;
         let body = if format == "html" { &raw_body } else { &text };
@@ -5823,8 +5941,163 @@ impl Tool for WebFetchTool {
             "hash": hash,
             "fetched_at": fetched_at,
             "cached": false,
+            "via": "direct",
             "max_bytes": max_bytes,
             "max_tokens": max_bytes / 4
+        })))
+    }
+}
+
+struct WebSearchTool;
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "web_search",
+            "Search the web through the local SearXNG instance and return ranked results with titles, URLs, and snippets. Requires Full access.",
+            RiskLevel::Read,
+        )
+        .with_timeout(30)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 20},
+                "categories": {"type": "string", "description": "SearXNG categories, e.g. general,news,it"},
+                "engines": {"type": "string", "description": "Comma-separated SearXNG engines"},
+                "language": {"type": "string", "description": "Language code such as en or all"},
+                "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]}
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "web_search (network reads require Full access)".to_owned(),
+            ));
+        }
+        let query = string_arg(&arguments, "query")?;
+        if query.trim().is_empty() {
+            return Err(ToolError::InvalidArgument("query must not be empty".to_owned()));
+        }
+        let max_results = optional_usize(&arguments, "max_results")
+            .unwrap_or(8)
+            .clamp(1, 20);
+        let base = std::env::var("OPENBAD_SEARXNG_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned());
+        let endpoint = format!("{}/search", base.trim_end_matches('/'));
+        let endpoint_url = reqwest::Url::parse(&endpoint)
+            .map_err(|error| ToolError::InvalidArgument(format!("invalid SearXNG URL: {error}")))?;
+        let host = endpoint_url.host_str().unwrap_or_default().to_owned();
+        if let Some(policy) = load_policy(context)? {
+            if let Some(reason) = policy.network_denied(&host) {
+                return Err(ToolError::ApprovalRequired(reason));
+            }
+        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent("OpenBaD/0.1 (+https://github.com/bruceamoser/OpenBaD)")
+            .build()
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let mut request = client
+            .get(endpoint_url)
+            .query(&[("q", query.as_str()), ("format", "json"), ("safesearch", "1")]);
+        if let Some(categories) = optional_string(&arguments, "categories") {
+            request = request.query(&[("categories", categories)]);
+        }
+        if let Some(engines) = optional_string(&arguments, "engines") {
+            request = request.query(&[("engines", engines)]);
+        }
+        if let Some(language) = optional_string(&arguments, "language") {
+            request = request.query(&[("language", language)]);
+        }
+        if let Some(time_range) = optional_string(&arguments, "time_range") {
+            request = request.query(&[("time_range", time_range)]);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| ToolError::Failed(format!("web_search: {error}")))?;
+        if !response.status().is_success() {
+            return Err(ToolError::Failed(format!(
+                "web_search returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > 2_097_152)
+        {
+            return Err(ToolError::Failed(
+                "search response is larger than 2 MiB".to_owned(),
+            ));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ToolError::Failed(format!("web_search body: {error}")))?;
+        let payload: Value = serde_json::from_str(&body)
+            .map_err(|error| ToolError::Failed(format!("web_search JSON: {error}")))?;
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut lines = vec![format!(
+            "Search results for {:?} ({}):",
+            query,
+            results.len().min(max_results)
+        )];
+        for (index, result) in results.iter().take(max_results).enumerate() {
+            let title = result
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("(untitled)");
+            let url = result.get("url").and_then(Value::as_str).unwrap_or("");
+            let snippet = result
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let engine = result
+                .get("engine")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            lines.push(format!(
+                "\n{}. {}\n   {}\n   {}{}",
+                index + 1,
+                title,
+                url,
+                snippet.trim(),
+                if engine.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n   [{engine}]")
+                }
+            ));
+        }
+        if let Some(answers) = payload.get("answers").and_then(Value::as_array) {
+            let answers = answers
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            if !answers.is_empty() {
+                lines.push(format!("\nAnswers: {}", answers.join(" | ")));
+            }
+        }
+        let content = truncate(&lines.join("\n"), context.max_output_bytes);
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "query": query,
+            "endpoint": endpoint,
+            "results": results.len().min(max_results),
+            "via": "searxng"
         })))
     }
 }

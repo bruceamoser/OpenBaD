@@ -7,6 +7,7 @@ import {
   FolderGit2,
   FolderPlus,
   Gauge,
+  GitBranch,
   KeyRound,
   Layers,
   Loader2,
@@ -19,25 +20,22 @@ import {
 } from "lucide-react";
 
 import AgentsPanel from "./AgentsPanel";
+import GitPanel from "./GitPanel";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import RevealButton from "./RevealButton";
 import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
 import {
   addProjectRepo,
-  answerProjectQuestion,
-  approveProjectPlan,
   importReferenceFiles,
   importWorkspaceFiles,
   listProjectFiles,
   loadProjectManifest,
-  loadProjectPlan,
-  loadProjectQuestions,
   loadProjectOverview,
   loadProjectRepos,
-  loadProjectTodos,
   pickDirectory,
   pickFiles,
   removeProjectRepo,
+  setProjectRepoReadOnly,
 } from "./backend";
 import type {
   Artifact,
@@ -46,10 +44,7 @@ import type {
   MemoryRecord,
   ProjectManifest,
   ProjectOverview,
-  ProjectPlan,
-  ProjectQuestion,
   ProjectRepo,
-  ProjectTodo,
   UploadReport,
   UploadSource,
   WorkspaceIndexSummary,
@@ -64,9 +59,7 @@ export type PanelTab =
   | "knowledge"
   | "retrieval"
   | "memory"
-  | "todos"
-  | "questions"
-  | "plan"
+  | "git"
   | "checkpoints"
   | "diagnostics";
 
@@ -78,9 +71,7 @@ const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "knowledge", label: "Knowledge" },
   { id: "retrieval", label: "Retrieval" },
   { id: "memory", label: "Memory" },
-  { id: "todos", label: "Todos" },
-  { id: "questions", label: "Questions" },
-  { id: "plan", label: "Plan" },
+  { id: "git", label: "Source Control" },
   { id: "checkpoints", label: "Edits" },
   { id: "diagnostics", label: "Diag" },
 ];
@@ -153,9 +144,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   const [fileQuery, setFileQuery] = useState("");
   const [repos, setRepos] = useState<ProjectRepo[]>([]);
   const [manifest, setManifest] = useState<ProjectManifest | null>(null);
-  const [todos, setTodos] = useState<ProjectTodo[]>([]);
-  const [questions, setQuestions] = useState<ProjectQuestion[]>([]);
-  const [plan, setPlan] = useState<ProjectPlan | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [workspaceNotice, setWorkspaceNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -165,30 +153,17 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       return;
     }
     try {
-      const [
-        nextOverview,
-        nextRepos,
-        nextFiles,
-        nextManifest,
-        nextTodos,
-        nextQuestions,
-        nextPlan,
-      ] = await Promise.all([
-        loadProjectOverview(workspacePath),
-        loadProjectRepos(workspacePath),
-        listProjectFiles(workspacePath),
-        loadProjectManifest(workspacePath),
-        loadProjectTodos(workspacePath),
-        loadProjectQuestions(workspacePath),
-        loadProjectPlan(workspacePath),
-      ]);
+      const [nextOverview, nextRepos, nextFiles, nextManifest] =
+        await Promise.all([
+          loadProjectOverview(workspacePath),
+          loadProjectRepos(workspacePath),
+          listProjectFiles(workspacePath),
+          loadProjectManifest(workspacePath),
+        ]);
       setOverview(nextOverview);
       setRepos(nextRepos);
       setFiles(nextFiles);
       setManifest(nextManifest);
-      setTodos(nextTodos);
-      setQuestions(nextQuestions);
-      setPlan(nextPlan);
       setDataError(null);
     } catch (cause) {
       setDataError(describeError(cause));
@@ -238,9 +213,6 @@ export default function ProjectPanel(props: ProjectPanelProps) {
     setRepos([]);
     setFiles([]);
     setManifest(null);
-    setTodos([]);
-    setQuestions([]);
-    setPlan(null);
     setFileQuery("");
     setDataError(null);
     setWorkspaceNotice(null);
@@ -253,9 +225,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       tab === "repos" ||
       tab === "knowledge" ||
       tab === "workspace" ||
-      tab === "todos" ||
-      tab === "questions" ||
-      tab === "plan"
+      tab === "git"
     ) {
       void refresh();
     }
@@ -328,12 +298,13 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             key={item.id}
             type="button"
             onClick={() => onTab(item.id)}
-            className={`shrink-0 rounded-md px-2 py-1 text-[10px] ${
+            className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[10px] ${
               tab === item.id
                 ? "bg-white/[0.08] text-slate-200"
                 : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
             }`}
           >
+            {item.id === "git" && <GitBranch size={10} />}
             {item.label}
           </button>
         ))}
@@ -572,27 +543,14 @@ export default function ProjectPanel(props: ProjectPanelProps) {
           />
         )}
 
-        {tab === "todos" && <TodoPanel todos={todos} />}
-
-        {tab === "plan" && (
-          <PlanPanel
-            plan={plan}
-            onApprove={async () => {
-              const approved = await approveProjectPlan(workspacePath);
-              setPlan(approved);
-              onWorkspaceChanged();
-            }}
-          />
-        )}
-
-        {tab === "questions" && (
-          <QuestionsPanel
-            questions={questions}
-            onAnswer={async (id, answer) => {
-              await answerProjectQuestion(workspacePath, id, answer);
-              onWorkspaceChanged();
-              void refresh();
-            }}
+        {tab === "git" && (
+          <GitPanel
+            project={project}
+            repos={repos}
+            revision={revision}
+            onArtifact={onArtifact}
+            onError={setDataError}
+            onWorkspaceChanged={onWorkspaceChanged}
           />
         )}
 
@@ -638,6 +596,7 @@ function ReferencesPanel({
 }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [permissionBusy, setPermissionBusy] = useState<string | null>(null);
 
   const add = async () => {
     try {
@@ -697,6 +656,29 @@ function ReferencesPanel({
     }
   };
 
+  const toggleEditable = async (repo: ProjectRepo) => {
+    setPermissionBusy(repo.id);
+    onError(null);
+    try {
+      const readOnly = !repo.read_only;
+      await setProjectRepoReadOnly(repo.id, readOnly);
+      onRepos(
+        repos.map((item) =>
+          item.id === repo.id ? { ...item, read_only: readOnly } : item,
+        ),
+      );
+      setNotice(
+        readOnly
+          ? `${repo.name} is read-only again.`
+          : `${repo.name} is editable by the assistant.`,
+      );
+    } catch (cause) {
+      onError(describeError(cause));
+    } finally {
+      setPermissionBusy(null);
+    }
+  };
+
   return (
     <div
       {...drop.zoneProps}
@@ -737,15 +719,31 @@ function ReferencesPanel({
               <Trash2 size={11} />
             </button>
           </div>
-          <p className="mt-1.5 text-[9px] uppercase tracking-wide text-slate-500">
-            {repo.read_only ? "read-only reference" : "editable"}
-          </p>
+          <button
+            type="button"
+            aria-pressed={repo.read_only}
+            disabled={permissionBusy === repo.id}
+            onClick={() => void toggleEditable(repo)}
+            title={
+              repo.read_only
+                ? "Allow the assistant to modify files in this reference"
+                : "Make this reference read-only again"
+            }
+            className={`mt-1.5 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] uppercase tracking-wide transition-colors ${
+              repo.read_only
+                ? "border-white/10 text-slate-500 hover:border-emerald-400/30 hover:text-emerald-200"
+                : "border-emerald-400/25 bg-emerald-400/[0.06] text-emerald-200"
+            } disabled:opacity-40`}
+          >
+            {permissionBusy === repo.id && <Loader2 size={9} className="animate-spin" />}
+            {repo.read_only ? "read-only · make editable" : "editable · make read-only"}
+          </button>
         </div>
       ))}
       {repos.length === 0 && (
         <p className="px-1 py-2 text-[11px] leading-4 text-slate-500">
-          Reference folders are read-only sources the assistant can inspect
-          alongside the project workspace.
+          Reference folders are project sources the assistant can inspect. Make
+          one editable when you want the assistant to change its files.
         </p>
       )}
       <button
@@ -834,253 +832,6 @@ function MemoryPanel({
         </div>
       ))}
       {memoryError !== null && <p className="text-[10px] text-amber-300">{memoryError}</p>}
-    </div>
-  );
-}
-
-function PlanPanel({
-  plan,
-  onApprove,
-}: {
-  plan: ProjectPlan | null;
-  onApprove: () => Promise<void>;
-}) {
-  const [busy, setBusy] = useState(false);
-  if (plan === null) {
-    return (
-      <p className="px-1 py-2 text-[11px] text-slate-500">
-        No plan yet. The assistant can draft one with plan_write.
-      </p>
-    );
-  }
-  const done = plan.steps.filter((step) => step.status === "done").length;
-  return (
-    <div className="space-y-2">
-      <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-        <div className="flex items-start justify-between gap-2">
-          <p className="text-[11px] leading-5 text-slate-200">{plan.goal}</p>
-          <span
-            className={
-              plan.status === "approved"
-                ? "shrink-0 rounded bg-emerald-400/15 px-1 py-0.5 text-[9px] text-emerald-300"
-                : "shrink-0 rounded bg-amber-400/15 px-1 py-0.5 text-[9px] text-amber-300"
-            }
-          >
-            {plan.status}
-          </span>
-        </div>
-        <p className="mt-1 text-[10px] text-slate-500">
-          {done}/{plan.steps.length} steps complete
-        </p>
-        {plan.status === "draft" && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await onApprove();
-              } finally {
-                setBusy(false);
-              }
-            }}
-            className="mt-2 rounded-md bg-emerald-400 px-2 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
-          >
-            {busy ? "Approving…" : "Approve plan"}
-          </button>
-        )}
-      </div>
-      {plan.steps.map((step) => (
-        <div
-          key={step.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
-        >
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-[11px] leading-5 text-slate-300">
-              {step.id}. {step.text}
-            </p>
-            <span className="shrink-0 rounded bg-white/[0.06] px-1 py-0.5 text-[9px] text-slate-400">
-              {step.status}
-            </span>
-          </div>
-          {step.verify_with !== null && (
-            <p className="mt-1 font-mono text-[9px] text-slate-500">
-              verify: {step.verify_with}
-            </p>
-          )}
-          {step.evidence !== null && (
-            <p className="mt-1 text-[9px] text-emerald-300/80">{step.evidence}</p>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function QuestionsPanel({
-  questions,
-  onAnswer,
-}: {
-  questions: ProjectQuestion[];
-  onAnswer: (id: string, answer: string) => Promise<void>;
-}) {
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async (id: string, answer: string) => {
-    if (answer.trim().length === 0) {
-      return;
-    }
-    setBusy(id);
-    try {
-      await onAnswer(id, answer.trim());
-      setDrafts((current) => ({ ...current, [id]: "" }));
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  if (questions.length === 0) {
-    return (
-      <p className="px-1 py-2 text-[11px] text-slate-500">
-        No questions yet. The assistant can queue a decision with ask_question.
-      </p>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      {questions.map((question) => (
-        <div
-          key={question.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
-        >
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-[11px] leading-5 text-slate-200">{question.question}</p>
-            <span
-              className={
-                question.answer === null
-                  ? "shrink-0 rounded bg-amber-400/15 px-1 py-0.5 text-[9px] text-amber-300"
-                  : "shrink-0 rounded bg-emerald-400/15 px-1 py-0.5 text-[9px] text-emerald-300"
-              }
-            >
-              {question.answer === null ? "pending" : "answered"}
-            </span>
-          </div>
-          {question.context !== null && (
-            <p className="mt-1 text-[10px] text-slate-500">{question.context}</p>
-          )}
-          {question.answer !== null ? (
-            <p className="mt-2 text-[11px] text-emerald-300">{question.answer}</p>
-          ) : (
-            <div className="mt-2 space-y-1.5">
-              {question.options.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {question.options.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      disabled={busy === question.id}
-                      onClick={() => void submit(question.id, option)}
-                      className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] text-slate-200 hover:bg-white/[0.08] disabled:opacity-40"
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div className="flex gap-1.5">
-                <input
-                  value={drafts[question.id] ?? ""}
-                  onChange={(event) =>
-                    setDrafts((current) => ({
-                      ...current,
-                      [question.id]: event.target.value,
-                    }))
-                  }
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      void submit(question.id, drafts[question.id] ?? "");
-                    }
-                  }}
-                  aria-label={`Answer ${question.question}`}
-                  placeholder="Type an answer…"
-                  className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
-                />
-                <button
-                  type="button"
-                  disabled={busy === question.id}
-                  onClick={() => void submit(question.id, drafts[question.id] ?? "")}
-                  className="rounded-md bg-emerald-400 px-2 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
-                >
-                  Answer
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      ))}
-      {error !== null && <p className="text-[10px] text-amber-300">{error}</p>}
-    </div>
-  );
-}
-
-function TodoPanel({ todos }: { todos: ProjectTodo[] }) {
-  if (todos.length === 0) {
-    return (
-      <div className="space-y-2 px-1 py-3">
-        <p className="text-[11px] text-slate-500">No project todos yet.</p>
-        <p className="text-[10px] leading-4 text-slate-500">
-          The assistant writes durable work state with{" "}
-          <code className="text-slate-400">todo_write</code>; it persists in{" "}
-          <code className="text-slate-400">.openbad/todos.json</code>.
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-2">
-      {todos.map((todo) => (
-        <div
-          key={todo.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"
-        >
-          <div className="flex items-start gap-2">
-            <span
-              className={`mt-0.5 rounded px-1 py-0.5 text-[8px] uppercase tracking-wide ${
-                todo.state === "done"
-                  ? "bg-emerald-400/10 text-emerald-300"
-                  : todo.state === "doing"
-                    ? "bg-sky-400/10 text-sky-300"
-                    : todo.state === "blocked"
-                      ? "bg-amber-400/10 text-amber-300"
-                      : todo.state === "dropped"
-                        ? "bg-slate-400/10 text-slate-500"
-                        : "bg-white/[0.06] text-slate-400"
-              }`}
-            >
-              {todo.state}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-[11px] leading-5 text-slate-300">{todo.text}</p>
-              {todo.done_when !== null && (
-                <p className="mt-0.5 text-[9px] leading-4 text-slate-500">
-                  Done when: {todo.done_when}
-                </p>
-              )}
-              {todo.blocked_by.length > 0 && (
-                <p className="mt-0.5 text-[9px] leading-4 text-amber-300/70">
-                  Blocked by: {todo.blocked_by.join(", ")}
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
