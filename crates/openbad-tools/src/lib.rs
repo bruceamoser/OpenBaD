@@ -9,12 +9,16 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use globset::Glob;
 use ignore::WalkBuilder;
 use openbad_governance::RiskLevel;
+use openbad_vault::Vault;
 use openbad_workspace::WorkspaceService;
 use serde_json::{Value, json};
 use wait_timeout::ChildExt;
+use zeroize::Zeroizing;
 
 /// A model-facing tool definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1019,6 +1023,9 @@ pub struct ToolContext {
     pub mcp: Option<Arc<dyn McpService>>,
     pub terminal: Option<Arc<dyn TerminalService>>,
     pub workflow: Option<Arc<dyn WorkflowEngine>>,
+    /// Optional pre-opened project vault. When absent, vault tools resolve the
+    /// key from `OPENBAD_VAULT_KEY` or the user's key file.
+    pub vault: Option<Arc<Vault>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
     outside_grants: Vec<OutsideGrant>,
@@ -1042,6 +1049,7 @@ impl Clone for ToolContext {
             mcp: self.mcp.clone(),
             terminal: self.terminal.clone(),
             workflow: self.workflow.clone(),
+            vault: self.vault.clone(),
             turn: AtomicU32::new(self.turn.load(Ordering::SeqCst)),
             read_paths: Mutex::new(
                 self.read_paths
@@ -1073,6 +1081,7 @@ impl ToolContext {
             mcp: None,
             terminal: None,
             workflow: None,
+            vault: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             outside_grants: Vec::new(),
@@ -1239,6 +1248,8 @@ impl ToolRegistry {
         registry.register(WriteFileTool);
         registry.register(EditFileTool);
         registry.register(RunCommandTool);
+        registry.register(VaultListTool);
+        registry.register(VaultExecTool);
         registry.register(RunTestsTool);
         registry.register(GitStatusTool);
         registry.register(GitDiffTool);
@@ -1354,7 +1365,15 @@ impl ToolRegistry {
         }
         let mut definitions = Vec::with_capacity(domains.len() * 2);
         for domain in domains.keys() {
-            definitions.push(domain_list_definition(domain));
+            // A real tool that ends in `_list` (the vault metadata tool) takes
+            // precedence over the synthetic domain catalog. The synthetic
+            // endpoint is only used when no such tool is registered.
+            let list_name = format!("{domain}_list");
+            if let Some(tool) = self.tools.get(&list_name) {
+                definitions.push(tool.definition());
+            } else {
+                definitions.push(domain_list_definition(domain));
+            }
             definitions.push(domain_run_definition(domain));
         }
         definitions
@@ -1370,6 +1389,9 @@ impl ToolRegistry {
 
     #[must_use]
     pub fn risk_for_call(&self, name: &str, arguments: &Value) -> Option<RiskLevel> {
+        if let Some(tool) = self.tools.get(name) {
+            return Some(tool.definition().risk);
+        }
         if self.grouped {
             if name.ends_with("_list") {
                 return Some(RiskLevel::Read);
@@ -1387,6 +1409,9 @@ impl ToolRegistry {
 
     #[must_use]
     pub fn parallel_safe(&self, name: &str, arguments: &str) -> bool {
+        if let Some(tool) = self.tools.get(name) {
+            return tool.definition().risk == RiskLevel::Read;
+        }
         if self.grouped {
             if name.ends_with("_list") {
                 return true;
@@ -1416,6 +1441,9 @@ impl ToolRegistry {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        if let Some(tool) = self.tools.get(name) {
+            return finish_result(tool.execute(arguments, context).await, context);
+        }
         if self.grouped {
             if let Some(domain) = name.strip_suffix("_list") {
                 if !self.tools.keys().any(|tool| tool_domain(tool) == domain) {
@@ -1533,13 +1561,14 @@ fn domain_list_definition(domain: &str) -> ToolDefinition {
 }
 
 fn domain_run_definition(domain: &str) -> ToolDefinition {
-    ToolDefinition::new(
-        format!("{domain}_run"),
+    let description = if domain == "vault" {
+        "Run vault_exec to run a command with a named vault secret in OPENBAD_VAULT_SECRET. Call vault_list for secret metadata. Secret values are never returned to the model.".to_owned()
+    } else {
         format!(
             "Run a tool from the {domain} domain. Call {domain}_list first to discover tool names and input schemas."
-        ),
-        RiskLevel::Execute,
-    )
+        )
+    };
+    ToolDefinition::new(format!("{domain}_run"), description, RiskLevel::Execute)
     .with_schema(json!({
         "type": "object",
         "properties": {
@@ -1570,6 +1599,7 @@ fn domain_description(domain: &str) -> String {
         "session" => "session checkpoints, resume, handoff, and history search",
         "mcp" => "MCP server configuration, tool discovery, and proxy calls",
         "snapshots" => "workspace snapshots and golden comparisons",
+        "vault" => "vault secret metadata and secret-scoped command execution",
         "web" => "web search, fetch, and package registry lookup",
         _ => "general-purpose tools",
     };
@@ -1613,6 +1643,7 @@ fn tool_domain(name: &str) -> &'static str {
         | "git_status" | "git_worktree" | "github" | "repo_health" => "git",
         "run_command" | "run_tests" | "job_list" | "job_logs" | "job_start" | "job_status"
         | "job_stop" | "terminal" => "exec",
+        "vault_exec" | "vault_list" => "vault",
         "remember" | "recall" | "list_memories" | "update_memory" | "forget_memory" => "memory",
         "add_knowledge" | "delete_knowledge" | "export_knowledge" | "get_knowledge"
         | "import_knowledge" | "list_knowledge" | "review_knowledge" | "update_knowledge" => {
@@ -3895,6 +3926,334 @@ impl Tool for EditFileTool {
             "validation": validation
         })))
     }
+}
+
+struct VaultListTool;
+
+#[async_trait]
+impl Tool for VaultListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "vault_list",
+            "List project vault secret metadata (name, id, created, updated, algorithm). Never returns secret values. Use vault_exec to run a command with a secret.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let entries = openbad_vault::list_metadata(context.workspace.root())
+            .map_err(|error| ToolError::Failed(format!("vault: {error}")))?;
+        let count = entries.len();
+        let secrets = entries
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "id": entry.id,
+                    "name": entry.name,
+                    "created": entry.created,
+                    "updated": entry.updated,
+                    "algorithm": entry.algorithm,
+                })
+            })
+            .collect::<Vec<_>>();
+        let content = serde_json::to_string_pretty(&json!({
+            "vault": ".openbad/blackbox",
+            "count": count,
+            "secrets": secrets,
+        }))
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "vault": ".openbad/blackbox",
+            "count": count,
+        })))
+    }
+}
+
+const VAULT_SECRET_ENV: &str = "OPENBAD_VAULT_SECRET";
+
+struct VaultExecTool;
+
+#[async_trait]
+impl Tool for VaultExecTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "vault_exec",
+            "Run a shell command with a named project vault secret in the OPENBAD_VAULT_SECRET environment variable. Requires Full access. The secret value is never returned to the model; stdout and stderr are redacted for the raw value and common encodings. There is no tool that returns secret values.",
+            RiskLevel::Execute,
+        )
+        .with_timeout(30)
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "secret": {"type": "string", "description": "Vault secret name; its value is exported as OPENBAD_VAULT_SECRET and never returned"},
+                "command": {"type": "string", "description": "Shell command; reference $OPENBAD_VAULT_SECRET"},
+                "cwd": {"type": "string", "description": "Workspace-relative working directory"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"}
+            },
+            "required": ["secret", "command"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_commands {
+            return Err(ToolError::ApprovalRequired(
+                "vault_exec (commands are disabled; switch the composer access mode to Full access)"
+                    .to_owned(),
+            ));
+        }
+        let secret_name = string_arg(&arguments, "secret")?;
+        if secret_name.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "secret must not be empty".to_owned(),
+            ));
+        }
+        let command = string_arg(&arguments, "command")?;
+        if command.trim().is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "command must not be empty".to_owned(),
+            ));
+        }
+        let class = classify_command(&command);
+        if class == CommandClass::Destructive
+            && !optional_bool(&arguments, "confirm_destructive").unwrap_or(false)
+        {
+            return Err(ToolError::ApprovalRequired(
+                "vault_exec (destructive command; set confirm_destructive=true after verifying the blast radius)"
+                    .to_owned(),
+            ));
+        }
+        check_command_policy(context, class, &command)?;
+        let cwd = vault_command_cwd(&arguments, context)?;
+        let timeout = optional_usize(&arguments, "timeout_seconds")
+            .unwrap_or(30)
+            .clamp(1, 600) as u64;
+
+        let vault = match context.vault.as_ref() {
+            Some(vault) => Arc::clone(vault),
+            None => Arc::new(
+                Vault::open(context.workspace.root()).map_err(vault_tool_error)?,
+            ),
+        };
+        let secret = vault.get(&secret_name).map_err(vault_tool_error)?;
+        let secret_text = secret.expose_env_str().map_err(vault_tool_error)?;
+        if secret_text.is_empty() {
+            return Err(ToolError::InvalidArgument(
+                "vault secret is empty and cannot be exported".to_owned(),
+            ));
+        }
+
+        let mut process = if cfg!(windows) {
+            let mut process = std::process::Command::new("cmd");
+            process.args(["/C", &command]);
+            process
+        } else {
+            let mut process = std::process::Command::new("sh");
+            process.args(["-c", &command]);
+            process
+        };
+        process
+            .current_dir(cwd)
+            .env(VAULT_SECRET_ENV, secret_text)
+            .env_remove(openbad_vault::KEY_ENV)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        let mut child = process.spawn()?;
+        let stdout_reader = child.stdout.take().map(read_output_stream);
+        let stderr_reader = child.stderr.take().map(read_output_stream);
+
+        let status = child.wait_timeout(Duration::from_secs(timeout))?;
+        kill_process_tree(&mut child);
+        let status = match status {
+            Some(status) => status,
+            None => {
+                let _ = child.wait();
+                return Err(ToolError::Timeout(timeout));
+            }
+        };
+        let raw_stdout = stdout_reader
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default();
+        let raw_stderr = stderr_reader
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default();
+        let (stdout, stdout_redactions) = redact_vault_secret(raw_stdout.as_str(), secret_text);
+        let (stderr, stderr_redactions) = redact_vault_secret(raw_stderr.as_str(), secret_text);
+        let (display_command, command_redactions) = redact_vault_secret(&command, secret_text);
+        let redactions = stdout_redactions + stderr_redactions + command_redactions;
+
+        let full = Zeroizing::new(format!(
+            "$ {display_command}\nexit: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code().unwrap_or(-1)
+        ));
+        let diagnostics = parse_diagnostics("auto", &format!("{stderr}\n{stdout}"));
+        // Keep vault output below the normal spill threshold. The generic
+        // finish_result would persist larger results under .openbad/spill;
+        // vault output must not be written to disk a second time.
+        let preview_cap = context.model_output_bytes.saturating_sub(512).max(64);
+        let mut content = if full.len() <= preview_cap {
+            full.as_str().to_owned()
+        } else {
+            format!(
+                "{}\n… [redacted output truncated: {} bytes; not saved] …",
+                head_tail(full.as_str(), preview_cap),
+                full.len()
+            )
+        };
+        if !diagnostics.is_empty() {
+            let summary = diagnostics
+                .iter()
+                .take(20)
+                .map(|diagnostic| {
+                    format!(
+                        "- {} {}:{} {}",
+                        diagnostic["severity"].as_str().unwrap_or("error"),
+                        diagnostic["path"].as_str().unwrap_or_default(),
+                        diagnostic["line"].as_u64().unwrap_or(0),
+                        diagnostic["message"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            content.push_str(&format!("\n\ndiagnostics: {}\n{summary}", diagnostics.len()));
+        }
+        if content.len() > context.model_output_bytes {
+            let mut end = context.model_output_bytes;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            content.truncate(end);
+        }
+        Ok(ToolResult::ok(content).with_metadata(json!({
+            "exit_code": status.code(),
+            "success": status.success(),
+            "command_class": class.label(),
+            "secret": secret_name,
+            "redactions": redactions,
+            "output_bytes": full.len(),
+            "diagnostics": diagnostics,
+        })))
+    }
+}
+
+fn vault_tool_error(error: openbad_vault::VaultError) -> ToolError {
+    ToolError::Failed(format!("vault: {error}"))
+}
+
+fn vault_command_cwd(arguments: &Value, context: &ToolContext) -> Result<PathBuf, ToolError> {
+    let Some(cwd) = optional_string(arguments, "cwd") else {
+        return Ok(context.workspace.root().to_path_buf());
+    };
+    let candidate = Path::new(&cwd);
+    if candidate.is_absolute() {
+        return Err(ToolError::OutsideRoot(cwd));
+    }
+    let path = context.workspace.resolve(candidate)?;
+    if !path.is_dir() {
+        return Err(ToolError::InvalidArgument(format!(
+            "cwd is not a directory: {cwd}"
+        )));
+    }
+    Ok(path)
+}
+
+fn read_output_stream(
+    stream: impl Read + Send + 'static,
+) -> std::thread::JoinHandle<Zeroizing<String>> {
+    const OUTPUT_CAP: u64 = 4 * 1024 * 1024;
+    std::thread::spawn(move || {
+        let mut bytes = Zeroizing::new(Vec::new());
+        let _ = stream.take(OUTPUT_CAP).read_to_end(&mut bytes);
+        Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned())
+    })
+}
+
+fn redact_vault_secret(content: &str, secret: &str) -> (String, usize) {
+    if secret.is_empty() {
+        return (content.to_owned(), 0);
+    }
+    let mut variants = vec![secret.to_owned()];
+    if secret.len() >= 8 {
+        let bytes = secret.as_bytes();
+        for encoded in [
+            STANDARD.encode(bytes),
+            STANDARD_NO_PAD.encode(bytes),
+            URL_SAFE.encode(bytes),
+            URL_SAFE_NO_PAD.encode(bytes),
+        ] {
+            if encoded.len() > 64 {
+                variants.push(vault_wrap(&encoded, 64));
+                variants.push(vault_wrap(&encoded, 76));
+            }
+            variants.push(encoded);
+        }
+        let hex = vault_hex(bytes);
+        variants.push(hex.clone());
+        variants.push(hex.to_uppercase());
+        if let Ok(escaped) = serde_json::to_string(secret) {
+            let escaped = escaped.trim_matches('"').to_owned();
+            if escaped != secret {
+                variants.push(escaped);
+            }
+        }
+    }
+    variants.sort_by(|left, right| right.len().cmp(&left.len()));
+    variants.dedup();
+
+    let mut output = content.to_owned();
+    let mut count = 0;
+    for variant in variants {
+        if variant.is_empty() {
+            continue;
+        }
+        count += output.matches(&variant).count();
+        output = output.replace(&variant, "[REDACTED]");
+    }
+    (output, count)
+}
+
+fn vault_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn vault_wrap(text: &str, width: usize) -> String {
+    if width == 0 {
+        return text.to_owned();
+    }
+    let mut wrapped = String::with_capacity(text.len() + text.len() / width);
+    for (index, chunk) in text.as_bytes().chunks(width).enumerate() {
+        if index > 0 {
+            wrapped.push('\n');
+        }
+        wrapped.push_str(&String::from_utf8_lossy(chunk));
+    }
+    wrapped
 }
 
 struct RunCommandTool;
@@ -18277,6 +18636,7 @@ invariants:
             "search",
             "session",
             "snapshots",
+            "vault",
             "web",
         ] {
             for suffix in ["list", "run"] {
@@ -18289,7 +18649,7 @@ invariants:
         }
         assert_eq!(
             definitions.len(),
-            36,
+            38,
             "{:?}",
             definitions
                 .iter()
@@ -18796,5 +19156,172 @@ invariants:
             .expect("dry run");
         assert!(preview.content.contains("dry run: sh main.sh"));
         assert_eq!(preview.metadata["dry_run"], true);
+    }
+
+    #[test]
+    fn vault_tools_are_registered_without_a_model_facing_get() {
+        let registry = ToolRegistry::with_builtin_tools();
+        let definitions = registry.definitions();
+        let names = definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"vault_list"));
+        assert!(names.contains(&"vault_run"));
+        assert!(!names.contains(&"vault_get"));
+
+        let list = definitions
+            .iter()
+            .find(|definition| definition.name == "vault_list")
+            .expect("vault_list definition");
+        assert!(list.description.contains("metadata"));
+        assert!(!list.description.contains("value is returned"));
+        assert_eq!(
+            registry.risk_for_call("vault_list", &json!({})),
+            Some(RiskLevel::Read)
+        );
+        assert_eq!(
+            registry.risk_for_call("vault_run", &json!({"tool": "vault_exec"})),
+            Some(RiskLevel::Execute)
+        );
+        assert_eq!(
+            registry.risk_for_call("vault_run", &json!({"tool": "vault_list"})),
+            Some(RiskLevel::Read)
+        );
+        assert!(registry.parallel_safe("vault_list", "{}"));
+        assert!(!registry.parallel_safe("vault_exec", "{}"));
+    }
+
+    #[tokio::test]
+    async fn vault_list_returns_metadata_and_never_the_value() {
+        let directory = tempdir().expect("tempdir");
+        let vault = Vault::with_key(directory.path(), [12u8; 32]);
+        vault
+            .put("list-secret", b"list-secret-value-798")
+            .expect("put");
+        let context = context(directory.path());
+
+        let result = ToolRegistry::with_builtin_tools()
+            .execute("vault_list", json!({}), &context)
+            .await
+            .expect("vault_list");
+        assert!(!result.content.contains("list-secret-value-798"));
+        assert!(result.content.contains("list-secret"));
+        assert!(result.content.contains("XChaCha20-Poly1305"));
+        assert_eq!(result.metadata["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn vault_exec_requires_full_access_and_redacts_the_secret() {
+        let directory = tempdir().expect("tempdir");
+        let vault = Vault::with_key(directory.path(), [13u8; 32]);
+        let secret = "vault-exec-test-secret-798";
+        vault.put("exec-token", secret.as_bytes()).expect("put");
+        let mut context = context(directory.path());
+        context.vault = Some(Arc::new(vault));
+
+        let denied = VaultExecTool
+            .execute(
+                json!({"secret": "exec-token", "command": "echo $OPENBAD_VAULT_SECRET"}),
+                &context,
+            )
+            .await
+            .expect_err("Full access is required");
+        assert!(matches!(&denied, ToolError::ApprovalRequired(_)));
+        assert!(!denied.to_string().contains(secret));
+
+        context.allow_commands = true;
+        let command = if cfg!(windows) {
+            "echo %OPENBAD_VAULT_SECRET% & echo %OPENBAD_VAULT_SECRET% 1>&2"
+        } else {
+            "printf '%s' \"$OPENBAD_VAULT_SECRET\"; printf '%s' \"$OPENBAD_VAULT_SECRET\" >&2"
+        };
+        let result = VaultExecTool
+            .execute(
+                json!({"secret": "exec-token", "command": command}),
+                &context,
+            )
+            .await
+            .expect("vault_exec");
+        assert!(!result.is_error);
+        assert!(!result.content.contains(secret));
+        assert!(result.content.contains("[REDACTED]"));
+        assert!(result.metadata["redactions"].as_u64().unwrap_or(0) >= 2);
+        assert_eq!(result.metadata["secret"], "exec-token");
+        assert!(!result.metadata.to_string().contains(secret));
+        assert!(result.metadata.get("value").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vault_exec_large_output_is_truncated_instead_of_spilled() {
+        let directory = tempdir().expect("tempdir");
+        let vault = Vault::with_key(directory.path(), [15u8; 32]);
+        vault.put("spill-token", b"spill-secret-value-798").expect("put");
+        let mut context = context(directory.path());
+        context.vault = Some(Arc::new(vault));
+        context.allow_commands = true;
+        context.model_output_bytes = 128;
+
+        let result = VaultExecTool
+            .execute(
+                json!({
+                    "secret": "spill-token",
+                    "command": "printf '%*s' 10000 '' | tr ' ' x"
+                }),
+                &context,
+            )
+            .await
+            .expect("vault_exec");
+        assert!(result.content.len() <= 128);
+        assert!(!directory.path().join(".openbad/spill").exists());
+    }
+
+    #[tokio::test]
+    async fn vault_exec_errors_do_not_echo_secret_values() {
+        let directory = tempdir().expect("tempdir");
+        let vault = Vault::with_key(directory.path(), [14u8; 32]);
+        vault
+            .put("known", b"known-secret-value-798")
+            .expect("put");
+        let mut context = context(directory.path());
+        context.vault = Some(Arc::new(vault));
+        context.allow_commands = true;
+
+        let error = VaultExecTool
+            .execute(
+                json!({"secret": "missing", "command": "echo $OPENBAD_VAULT_SECRET"}),
+                &context,
+            )
+            .await
+            .expect_err("missing secret");
+        assert!(!error.to_string().contains("known-secret-value-798"));
+        assert!(!error.to_string().contains("secret-value"));
+    }
+
+    #[test]
+    fn vault_redaction_covers_raw_base64_and_hex_forms() {
+        let secret = "sup3r-s3cret-value-798";
+        let (raw, count) = redact_vault_secret(&format!("before {secret} after"), secret);
+        assert_eq!(count, 1);
+        assert!(!raw.contains(secret));
+        assert!(raw.contains("[REDACTED]"));
+
+        let encoded = STANDARD.encode(secret.as_bytes());
+        let (raw, count) = redact_vault_secret(&format!("token={encoded}"), secret);
+        assert_eq!(count, 1);
+        assert!(!raw.contains(&encoded));
+
+        let hex = vault_hex(secret.as_bytes());
+        let (raw, count) = redact_vault_secret(&format!("hex={hex}"), secret);
+        assert_eq!(count, 1);
+        assert!(!raw.contains(&hex));
+
+        let long_secret = "a-long-vault-secret-value-that-wraps-across-base64-lines-798";
+        let encoded = STANDARD.encode(long_secret.as_bytes());
+        let wrapped = vault_wrap(&encoded, 64);
+        let (raw, count) = redact_vault_secret(&format!("wrapped={wrapped}"), long_secret);
+        assert_eq!(count, 1);
+        assert!(!raw.contains(&wrapped));
     }
 }

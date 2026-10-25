@@ -9,8 +9,10 @@ authors.workspace = true
 [dependencies]
 openbad-core = { path = "../openbad-core" }
 openbad-governance = { path = "../openbad-governance" }
+openbad-vault = { path = "../openbad-vault" }
 openbad-workspace = { path = "../openbad-workspace" }
 async-trait = "0.1"
+base64 = "0.22"
 blake3 = "1"
 globset = "0.4"
 ignore = "0.4"
@@ -25,6 +27,7 @@ tempfile = "3"
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 wait-timeout = "0.2"
+zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
