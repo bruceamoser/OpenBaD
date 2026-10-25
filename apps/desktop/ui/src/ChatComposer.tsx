@@ -21,9 +21,9 @@ import {
   X,
 } from "lucide-react";
 
-import { pickFiles } from "./backend";
+import { pickFiles, readClipboardImage } from "./backend";
 import { droppedToUploads, fileName, filesToUploads, useFileDropZone } from "./dropzone";
-import type { AccessMode, UploadSource } from "./types";
+import type { AccessMode, ClipboardImage, UploadSource } from "./types";
 import { useDraftHistory } from "./useDraftHistory";
 
 export type ChatComposerHandle = {
@@ -70,6 +70,36 @@ const TEXTAREA_MAX_HEIGHT_PX =
 
 // ^\s*(\d+)\.\s, with the indentation captured so it can be reused.
 const ORDERED_LIST_PREFIX = /^([ \t]*)(\d+)\.\s/;
+
+function clipboardImageExtension(mime: string): string {
+  if (mime === "image/jpeg") {
+    return "jpg";
+  }
+  return mime.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "png";
+}
+
+// A deterministic name lets the attachment merge logic drop repeated pastes of
+// the same clipboard image instead of stacking duplicate chips.
+function clipboardImageFingerprint(image: ClipboardImage): string {
+  let hash = image.bytes;
+  const data = image.dataBase64;
+  const step = Math.max(1, Math.floor(data.length / 512));
+  for (let index = 0; index < data.length; index += step) {
+    hash = ((hash << 5) + hash + data.charCodeAt(index)) | 0;
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function clipboardImageUpload(image: ClipboardImage): UploadSource {
+  const extension = clipboardImageExtension(image.mime);
+  return {
+    name: `pasted-image-${clipboardImageFingerprint(image)}.${extension}`,
+    contentBase64: image.dataBase64,
+    mime: image.mime,
+    // Data URLs need no lifetime management and survive the thumbnail render.
+    previewUrl: `data:${image.mime};base64,${image.dataBase64}`,
+  };
+}
 
 type OrderedListInsertion = {
   value: string;
@@ -228,9 +258,10 @@ function ChatComposer({
 
   const handlePaste = useCallback(
     async (event: React.ClipboardEvent<HTMLDivElement>) => {
-      const files = Array.from(event.clipboardData.files);
+      const clipboard = event.clipboardData;
+      const files = Array.from(clipboard.files);
       if (files.length === 0) {
-        for (const item of Array.from(event.clipboardData.items)) {
+        for (const item of Array.from(clipboard.items)) {
           if (item.kind !== "file") {
             continue;
           }
@@ -240,12 +271,31 @@ function ChatComposer({
           }
         }
       }
-      if (files.length === 0) {
+      if (files.length > 0) {
+        event.preventDefault();
+        try {
+          mergeAttachments(await filesToUploads(files, { pasted: true }));
+          textareaRef.current?.focus();
+        } catch (cause) {
+          onError(describeError(cause));
+        }
         return;
       }
-      event.preventDefault();
+
+      // Normal text paste is left entirely to the browser. Only when the
+      // clipboard carries no file and no text do we ask the native side for an
+      // image, which is what WebKitGTK requires for screenshot pastes.
+      if (clipboard.getData("text/plain").length > 0) {
+        return;
+      }
       try {
-        mergeAttachments(await filesToUploads(files, { pasted: true }));
+        const image = await readClipboardImage();
+        if (image === null) {
+          onError("No image found on the clipboard.");
+          return;
+        }
+        event.preventDefault();
+        mergeAttachments([clipboardImageUpload(image)]);
         textareaRef.current?.focus();
       } catch (cause) {
         onError(describeError(cause));

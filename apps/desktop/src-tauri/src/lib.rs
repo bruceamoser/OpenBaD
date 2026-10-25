@@ -1,3 +1,4 @@
+mod clipboard;
 mod git;
 mod preview;
 mod services;
@@ -64,11 +65,140 @@ fn subagent_retention_ms() -> i64 {
 pub struct AppState {
     store: Arc<Mutex<Store>>,
     secrets: Box<dyn SecretStore>,
-    cancel: Arc<AtomicBool>,
-    steering: Arc<SteeringInbox>,
+    /// One cancellation token and steering inbox per UI-generated run id. The
+    /// registry also enforces one running turn per project.
+    runs: Arc<Mutex<RunRegistry>>,
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<openbad_terminal::TerminalManager>,
     mcp: McpManagers,
+}
+
+#[derive(Default)]
+struct RunRegistry {
+    runs: HashMap<String, RunEntry>,
+    /// Runs cancelled before their `chat` invocation registered the token. This
+    /// closes the stop-immediately race without leaking a global cancel flag.
+    cancelled: std::collections::HashSet<String>,
+}
+
+struct RunEntry {
+    workspace_path: PathBuf,
+    cancel: Arc<AtomicBool>,
+    steering: Arc<SteeringInbox>,
+}
+
+struct RunGuard {
+    registry: Arc<Mutex<RunRegistry>>,
+    run_id: String,
+    cancel: Arc<AtomicBool>,
+    steering: Arc<SteeringInbox>,
+}
+
+impl RunGuard {
+    fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    fn steering(&self) -> Arc<SteeringInbox> {
+        Arc::clone(&self.steering)
+    }
+
+    /// Close steering as soon as the agent loop ends, before persistence work
+    /// gives the UI a false "still running" window to steer into.
+    fn finish_steering(&self) {
+        self.steering.end();
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.steering.end();
+        if let Ok(mut registry) = self.registry.lock() {
+            let matches = registry
+                .runs
+                .get(&self.run_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.cancel, &self.cancel));
+            if matches {
+                registry.runs.remove(&self.run_id);
+            }
+        }
+    }
+}
+
+fn begin_run(
+    registry: &Arc<Mutex<RunRegistry>>,
+    run_id: &str,
+    workspace_path: &Path,
+) -> Result<RunGuard, String> {
+    let workspace_path = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let mut runs = registry
+        .lock()
+        .map_err(|error| format!("run registry lock poisoned: {error}"))?;
+    if runs.runs.contains_key(run_id) {
+        return Err(format!("run id is already active: {run_id}"));
+    }
+    if runs
+        .runs
+        .values()
+        .any(|entry| entry.workspace_path == workspace_path)
+    {
+        return Err(
+            "A turn is already running for this project. Wait for it to finish or stop it."
+                .to_owned(),
+        );
+    }
+    let cancelled = runs.cancelled.remove(run_id);
+    let cancel = Arc::new(AtomicBool::new(cancelled));
+    let steering = Arc::new(SteeringInbox::default());
+    steering.begin();
+    runs.runs.insert(
+        run_id.to_owned(),
+        RunEntry {
+            workspace_path,
+            cancel: Arc::clone(&cancel),
+            steering: Arc::clone(&steering),
+        },
+    );
+    Ok(RunGuard {
+        registry: Arc::clone(registry),
+        run_id: run_id.to_owned(),
+        cancel,
+        steering,
+    })
+}
+
+fn cancel_registered_run(
+    registry: &Arc<Mutex<RunRegistry>>,
+    run_id: &str,
+) -> Result<bool, String> {
+    let mut registry = registry
+        .lock()
+        .map_err(|error| format!("run registry lock poisoned: {error}"))?;
+    if let Some(entry) = registry.runs.get(run_id) {
+        entry.cancel.store(true, Ordering::SeqCst);
+        return Ok(true);
+    }
+    registry.cancelled.insert(run_id.to_owned());
+    Ok(false)
+}
+
+fn steer_registered_run(
+    registry: &Arc<Mutex<RunRegistry>>,
+    run_id: &str,
+    message: &str,
+) -> Result<bool, String> {
+    let steering = {
+        let registry = registry
+            .lock()
+            .map_err(|error| format!("run registry lock poisoned: {error}"))?;
+        registry.runs.get(run_id).map(|entry| Arc::clone(&entry.steering))
+    };
+    let Some(steering) = steering else {
+        return Err("no active turn to steer".to_owned());
+    };
+    Ok(steering.push(message.to_owned()))
 }
 
 /// Keeps one MCP manager per workspace so the settings UI, the chat loop, and
@@ -3654,8 +3784,8 @@ fn save_api_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn cancel_chat(state: State<'_, AppState>) -> Result<(), String> {
-    state.cancel.store(true, Ordering::SeqCst);
+fn cancel_chat(state: State<'_, AppState>, run_id: String) -> Result<(), String> {
+    cancel_registered_run(&state.runs, &run_id)?;
     Ok(())
 }
 
@@ -3993,6 +4123,10 @@ async fn install_update(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatInput {
+    /// UI-generated identifier for this turn, used to scope cancellation,
+    /// steering, and one-run-per-project enforcement.
+    #[serde(default)]
+    pub run_id: String,
     pub session_id: Option<String>,
     pub workspace_path: String,
     pub message: String,
@@ -4007,12 +4141,12 @@ pub struct ChatInput {
 }
 
 #[tauri::command]
-fn steer_chat(state: State<'_, AppState>, message: String) -> Result<(), String> {
+fn steer_chat(state: State<'_, AppState>, run_id: String, message: String) -> Result<(), String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("steering message must not be empty".to_owned());
     }
-    if state.steering.push(message.to_owned()) {
+    if steer_registered_run(&state.runs, &run_id, message)? {
         Ok(())
     } else {
         Err("no active turn to steer".to_owned())
@@ -4026,6 +4160,7 @@ async fn chat(
     on_event: Channel<AgentEvent>,
 ) -> Result<ChatReply, String> {
     let ChatInput {
+        run_id,
         session_id,
         workspace_path,
         message,
@@ -4049,6 +4184,15 @@ async fn chat(
             workspace_path.display()
         ));
     }
+    let run_id = if run_id.trim().is_empty() {
+        Uuid::now_v7().to_string()
+    } else {
+        run_id
+    };
+    // This guard lives until the end of the turn and removes the run entry on
+    // every exit path, including errors and cancellation.
+    let run_guard = begin_run(&state.runs, &run_id, &workspace_path)?;
+    let cancel = run_guard.cancel_token();
     let title_source = if prompt.is_empty() {
         "Attached documents".to_owned()
     } else {
@@ -4059,7 +4203,6 @@ async fn chat(
 
     let api_key = resolve_api_key(&state)?;
     let redactions = vec![api_key.clone()];
-    state.cancel.store(false, Ordering::SeqCst);
 
     let (session, workspace_id, history, turn, indexed) = {
         let store = state
@@ -4242,7 +4385,7 @@ async fn chat(
             }));
     }
     agent = agent
-        .with_steering(Arc::clone(&state.steering))
+        .with_steering(run_guard.steering())
         .with_redactions(redactions)
         .with_checkpoints(Arc::new(SessionCheckpoints {
             store: Arc::clone(&state.store),
@@ -4260,11 +4403,10 @@ async fn chat(
 
     let observer = ChannelObserver {
         channel: on_event,
-        cancel: state.cancel.clone(),
+        cancel,
     };
-    state.steering.begin();
     let outcome = agent.run_with_observer(history, &observer).await;
-    state.steering.end();
+    run_guard.finish_steering();
     let run = match outcome {
         Ok(run) => run,
         Err(error) => {
@@ -4592,8 +4734,7 @@ pub fn run() {
         .manage(AppState {
             store: Arc::new(Mutex::new(store)),
             secrets: secret_store(),
-            cancel: Arc::new(AtomicBool::new(false)),
-            steering: Arc::new(SteeringInbox::default()),
+            runs: Arc::new(Mutex::new(RunRegistry::default())),
             subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
             mcp: McpManagers::default(),
@@ -4622,6 +4763,7 @@ pub fn run() {
             cancel_agent,
             save_api_key,
             clear_api_key,
+            clipboard::read_clipboard_image,
             cancel_chat,
             steer_chat,
             api_key_status,
@@ -4840,6 +4982,7 @@ mod tests {
     #[test]
     fn chat_input_accepts_camel_case_fields() {
         let input: ChatInput = serde_json::from_value(json!({
+            "runId": "run-1",
             "sessionId": null,
             "workspacePath": "/tmp/work",
             "message": "hello",
@@ -4851,11 +4994,67 @@ mod tests {
             "reasoningEffort": "max"
         }))
         .expect("input");
+        assert_eq!(input.run_id, "run-1");
         assert_eq!(input.workspace_path, "/tmp/work");
         assert!(input.allow_writes);
         assert_eq!(input.max_steps, Some(32));
         assert_eq!(input.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(input.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn runs_are_scoped_to_a_project_and_cancel_independently() {
+        let registry = Arc::new(Mutex::new(RunRegistry::default()));
+        let first = begin_run(&registry, "run-a", Path::new("/tmp/openbad-project-a"))
+            .expect("first run");
+        let second = begin_run(&registry, "run-b", Path::new("/tmp/openbad-project-b"))
+            .expect("second run");
+
+        let duplicate = begin_run(&registry, "run-c", Path::new("/tmp/openbad-project-a"))
+            .err()
+            .expect("one run per project");
+        assert!(duplicate.contains("already running"));
+
+        assert!(!first.cancel_token().load(Ordering::SeqCst));
+        assert!(!second.cancel_token().load(Ordering::SeqCst));
+        assert!(cancel_registered_run(&registry, "run-a").expect("cancel"));
+        assert!(first.cancel_token().load(Ordering::SeqCst));
+        assert!(
+            !second.cancel_token().load(Ordering::SeqCst),
+            "cancelling one run must not cancel another"
+        );
+
+        assert!(
+            steer_registered_run(&registry, "run-b", "focus on tests").expect("steer"),
+            "the target run accepts steering"
+        );
+        assert!(
+            steer_registered_run(&registry, "run-b", "and keep going").expect("steer"),
+            "the active inbox accepts more than one steering message"
+        );
+
+        first.finish_steering();
+        assert!(
+            !steer_registered_run(&registry, "run-a", "too late").expect("registry entry"),
+            "steering closes as soon as the agent loop returns"
+        );
+        drop(first);
+        let replacement = begin_run(&registry, "run-c", Path::new("/tmp/openbad-project-a"))
+            .expect("project is free after the run guard drops");
+        drop(replacement);
+        assert!(steer_registered_run(&registry, "run-a", "late").is_err());
+    }
+
+    #[test]
+    fn cancellation_before_registration_is_not_lost() {
+        let registry = Arc::new(Mutex::new(RunRegistry::default()));
+        assert!(!cancel_registered_run(&registry, "early-stop").expect("cancel"));
+        let run = begin_run(&registry, "early-stop", Path::new("/tmp/openbad-early"))
+            .expect("run");
+        assert!(
+            run.cancel_token().load(Ordering::SeqCst),
+            "a stop that arrives before chat registers the run still cancels it"
+        );
     }
 
     #[test]

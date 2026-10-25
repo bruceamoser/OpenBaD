@@ -1,8 +1,17 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import {
   Archive,
   ArchiveRestore,
+  ArrowDown,
   BookOpen,
   Bot,
   Check,
@@ -158,6 +167,16 @@ function loadPreferences(): Preferences {
   return defaultPreferences;
 }
 
+type ScrollPosition = {
+  scrollTop: number;
+  follow: boolean;
+};
+
+type ScrollRestore = ScrollPosition & {
+  /** Scroll to the live bottom instead of the stored offset. */
+  bottom: boolean;
+};
+
 type BackgroundRun = {
   id: string;
   projectId: string | null;
@@ -167,6 +186,10 @@ type BackgroundRun = {
   permissionMode: PermissionMode;
   entries: ChatEntry[];
   busy: boolean;
+  stopRequested: boolean;
+  scrollTop: number;
+  follow: boolean;
+  totalDurationMs: number;
   pendingToolApproval: ToolApprovalRequest | null;
   pendingAccessRequest: OutsideAccessRequest | null;
   pendingPreview: PreviewTarget | null;
@@ -246,6 +269,7 @@ export default function App() {
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -279,6 +303,8 @@ export default function App() {
   const composerRef = useRef<ChatComposerHandle | null>(null);
   const sessionSearchRef = useRef<HTMLInputElement | null>(null);
   const followRef = useRef(true);
+  const scrollPositionsRef = useRef<Map<string, ScrollPosition>>(new Map());
+  const pendingScrollRestoreRef = useRef<ScrollRestore | null>(null);
   const autoCollapsedSidebar = useRef(false);
   const sendRef = useRef<(text: string) => void>(() => undefined);
   const steerRef = useRef<(text: string) => void>(() => undefined);
@@ -555,12 +581,31 @@ export default function App() {
     };
   }, [sessionId]);
 
-  useEffect(() => {
+  // Follow new content only while the reader is already at the bottom. Busy
+  // transitions deliberately do not scroll: they would yank the viewport away
+  // from someone reading history while a turn streams in the background.
+  useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (element !== null && followRef.current) {
-      element.scrollTop = element.scrollHeight;
+    if (element === null || !followRef.current) {
+      return;
     }
-  }, [entries, busy]);
+    element.scrollTop = element.scrollHeight;
+  }, [entries]);
+
+  useLayoutEffect(() => {
+    const pending = pendingScrollRestoreRef.current;
+    const element = scrollRef.current;
+    if (pending === null || element === null) {
+      return;
+    }
+    pendingScrollRestoreRef.current = null;
+    element.scrollTop =
+      pending.bottom || pending.follow ? element.scrollHeight : pending.scrollTop;
+    const atBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+    followRef.current = atBottom;
+    setShowJumpToLatest(!atBottom);
+  }, [activeProjectId, entries, sessionId]);
 
   useEffect(() => {
     try {
@@ -577,34 +622,133 @@ export default function App() {
     setProjectNameDraft(activeProject?.name ?? "");
   }, [activeProject?.id, activeProject?.name]);
 
+  const saveScrollPosition = useCallback(
+    (element: HTMLDivElement) => {
+      // Derive follow from the live box rather than the last scroll event so a
+      // programmatic scroll immediately before a project switch is still saved
+      // accurately.
+      const follow =
+        element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+      followRef.current = follow;
+      const position: ScrollPosition = {
+        scrollTop: element.scrollTop,
+        follow,
+      };
+      const runKey = visibleRunRef.current;
+      const run = runKey === null ? undefined : runsRef.current.get(runKey);
+      if (run !== undefined) {
+        run.scrollTop = position.scrollTop;
+        run.follow = position.follow;
+      }
+      if (sessionId !== null) {
+        scrollPositionsRef.current.set(`session:${sessionId}`, position);
+      } else if (workspacePath.length > 0) {
+        scrollPositionsRef.current.set(`project:${workspacePath}`, position);
+      }
+    },
+    [sessionId, workspacePath],
+  );
+
+  const captureCurrentScroll = useCallback(() => {
+    const element = scrollRef.current;
+    if (element !== null) {
+      saveScrollPosition(element);
+    }
+  }, [saveScrollPosition]);
+
   const handleChatScroll = useCallback(() => {
     const element = scrollRef.current;
     if (element === null) {
       return;
     }
-    followRef.current =
+    const atBottom =
       element.scrollHeight - element.scrollTop - element.clientHeight < 96;
-  }, []);
+    followRef.current = atBottom;
+    setShowJumpToLatest(!atBottom);
+    saveScrollPosition(element);
+  }, [saveScrollPosition]);
 
-  const selectProject = useCallback((project: WorkspaceSummary) => {
-    const run = runsRef.current.get(project.path);
-    visibleRunRef.current = run === undefined ? null : project.path;
-    setActiveProjectId(project.id);
-    setWorkspacePath(project.path);
-    setProjectNameDraft(project.name);
-    rememberProjectPath(project.path);
-    setSessionId(run?.sessionId ?? null);
-    setEntries(run === undefined ? [] : [...run.entries]);
-    setPermissionMode(run?.permissionMode ?? "read");
-    setAccessRequest(run?.pendingAccessRequest ?? null);
-    setToolApproval(run?.pendingToolApproval ?? null);
-    setPreview(run?.pendingPreview ?? null);
-    setBusy(run?.busy ?? false);
-    setStopRequested(false);
-    setQueuedMessages([]);
-    setError(run?.error ?? null);
+  const jumpToLatest = useCallback(() => {
+    const element = scrollRef.current;
+    if (element === null) {
+      return;
+    }
+    element.scrollTop = element.scrollHeight;
     followRef.current = true;
-  }, []);
+    setShowJumpToLatest(false);
+    saveScrollPosition(element);
+  }, [saveScrollPosition]);
+
+  const handleChatKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const element = scrollRef.current;
+      if (element === null) {
+        return;
+      }
+      const page = Math.max(80, element.clientHeight * 0.9);
+      switch (event.key) {
+        case "PageDown":
+          element.scrollTop = Math.min(
+            element.scrollHeight,
+            element.scrollTop + page,
+          );
+          break;
+        case "PageUp":
+          element.scrollTop = Math.max(0, element.scrollTop - page);
+          break;
+        case "Home":
+          element.scrollTop = 0;
+          break;
+        case "End":
+          element.scrollTop = element.scrollHeight;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      const atBottom =
+        element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+      followRef.current = atBottom;
+      setShowJumpToLatest(!atBottom);
+      saveScrollPosition(element);
+    },
+    [saveScrollPosition],
+  );
+
+  const selectProject = useCallback(
+    (project: WorkspaceSummary) => {
+      captureCurrentScroll();
+      const run = runsRef.current.get(project.path);
+      const stored =
+        run === undefined
+          ? scrollPositionsRef.current.get(`project:${project.path}`)
+          : { scrollTop: run.scrollTop, follow: run.follow };
+      pendingScrollRestoreRef.current = {
+        scrollTop: stored?.scrollTop ?? 0,
+        follow: stored?.follow ?? true,
+        bottom: stored === undefined || stored.follow,
+      };
+      followRef.current = pendingScrollRestoreRef.current.follow;
+      visibleRunRef.current = run === undefined ? null : project.path;
+      setActiveProjectId(project.id);
+      setWorkspacePath(project.path);
+      setProjectNameDraft(project.name);
+      rememberProjectPath(project.path);
+      setSessionId(run?.sessionId ?? null);
+      setEntries(run === undefined ? [] : [...run.entries]);
+      setPermissionMode(run?.permissionMode ?? "read");
+      setAccessRequest(run?.pendingAccessRequest ?? null);
+      setToolApproval(run?.pendingToolApproval ?? null);
+      setPreview(run?.pendingPreview ?? null);
+      setBusy(run?.busy ?? false);
+      setStopRequested(run?.stopRequested ?? false);
+      setQueuedMessages([]);
+      setError(run?.error ?? null);
+      setTotalDurationMs(run?.totalDurationMs ?? 0);
+      setShowJumpToLatest(false);
+    },
+    [captureCurrentScroll],
+  );
 
   const openPreview = useCallback((target: PreviewTarget) => {
     setPreview(target);
@@ -735,7 +879,10 @@ export default function App() {
   ]);
 
   const newSession = useCallback(() => {
+    captureCurrentScroll();
     visibleRunRef.current = null;
+    pendingScrollRestoreRef.current = { scrollTop: 0, follow: true, bottom: true };
+    followRef.current = true;
     setSessionId(null);
     setEntries([]);
     setTotalDurationMs(0);
@@ -747,13 +894,18 @@ export default function App() {
     setStopRequested(false);
     setQueuedMessages([]);
     setError(null);
-    followRef.current = true;
+    setShowJumpToLatest(false);
     composerRef.current?.focus();
-  }, []);
+  }, [captureCurrentScroll]);
 
   const changePermissionMode = useCallback(
     (mode: PermissionMode) => {
       setPermissionMode(mode);
+      const runKey = visibleRunRef.current;
+      const run = runKey === null ? undefined : runsRef.current.get(runKey);
+      if (run !== undefined) {
+        run.permissionMode = mode;
+      }
       if (sessionId === null) {
         return;
       }
@@ -862,10 +1014,20 @@ export default function App() {
   }, []);
 
   const stop = useCallback(async () => {
+    const runKey = visibleRunRef.current;
+    const run = runKey === null ? undefined : runsRef.current.get(runKey);
+    if (run === undefined || !run.busy) {
+      return;
+    }
+    run.stopRequested = true;
     setStopRequested(true);
     try {
-      await cancelChat();
+      // Only the run shown in this project is cancelled. A turn streaming in
+      // another project keeps its own token and continues.
+      await cancelChat(run.id);
     } catch (cause) {
+      run.stopRequested = false;
+      setStopRequested(false);
       setError(describeError(cause));
     }
   }, []);
@@ -990,22 +1152,18 @@ export default function App() {
     if ((text.length === 0 && pending.length === 0) || workspacePath.length === 0) {
       return;
     }
-    const activeRun = [...runsRef.current.values()].find((run) => run.busy);
-    if (activeRun !== undefined) {
+    // Only the same project is serialized. Another project may keep a turn
+    // streaming while this one starts a new one.
+    const activeRun = runsRef.current.get(workspacePath);
+    if (activeRun?.busy === true) {
       setError(
-        activeRun.workspacePath === workspacePath
-          ? "This session is already running. Wait for it to finish or stop it."
-          : `A session is still running in ${activeRun.projectName}. Switch back to that project to follow it or stop it.`,
+        "This project already has a running turn. Switch to that session to follow or stop it.",
       );
-      return;
-    }
-    if (busy) {
       return;
     }
     setBusy(true);
     setStopRequested(false);
     setError(null);
-    followRef.current = true;
     const assistantId = nextId();
     const userId = nextId();
     const userEntry: ChatEntry = {
@@ -1024,8 +1182,9 @@ export default function App() {
       startedAt: Date.now(),
     };
     const runKey = workspacePath;
+    const runId = nextId();
     const run: BackgroundRun = {
-      id: nextId(),
+      id: runId,
       projectId: activeProjectId,
       projectName: activeProject?.name ?? "another project",
       workspacePath,
@@ -1033,6 +1192,10 @@ export default function App() {
       permissionMode,
       entries: [userEntry, assistantEntry],
       busy: true,
+      stopRequested: false,
+      scrollTop: scrollRef.current?.scrollTop ?? 0,
+      follow: followRef.current,
+      totalDurationMs,
       pendingToolApproval: null,
       pendingAccessRequest: null,
       pendingPreview: null,
@@ -1045,6 +1208,7 @@ export default function App() {
     try {
       const reply = await sendChat(
         {
+          runId,
           sessionId,
           workspacePath,
           message: text,
@@ -1104,7 +1268,9 @@ export default function App() {
       run.sessionId = reply.session_id;
       if (sessionId === null) {
         try {
-          await persistSessionAccessMode(reply.session_id, permissionMode);
+          // Use the run's latest mode: the user may have approved tool access
+          // or changed permissions while the first turn was streaming.
+          await persistSessionAccessMode(reply.session_id, run.permissionMode);
         } catch (cause) {
           setError(describeError(cause));
         }
@@ -1136,10 +1302,11 @@ export default function App() {
             }
           : entry,
       );
+      run.totalDurationMs += reply.duration_ms;
       if (visibleRunRef.current === runKey) {
         setSessionId(reply.session_id);
         setEntries([...run.entries]);
-        setTotalDurationMs((current) => current + reply.duration_ms);
+        setTotalDurationMs(run.totalDurationMs);
       }
       void loadFoundation();
       void loadSessions();
@@ -1166,6 +1333,7 @@ export default function App() {
       }
     } finally {
       run.busy = false;
+      run.stopRequested = false;
       if (visibleRunRef.current === runKey) {
         setBusy(false);
         setStopRequested(false);
@@ -1176,7 +1344,6 @@ export default function App() {
     activeProjectId,
     allowCommands,
     allowWrites,
-    busy,
     loadFoundation,
     loadMemories,
     loadProjects,
@@ -1187,6 +1354,7 @@ export default function App() {
     reasoningEffort,
     sessionId,
     thinking,
+    totalDurationMs,
     workspacePath,
   ]);
 
@@ -1195,25 +1363,33 @@ export default function App() {
     if (text.length === 0) {
       return;
     }
-    if (visibleRunRef.current !== workspacePath) {
-      setError("No running session is visible in this project. Switch back to its project first.");
-      return;
-    }
-    if (!busy) {
+    const run = runsRef.current.get(workspacePath);
+    if (run === undefined || !run.busy) {
       void send(text);
       return;
     }
+    if (visibleRunRef.current !== workspacePath) {
+      setError(
+        "This project is already running in another session. Open that session to steer it.",
+      );
+      return;
+    }
     try {
-      await steerRunningTurn(text);
-      setEntries((current) => [
-        ...current,
-        { id: nextId(), role: "user", text, steering: true },
-      ]);
-      followRef.current = true;
+      await steerRunningTurn(run.id, text);
+      const steeringEntry: ChatEntry = {
+        id: nextId(),
+        role: "user",
+        text,
+        steering: true,
+      };
+      run.entries = [...run.entries, steeringEntry];
+      if (visibleRunRef.current === workspacePath) {
+        setEntries([...run.entries]);
+      }
     } catch {
       setQueuedMessages((current) => [...current, text]);
     }
-  }, [busy, send]);
+  }, [send, workspacePath]);
   sendRef.current = (text) => {
     void send(text);
   };
@@ -1246,6 +1422,7 @@ export default function App() {
 
   const openSession = useCallback(
     async (session: SessionSummary) => {
+      captureCurrentScroll();
       setError(null);
       try {
         const view = await fetchSession(session.id);
@@ -1259,6 +1436,15 @@ export default function App() {
         const showRun =
           run !== undefined &&
           (run.sessionId === view.session_id || run.sessionId === null);
+        const stored = showRun
+          ? { scrollTop: run.scrollTop, follow: run.follow }
+          : scrollPositionsRef.current.get(`session:${view.session_id}`);
+        pendingScrollRestoreRef.current = {
+          scrollTop: stored?.scrollTop ?? 0,
+          follow: stored?.follow ?? true,
+          bottom: stored === undefined || stored.follow,
+        };
+        followRef.current = pendingScrollRestoreRef.current.follow;
         if (project !== undefined) {
           setActiveProjectId(project.id);
           setWorkspacePath(project.path);
@@ -1273,11 +1459,12 @@ export default function App() {
         setToolApproval(showRun ? run.pendingToolApproval : null);
         setPreview(showRun ? run.pendingPreview : null);
         setBusy(showRun ? run.busy : false);
-        setStopRequested(false);
+        setStopRequested(showRun ? run.stopRequested : false);
         setQueuedMessages([]);
         setError(showRun ? run.error : null);
-        followRef.current = true;
-        setTotalDurationMs(view.total_duration_ms);
+        setTotalDurationMs(
+          showRun ? run.totalDurationMs : view.total_duration_ms,
+        );
         setEntries(
           showRun
             ? [...run.entries]
@@ -1301,7 +1488,7 @@ export default function App() {
         setError(describeError(cause));
       }
     },
-    [projects, workspacePath],
+    [captureCurrentScroll, projects, workspacePath],
   );
 
   const beginRenameSession = useCallback((session: SessionSummary) => {
@@ -1403,6 +1590,13 @@ export default function App() {
         setSessionId(null);
         setEntries([]);
         setQueuedMessages([]);
+        visibleRunRef.current = null;
+        pendingScrollRestoreRef.current = null;
+        followRef.current = true;
+        setBusy(false);
+        setStopRequested(false);
+        setShowJumpToLatest(false);
+        setTotalDurationMs(0);
       }
       setSettingsOpen(false);
     } catch (cause) {
@@ -1918,7 +2112,7 @@ export default function App() {
         </aside>
       )}
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] px-4">
           {!sidebarOpen && (
             <button
@@ -1995,12 +2189,17 @@ export default function App() {
               Drop files to attach them to the chat
             </div>
           )}
-          <div
-            ref={scrollRef}
-            onScroll={handleChatScroll}
-            data-testid="chat-scroll"
-            className="min-h-0 flex-1 overflow-y-auto"
-          >
+          <div className="relative min-h-0 flex-1">
+            <div
+              ref={scrollRef}
+              onScroll={handleChatScroll}
+              onKeyDown={handleChatKeyDown}
+              tabIndex={0}
+              role="region"
+              aria-label="Chat transcript"
+              data-testid="chat-scroll"
+              className="chat-scroll h-full overflow-y-auto outline-none"
+            >
             <div className="mx-auto w-full max-w-3xl space-y-6 px-5 py-6">
               {entries.length === 0 && (
                 <div className="pt-16">
@@ -2071,6 +2270,17 @@ export default function App() {
                 </div>
               )}
             </div>
+            </div>
+            {showJumpToLatest && (
+              <button
+                type="button"
+                aria-label="Jump to latest"
+                onClick={jumpToLatest}
+                className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-white/[0.1] bg-[#151921]/95 px-3 py-1.5 text-[11px] font-medium text-slate-200 shadow-lg backdrop-blur hover:bg-[#1b202a]"
+              >
+                <ArrowDown size={12} /> Jump to latest
+              </button>
+            )}
           </div>
 
           <ChatComposer

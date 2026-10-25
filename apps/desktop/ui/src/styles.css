@@ -497,3 +497,11 @@ code {
   align-items: center;
   gap: 2px;
 }
+
+/* Keep the transcript scroller independent of composer growth and browser
+   scroll anchoring, which otherwise fights explicit position restores. */
+.chat-scroll {
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
