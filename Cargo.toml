@@ -19,6 +19,7 @@ members = [
     "crates/openbad-lsp",
     "crates/openbad-terminal",
     "crates/openbad-transfer",
+    "crates/openbad-vault",
 ]
 
 [workspace.package]
