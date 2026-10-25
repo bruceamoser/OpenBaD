@@ -83,6 +83,7 @@ export type ChatEntry = {
   steering?: boolean;
   attachments?: ChatAttachment[];
   usage?: Usage;
+  preview?: PreviewTarget;
 };
 
 export type AgentEvent =
@@ -274,6 +275,15 @@ export type Artifact = {
   language?: string;
 };
 
+export type PreviewTarget =
+  | { kind: "artifact"; artifact: Artifact }
+  | {
+      kind: "git";
+      workspacePath: string;
+      repoPath: string;
+      repoName: string;
+    };
+
 
 export type ProjectCommand = {
   command: string;
@@ -449,6 +459,19 @@ export type GitRepoStatus = {
   remotes: GitRemote[];
   lastCommit: GitCommit | null;
   operation: string | null;
+  error: string | null;
+};
+
+export type GitRepoSummary = {
+  path: string;
+  name: string;
+  isRepo: boolean;
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  dirty: number;
   error: string | null;
 };
 

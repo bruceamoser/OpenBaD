@@ -14,6 +14,7 @@ import {
   PackageOpen,
   Copy,
   Database,
+  Eye,
   FileText,
   Folder,
   FolderGit2,
@@ -99,6 +100,7 @@ import type {
   MemoryRecord,
   OutsideAccessGrant,
   OutsideAccessRequest,
+  PreviewTarget,
   ProjectAreaCounts,
   ProjectExportReport,
   ProjectImportReport,
@@ -109,6 +111,9 @@ import type {
   WorkspaceIndexSummary,
   WorkspaceSummary,
 } from "./types";
+
+// Artifact previews and repository source control share the preview pane.
+export type { PreviewTarget };
 
 type Preferences = {
   model: string;
@@ -164,7 +169,7 @@ type BackgroundRun = {
   busy: boolean;
   pendingToolApproval: ToolApprovalRequest | null;
   pendingAccessRequest: OutsideAccessRequest | null;
-  pendingArtifact: Artifact | null;
+  pendingPreview: PreviewTarget | null;
   error: string | null;
 };
 
@@ -247,7 +252,8 @@ export default function App() {
   const [panelTab, setPanelTab] = useState<PanelTab>("overview");
   const [panelWidth, setPanelWidth] = useState(460);
   const [previewWidth, setPreviewWidth] = useState(420);
-  const [artifact, setArtifact] = useState<Artifact | null>(null);
+  const [preview, setPreview] = useState<PreviewTarget | null>(null);
+  const previewOpen = preview !== null;
   const [totalDurationMs, setTotalDurationMs] = useState(0);
   const [transfer, setTransfer] = useState<TransferState | null>(null);
   const [mergeBundle, setMergeBundle] = useState<string | null>(null);
@@ -496,6 +502,9 @@ export default function App() {
     }
     let active = true;
     const load = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
       void loadProjectAreaCounts(workspacePath)
         .then((counts) => {
           if (active) {
@@ -509,10 +518,14 @@ export default function App() {
         .catch(() => undefined);
     };
     load();
-    const timer = window.setInterval(load, 2000);
+    const timer = window.setInterval(load, 5_000);
+    window.addEventListener("focus", load);
+    document.addEventListener("visibilitychange", load);
     return () => {
       active = false;
       window.clearInterval(timer);
+      window.removeEventListener("focus", load);
+      document.removeEventListener("visibilitychange", load);
     };
   }, [projectRevision, workspacePath]);
 
@@ -585,12 +598,34 @@ export default function App() {
     setPermissionMode(run?.permissionMode ?? "read");
     setAccessRequest(run?.pendingAccessRequest ?? null);
     setToolApproval(run?.pendingToolApproval ?? null);
-    setArtifact(run?.pendingArtifact ?? null);
+    setPreview(run?.pendingPreview ?? null);
     setBusy(run?.busy ?? false);
     setStopRequested(false);
     setQueuedMessages([]);
     setError(run?.error ?? null);
     followRef.current = true;
+  }, []);
+
+  const openPreview = useCallback((target: PreviewTarget) => {
+    setPreview(target);
+  }, []);
+
+  const openArtifact = useCallback((artifact: Artifact | null) => {
+    setPreview(artifact === null ? null : { kind: "artifact", artifact });
+  }, []);
+
+  const openGitRepo = useCallback(
+    (repoPath: string, repoName: string) => {
+      if (workspacePath.length === 0) {
+        return;
+      }
+      setPreview({ kind: "git", workspacePath, repoPath, repoName });
+    },
+    [workspacePath],
+  );
+
+  const markWorkspaceChanged = useCallback(() => {
+    setProjectRevision((current) => current + 1);
   }, []);
 
   const exportProjectFlow = useCallback(async () => {
@@ -704,7 +739,7 @@ export default function App() {
     setSessionId(null);
     setEntries([]);
     setTotalDurationMs(0);
-    setArtifact(null);
+    setPreview(null);
     setPermissionMode("read");
     setAccessRequest(null);
     setToolApproval(null);
@@ -896,20 +931,6 @@ export default function App() {
     setPanelOpen(true);
   }, []);
 
-  const openArtifact = useCallback((next: Artifact | null) => {
-    setArtifact(next);
-  }, []);
-
-  useEffect(() => {
-    if (!panelOpen || workspacePath.length === 0) {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      setProjectRevision((value) => value + 1);
-    }, 2_500);
-    return () => window.clearInterval(interval);
-  }, [panelOpen, workspacePath]);
-
   useEffect(() => {
     if (panelOpen && window.innerWidth < 1180 && sidebarOpen) {
       autoCollapsedSidebar.current = true;
@@ -925,7 +946,7 @@ export default function App() {
       event.preventDefault();
       const startX = event.clientX;
       const startWidth = panelWidth;
-      const reserved = 380 + (artifact !== null ? previewWidth + 4 : 0);
+      const reserved = 380 + (previewOpen ? previewWidth + 4 : 0);
       const move = (pointer: PointerEvent) => {
         const available = Math.max(320, window.innerWidth - reserved);
         setPanelWidth(
@@ -939,7 +960,7 @@ export default function App() {
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", stop);
     },
-    [panelWidth, artifact, previewWidth],
+    [panelWidth, previewOpen, previewWidth],
   );
 
   const startPreviewResize = useCallback(
@@ -1014,7 +1035,7 @@ export default function App() {
       busy: true,
       pendingToolApproval: null,
       pendingAccessRequest: null,
-      pendingArtifact: null,
+      pendingPreview: null,
       error: null,
     };
     runsRef.current.set(runKey, run);
@@ -1039,14 +1060,19 @@ export default function App() {
           if (current === undefined) {
             return;
           }
+          let eventPreview: PreviewTarget | null = null;
           if (event.type === "tool_result") {
-            const nextArtifact = artifactFromMetadata(event.metadata);
+            const nextPreview = previewTargetFromMetadata(
+              event.metadata,
+              workspacePath,
+            );
+            eventPreview = nextPreview;
             const nextAccessRequest = accessRequestFromMetadata(event.metadata);
             const nextToolApproval = toolApprovalFromMetadata(event.metadata);
-            if (nextArtifact !== null) {
-              current.pendingArtifact = nextArtifact;
+            if (nextPreview !== null) {
+              current.pendingPreview = nextPreview;
               if (visibleRunRef.current === runKey) {
-                openArtifact(nextArtifact);
+                openPreview(nextPreview);
               }
             }
             if (nextAccessRequest !== null) {
@@ -1062,9 +1088,14 @@ export default function App() {
               }
             }
           }
-          current.entries = current.entries.map((entry) =>
-            entry.id === assistantId ? applyAgentEvent(entry, event) : entry,
-          );
+          const entryPreview = eventPreview;
+          current.entries = current.entries.map((entry) => {
+            const updated =
+              entry.id === assistantId ? applyAgentEvent(entry, event) : entry;
+            return entry.id === assistantId && entryPreview !== null
+              ? { ...updated, preview: entryPreview }
+              : updated;
+          });
           if (visibleRunRef.current === runKey) {
             setEntries([...current.entries]);
           }
@@ -1151,7 +1182,7 @@ export default function App() {
     loadProjects,
     loadSessions,
     model,
-    openArtifact,
+    openPreview,
     permissionMode,
     reasoningEffort,
     sessionId,
@@ -1240,7 +1271,7 @@ export default function App() {
         setPermissionMode(showRun ? run.permissionMode : session.access_mode);
         setAccessRequest(showRun ? run.pendingAccessRequest : null);
         setToolApproval(showRun ? run.pendingToolApproval : null);
-        setArtifact(showRun ? run.pendingArtifact : null);
+        setPreview(showRun ? run.pendingPreview : null);
         setBusy(showRun ? run.busy : false);
         setStopRequested(false);
         setQueuedMessages([]);
@@ -2027,7 +2058,7 @@ export default function App() {
                     entry={entry}
                     nowMs={running ? nowMs : undefined}
                     workspacePath={workspacePath}
-                    onOpenAttachment={openArtifact}
+                    onOpenPreview={openPreview}
                     running={running}
                   />
                 );
@@ -2068,15 +2099,17 @@ export default function App() {
         </div>
       </div>
 
-      {artifact !== null && (
+      {preview !== null && (
         <PreviewPane
-          artifact={artifact}
+          target={preview}
           workspacePath={workspacePath}
           revision={projectRevision}
           width={previewWidth}
           reserved={720 + (panelOpen ? panelWidth + 4 : 0)}
           onResizeStart={startPreviewResize}
-          onClose={() => setArtifact(null)}
+          onClose={() => setPreview(null)}
+          onArtifact={openArtifact}
+          onWorkspaceChanged={markWorkspaceChanged}
         />
       )}
 
@@ -2093,7 +2126,7 @@ export default function App() {
             className="flex min-h-0 shrink-0 overflow-hidden"
             style={{
               width: `clamp(320px, ${panelWidth}px, calc(100vw - ${
-                380 + (artifact !== null ? previewWidth + 4 : 0)
+                380 + (previewOpen ? previewWidth + 4 : 0)
               }px))`,
             }}
           >
@@ -2122,9 +2155,10 @@ export default function App() {
               sessionId={sessionId}
               onOpenSettings={openSettings}
               onArtifact={openArtifact}
+              onOpenGit={openGitRepo}
               onImportBundle={() => void startMergeImport()}
               revision={projectRevision}
-              onWorkspaceChanged={() => setProjectRevision((value) => value + 1)}
+              onWorkspaceChanged={markWorkspaceChanged}
             />
           </div>
         </>
@@ -2624,14 +2658,15 @@ const MessageCard = memo(function MessageCard({
   nowMs,
   running = false,
   workspacePath,
-  onOpenAttachment,
+  onOpenPreview,
 }: {
   entry: ChatEntry;
   nowMs?: number;
   running?: boolean;
   workspacePath?: string;
-  onOpenAttachment?: (artifact: Artifact) => void;
+  onOpenPreview?: (target: PreviewTarget) => void;
 }) {
+  const preview = entry.preview;
   if (entry.role === "user") {
     return (
       <div className="flex justify-end">
@@ -2655,13 +2690,16 @@ const MessageCard = memo(function MessageCard({
                         ? attachment.name
                         : `Preview ${attachment.path}`
                     }
-                    disabled={attachment.path === undefined || onOpenAttachment === undefined}
+                    disabled={attachment.path === undefined || onOpenPreview === undefined}
                     onClick={() =>
                       attachment.path !== undefined &&
-                      onOpenAttachment?.({
-                        kind: "file",
-                        title: attachment.name,
-                        uri: attachment.path,
+                      onOpenPreview?.({
+                        kind: "artifact",
+                        artifact: {
+                          kind: "file",
+                          title: attachment.name,
+                          uri: attachment.path,
+                        },
                       })
                     }
                     className="flex min-w-0 items-center gap-1 disabled:cursor-default"
@@ -2745,6 +2783,16 @@ const MessageCard = memo(function MessageCard({
               ))}
             </div>
           </details>
+        )}
+        {preview !== undefined && onOpenPreview !== undefined && (
+          <button
+            type="button"
+            onClick={() => onOpenPreview(preview)}
+            className="mt-2 inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[10px] text-slate-400 transition-colors hover:border-emerald-400/25 hover:text-emerald-200"
+          >
+            <Eye size={11} />
+            {preview.kind === "git" ? "Open source control" : "Reopen preview"}
+          </button>
         )}
         {entry.usage !== undefined && (
           <p className="mt-2 font-mono text-[10px] text-slate-500">
@@ -3362,7 +3410,7 @@ function runningMs(entries: ChatEntry[], nowMs: number): number {
   return Math.max(0, nowMs - last.startedAt);
 }
 
-function artifactFromMetadata(metadata: unknown): Artifact | null {
+function artifactRecord(metadata: unknown): Record<string, unknown> | null {
   if (typeof metadata !== "object" || metadata === null) {
     return null;
   }
@@ -3370,7 +3418,10 @@ function artifactFromMetadata(metadata: unknown): Artifact | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
-  const record = value as Record<string, unknown>;
+  return value as Record<string, unknown>;
+}
+
+function artifactFromRecord(record: Record<string, unknown>): Artifact | null {
   const kind = record.kind;
   const title = record.title;
   if (
@@ -3387,6 +3438,48 @@ function artifactFromMetadata(metadata: unknown): Artifact | null {
     content: typeof record.content === "string" ? record.content : undefined,
     language: typeof record.language === "string" ? record.language : undefined,
   };
+}
+
+function previewTargetFromMetadata(
+  metadata: unknown,
+  workspacePath: string,
+): PreviewTarget | null {
+  const record = artifactRecord(metadata);
+  if (record === null) {
+    return null;
+  }
+  if (record.kind === "git") {
+    const title =
+      typeof record.title === "string" && record.title.trim().length > 0
+        ? record.title.trim()
+        : "Repository";
+    const uri = typeof record.uri === "string" ? record.uri.trim() : "";
+    return {
+      kind: "git",
+      workspacePath,
+      repoPath:
+        uri.length === 0
+          ? workspacePath
+          : resolvePreviewRepoPath(workspacePath, uri),
+      repoName: title,
+    };
+  }
+  const artifact = artifactFromRecord(record);
+  return artifact === null ? null : { kind: "artifact", artifact };
+}
+
+function resolvePreviewRepoPath(workspacePath: string, repoPath: string): string {
+  if (
+    repoPath.startsWith("/") ||
+    repoPath.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(repoPath)
+  ) {
+    return repoPath;
+  }
+  const base = workspacePath.replace(/[\\/]+$/, "");
+  return base.length === 0
+    ? repoPath
+    : `${base}/${repoPath.replace(/^[\\/]+/, "")}`;
 }
 
 
