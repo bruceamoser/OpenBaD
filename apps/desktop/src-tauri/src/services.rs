@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+/// A version banner should be immediate; anything slower is a hung binary.
+const BINARY_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceStatus {
@@ -122,28 +125,29 @@ fn tcp_probe(url: &str) -> (bool, String) {
 }
 
 fn binary_probe(binary: &str) -> (bool, String) {
-    match Command::new(binary).arg("--version").output() {
-        Ok(output) => {
-            let text = if output.stdout.is_empty() {
-                String::from_utf8_lossy(&output.stderr).trim().to_owned()
-            } else {
-                String::from_utf8_lossy(&output.stdout).trim().to_owned()
-            };
-            if text.is_empty() {
-                (true, "installed".to_owned())
-            } else {
-                (true, text.lines().next().unwrap_or("installed").to_owned())
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            (false, "not installed".to_owned())
-        }
-        Err(error) => (false, error.to_string()),
+    let mut command = Command::new(binary);
+    command.arg("--version");
+    let output = match crate::process::run_bounded(
+        &mut command,
+        BINARY_PROBE_TIMEOUT,
+        &format!("{binary} --version"),
+    ) {
+        Ok(output) => output,
+        Err(error) => return (false, error),
+    };
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr).trim().to_owned()
+    } else {
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    if text.is_empty() {
+        (true, "installed".to_owned())
+    } else {
+        (true, text.lines().next().unwrap_or("installed").to_owned())
     }
 }
 
-#[tauri::command]
-pub fn services_status() -> Vec<ServiceStatus> {
+fn collect_status() -> Vec<ServiceStatus> {
     DEFINITIONS
         .iter()
         .map(|definition| {
@@ -167,6 +171,13 @@ pub fn services_status() -> Vec<ServiceStatus> {
             }
         })
         .collect()
+}
+
+#[tauri::command]
+pub async fn services_status() -> Vec<ServiceStatus> {
+    tauri::async_runtime::spawn_blocking(collect_status)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]

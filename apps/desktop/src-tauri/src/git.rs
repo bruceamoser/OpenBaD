@@ -1,12 +1,20 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
 
-use crate::AppState;
+use crate::{off_thread, AppState};
 
-const GIT_TIMEOUT_SECS: u64 = 120;
+/// Network git operations (`fetch`, `pull`, `push`) may legitimately take a while.
+const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
+/// Local reads answer in milliseconds; a slow answer means a slow or remote
+/// filesystem, so fail fast instead of pinning a worker thread.
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many repositories to probe at once when summarizing a project.
+const SUMMARY_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,32 +100,26 @@ pub struct GitCommandResult {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
-    let mut child = Command::new("git")
+    git_with_timeout(repo, args, GIT_PROBE_TIMEOUT)
+}
+
+fn git_with_timeout(repo: &Path, args: &[&str], timeout: Duration) -> Result<Output, String> {
+    let mut command = Command::new("git");
+    command
         .current_dir(repo)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run git: {error}"))?;
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed().as_secs() < GIT_TIMEOUT_SECS => {
-                std::thread::sleep(std::time::Duration::from_millis(40));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("git {} timed out", args.join(" ")));
-            }
-            Err(error) => return Err(format!("git process failed: {error}")),
-        }
+        .env("GIT_TERMINAL_PROMPT", "0");
+    crate::process::run_bounded(&mut command, timeout, &format!("git {}", args.join(" ")))
+}
+
+/// Describes a non-zero git exit, preferring stderr because stdout is usually empty.
+fn failure(args: &[&str], output: &Output) -> String {
+    let detail = stderr(output);
+    if detail.is_empty() {
+        format!("git {} exited with {}", args.join(" "), output.status)
+    } else {
+        format!("git {} failed: {detail}", args.join(" "))
     }
-    child
-        .wait_with_output()
-        .map_err(|error| format!("git output failed: {error}"))
 }
 
 fn text(output: &Output) -> String {
@@ -128,10 +130,14 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_owned()
 }
 
-fn is_repo(repo: &Path) -> bool {
-    git(repo, &["rev-parse", "--is-inside-work-tree"])
-        .map(|output| output.status.success() && text(&output) == "true")
-        .unwrap_or(false)
+fn is_repo(repo: &Path) -> Result<bool, String> {
+    let output = git(repo, &["rev-parse", "--is-inside-work-tree"])?;
+    if !output.status.success() {
+        // `rev-parse` exits non-zero for a plain directory; that is a real
+        // answer, not a failure to report.
+        return Ok(false);
+    }
+    Ok(text(&output) == "true")
 }
 
 fn branch_name(repo: &Path) -> (Option<String>, bool) {
@@ -183,12 +189,11 @@ fn ahead_behind(repo: &Path, upstream: Option<&str>) -> (u32, u32) {
     (ahead, behind)
 }
 
-fn parse_files(repo: &Path) -> Vec<GitFileChange> {
-    let Ok(output) = git(repo, &["status", "--porcelain=v1", "-z"]) else {
-        return Vec::new();
-    };
+fn parse_files(repo: &Path) -> Result<Vec<GitFileChange>, String> {
+    let args = ["status", "--porcelain=v1", "-z"];
+    let output = git(repo, &args)?;
     if !output.status.success() {
-        return Vec::new();
+        return Err(failure(&args, &output));
     }
     let raw = String::from_utf8_lossy(&output.stdout);
     let mut parts = raw.split('\0');
@@ -216,7 +221,7 @@ fn parse_files(repo: &Path) -> Vec<GitFileChange> {
             worktree_status,
         });
     }
-    files
+    Ok(files)
 }
 
 fn parse_branches(repo: &Path) -> Vec<GitBranch> {
@@ -369,10 +374,14 @@ pub fn status_for(repo: &Path) -> GitRepoStatus {
         operation: None,
         error: None,
     };
-    if !is_repo(repo) {
-        return status;
+    match is_repo(repo) {
+        Ok(true) => status.is_repo = true,
+        Ok(false) => return status,
+        Err(error) => {
+            status.error = Some(error);
+            return status;
+        }
     }
-    status.is_repo = true;
     let (branch, detached) = branch_name(repo);
     status.branch = branch;
     status.detached = detached;
@@ -383,7 +392,10 @@ pub fn status_for(repo: &Path) -> GitRepoStatus {
     status.has_commits = git(repo, &["rev-parse", "--verify", "HEAD"])
         .map(|output| output.status.success())
         .unwrap_or(false);
-    status.files = parse_files(repo);
+    match parse_files(repo) {
+        Ok(files) => status.files = files,
+        Err(error) => status.error = Some(error),
+    }
     status.branches = parse_branches(repo);
     status.remotes = parse_remotes(repo);
     status.last_commit = last_commit(repo);
@@ -413,10 +425,14 @@ pub fn summary_for(repo: &Path) -> GitRepoSummary {
         dirty: 0,
         error: None,
     };
-    if !is_repo(repo) {
-        return summary;
+    match is_repo(repo) {
+        Ok(true) => summary.is_repo = true,
+        Ok(false) => return summary,
+        Err(error) => {
+            summary.error = Some(error);
+            return summary;
+        }
     }
-    summary.is_repo = true;
     let (branch, detached) = branch_name(repo);
     summary.branch = branch;
     summary.detached = detached;
@@ -424,7 +440,10 @@ pub fn summary_for(repo: &Path) -> GitRepoSummary {
     let (ahead, behind) = ahead_behind(repo, summary.upstream.as_deref());
     summary.ahead = ahead;
     summary.behind = behind;
-    summary.dirty = parse_files(repo).len() as u32;
+    match parse_files(repo) {
+        Ok(files) => summary.dirty = files.len() as u32,
+        Err(error) => summary.error = Some(error),
+    }
     summary
 }
 
@@ -518,94 +537,131 @@ fn validate_paths(paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn action(
-    state: &AppState,
-    workspace_path: &str,
-    repo_path: &str,
-    args: &[&str],
-) -> Result<GitCommandResult, String> {
-    let repo = checked_repo(state, workspace_path, repo_path)?;
-    let output = git(&repo, args)?;
-    let mut message = text(&output);
-    let error = stderr(&output);
+fn build_result(repo: &Path, output: &Output) -> GitCommandResult {
+    let mut message = text(output);
+    let error = stderr(output);
     if !message.is_empty() && !error.is_empty() {
         message.push('\n');
     }
     message.push_str(&error);
-    Ok(GitCommandResult {
+    GitCommandResult {
         ok: output.status.success(),
         message,
-        status: Some(status_for(&repo)),
-    })
+        status: Some(status_for(repo)),
+    }
+}
+
+fn run_action(repo: &Path, args: &[String], timeout: Duration) -> Result<GitCommandResult, String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = git_with_timeout(repo, &refs, timeout)?;
+    Ok(build_result(repo, &output))
+}
+
+enum SummaryTarget {
+    Repo(PathBuf),
+    Unavailable { path: String, error: String },
+}
+
+/// Probes every repository, at most [`SUMMARY_CONCURRENCY`] at a time, and
+/// returns the summaries in the order they were requested.
+fn summarize_all(targets: Vec<SummaryTarget>) -> Vec<GitRepoSummary> {
+    let collected = std::sync::Mutex::new(Vec::with_capacity(targets.len()));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = SUMMARY_CONCURRENCY.min(targets.len()).max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(target) = targets.get(index) else {
+                        break;
+                    };
+                    let summary = match target {
+                        SummaryTarget::Repo(path) => summary_for(path),
+                        SummaryTarget::Unavailable { path, error } => {
+                            unavailable_summary(path, error)
+                        }
+                    };
+                    if let Ok(mut collected) = collected.lock() {
+                        collected.push((index, summary));
+                    }
+                }
+            });
+        }
+    });
+    let Ok(mut collected) = collected.into_inner() else {
+        return Vec::new();
+    };
+    collected.sort_by_key(|(index, _)| *index);
+    collected.into_iter().map(|(_, summary)| summary).collect()
 }
 
 #[tauri::command]
-pub fn git_repo_status(
+pub async fn git_repo_status(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
 ) -> Result<GitRepoStatus, String> {
     let repo = checked_repo(&state, &workspace_path, &repo_path)?;
-    Ok(status_for(&repo))
+    off_thread(move || Ok(status_for(&repo))).await
 }
 
 #[tauri::command]
-pub fn git_project_repos(
+pub async fn git_project_repos(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_paths: Vec<String>,
 ) -> Result<Vec<GitRepoSummary>, String> {
     const MAX_REPOS: usize = 256;
     if repo_paths.len() > MAX_REPOS {
-        return Err(format!("at most {MAX_REPOS} repositories can be summarized"));
+        return Err(format!(
+            "at most {MAX_REPOS} repositories can be summarized"
+        ));
     }
     let mut ordered = Vec::with_capacity(repo_paths.len() + 1);
     ordered.push(workspace_path.clone());
-    ordered.extend(repo_paths.into_iter().filter(|path| path != &workspace_path));
+    ordered.extend(
+        repo_paths
+            .into_iter()
+            .filter(|path| path != &workspace_path),
+    );
     let mut seen = std::collections::HashSet::new();
-    let mut summaries = Vec::with_capacity(ordered.len());
+    let mut targets = Vec::with_capacity(ordered.len());
     for path in ordered {
         if !seen.insert(path.clone()) {
             continue;
         }
-        match checked_repo(&state, &workspace_path, &path) {
-            Ok(repo) => summaries.push(summary_for(&repo)),
-            Err(error) => summaries.push(unavailable_summary(&path, &error)),
-        }
+        targets.push(match checked_repo(&state, &workspace_path, &path) {
+            Ok(repo) => SummaryTarget::Repo(repo),
+            Err(error) => SummaryTarget::Unavailable { path, error },
+        });
     }
-    Ok(summaries)
+    off_thread(move || Ok(summarize_all(targets))).await
 }
 
 #[tauri::command]
-pub fn git_init(
+pub async fn git_init(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
 ) -> Result<GitCommandResult, String> {
     let repo = checked_repo(&state, &workspace_path, &repo_path)?;
-    if is_repo(&repo) {
-        return Ok(GitCommandResult {
-            ok: true,
-            message: "already a git repository".to_owned(),
-            status: Some(status_for(&repo)),
-        });
-    }
-    let output = git(&repo, &["init", "-b", "main"])?;
-    let mut message = text(&output);
-    let error = stderr(&output);
-    if !message.is_empty() && !error.is_empty() {
-        message.push('\n');
-    }
-    message.push_str(&error);
-    Ok(GitCommandResult {
-        ok: output.status.success(),
-        message,
-        status: Some(status_for(&repo)),
+    off_thread(move || {
+        if is_repo(&repo).unwrap_or(false) {
+            return Ok(GitCommandResult {
+                ok: true,
+                message: "already a git repository".to_owned(),
+                status: Some(status_for(&repo)),
+            });
+        }
+        let output = git(&repo, &["init", "-b", "main"])?;
+        Ok(build_result(&repo, &output))
     })
+    .await
 }
 
 #[tauri::command]
-pub fn git_checkout(
+pub async fn git_checkout(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
@@ -613,47 +669,56 @@ pub fn git_checkout(
     create: bool,
 ) -> Result<GitCommandResult, String> {
     validate_branch(&branch)?;
-    let args = if create {
-        vec!["switch", "-c", branch.as_str()]
-    } else {
-        vec!["switch", branch.as_str()]
-    };
-    action(&state, &workspace_path, &repo_path, &args)
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    off_thread(move || {
+        let args = if create {
+            vec!["switch".to_owned(), "-c".to_owned(), branch]
+        } else {
+            vec!["switch".to_owned(), branch]
+        };
+        run_action(&repo, &args, GIT_PROBE_TIMEOUT)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn git_fetch(
+pub async fn git_fetch(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
     remote: Option<String>,
 ) -> Result<GitCommandResult, String> {
-    let mut args = vec!["fetch", "--prune"];
+    let mut args = vec!["fetch".to_owned(), "--prune".to_owned()];
     if let Some(remote) = remote.as_deref() {
         validate_branch(remote)?;
-        args.push(remote);
+        args.push(remote.to_owned());
     }
-    action(&state, &workspace_path, &repo_path, &args)
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    off_thread(move || run_action(&repo, &args, GIT_NETWORK_TIMEOUT)).await
 }
 
 #[tauri::command]
-pub fn git_pull(
+pub async fn git_pull(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
     mode: Option<String>,
 ) -> Result<GitCommandResult, String> {
-    let mut args = vec!["pull"];
-    match mode.as_deref().unwrap_or("ff-only") {
-        "merge" => args.push("--no-rebase"),
-        "rebase" => args.push("--rebase"),
-        _ => args.push("--ff-only"),
-    }
-    action(&state, &workspace_path, &repo_path, &args)
+    let mut args = vec!["pull".to_owned()];
+    args.push(
+        match mode.as_deref().unwrap_or("ff-only") {
+            "merge" => "--no-rebase",
+            "rebase" => "--rebase",
+            _ => "--ff-only",
+        }
+        .to_owned(),
+    );
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    off_thread(move || run_action(&repo, &args, GIT_NETWORK_TIMEOUT)).await
 }
 
 #[tauri::command]
-pub fn git_push(
+pub async fn git_push(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
@@ -661,56 +726,59 @@ pub fn git_push(
     branch: Option<String>,
     set_upstream: bool,
 ) -> Result<GitCommandResult, String> {
-    let mut args = vec!["push"];
+    let mut args = vec!["push".to_owned()];
     if set_upstream {
-        args.push("--set-upstream");
+        args.push("--set-upstream".to_owned());
     }
     if let Some(remote) = remote.as_deref() {
         validate_branch(remote)?;
-        args.push(remote);
+        args.push(remote.to_owned());
     }
     if let Some(branch) = branch.as_deref() {
         validate_branch(branch)?;
-        args.push(branch);
+        args.push(branch.to_owned());
     }
-    action(&state, &workspace_path, &repo_path, &args)
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    off_thread(move || run_action(&repo, &args, GIT_NETWORK_TIMEOUT)).await
 }
 
 #[tauri::command]
-pub fn git_stage(
+pub async fn git_stage(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
     paths: Vec<String>,
 ) -> Result<GitCommandResult, String> {
     validate_paths(&paths)?;
-    let mut args = vec!["add", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    action(&state, &workspace_path, &repo_path, &args)
+    let mut args = vec!["add".to_owned(), "--".to_owned()];
+    args.extend(paths);
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    off_thread(move || run_action(&repo, &args, GIT_PROBE_TIMEOUT)).await
 }
 
 #[tauri::command]
-pub fn git_unstage(
+pub async fn git_unstage(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
     paths: Vec<String>,
 ) -> Result<GitCommandResult, String> {
     validate_paths(&paths)?;
-    let mut args = vec!["restore", "--staged", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    action(&state, &workspace_path, &repo_path, &args)
+    let mut args = vec!["restore".to_owned(), "--staged".to_owned(), "--".to_owned()];
+    args.extend(paths);
+    let repo = checked_repo(&state, &workspace_path, &repo_path)?;
+    off_thread(move || run_action(&repo, &args, GIT_PROBE_TIMEOUT)).await
 }
 
 #[tauri::command]
-pub fn git_commit(
+pub async fn git_commit(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
     message: String,
     stage_all: bool,
 ) -> Result<GitCommandResult, String> {
-    let message = message.trim();
+    let message = message.trim().to_owned();
     if message.is_empty() {
         return Err("commit message is required".to_owned());
     }
@@ -718,32 +786,25 @@ pub fn git_commit(
         return Err("commit message is too long".to_owned());
     }
     let repo = checked_repo(&state, &workspace_path, &repo_path)?;
-    if stage_all {
-        let output = git(&repo, &["add", "-A"])?;
-        if !output.status.success() {
-            return Ok(GitCommandResult {
-                ok: false,
-                message: stderr(&output),
-                status: Some(status_for(&repo)),
-            });
+    off_thread(move || {
+        if stage_all {
+            let output = git(&repo, &["add", "-A"])?;
+            if !output.status.success() {
+                return Ok(GitCommandResult {
+                    ok: false,
+                    message: stderr(&output),
+                    status: Some(status_for(&repo)),
+                });
+            }
         }
-    }
-    let output = git(&repo, &["commit", "-m", message])?;
-    let mut result = text(&output);
-    let error = stderr(&output);
-    if !result.is_empty() && !error.is_empty() {
-        result.push('\n');
-    }
-    result.push_str(&error);
-    Ok(GitCommandResult {
-        ok: output.status.success(),
-        message: result,
-        status: Some(status_for(&repo)),
+        let output = git(&repo, &["commit", "-m", &message])?;
+        Ok(build_result(&repo, &output))
     })
+    .await
 }
 
 #[tauri::command]
-pub fn git_diff(
+pub async fn git_diff(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
@@ -752,65 +813,74 @@ pub fn git_diff(
     context_lines: Option<u32>,
 ) -> Result<String, String> {
     let repo = checked_repo(&state, &workspace_path, &repo_path)?;
-    let context = format!("-U{}", context_lines.unwrap_or(3).min(20));
-    let mut args = vec!["diff", "--no-color", context.as_str()];
-    if staged {
-        args.push("--staged");
-    }
     if let Some(path) = path.as_deref() {
         validate_paths(&[path.to_owned()])?;
-        args.push("--");
-        args.push(path);
     }
-    let output = git(&repo, &args)?;
-    if !output.status.success() {
-        return Err(stderr(&output));
-    }
-    let mut diff = String::from_utf8_lossy(&output.stdout).into_owned();
-    const MAX_DIFF_BYTES: usize = 256 * 1024;
-    if diff.len() > MAX_DIFF_BYTES {
-        diff.truncate(MAX_DIFF_BYTES);
-        diff.push_str("\n… diff truncated");
-    }
-    Ok(diff)
+    off_thread(move || {
+        let context = format!("-U{}", context_lines.unwrap_or(3).min(20));
+        let mut args = vec!["diff".to_owned(), "--no-color".to_owned(), context];
+        if staged {
+            args.push("--staged".to_owned());
+        }
+        if let Some(path) = path {
+            args.push("--".to_owned());
+            args.push(path);
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = git_with_timeout(&repo, &refs, GIT_PROBE_TIMEOUT)?;
+        if !output.status.success() {
+            return Err(failure(&refs, &output));
+        }
+        let mut diff = String::from_utf8_lossy(&output.stdout).into_owned();
+        const MAX_DIFF_BYTES: usize = 256 * 1024;
+        if diff.len() > MAX_DIFF_BYTES {
+            diff.truncate(MAX_DIFF_BYTES);
+            diff.push_str("\n… diff truncated");
+        }
+        Ok(diff)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn git_log(
+pub async fn git_log(
     state: State<'_, AppState>,
     workspace_path: String,
     repo_path: String,
     limit: Option<u32>,
 ) -> Result<Vec<GitCommit>, String> {
     let repo = checked_repo(&state, &workspace_path, &repo_path)?;
-    let limit = format!("-{}", limit.unwrap_or(20).clamp(1, 100));
-    let output = git(
-        &repo,
-        &[
-            "log",
-            limit.as_str(),
-            "--format=%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%D",
-        ],
-    )?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    Ok(raw
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split('\0');
-            Some(GitCommit {
-                hash: fields.next()?.to_owned(),
-                short_hash: fields.next()?.to_owned(),
-                author: fields.next()?.to_owned(),
-                email: fields.next()?.to_owned(),
-                date: fields.next()?.to_owned(),
-                subject: fields.next()?.to_owned(),
-                refs: fields.next().unwrap_or_default().to_owned(),
+    off_thread(move || {
+        let limit = format!("-{}", limit.unwrap_or(20).clamp(1, 100));
+        let output = git(
+            &repo,
+            &[
+                "log",
+                limit.as_str(),
+                "--format=%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%D",
+            ],
+        )?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        Ok(raw
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\0');
+                Some(GitCommit {
+                    hash: fields.next()?.to_owned(),
+                    short_hash: fields.next()?.to_owned(),
+                    author: fields.next()?.to_owned(),
+                    email: fields.next()?.to_owned(),
+                    date: fields.next()?.to_owned(),
+                    subject: fields.next()?.to_owned(),
+                    refs: fields.next().unwrap_or_default().to_owned(),
+                })
             })
-        })
-        .collect())
+            .collect())
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -854,8 +924,18 @@ mod tests {
         assert!(!status.detached);
         assert!(status.has_commits);
         assert!(status.last_commit.is_some());
-        assert!(status.files.iter().any(|file| file.path == "README.md" && file.unstaged));
-        assert!(status.files.iter().any(|file| file.path == "new.txt" && file.untracked));
+        assert!(
+            status
+                .files
+                .iter()
+                .any(|file| file.path == "README.md" && file.unstaged)
+        );
+        assert!(
+            status
+                .files
+                .iter()
+                .any(|file| file.path == "new.txt" && file.untracked)
+        );
     }
 
     #[test]
@@ -910,5 +990,75 @@ mod tests {
         assert!(output.status.success());
         let status = status_for(repo);
         assert!(status.files.is_empty());
+    }
+
+    /// A corrupt index makes `git status` exit non-zero while the repository is
+    /// still otherwise valid, which is exactly the state that used to be
+    /// reported as "clean".
+    fn corrupt_index(repo: &Path) {
+        std::fs::write(repo.join(".git/index"), "garbage").expect("corrupt index");
+    }
+
+    #[test]
+    fn summary_surfaces_a_failed_status_instead_of_clean() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "README.md", "initial\n");
+        corrupt_index(repo);
+
+        let summary = summary_for(repo);
+        assert!(summary.is_repo, "the repository itself is still valid");
+        assert_eq!(summary.dirty, 0);
+        assert!(
+            summary.error.is_some(),
+            "a failed git status must not be reported as clean"
+        );
+    }
+
+    #[test]
+    fn status_surfaces_a_failed_status_instead_of_clean() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "README.md", "initial\n");
+        corrupt_index(repo);
+
+        let status = status_for(repo);
+        assert!(status.is_repo);
+        assert!(status.files.is_empty());
+        assert!(
+            status.error.is_some(),
+            "a failed git status must surface an error"
+        );
+    }
+
+    #[test]
+    fn probe_timeout_is_shorter_than_network_timeout() {
+        assert!(
+            GIT_PROBE_TIMEOUT < GIT_NETWORK_TIMEOUT,
+            "local probes must fail before network operations do"
+        );
+    }
+
+    #[test]
+    fn summarize_all_keeps_request_order_and_reports_unavailable() {
+        let first = init_repo();
+        let second = init_repo();
+        commit_file(first.path(), "README.md", "one\n");
+        let targets = vec![
+            SummaryTarget::Repo(second.path().to_path_buf()),
+            SummaryTarget::Unavailable {
+                path: "/not-registered".to_owned(),
+                error: "not registered".to_owned(),
+            },
+            SummaryTarget::Repo(first.path().to_path_buf()),
+        ];
+
+        let summaries = summarize_all(targets);
+
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[0].path, second.path().to_string_lossy());
+        assert_eq!(summaries[1].path, "/not-registered");
+        assert_eq!(summaries[1].error.as_deref(), Some("not registered"));
+        assert_eq!(summaries[2].path, first.path().to_string_lossy());
     }
 }

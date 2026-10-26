@@ -1,6 +1,7 @@
 mod clipboard;
 mod git;
 mod preview;
+mod process;
 mod services;
 
 use std::collections::HashMap;
@@ -45,6 +46,19 @@ use uuid::Uuid;
 const API_KEY_REFERENCE: &str = "openbad/deepseek/api_key";
 const USER_ID_SETTING: &str = "install_user_id";
 const DEFAULT_SUBAGENT_RETENTION_SECONDS: i64 = 60;
+
+/// Runs a blocking body on the Tauri blocking pool. Commands that are not
+/// `async` execute on the main thread, so anything that touches the
+/// filesystem, a subprocess, or SQLite in bulk belongs here.
+pub(crate) async fn off_thread<F, T>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())?
+}
 
 pub fn now_millis() -> i64 {
     SystemTime::now()
@@ -1726,7 +1740,11 @@ fn project_manifest(
 }
 
 #[tauri::command]
-fn project_todos(workspace_path: String) -> Result<Vec<ProjectTodo>, String> {
+async fn project_todos(workspace_path: String) -> Result<Vec<ProjectTodo>, String> {
+    off_thread(move || read_project_todos(workspace_path)).await
+}
+
+fn read_project_todos(workspace_path: String) -> Result<Vec<ProjectTodo>, String> {
     let path = PathBuf::from(&workspace_path)
         .join(".openbad")
         .join("todos.json");
@@ -2387,6 +2405,8 @@ const MAX_CHAT_EXTRACTED_BYTES: usize = 192 * 1024;
 const MAX_CHAT_ATTACHMENTS: usize = 8;
 const MAX_OCR_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_PDF_BYTES: u64 = 25 * 1024 * 1024;
+/// OCR is per-file and runs under a command that has no other progress signal.
+const OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const UPLOADED_REFERENCES_NAME: &str = "Uploaded documents";
 
 /// One document supplied by the UI, either as a filesystem path or as inline text.
@@ -2699,8 +2719,17 @@ fn import_workspace_files(
 }
 
 #[tauri::command]
-fn import_reference_files(
+async fn import_reference_files(
     state: State<'_, AppState>,
+    workspace_path: String,
+    files: Vec<UploadSource>,
+) -> Result<ReferenceUpload, String> {
+    let store = state.store.clone();
+    off_thread(move || store_reference_files(store, workspace_path, files)).await
+}
+
+fn store_reference_files(
+    store: std::sync::Arc<std::sync::Mutex<Store>>,
     workspace_path: String,
     files: Vec<UploadSource>,
 ) -> Result<ReferenceUpload, String> {
@@ -2708,8 +2737,7 @@ fn import_reference_files(
     if !root.is_dir() {
         return Err(format!("workspace is not a directory: {workspace_path}"));
     }
-    let store = state
-        .store
+    let store = store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     let workspace = project_workspace(&store, &workspace_path)?;
@@ -2822,15 +2850,20 @@ fn truncate_chars(text: &str, max_bytes: usize) -> String {
 }
 
 fn ocr_image(path: &Path) -> Option<String> {
-    let output = std::process::Command::new("tesseract")
+    let mut command = std::process::Command::new("tesseract");
+    command
         .arg(path)
         .arg("stdout")
         .arg("-l")
         .arg("eng")
         .arg("--psm")
-        .arg("3")
-        .output()
-        .ok()?;
+        .arg("3");
+    let output = crate::process::run_bounded(
+        &mut command,
+        OCR_TIMEOUT,
+        &format!("tesseract {}", path.display()),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2998,7 +3031,11 @@ fn delete_knowledge_document(
 }
 
 #[tauri::command]
-fn project_files(workspace_path: String) -> Result<Vec<String>, String> {
+async fn project_files(workspace_path: String) -> Result<Vec<String>, String> {
+    off_thread(move || scan_project_files(workspace_path)).await
+}
+
+fn scan_project_files(workspace_path: String) -> Result<Vec<String>, String> {
     let root =
         std::fs::canonicalize(&workspace_path).map_err(|error| format!("workspace: {error}"))?;
     if !root.is_dir() {
@@ -3028,34 +3065,43 @@ fn project_files(workspace_path: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn search_project(
+async fn search_project(
     state: State<'_, AppState>,
     workspace_path: String,
     query: String,
     limit: Option<u32>,
 ) -> Result<Vec<ProjectHit>, String> {
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let workspace = project_workspace(&store, &workspace_path)?;
-    store
-        .retrieve_project(workspace, &query, limit.unwrap_or(12).clamp(1, 50))
-        .map_err(|error| error.to_string())
+    let store = state.store.clone();
+    off_thread(move || {
+        let store = store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let workspace = project_workspace(&store, &workspace_path)?;
+        store
+            .retrieve_project(workspace, &query, limit.unwrap_or(12).clamp(1, 50))
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn project_file(workspace_path: String, path: String) -> Result<preview::ProjectFileView, String> {
-    let workspace = WorkspaceService::new(PathBuf::from(&workspace_path));
-    let resolved = workspace
-        .resolve(Path::new(&path))
-        .map_err(|error| error.to_string())?;
-    let relative = resolved
-        .strip_prefix(workspace.root())
-        .unwrap_or(&resolved)
-        .to_string_lossy()
-        .into_owned();
-    preview::preview_file(&resolved, relative)
+async fn project_file(
+    workspace_path: String,
+    path: String,
+) -> Result<preview::ProjectFileView, String> {
+    off_thread(move || {
+        let workspace = WorkspaceService::new(PathBuf::from(&workspace_path));
+        let resolved = workspace
+            .resolve(Path::new(&path))
+            .map_err(|error| error.to_string())?;
+        let relative = resolved
+            .strip_prefix(workspace.root())
+            .unwrap_or(&resolved)
+            .to_string_lossy()
+            .into_owned();
+        preview::preview_file(&resolved, relative)
+    })
+    .await
 }
 
 /// Resolves a UI reference to an existing path inside the workspace or one of
@@ -4843,7 +4889,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join("src")).expect("src");
         std::fs::write(root.path().join("README.md"), "readme").expect("readme");
         std::fs::write(root.path().join("src/main.rs"), "fn main() {}").expect("main");
-        let files = project_files(root.path().to_string_lossy().into_owned()).expect("files");
+        let files = scan_project_files(root.path().to_string_lossy().into_owned()).expect("files");
         assert!(files.contains(&"README.md".to_owned()));
         assert!(files.contains(&"src/main.rs".to_owned()));
     }

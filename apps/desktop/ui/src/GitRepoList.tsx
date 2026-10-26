@@ -213,7 +213,11 @@ export default function GitRepoList({
                           : (summary.branch ?? "no branch")}
                       </span>
                     </span>
-                    {summary.isRepo ? (
+                    {summary.error !== null ? (
+                      <span className="text-amber-300" title={summary.error}>
+                        {summary.isRepo ? "status unavailable" : "not a repository"}
+                      </span>
+                    ) : summary.isRepo ? (
                       <span
                         className={
                           summary.dirty > 0
@@ -226,9 +230,7 @@ export default function GitRepoList({
                           : "clean"}
                       </span>
                     ) : (
-                      <span className="text-amber-300">
-                        {summary.error ?? "not a repository"}
-                      </span>
+                      <span className="text-amber-300">not a repository</span>
                     )}
                     {meta?.read_only === true && (
                       <span className="text-slate-600">read-only</span>
