@@ -114,6 +114,7 @@ import type {
   ProjectExportReport,
   ProjectImportReport,
   SessionSummary,
+  SessionView,
   ToolApprovalRequest,
   UploadSource,
   Usage,
@@ -195,6 +196,24 @@ type BackgroundRun = {
   pendingPreview: PreviewTarget | null;
   error: string | null;
 };
+
+function sessionEntries(messages: SessionView["messages"]): ChatEntry[] {
+  return messages.map((item) => ({
+    id: nextId(),
+    role: item.role === "user" ? "user" : "assistant",
+    text: item.text,
+    attachments: (item.attachments ?? []).map((attachment) =>
+      attachment.includes("/") || attachment.includes("\\")
+        ? {
+            name: attachment.split(/[\\/]/).at(-1) ?? attachment,
+            path: attachment,
+          }
+        : { name: attachment },
+    ),
+    reasoning: item.reasoning ?? "",
+    durationMs: item.duration_ms ?? undefined,
+  }));
+}
 
 function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
   switch (event.type) {
@@ -746,6 +765,22 @@ export default function App() {
       setError(run?.error ?? null);
       setTotalDurationMs(run?.totalDurationMs ?? 0);
       setShowJumpToLatest(false);
+      if (run !== undefined && !run.busy && run.sessionId !== null) {
+        // A completed run only caches its own turn. Hydrate the full session
+        // transcript so switching back does not hide earlier turns.
+        void fetchSession(run.sessionId)
+          .then((view) => {
+            const current = runsRef.current.get(project.path);
+            if (current !== run) {
+              return;
+            }
+            run.entries = sessionEntries(view.messages);
+            if (visibleRunRef.current === project.path) {
+              setEntries([...run.entries]);
+            }
+          })
+          .catch(() => undefined);
+      }
     },
     [captureCurrentScroll],
   );
@@ -1183,6 +1218,14 @@ export default function App() {
     };
     const runKey = workspacePath;
     const runId = nextId();
+    const existingRun = runsRef.current.get(runKey);
+    // Preserve the turns already visible in this session. The previous run
+    // cache only holds the latest turn; the live `entries` state is the full
+    // transcript the user can currently see.
+    const baseEntries =
+      existingRun !== undefined && existingRun.busy
+        ? existingRun.entries
+        : entries;
     const run: BackgroundRun = {
       id: runId,
       projectId: activeProjectId,
@@ -1190,7 +1233,7 @@ export default function App() {
       workspacePath,
       sessionId,
       permissionMode,
-      entries: [userEntry, assistantEntry],
+      entries: [...baseEntries, userEntry, assistantEntry],
       busy: true,
       stopRequested: false,
       scrollTop: scrollRef.current?.scrollTop ?? 0,
@@ -1344,6 +1387,7 @@ export default function App() {
     activeProjectId,
     allowCommands,
     allowWrites,
+    entries,
     loadFoundation,
     loadMemories,
     loadProjects,
@@ -1433,8 +1477,17 @@ export default function App() {
         const targetPath = project?.path ?? session.workspace_path ?? workspacePath;
         const run =
           targetPath.length === 0 ? undefined : runsRef.current.get(targetPath);
+        const loadedEntries = sessionEntries(view.messages);
+        if (
+          run !== undefined &&
+          !run.busy &&
+          (run.sessionId === view.session_id || run.sessionId === null)
+        ) {
+          run.entries = loadedEntries;
+        }
         const showRun =
           run !== undefined &&
+          (run.busy || run.sessionId === null) &&
           (run.sessionId === view.session_id || run.sessionId === null);
         const stored = showRun
           ? { scrollTop: run.scrollTop, follow: run.follow }
@@ -1465,25 +1518,7 @@ export default function App() {
         setTotalDurationMs(
           showRun ? run.totalDurationMs : view.total_duration_ms,
         );
-        setEntries(
-          showRun
-            ? [...run.entries]
-            : view.messages.map((item) => ({
-                id: nextId(),
-                role: item.role === "user" ? "user" : "assistant",
-                text: item.text,
-                attachments: (item.attachments ?? []).map((attachment) =>
-                  attachment.includes("/") || attachment.includes("\\")
-                    ? {
-                        name: attachment.split(/[\\/]/).at(-1) ?? attachment,
-                        path: attachment,
-                      }
-                    : { name: attachment },
-                ),
-                reasoning: item.reasoning ?? "",
-                durationMs: item.duration_ms ?? undefined,
-              })),
-        );
+        setEntries(showRun ? [...run.entries] : loadedEntries);
       } catch (cause) {
         setError(describeError(cause));
       }
