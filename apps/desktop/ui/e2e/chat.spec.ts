@@ -946,3 +946,16 @@ test("checks for updates from the About settings", async ({ page }) => {
     settings.getByText("OpenBaD 0.1.0 is up to date."),
   ).toBeVisible();
 });
+
+test("keeps earlier turns visible when a new turn starts", async ({ page }) => {
+  await page.goto("/");
+  const transcript = page.getByTestId("chat-scroll");
+
+  await sendPrompt(page, "First question");
+  await expect(page.getByText("Done ·", { exact: false }).first()).toBeVisible();
+  await expect(transcript.getByText("First question", { exact: true })).toBeVisible();
+
+  await sendPrompt(page, "Second question");
+  await expect(transcript.getByText("First question", { exact: true })).toBeVisible();
+  await expect(transcript.getByText("Second question", { exact: true })).toBeVisible();
+});
