@@ -63,12 +63,22 @@ Applies to all changes in `/home/bmoser/repos/OpenBaD`.
 1. Decide the semantic version (patch for fixes, minor for features).
 2. Bump all version locations: workspace `Cargo.toml`, `Cargo.lock`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/ui/package.json`.
 3. Update release notes/changelog.
-4. Build the frontend and local release binary:
+4. Build the frontend and release binary to confirm it compiles:
    - `pnpm --dir apps/desktop/ui build`
    - `cd apps/desktop && ./ui/node_modules/.bin/tauri build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'`
-5. Tag `vX.Y.Z` and push the tag. CI builds the Linux, macOS, and Windows assets.
-6. Verify the GitHub release exists with all expected assets and `SHA256SUMS`.
-7. If the release is broken, delete the release/tag, revert or hotfix on a new branch, and repeat the SOP. Do not silently replace assets.
+
+   This is a compile smoke check only. **Do not install, copy, or run the built
+   binary on the local machine.** A local run of `target/release/openbad-desktop`
+   proves nothing about the shipped artifact and skips the path users actually
+   take.
+5. Verify the release through the updater, not by deploying locally.
+   `openbad-update` reads `repos/<repo>/releases/latest` and installs the
+   platform asset, so only a published release is testable:
+   - Tag `vX.Y.Z` and push the tag. CI builds the Linux, macOS, and Windows assets.
+   - Verify the GitHub release exists with all expected assets and `SHA256SUMS`.
+   - On a machine running the previous version, use the in-app updater to move
+     to `X.Y.Z` and confirm it checks, downloads, installs, and restarts.
+6. If the release is broken, delete the release/tag, revert or hotfix on a new branch, and repeat the SOP. Do not silently replace assets.
 
 ## Exceptions
 
