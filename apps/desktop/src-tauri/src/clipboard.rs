@@ -159,9 +159,7 @@ mod tests {
         (
             2,
             2,
-            vec![
-                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 0,
-            ],
+            vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 0],
         )
     }
 
@@ -184,9 +182,7 @@ mod tests {
         assert!(png_size_within_limit(png.len()));
         assert_eq!(
             base64_encoded_len(png.len()),
-            base64::engine::general_purpose::STANDARD
-                .encode(&png)
-                .len()
+            base64::engine::general_purpose::STANDARD.encode(&png).len()
         );
 
         let decoder = png::Decoder::new(std::io::Cursor::new(&png));

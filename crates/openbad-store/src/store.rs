@@ -3656,7 +3656,10 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(store.schema_version().expect("version"), "0014_reference_access");
+        assert_eq!(
+            store.schema_version().expect("version"),
+            "0014_reference_access"
+        );
     }
 
     #[test]

@@ -85,9 +85,7 @@ fn run() -> Result<(), String> {
                 ));
             }
             let vault = Vault::open(&workspace).map_err(|error| error.to_string())?;
-            let entry = vault
-                .put(name, &value)
-                .map_err(|error| error.to_string())?;
+            let entry = vault.put(name, &value).map_err(|error| error.to_string())?;
             println!("stored {} ({})", entry.name, entry.id);
         }
         "get" => {
