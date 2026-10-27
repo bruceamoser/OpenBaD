@@ -24,6 +24,12 @@ v0.1.3.
 Bundled desktop release containing the project export/import described below on
 top of v0.1.4.
 
+## v0.1.11
+
+Bundled desktop release containing the context-budget and history-compaction
+work described below, on top of the project export/import and other 2026-10-27
+changes.
+
 ## 2026-10-27
 
 - **Context budget and history compaction.** Before each provider request the
