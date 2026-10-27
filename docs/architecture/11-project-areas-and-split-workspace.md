@@ -298,6 +298,5 @@ their history across restarts is follow-up work.
 - Agent tests verify tool metadata reaches the observer.
 - Desktop command tests cover unique upload names, path traversal in supplied
   names, folder rejection, and bounded chat attachments.
-- Playwright covers project creation, reference folders, project knowledge,
-  retrieval, assistant-presented artifacts, and dropped documents in the chat
-  composer, Workspace, References, and Knowledge areas.
+- Native Tauri end-to-end tests cover launch, project counts, the Agents area,
+  a real chat round-trip, and both copy controls.

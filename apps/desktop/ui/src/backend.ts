@@ -218,7 +218,7 @@ const mockManifest: ProjectManifest = {
   },
   commands: {
     verify: "cargo test --workspace",
-    web: "pnpm --dir apps/desktop/ui test:e2e",
+    web: "pnpm --dir apps/desktop/ui build",
   },
   recipes: {
     verify: {

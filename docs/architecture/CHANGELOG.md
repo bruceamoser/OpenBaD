@@ -32,6 +32,11 @@ changes.
 
 ## 2026-10-27
 
+- **Playwright browser suite removed.** The `apps/desktop/ui/e2e` harness and
+  `@playwright/test` dependency are gone. UI gating is now TypeScript typecheck
+  plus a production Vite build; the WebDriver suite in
+  `apps/desktop/native-e2e/` remains the end-to-end coverage. This removes a
+  permanently drifting duplicate of the native suite.
 - **Context budget and history compaction.** Before each provider request the
   agent now estimates prompt tokens against the model window and caps the
   completion budget so prompt plus output cannot exceed it. When history crosses

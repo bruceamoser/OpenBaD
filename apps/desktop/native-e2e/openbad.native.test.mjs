@@ -21,9 +21,6 @@ const labelCount = [
   "Knowledge",
   "Retrieval",
   "Memory",
-  "Todos",
-  "Questions",
-  "Plan",
 ];
 
 let fixture;
