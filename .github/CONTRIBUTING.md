@@ -126,7 +126,9 @@ Harness changes must preserve:
 
 - Rust unit tests live beside the code or in `crates/*/tests`.
 - Integration tests use a temporary SQLite database and a mock provider.
-- UI tests use Vitest + Testing Library; E2E uses Playwright + Tauri.
+- UI checks are TypeScript typecheck plus a Vite production build; native
+  end-to-end tests live in `apps/desktop/native-e2e/` and use Tauri +
+  WebDriver.
 - Cache/cost benchmarks use fixtures in `tests/fixtures/cache/`.
 - Real DeepSeek calls are opt-in nightly jobs with a capped budget.
 

@@ -113,7 +113,8 @@
 ### Testing
 - Rust unit tests: `#[cfg(test)]` or `crates/*/tests`.
 - Integration tests: `tests/integration/` with a temp SQLite DB and mock provider.
-- UI tests: Vitest + Testing Library; E2E with Playwright + Tauri.
+- UI checks: TypeScript typecheck + Vite build; native E2E in
+  `apps/desktop/native-e2e/` with Tauri + WebDriver.
 - Benchmarks: `benches/` with Criterion; cache/cost benchmarks in `tests/fixtures/cache/`.
 - Minimum: unit tests for all public functions; integration tests where the issue specifies.
 - Real DeepSeek calls only in opt-in nightly jobs with a capped budget.

@@ -55,10 +55,9 @@ is opened in a normal browser, `ui/src/backend.ts` switches to a mock backend th
 streams reasoning, content, tool calls, and usage. This is useful for layout,
 scroll, and streaming tests without rebuilding the native app.
 
-`pnpm --dir ui test:e2e` runs the Playwright smoke tests against that mock
-backend. They cover streamed reasoning and tool cards, auto-scroll,
-cancellation, projects and sessions, checkpoints, memory, project knowledge and
-retrieval, reference folders, assistant artifacts, and the command menu.
+There is no browser test suite: the mock backend is a manual development aid.
+Automated end-to-end coverage lives in `apps/desktop/native-e2e/` and drives the
+real Tauri binary through `tauri-driver` and `WebKitWebDriver`.
 
 ## Interface
 

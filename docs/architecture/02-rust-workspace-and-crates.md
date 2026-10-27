@@ -308,8 +308,8 @@ No global mutable singletons. Tests construct the same state with temp paths.
 | Unit | `crates/*/src/**/tests` or `#[cfg(test)]` | Pure logic, parsers, scoring |
 | Integration | `tests/integration/` | Store + harness + mock provider |
 | Provider contract | `tests/providers/` | Adapter behavior against recorded fixtures |
-| UI | `apps/desktop/ui/tests/` | Components, stores, interactions |
-| E2E | `tests/e2e/` | Tauri + mock provider + temp workspace |
+| UI | `apps/desktop/ui/` | TypeScript typecheck + Vite production build |
+| E2E | `apps/desktop/native-e2e/` | Tauri + mock provider + temp workspace |
 | Benchmarks | `benches/` | Cache hit rate, token counts, latency, indexing |
 
 ### Test doubles

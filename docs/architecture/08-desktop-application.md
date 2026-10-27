@@ -423,11 +423,9 @@ route is not exported; the target uses its own routing.
 
 | Layer | Tool | What |
 | --- | --- | --- |
-| Components | Vitest + Testing Library | Rendering, interactions, accessibility |
-| Stores | Vitest | State transitions, event application |
-| E2E | Playwright + Tauri driver | Launch, chat with mock provider, approve, diff |
-| Visual | Playwright snapshots | Key views and themes |
-| Performance | Playwright traces + Rust benches | Startup, streaming, large lists |
+| UI | TypeScript + Vite | Typecheck and production build |
+| Native E2E | Tauri driver + WebKitWebDriver | Launch, chat with mock provider, approve, diff |
+| Rust | `cargo test`, Criterion benches | Store, agent, tools, streaming, large lists |
 
 Mock provider fixtures cover DeepSeek streaming, tool calls, thinking output,
 cache usage, errors, and rate limits.

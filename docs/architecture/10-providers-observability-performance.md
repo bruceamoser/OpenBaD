@@ -287,7 +287,7 @@ diagnostics panel.
 
 - Rust: `cargo flamegraph`, `tracing` spans, `pprof` optional.
 - SQLite: `EXPLAIN QUERY PLAN`, slow-query log (> 50 ms).
-- UI: React Profiler, Playwright traces.
+- UI: React Profiler and browser devtools.
 - Provider: first-token, total latency, cache hit, retry count.
 
 ## 7. Benchmarks

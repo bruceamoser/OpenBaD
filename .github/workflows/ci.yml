@@ -51,14 +51,6 @@ jobs:
           pnpm typecheck
           pnpm build
 
-      - name: Install the Playwright browser
-        working-directory: apps/desktop/ui
-        run: pnpm exec playwright install chromium
-
-      - name: UI end-to-end tests
-        working-directory: apps/desktop/ui
-        run: pnpm test:e2e
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
