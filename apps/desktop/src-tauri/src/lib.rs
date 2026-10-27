@@ -1501,6 +1501,10 @@ pub enum AgentEvent {
     Usage {
         usage: UsageTotals,
     },
+    Compaction {
+        before_bytes: usize,
+        after_bytes: usize,
+    },
 }
 
 struct ChannelObserver {
@@ -1554,6 +1558,15 @@ impl AgentObserver for ChannelObserver {
 
     fn on_usage(&self, usage: &UsageTotals) {
         let _ = self.channel.send(AgentEvent::Usage { usage: *usage });
+    }
+
+    fn on_compaction(&self, before_bytes: usize, after_bytes: usize) {
+        if after_bytes < before_bytes {
+            let _ = self.channel.send(AgentEvent::Compaction {
+                before_bytes,
+                after_bytes,
+            });
+        }
     }
 
     fn is_cancelled(&self) -> bool {

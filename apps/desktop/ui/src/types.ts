@@ -99,7 +99,8 @@ export type AgentEvent =
       is_error: boolean;
       metadata: unknown;
     }
-  | { type: "usage"; usage: Usage };
+  | { type: "usage"; usage: Usage }
+  | { type: "compaction"; before_bytes: number; after_bytes: number };
 
 export type WorkspaceIndexSummary = {
   files: number;
