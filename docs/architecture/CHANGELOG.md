@@ -26,6 +26,17 @@ top of v0.1.4.
 
 ## 2026-10-27
 
+- **Context budget and history compaction.** Before each provider request the
+  agent now estimates prompt tokens against the model window and caps the
+  completion budget so prompt plus output cannot exceed it. When history crosses
+  the pressure threshold it replaces older turns with a bounded
+  `<compacted-summary>` block, preserving the system prompt and recent whole
+  turns. Assistant `reasoning_content` is still passed back verbatim while tools
+  are present; older reasoning leaves the request only when its whole turn is
+  compacted. A request that cannot fit after compaction returns a clear
+  `ContextOverflow` error instead of a raw provider 400. The desktop chat shows a
+  live `context compacted` marker; stored history and the UI transcript remain
+  unchanged.
 - **Project export/import.** New `openbad-transfer` crate packs a project into a
   single `.openbad-project` zip: workspace files (including `.git` and
   `.openbad`, excluding rebuildable output and `.gitignore`d paths) plus

@@ -254,6 +254,15 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
       };
     case "usage":
       return { ...entry, usage: event.usage };
+    case "compaction":
+      return {
+        ...entry,
+        status: "Context compacted",
+        tools: [
+          ...(entry.tools ?? []),
+          `⟳ context compacted (${formatBytes(event.before_bytes)} → ${formatBytes(event.after_bytes)})`,
+        ],
+      };
   }
 }
 

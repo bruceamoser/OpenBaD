@@ -22,6 +22,12 @@ use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// Conservative bytes-per-token estimate. English is closer to 4, but code,
+/// JSON, and tool output tokenize denser, so 3 leaves headroom.
+const ESTIMATED_BYTES_PER_TOKEN: usize = 3;
+/// Room for tokenizer drift and provider-side framing.
+const CONTEXT_SAFETY_TOKENS: usize = 8_192;
+
 /// Messages the human injects into a running turn. They are delivered before
 /// the next provider request, so they can redirect the agent without starting a
 /// second turn.
@@ -71,10 +77,17 @@ impl SteeringInbox {
 pub struct AgentConfig {
     pub max_steps: u32,
     pub max_output_tokens: u32,
+    /// Provider context window in tokens. Requests are capped so that the
+    /// estimated prompt plus the completion budget fits inside it.
+    pub context_window: u32,
+    /// Compact history once estimated prompt tokens exceed this fraction of
+    /// the context window.
+    pub compact_at_ratio: f32,
     pub allow_writes: bool,
     pub allow_commands: bool,
     pub stream: bool,
     pub system_prompt: Option<String>,
+    /// Legacy byte threshold for compacting old tool results.
     pub compact_after_bytes: usize,
     pub compact_keep_recent: usize,
 }
@@ -84,6 +97,8 @@ impl Default for AgentConfig {
         Self {
             max_steps: 0,
             max_output_tokens: 16_384,
+            context_window: 1_000_000,
+            compact_at_ratio: 0.85,
             allow_writes: false,
             allow_commands: false,
             stream: true,
@@ -139,6 +154,13 @@ pub enum AgentError {
     EmptyResponse,
     #[error("invalid tool arguments for {tool}: {message}")]
     InvalidToolArguments { tool: String, message: String },
+    #[error(
+        "context window would overflow even after compaction: about {estimated_input} input tokens for a {context_window}-token window; start a new session or remove large attachments"
+    )]
+    ContextOverflow {
+        estimated_input: usize,
+        context_window: u32,
+    },
     #[error("agent turn was cancelled")]
     Cancelled,
 }
@@ -418,6 +440,12 @@ impl<T: HttpTransport> Agent<T> {
         let start_len = messages.len();
 
         let tool_schemas = self.tools.openai_tools();
+        let tool_tokens = estimate_tokens(
+            tool_schemas
+                .iter()
+                .map(|schema| schema.to_string().len())
+                .sum(),
+        );
         if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
             let names: Vec<&str> = tool_schemas
                 .iter()
@@ -475,24 +503,67 @@ impl<T: HttpTransport> Agent<T> {
                     messages.push(ChatMessage::user(message));
                 }
             }
-            if self.config.compact_after_bytes > 0 {
-                let before = messages.iter().map(message_bytes).sum::<usize>();
-                if before > self.config.compact_after_bytes {
-                    compact_tool_results(&mut messages, self.config.compact_keep_recent);
-                    let after = messages.iter().map(message_bytes).sum::<usize>();
-                    observer.on_compaction(before, after);
-                }
-            }
-            // The catalog is volatile tail context: keep the cached history prefix
-            // intact and append it only for this request.
             let mut request_messages = messages.clone();
+            let catalog_tokens = mcp_catalog
+                .as_ref()
+                .map_or(0, |catalog| estimate_tokens(message_bytes(catalog)));
+            let before_bytes = request_messages.iter().map(message_bytes).sum::<usize>();
+            if self.config.compact_after_bytes > 0 && before_bytes > self.config.compact_after_bytes
+            {
+                compact_tool_results(&mut request_messages, self.config.compact_keep_recent);
+            }
+            let mut input_tokens = request_tokens(&request_messages, tool_tokens) + catalog_tokens;
+            let initial_input_tokens = input_tokens;
+            let context_window = self.config.context_window as usize;
+            let configured_output = self.config.max_output_tokens as usize;
+            let safety = CONTEXT_SAFETY_TOKENS.min(context_window / 8).max(1);
+            let compact_ratio = if self.config.compact_at_ratio.is_finite() {
+                self.config.compact_at_ratio.clamp(0.5, 0.95)
+            } else {
+                0.85
+            };
+            let compact_at =
+                ((context_window as f32 * compact_ratio) as usize).max(context_window / 10);
+            if input_tokens + configured_output + safety > context_window
+                || input_tokens > compact_at
+            {
+                let target = compact_at
+                    .saturating_sub(
+                        configured_output.min(context_window / 2) + safety + tool_tokens,
+                    )
+                    .max(context_window / 10);
+                compact_request(
+                    &mut request_messages,
+                    self.config.compact_keep_recent,
+                    target,
+                );
+                input_tokens = request_tokens(&request_messages, tool_tokens) + catalog_tokens;
+            }
+            let after_bytes = request_messages.iter().map(message_bytes).sum::<usize>();
+            if after_bytes < before_bytes {
+                observer.on_compaction(before_bytes, after_bytes);
+            }
+            // The catalog is volatile tail context: keep it outside the
+            // compactable history and append it only for this request.
             if let Some(catalog) = &mcp_catalog {
                 request_messages.push(catalog.clone());
             }
+            let available = context_window.saturating_sub(input_tokens + safety);
+            if available == 0 {
+                return Err(AgentError::ContextOverflow {
+                    estimated_input: initial_input_tokens.max(input_tokens),
+                    context_window: self.config.context_window,
+                });
+            }
+            let max_output_tokens = self
+                .config
+                .max_output_tokens
+                .min(u32::try_from(available).unwrap_or(u32::MAX))
+                .max(1);
             let request = self.client.build_request(
                 request_messages,
                 Some(tool_schemas.clone()),
-                Some(self.config.max_output_tokens),
+                Some(max_output_tokens),
                 self.config.stream,
             );
             let envelope = RequestEnvelope {
@@ -507,7 +578,7 @@ impl<T: HttpTransport> Agent<T> {
                 workspace_hash: Some(hash_bytes(
                     self.workspace.root().to_string_lossy().as_bytes(),
                 )),
-                max_output_tokens: self.config.max_output_tokens,
+                max_output_tokens,
             };
             let frozen = request.freeze(envelope)?;
 
@@ -914,6 +985,174 @@ fn message_bytes(message: &ChatMessage) -> usize {
     content + reasoning + tool_calls + 32
 }
 
+fn estimate_tokens(bytes: usize) -> usize {
+    bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN)
+}
+
+fn request_tokens(messages: &[ChatMessage], tool_tokens: usize) -> usize {
+    messages
+        .iter()
+        .map(|message| estimate_tokens(message_bytes(message)) + 4)
+        .sum::<usize>()
+        + tool_tokens
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn truncate_bytes(text: &str, max_bytes: usize) -> (String, usize) {
+    if text.len() <= max_bytes {
+        return (text.to_owned(), 0);
+    }
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = text[..end].to_owned();
+    truncated.push('…');
+    (truncated, text.len().saturating_sub(end))
+}
+
+/// Choose a user-message boundary so the recent window keeps whole turns and
+/// never strands a tool result without its assistant call.
+fn recent_turn_start(messages: &[ChatMessage], keep_recent: usize) -> usize {
+    if messages.len() <= 2 {
+        return 1;
+    }
+    let target = messages.len().saturating_sub(keep_recent.max(4)).max(2);
+    messages
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(index, message)| *index >= target && message.role == ChatRole::User)
+        .map(|(index, _)| index)
+        .or_else(|| {
+            messages
+                .iter()
+                .rposition(|message| message.role == ChatRole::User)
+                .filter(|index| *index > 1)
+        })
+        .unwrap_or(1)
+}
+
+fn summarize_messages(messages: &[ChatMessage]) -> String {
+    let mut parts = Vec::new();
+    for message in messages {
+        match message.role {
+            ChatRole::User => {
+                if let Some(content) = message.content.as_deref() {
+                    let text = truncate_chars(content.trim(), 1_200);
+                    if !text.is_empty() {
+                        parts.push(format!("User message: {text}"));
+                    }
+                }
+            }
+            ChatRole::Assistant => {
+                if let Some(content) = message.content.as_deref() {
+                    let text = truncate_chars(content.trim(), 800);
+                    if !text.is_empty() {
+                        parts.push(format!("Assistant: {text}"));
+                    }
+                }
+                if let Some(calls) = &message.tool_calls {
+                    let names = calls
+                        .iter()
+                        .map(|call| {
+                            format!(
+                                "{}({})",
+                                call.function.name,
+                                truncate_chars(&call.function.arguments, 160)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    parts.push(format!("Tool calls: {names}"));
+                }
+            }
+            ChatRole::Tool => {
+                if let Some(content) = message.content.as_deref() {
+                    let text = truncate_chars(content.trim(), 400);
+                    if !text.is_empty() {
+                        parts.push(format!("Tool result: {text}"));
+                    }
+                }
+            }
+            ChatRole::System => {}
+        }
+    }
+    let mut summary = parts.join("\n");
+    if summary.chars().count() > 16_000 {
+        let omitted = summary.chars().count() - 16_000;
+        summary = truncate_chars(&summary, 16_000);
+        summary.push_str(&format!("\n[summary truncated; {omitted} chars omitted]"));
+    }
+    summary
+}
+
+fn trim_large_messages(messages: &mut [ChatMessage], target_tokens: usize) {
+    let per_message = target_tokens
+        .saturating_mul(ESTIMATED_BYTES_PER_TOKEN)
+        .checked_div(messages.len().max(1))
+        .unwrap_or(0)
+        .max(512);
+    let last = messages.len().saturating_sub(1);
+    for (index, message) in messages.iter_mut().enumerate().skip(1) {
+        // Preserve the current user request, but a trailing tool result is
+        // fair game when the request would otherwise not fit.
+        if index == last && message.role != ChatRole::Tool {
+            continue;
+        }
+        let cap = match message.role {
+            ChatRole::Tool => per_message.min(4_000),
+            ChatRole::Assistant => per_message.saturating_mul(2).min(8_000),
+            ChatRole::User => per_message.saturating_mul(4).min(16_000),
+            ChatRole::System => 0,
+        };
+        if cap == 0 {
+            continue;
+        }
+        if let Some(content) = message.content.as_mut() {
+            if content.len() > cap {
+                let (mut trimmed, omitted) = truncate_bytes(content, cap);
+                trimmed.push_str(&format!("\n[compacted; {omitted} bytes omitted]"));
+                *content = trimmed;
+            }
+        }
+    }
+}
+
+/// Replace older turns with a bounded extractive summary and trim oversized
+/// retained messages. The original events stay untouched in the store; this
+/// only shapes the next provider request.
+fn compact_request(
+    messages: &mut Vec<ChatMessage>,
+    keep_recent: usize,
+    target_tokens: usize,
+) -> usize {
+    let before = messages.iter().map(message_bytes).sum::<usize>();
+    let recent_start = recent_turn_start(messages, keep_recent);
+    if recent_start > 1 {
+        let summary = summarize_messages(&messages[1..recent_start]);
+        if !summary.is_empty() {
+            let marker = ChatMessage::user(format!(
+                "<compacted-summary range=\"messages:1-{}\">\n[Compacted transcript excerpt; this is not a new user request.]\n{}\n</compacted-summary>",
+                recent_start - 1,
+                summary
+            ));
+            messages.drain(1..recent_start);
+            messages.insert(1, marker);
+        }
+    }
+    trim_large_messages(messages, target_tokens);
+    before.saturating_sub(messages.iter().map(message_bytes).sum::<usize>())
+}
+
 fn compact_tool_results(messages: &mut [ChatMessage], keep_recent: usize) -> usize {
     if messages.len() <= keep_recent.saturating_add(1) {
         return 0;
@@ -1096,6 +1335,32 @@ mod tests {
             status: 200,
             body: body.as_bytes().to_vec(),
         }
+    }
+
+    struct RecordingTransport {
+        responses: Mutex<VecDeque<HttpResponse>>,
+        requests: Arc<Mutex<Vec<HttpRequest>>>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for RecordingTransport {
+        async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            self.requests.lock().expect("requests").push(request);
+            self.responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Request("no mock response".to_owned()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
+    }
+
+    fn request_json(requests: &Arc<Mutex<Vec<HttpRequest>>>, index: usize) -> Value {
+        let requests = requests.lock().expect("requests");
+        serde_json::from_slice(&requests[index].body).expect("request json")
     }
 
     #[tokio::test]
@@ -1400,6 +1665,192 @@ mod tests {
         let before = *observer.before.lock().expect("before");
         let after = *observer.after.lock().expect("after");
         assert!(before > after);
+    }
+
+    #[tokio::test]
+    async fn reasoning_is_replayed_when_tools_are_present() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = RecordingTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Looking.","reasoning_content":"private chain of thought","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2}}"#,
+                ),
+            ])),
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("read hello.txt")])
+            .await
+            .expect("run");
+        let request = request_json(&requests, 1);
+        let messages = request["messages"].as_array().expect("messages");
+        assert!(
+            messages.iter().any(|message| {
+                message["role"] == json!("assistant")
+                    && message["content"] == json!("Looking.")
+                    && message["reasoning_content"] == json!("private chain of thought")
+            }),
+            "reasoning must be passed back verbatim while tools are present"
+        );
+        assert!(
+            run.new_messages.iter().any(|message| {
+                message.reasoning_content.as_deref() == Some("private chain of thought")
+            }),
+            "reasoning still belongs in the persisted run"
+        );
+    }
+
+    #[tokio::test]
+    async fn huge_reasoning_history_is_compacted_before_the_budget_check() {
+        let directory = tempdir().expect("tempdir");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = RecordingTransport {
+            responses: Mutex::new(VecDeque::from([response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            )])),
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::new(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let mut history = Vec::new();
+        for turn in 0..40 {
+            history.push(ChatMessage::user(format!("turn {turn}")));
+            let mut assistant = ChatMessage::assistant("ok");
+            assistant.reasoning_content = Some("r".repeat(100_000));
+            history.push(assistant);
+        }
+        history.push(ChatMessage::user("latest request"));
+        agent.run(history).await.expect("run");
+        let request = request_json(&requests, 0);
+        let messages = request["messages"].as_array().expect("messages");
+        assert!(messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("<compacted-summary"))
+        }));
+        assert_eq!(request["max_tokens"], json!(16_384));
+        let reasoning_bytes = messages
+            .iter()
+            .filter_map(|message| message["reasoning_content"].as_str())
+            .map(str::len)
+            .sum::<usize>();
+        assert!(
+            reasoning_bytes < 500_000,
+            "compaction should drop most old reasoning rather than replay 4 MB"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_compacts_history_and_fits_completion_budget() {
+        let directory = tempdir().expect("tempdir");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = RecordingTransport {
+            responses: Mutex::new(VecDeque::from([response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            )])),
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::new(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                context_window: 12_000,
+                max_output_tokens: 16_384,
+                compact_at_ratio: 0.5,
+                compact_keep_recent: 4,
+                compact_after_bytes: 0,
+                ..AgentConfig::default()
+            },
+        );
+        let history = vec![
+            ChatMessage::user(format!("old request {}", "x".repeat(60_000))),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("latest request"),
+        ];
+        let run = agent.run(history).await.expect("run");
+        assert_eq!(run.text, "Done.");
+        let request = request_json(&requests, 0);
+        let messages = request["messages"].as_array().expect("messages");
+        assert_eq!(messages.first().expect("first")["role"], json!("system"));
+        assert!(messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("<compacted-summary"))
+        }));
+        assert_eq!(
+            messages.last().expect("last")["content"],
+            json!("latest request")
+        );
+        let max_tokens = request["max_tokens"].as_u64().expect("max_tokens");
+        assert!(max_tokens < 16_384, "completion budget must shrink");
+        let estimated_input = messages
+            .iter()
+            .map(|message| message.to_string().len())
+            .sum::<usize>()
+            / 3;
+        assert!(estimated_input + max_tokens as usize + 1_500 <= 12_000);
+    }
+
+    #[tokio::test]
+    async fn a_single_message_that_cannot_fit_reports_context_overflow() {
+        let directory = tempdir().expect("tempdir");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = RecordingTransport {
+            responses: Mutex::new(VecDeque::from([response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"unused"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            )])),
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::new(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                context_window: 32_000,
+                max_output_tokens: 16_384,
+                compact_after_bytes: 0,
+                ..AgentConfig::default()
+            },
+        );
+        let error = agent
+            .run(vec![ChatMessage::user("x".repeat(200_000))])
+            .await
+            .expect_err("oversized single message");
+        assert!(matches!(
+            error,
+            AgentError::ContextOverflow {
+                estimated_input,
+                context_window: 32_000,
+            } if estimated_input > 32_000
+        ));
+        assert!(requests.lock().expect("requests").is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
