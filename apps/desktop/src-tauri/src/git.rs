@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::State;
 
-use crate::{off_thread, AppState};
+use crate::{AppState, off_thread};
 
 /// Network git operations (`fetch`, `pull`, `push`) may legitimately take a while.
 const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -163,7 +163,12 @@ fn branch_name(repo: &Path) -> (Option<String>, bool) {
 fn upstream(repo: &Path) -> Option<String> {
     git(
         repo,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )
     .ok()
     .filter(|output| output.status.success())
@@ -484,10 +489,7 @@ fn checked_repo(
         .into_iter()
         .find(|candidate| canonical(&candidate.path).ok().as_deref() == Some(workspace.as_path()))
     else {
-        return Err(format!(
-            "{} is not a registered project",
-            workspace_path
-        ));
+        return Err(format!("{} is not a registered project", workspace_path));
     };
     if repo == Path::new(&workspace.path) {
         return Ok(repo);
@@ -495,9 +497,10 @@ fn checked_repo(
     let references = store
         .list_project_repos(workspace.id)
         .map_err(|error| error.to_string())?;
-    if references.iter().any(|reference| {
-        canonical(&reference.path).ok().as_deref() == Some(repo.as_path())
-    }) {
+    if references
+        .iter()
+        .any(|reference| canonical(&reference.path).ok().as_deref() == Some(repo.as_path()))
+    {
         Ok(repo)
     } else {
         Err(format!(
@@ -512,7 +515,8 @@ fn validate_branch(branch: &str) -> Result<(), String> {
         return Err("invalid branch name".to_owned());
     }
     if branch.chars().any(|character| {
-        character.is_control() || matches!(character, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        character.is_control()
+            || matches!(character, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
     }) {
         return Err("invalid branch name".to_owned());
     }

@@ -1568,16 +1568,17 @@ fn domain_run_definition(domain: &str) -> ToolDefinition {
             "Run a tool from the {domain} domain. Call {domain}_list first to discover tool names and input schemas."
         )
     };
-    ToolDefinition::new(format!("{domain}_run"), description, RiskLevel::Execute)
-    .with_schema(json!({
-        "type": "object",
-        "properties": {
-            "tool": {"type": "string"},
-            "arguments": {"type": "object"}
-        },
-        "required": ["tool"],
-        "additionalProperties": false
-    }))
+    ToolDefinition::new(format!("{domain}_run"), description, RiskLevel::Execute).with_schema(
+        json!({
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "arguments": {"type": "object"}
+            },
+            "required": ["tool"],
+            "additionalProperties": false
+        }),
+    )
 }
 
 fn domain_description(domain: &str) -> String {
@@ -4045,9 +4046,7 @@ impl Tool for VaultExecTool {
 
         let vault = match context.vault.as_ref() {
             Some(vault) => Arc::clone(vault),
-            None => Arc::new(
-                Vault::open(context.workspace.root()).map_err(vault_tool_error)?,
-            ),
+            None => Arc::new(Vault::open(context.workspace.root()).map_err(vault_tool_error)?),
         };
         let secret = vault.get(&secret_name).map_err(vault_tool_error)?;
         let secret_text = secret.expose_env_str().map_err(vault_tool_error)?;
@@ -4135,7 +4134,10 @@ impl Tool for VaultExecTool {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            content.push_str(&format!("\n\ndiagnostics: {}\n{summary}", diagnostics.len()));
+            content.push_str(&format!(
+                "\n\ndiagnostics: {}\n{summary}",
+                diagnostics.len()
+            ));
         }
         if content.len() > context.model_output_bytes {
             let mut end = context.model_output_bytes;
@@ -4217,7 +4219,7 @@ fn redact_vault_secret(content: &str, secret: &str) -> (String, usize) {
             }
         }
     }
-    variants.sort_by(|left, right| right.len().cmp(&left.len()));
+    variants.sort_by_key(|right| std::cmp::Reverse(right.len()));
     variants.dedup();
 
     let mut output = content.to_owned();
@@ -6054,7 +6056,11 @@ fn parse_jina_response(raw: &str) -> (Option<String>, Option<String>, String) {
     }
     let body = raw
         .find("Markdown Content:")
-        .map(|index| raw[index + "Markdown Content:".len()..].trim_start().to_owned())
+        .map(|index| {
+            raw[index + "Markdown Content:".len()..]
+                .trim_start()
+                .to_owned()
+        })
         .unwrap_or_else(|| raw.trim().to_owned());
     (title, source, body)
 }
@@ -6197,10 +6203,12 @@ impl Tool for WebFetchTool {
                                 save_web_cache(context, &raw, &raw_jina, &entry)?;
                                 let heading = title.clone().unwrap_or_else(|| raw.clone());
                                 return Ok(ToolResult::ok(truncate(
-                                    &format!("{heading}
+                                    &format!(
+                                        "{heading}
 {final_url}
 
-{text}"),
+{text}"
+                                    ),
                                     max_bytes,
                                 ))
                                 .with_metadata(json!({
@@ -6345,7 +6353,9 @@ impl Tool for WebSearchTool {
         }
         let query = string_arg(&arguments, "query")?;
         if query.trim().is_empty() {
-            return Err(ToolError::InvalidArgument("query must not be empty".to_owned()));
+            return Err(ToolError::InvalidArgument(
+                "query must not be empty".to_owned(),
+            ));
         }
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(8)
@@ -6366,9 +6376,11 @@ impl Tool for WebSearchTool {
             .user_agent("OpenBaD/0.1 (+https://github.com/bruceamoser/OpenBaD)")
             .build()
             .map_err(|error| ToolError::Failed(error.to_string()))?;
-        let mut request = client
-            .get(endpoint_url)
-            .query(&[("q", query.as_str()), ("format", "json"), ("safesearch", "1")]);
+        let mut request = client.get(endpoint_url).query(&[
+            ("q", query.as_str()),
+            ("format", "json"),
+            ("safesearch", "1"),
+        ]);
         if let Some(categories) = optional_string(&arguments, "categories") {
             request = request.query(&[("categories", categories)]);
         }
@@ -6421,14 +6433,8 @@ impl Tool for WebSearchTool {
                 .and_then(Value::as_str)
                 .unwrap_or("(untitled)");
             let url = result.get("url").and_then(Value::as_str).unwrap_or("");
-            let snippet = result
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let engine = result
-                .get("engine")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let snippet = result.get("content").and_then(Value::as_str).unwrap_or("");
+            let engine = result.get("engine").and_then(Value::as_str).unwrap_or("");
             lines.push(format!(
                 "\n{}. {}\n   {}\n   {}{}",
                 index + 1,
@@ -6443,10 +6449,7 @@ impl Tool for WebSearchTool {
             ));
         }
         if let Some(answers) = payload.get("answers").and_then(Value::as_array) {
-            let answers = answers
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>();
+            let answers = answers.iter().filter_map(Value::as_str).collect::<Vec<_>>();
             if !answers.is_empty() {
                 lines.push(format!("\nAnswers: {}", answers.join(" | ")));
             }
@@ -6541,20 +6544,16 @@ impl Tool for PresentArtifactTool {
     }
 }
 
-fn preview_repo_path(
-    context: &ToolContext,
-    requested: Option<&str>,
-) -> Result<PathBuf, ToolError> {
+fn preview_repo_path(context: &ToolContext, requested: Option<&str>) -> Result<PathBuf, ToolError> {
     let root = context.workspace.root().to_path_buf();
     let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(root);
     };
     if let Some(project) = &context.project {
         if let Ok(repos) = project.list_repos() {
-            if let Some(repo) = repos
-                .iter()
-                .find(|repo| repo.name == requested || repo.id == requested || repo.path == requested)
-            {
+            if let Some(repo) = repos.iter().find(|repo| {
+                repo.name == requested || repo.id == requested || repo.path == requested
+            }) {
                 return Ok(PathBuf::from(&repo.path));
             }
         }
@@ -16146,10 +16145,7 @@ invariants:
 
         let secret = format!("sk-{}", "123456789012345678901234");
         let blocked = WriteFileTool
-            .execute(
-                json!({"path": "secret.txt", "content": secret}),
-                &context,
-            )
+            .execute(json!({"path": "secret.txt", "content": secret}), &context)
             .await
             .expect_err("secret");
         assert!(blocked.to_string().contains("API key"));
@@ -19257,7 +19253,9 @@ invariants:
     async fn vault_exec_large_output_is_truncated_instead_of_spilled() {
         let directory = tempdir().expect("tempdir");
         let vault = Vault::with_key(directory.path(), [15u8; 32]);
-        vault.put("spill-token", b"spill-secret-value-798").expect("put");
+        vault
+            .put("spill-token", b"spill-secret-value-798")
+            .expect("put");
         let mut context = context(directory.path());
         context.vault = Some(Arc::new(vault));
         context.allow_commands = true;
@@ -19281,9 +19279,7 @@ invariants:
     async fn vault_exec_errors_do_not_echo_secret_values() {
         let directory = tempdir().expect("tempdir");
         let vault = Vault::with_key(directory.path(), [14u8; 32]);
-        vault
-            .put("known", b"known-secret-value-798")
-            .expect("put");
+        vault.put("known", b"known-secret-value-798").expect("put");
         let mut context = context(directory.path());
         context.vault = Some(Arc::new(vault));
         context.allow_commands = true;

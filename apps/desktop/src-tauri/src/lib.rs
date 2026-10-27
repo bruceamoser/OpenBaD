@@ -183,10 +183,7 @@ fn begin_run(
     })
 }
 
-fn cancel_registered_run(
-    registry: &Arc<Mutex<RunRegistry>>,
-    run_id: &str,
-) -> Result<bool, String> {
+fn cancel_registered_run(registry: &Arc<Mutex<RunRegistry>>, run_id: &str) -> Result<bool, String> {
     let mut registry = registry
         .lock()
         .map_err(|error| format!("run registry lock poisoned: {error}"))?;
@@ -207,7 +204,10 @@ fn steer_registered_run(
         let registry = registry
             .lock()
             .map_err(|error| format!("run registry lock poisoned: {error}"))?;
-        registry.runs.get(run_id).map(|entry| Arc::clone(&entry.steering))
+        registry
+            .runs
+            .get(run_id)
+            .map(|entry| Arc::clone(&entry.steering))
     };
     let Some(steering) = steering else {
         return Err("no active turn to steer".to_owned());
@@ -2936,9 +2936,11 @@ fn compose_chat_message(
     }
     let mut message = prompt.trim_end().to_owned();
     if !message.is_empty() {
-        message.push_str("
+        message.push_str(
+            "
 
-");
+",
+        );
     }
     message.push_str(
         "The user attached these files. They are saved inside the workspace and can be read with the file tools:
@@ -2953,8 +2955,11 @@ fn compose_chat_message(
             .strip_prefix(workspace_root)
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|_| file.path.clone());
-        message.push_str(&format!("- {relative} ({} bytes)
-", file.bytes));
+        message.push_str(&format!(
+            "- {relative} ({} bytes)
+",
+            file.bytes
+        ));
         let extension = attachment_extension(path);
         let is_image = matches!(
             extension.as_str(),
@@ -5064,10 +5069,10 @@ mod tests {
     #[test]
     fn runs_are_scoped_to_a_project_and_cancel_independently() {
         let registry = Arc::new(Mutex::new(RunRegistry::default()));
-        let first = begin_run(&registry, "run-a", Path::new("/tmp/openbad-project-a"))
-            .expect("first run");
-        let second = begin_run(&registry, "run-b", Path::new("/tmp/openbad-project-b"))
-            .expect("second run");
+        let first =
+            begin_run(&registry, "run-a", Path::new("/tmp/openbad-project-a")).expect("first run");
+        let second =
+            begin_run(&registry, "run-b", Path::new("/tmp/openbad-project-b")).expect("second run");
 
         let duplicate = begin_run(&registry, "run-c", Path::new("/tmp/openbad-project-a"))
             .err()
@@ -5108,8 +5113,7 @@ mod tests {
     fn cancellation_before_registration_is_not_lost() {
         let registry = Arc::new(Mutex::new(RunRegistry::default()));
         assert!(!cancel_registered_run(&registry, "early-stop").expect("cancel"));
-        let run = begin_run(&registry, "early-stop", Path::new("/tmp/openbad-early"))
-            .expect("run");
+        let run = begin_run(&registry, "early-stop", Path::new("/tmp/openbad-early")).expect("run");
         assert!(
             run.cancel_token().load(Ordering::SeqCst),
             "a stop that arrives before chat registers the run still cancels it"

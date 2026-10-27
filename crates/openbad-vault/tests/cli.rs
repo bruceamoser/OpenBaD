@@ -44,13 +44,22 @@ fn cli_put_get_list_rm_roundtrip_without_plaintext_metadata() {
     let key = STANDARD.encode([11u8; 32]);
     let secret = b"cli-secret-value-798";
 
-    let put = run(&["put", "db-password"], directory.path(), &key, Some(secret));
+    let put = run(
+        &["put", "db-password"],
+        directory.path(),
+        &key,
+        Some(secret),
+    );
     assert!(
         put.status.success(),
         "put failed: {}",
         String::from_utf8_lossy(&put.stderr)
     );
-    assert!(!put.stdout.windows(secret.len()).any(|window| window == secret));
+    assert!(
+        !put.stdout
+            .windows(secret.len())
+            .any(|window| window == secret)
+    );
 
     let get = run(&["get", "db-password"], directory.path(), &key, None);
     assert!(

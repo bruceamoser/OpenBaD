@@ -249,11 +249,8 @@ impl Vault {
         if entry.algorithm != ALGORITHM {
             return Err(VaultError::UnsupportedAlgorithm(entry.algorithm));
         }
-        let bytes = read_regular_file(
-            &value_path(&directory, &entry.id),
-            MAX_CIPHERTEXT_BYTES,
-        )?
-        .ok_or_else(|| VaultError::MissingValue(name.to_owned()))?;
+        let bytes = read_regular_file(&value_path(&directory, &entry.id), MAX_CIPHERTEXT_BYTES)?
+            .ok_or_else(|| VaultError::MissingValue(name.to_owned()))?;
         decrypt_value(&self.key, &entry, &bytes)
     }
 
@@ -303,7 +300,10 @@ pub fn default_key_file_path() -> Result<PathBuf, VaultError> {
         .ok_or(VaultError::NoHomeDirectory)?
         .home_dir()
         .to_path_buf();
-    Ok(home.join(".config").join("openbaddesktop").join("vault.key"))
+    Ok(home
+        .join(".config")
+        .join("openbaddesktop")
+        .join("vault.key"))
 }
 
 fn load_key() -> Result<Zeroizing<[u8; 32]>, VaultError> {
@@ -359,10 +359,7 @@ fn load_or_create_key_at(path: &Path) -> Result<Zeroizing<[u8; 32]>, VaultError>
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let parent = path.parent().ok_or_else(|| {
-                VaultError::InvalidVaultPath(format!(
-                    "key path has no parent: {}",
-                    path.display()
-                ))
+                VaultError::InvalidVaultPath(format!("key path has no parent: {}", path.display()))
             })?;
             ensure_private_dir(parent)?;
             let mut key = Zeroizing::new([0u8; 32]);
@@ -562,10 +559,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = match options.open(&temp) {
-        Ok(file) => file,
-        Err(error) => return Err(error.into()),
-    };
+    let mut file = options.open(&temp)?;
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
         let _ = fs::remove_file(&temp);
@@ -590,11 +584,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), VaultError> {
     Ok(())
 }
 
-fn encrypt_value(
-    key: &[u8; 32],
-    entry: &VaultEntry,
-    value: &[u8],
-) -> Result<Vec<u8>, VaultError> {
+fn encrypt_value(key: &[u8; 32], entry: &VaultEntry, value: &[u8]) -> Result<Vec<u8>, VaultError> {
     let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key));
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;
@@ -770,13 +760,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = |path: &Path| {
-                fs::metadata(path)
-                    .expect("metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777
-            };
+            let mode =
+                |path: &Path| fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
             let vault_path = vault_dir(directory.path());
             assert_eq!(mode(&vault_path), 0o700);
             assert_eq!(mode(&vault_path.join("index.json")), 0o600);
@@ -792,23 +777,19 @@ mod tests {
         let object = entries[0].as_object().expect("entry object");
         let mut keys = object.keys().cloned().collect::<Vec<_>>();
         keys.sort();
-        assert_eq!(
-            keys,
-            vec!["algorithm", "created", "id", "name", "updated"]
-        );
+        assert_eq!(keys, vec!["algorithm", "created", "id", "name", "updated"]);
         assert_eq!(object["algorithm"], ALGORITHM);
         assert!(!index.to_string().contains("correct horse"));
-        assert!(!scan_for_plaintext(
-            &vault_dir(directory.path()),
-            secret
-        ));
+        assert!(!scan_for_plaintext(&vault_dir(directory.path()), secret));
     }
 
     #[test]
     fn wrong_key_fails_authentication() {
         let directory = tempdir().expect("tempdir");
         let writer = test_vault(directory.path(), [1u8; 32]);
-        writer.put("api-token", b"not-for-the-wrong-key").expect("put");
+        writer
+            .put("api-token", b"not-for-the-wrong-key")
+            .expect("put");
 
         let reader = test_vault(directory.path(), [2u8; 32]);
         let error = reader.get("api-token").expect_err("wrong key must fail");
@@ -819,8 +800,12 @@ mod tests {
     fn tampering_and_value_swaps_are_detected() {
         let directory = tempdir().expect("tempdir");
         let vault = test_vault(directory.path(), [3u8; 32]);
-        let first = vault.put("first", b"first-secret-value").expect("put first");
-        let second = vault.put("second", b"second-secret-value").expect("put second");
+        let first = vault
+            .put("first", b"first-secret-value")
+            .expect("put first");
+        let second = vault
+            .put("second", b"second-secret-value")
+            .expect("put second");
 
         let first_path = vault_dir(directory.path()).join(format!("{}.secret", first.id));
         let second_path = vault_dir(directory.path()).join(format!("{}.secret", second.id));
@@ -862,7 +847,9 @@ mod tests {
     fn renaming_an_index_entry_breaks_authentication() {
         let directory = tempdir().expect("tempdir");
         let vault = test_vault(directory.path(), [10u8; 32]);
-        vault.put("original-name", b"rename-bound-value").expect("put");
+        vault
+            .put("original-name", b"rename-bound-value")
+            .expect("put");
 
         let index_path = vault_dir(directory.path()).join("index.json");
         let mut index = index_json(directory.path());
