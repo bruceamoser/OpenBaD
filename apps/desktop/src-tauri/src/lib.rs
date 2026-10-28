@@ -83,7 +83,7 @@ pub struct AppState {
     store: Arc<Mutex<Store>>,
     secrets: Box<dyn SecretStore>,
     /// One cancellation token and inbox per UI-generated run id. The
-    /// registry also enforces one running turn per project.
+    /// registry also enforces one running turn per session.
     runs: Arc<Mutex<RunRegistry>>,
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<openbad_terminal::TerminalManager>,
@@ -99,7 +99,7 @@ struct RunRegistry {
 }
 
 struct RunEntry {
-    workspace_path: PathBuf,
+    session_id: Option<String>,
     cancel: Arc<AtomicBool>,
     inbox: Arc<Inbox>,
 }
@@ -145,26 +145,25 @@ impl Drop for RunGuard {
 fn begin_run(
     registry: &Arc<Mutex<RunRegistry>>,
     run_id: &str,
-    workspace_path: &Path,
+    session_id: Option<&str>,
 ) -> Result<RunGuard, String> {
-    let workspace_path = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
     let mut runs = registry
         .lock()
         .map_err(|error| format!("run registry lock poisoned: {error}"))?;
     if runs.runs.contains_key(run_id) {
         return Err(format!("run id is already active: {run_id}"));
     }
-    if runs
-        .runs
-        .values()
-        .any(|entry| entry.workspace_path == workspace_path)
-    {
-        return Err(
-            "A turn is already running for this project. Wait for it to finish or stop it."
-                .to_owned(),
-        );
+    if let Some(session_id) = session_id {
+        if runs
+            .runs
+            .values()
+            .any(|entry| entry.session_id.as_deref() == Some(session_id))
+        {
+            return Err(
+                "A turn is already running for this session. Wait for it to finish or stop it."
+                    .to_owned(),
+            );
+        }
     }
     let cancelled = runs.cancelled.remove(run_id);
     let cancel = Arc::new(AtomicBool::new(cancelled));
@@ -173,7 +172,7 @@ fn begin_run(
     runs.runs.insert(
         run_id.to_owned(),
         RunEntry {
-            workspace_path,
+            session_id: session_id.map(str::to_owned),
             cancel: Arc::clone(&cancel),
             inbox: Arc::clone(&inbox),
         },
@@ -4449,7 +4448,7 @@ async fn chat(
     };
     // This guard lives until the end of the turn and removes the run entry on
     // every exit path, including errors and cancellation.
-    let run_guard = begin_run(&state.runs, &run_id, &workspace_path)?;
+    let run_guard = begin_run(&state.runs, &run_id, session_id.as_deref())?;
     let cancel = run_guard.cancel_token();
     let title_source = if prompt.is_empty() {
         "Attached documents".to_owned()
@@ -5547,16 +5546,15 @@ mod tests {
     }
 
     #[test]
-    fn runs_are_scoped_to_a_project_and_cancel_independently() {
+    fn runs_are_scoped_to_a_session_and_cancel_independently() {
         let registry = Arc::new(Mutex::new(RunRegistry::default()));
-        let first =
-            begin_run(&registry, "run-a", Path::new("/tmp/openbad-project-a")).expect("first run");
-        let second =
-            begin_run(&registry, "run-b", Path::new("/tmp/openbad-project-b")).expect("second run");
+        let first = begin_run(&registry, "run-a", Some("session-1")).expect("first run");
+        let second = begin_run(&registry, "run-b", Some("session-2"))
+            .expect("a second session runs concurrently");
 
-        let duplicate = begin_run(&registry, "run-c", Path::new("/tmp/openbad-project-a"))
+        let duplicate = begin_run(&registry, "run-c", Some("session-1"))
             .err()
-            .expect("one run per project");
+            .expect("one run per session");
         assert!(duplicate.contains("already running"));
 
         assert!(!first.cancel_token().load(Ordering::SeqCst));
@@ -5583,17 +5581,26 @@ mod tests {
             "steering closes as soon as the agent loop returns"
         );
         drop(first);
-        let replacement = begin_run(&registry, "run-c", Path::new("/tmp/openbad-project-a"))
-            .expect("project is free after the run guard drops");
+        let replacement = begin_run(&registry, "run-c", Some("session-1"))
+            .expect("session is free after the run guard drops");
         drop(replacement);
         assert!(steer_registered_run(&registry, "run-a", "late").is_err());
+    }
+
+    #[test]
+    fn anonymous_runs_do_not_collide() {
+        let registry = Arc::new(Mutex::new(RunRegistry::default()));
+        let first = begin_run(&registry, "run-a", None).expect("first anonymous run");
+        let second = begin_run(&registry, "run-b", None).expect("second anonymous run");
+        assert_eq!(first.inbox().len(), 0);
+        assert_eq!(second.inbox().len(), 0);
     }
 
     #[test]
     fn cancellation_before_registration_is_not_lost() {
         let registry = Arc::new(Mutex::new(RunRegistry::default()));
         assert!(!cancel_registered_run(&registry, "early-stop").expect("cancel"));
-        let run = begin_run(&registry, "early-stop", Path::new("/tmp/openbad-early")).expect("run");
+        let run = begin_run(&registry, "early-stop", None).expect("run");
         assert!(
             run.cancel_token().load(Ordering::SeqCst),
             "a stop that arrives before chat registers the run still cancels it"
