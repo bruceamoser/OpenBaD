@@ -161,6 +161,7 @@ Priority: **P0** = MVP, **P1** = v1.0, **P2** = later. Phase refers to
 | F-51 | Off-peak scheduling for maintenance and auxiliary work | DeepSeek | P1 | 6 |
 | F-52 | Optional encrypted cloud backup/sync | New | P2 | 8 |
 | F-53 | Connector layer: MCP-first, with thin native Git/GitHub/web connectors | Clarity + DSH | P1 | 5 |
+| F-54 | Parallel agent sessions with independent run state and per-session cancellation | DSH + VS Code | P1 | 9 |
 
 ## 5. What we keep from each system
 
