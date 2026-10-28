@@ -118,6 +118,7 @@ import type {
   SessionSummary,
   SessionView,
   ToolApprovalRequest,
+  ToolCallView,
   UploadSource,
   Usage,
   WorkspaceIndexSummary,
@@ -241,24 +242,28 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
         lastContentStep: event.step,
         status: "Writing…",
       };
-    case "tool_call":
-      return {
-        ...entry,
-        status: `Calling ${event.name}…`,
-        tools: [...(entry.tools ?? []), `→ ${event.name}(${event.arguments})`],
-      };
-    case "tool_result":
-      return {
-        ...entry,
-        status: `${event.name} finished`,
-        tools: [
-          ...(entry.tools ?? []),
-          `${event.is_error ? "✗" : "✓"} ${event.name}: ${event.content}`,
-        ],
-      };
-    case "usage":
-      return { ...entry, usage: event.usage };
-    case "tool_status":
+    case "tool_call": {
+      const toolCalls = [...(entry.toolCalls ?? [])];
+      toolCalls.push({
+        id: `${event.step}-${toolCalls.length}`,
+        name: event.name,
+        arguments: event.arguments,
+        status: "queued",
+      });
+      return { ...entry, status: `Calling ${event.name}…`, toolCalls };
+    }
+    case "tool_status": {
+      const toolCalls = [...(entry.toolCalls ?? [])];
+      const index = toolCalls.findIndex(
+        (tool) => tool.name === event.name && tool.status !== "settled",
+      );
+      if (index >= 0) {
+        toolCalls[index] = {
+          ...toolCalls[index],
+          status: event.status as ToolCallView["status"],
+          durationMs: event.duration_ms ?? toolCalls[index].durationMs,
+        };
+      }
       return {
         ...entry,
         status:
@@ -267,7 +272,26 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
             : event.status === "settled"
               ? `${event.name} finished`
               : `Queued ${event.name}`,
+        toolCalls,
       };
+    }
+    case "tool_result": {
+      const toolCalls = [...(entry.toolCalls ?? [])];
+      const index = toolCalls.findIndex(
+        (tool) => tool.name === event.name && tool.result === undefined,
+      );
+      if (index >= 0) {
+        toolCalls[index] = {
+          ...toolCalls[index],
+          status: "settled",
+          result: event.content,
+          isError: event.is_error,
+        };
+      }
+      return { ...entry, status: `${event.name} finished`, toolCalls };
+    }
+    case "usage":
+      return { ...entry, usage: event.usage };
     case "approval_request":
       return { ...entry, status: `Waiting for approval: ${event.tool}` };
     case "approval_decision":
@@ -1282,6 +1306,41 @@ export default function App() {
     visibleRunRef.current = runKey;
     setEntries([...run.entries]);
 
+    // Streaming deltas are frame-batched so a long answer repaints at most once
+    // per frame instead of once per token.
+    const deltaBuffer: AgentEvent[] = [];
+    let flushHandle: number | null = null;
+    const flushDeltas = () => {
+      if (flushHandle !== null) {
+        cancelAnimationFrame(flushHandle);
+        flushHandle = null;
+      }
+      if (deltaBuffer.length === 0) {
+        return;
+      }
+      const pendingEvents = deltaBuffer.splice(0, deltaBuffer.length);
+      const active = runsRef.current.get(runKey);
+      if (active === undefined) {
+        return;
+      }
+      active.entries = active.entries.map((entry) =>
+        entry.id === assistantId
+          ? pendingEvents.reduce((acc, item) => applyAgentEvent(acc, item), entry)
+          : entry,
+      );
+      if (visibleRunRef.current === runKey) {
+        setEntries([...active.entries]);
+      }
+    };
+    const scheduleFlush = () => {
+      if (flushHandle === null) {
+        flushHandle = requestAnimationFrame(() => {
+          flushHandle = null;
+          flushDeltas();
+        });
+      }
+    };
+
     try {
       const reply = await sendChat(
         {
@@ -1298,6 +1357,12 @@ export default function App() {
           attachments: pending,
         },
         (event) => {
+          if (event.type === "content" || event.type === "reasoning") {
+            deltaBuffer.push(event);
+            scheduleFlush();
+            return;
+          }
+          flushDeltas();
           const current = runsRef.current.get(runKey);
           if (current === undefined) {
             return;
@@ -1361,6 +1426,7 @@ export default function App() {
           }
         },
       );
+      flushDeltas();
       run.sessionId = reply.session_id;
       if (sessionId === null) {
         try {
@@ -1398,6 +1464,20 @@ export default function App() {
             }
           : entry,
       );
+      try {
+        const checkpoints = await fetchCheckpoints(reply.session_id);
+        const cutoff = Date.now() - reply.duration_ms - 2_000;
+        const count = checkpoints.filter(
+          (checkpoint) => checkpoint.created_at >= cutoff,
+        ).length;
+        if (count > 0) {
+          run.entries = run.entries.map((entry) =>
+            entry.id === assistantId ? { ...entry, checkpointCount: count } : entry,
+          );
+        }
+      } catch {
+        // Checkpoint counts are best-effort.
+      }
       run.totalDurationMs += reply.duration_ms;
       if (visibleRunRef.current === runKey) {
         setSessionId(reply.session_id);
@@ -1412,6 +1492,7 @@ export default function App() {
       setProjectRevision((value) => value + 1);
       window.setTimeout(() => setProjectRevision((value) => value + 1), 1_500);
     } catch (cause) {
+      flushDeltas();
       const message = describeError(cause);
       run.error = message;
       run.entries = run.entries.map((entry) =>
@@ -2327,12 +2408,20 @@ export default function App() {
                 </div>
               )}
 
-              {entries.map((entry) => {
+              {entries.map((entry, index) => {
                 const running =
                   busy &&
                   entry.role === "assistant" &&
                   entry.id ===
                     [...entries].reverse().find((item) => item.role === "assistant")?.id;
+                const lastUser =
+                  entry.role === "user" &&
+                  index ===
+                    entries.reduce(
+                      (last, item, itemIndex) =>
+                        item.role === "user" ? itemIndex : last,
+                      -1,
+                    );
                 return (
                   <MessageCard
                     key={entry.id}
@@ -2340,6 +2429,13 @@ export default function App() {
                     nowMs={running ? nowMs : undefined}
                     workspacePath={workspacePath}
                     onOpenPreview={openPreview}
+                    onRetry={lastUser && !busy ? () => void send(entry.text) : undefined}
+                    onEdit={lastUser ? () => composerRef.current?.setDraft(entry.text) : undefined}
+                    onReviewChanges={
+                      entry.role === "assistant" && (entry.checkpointCount ?? 0) > 0
+                        ? () => openPanel("checkpoints")
+                        : undefined
+                    }
                     running={running}
                   />
                 );
@@ -2955,18 +3051,93 @@ function TransferDialog({
   );
 }
 
+function ToolCallCard({ tool }: { tool: ToolCallView }) {
+  const [open, setOpen] = useState(tool.isError === true);
+  const label =
+    tool.status === "queued"
+      ? "Queued"
+      : tool.status === "running"
+        ? "Running…"
+        : tool.isError === true
+          ? "Failed"
+          : "Done";
+  const tone =
+    tool.isError === true
+      ? "border-rose-500/30 bg-rose-500/[0.04]"
+      : "border-white/[0.06] bg-black/20";
+  const chip =
+    tool.isError === true
+      ? "text-rose-300"
+      : tool.status === "running"
+        ? "text-emerald-300"
+        : "text-slate-500";
+  return (
+    <div className={`rounded-md border px-3 py-2 ${tone}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <Wrench size={11} className="shrink-0 text-slate-500" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300">
+          {tool.name}
+        </span>
+        <span className={`text-[9px] uppercase tracking-[0.12em] ${chip}`}>{label}</span>
+        {tool.durationMs !== undefined && (
+          <span className="font-mono text-[9px] text-slate-600">{tool.durationMs}ms</span>
+        )}
+        <ChevronDown
+          size={11}
+          className={`shrink-0 text-slate-600 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <div>
+            <p className="text-[9px] uppercase tracking-[0.14em] text-slate-600">Arguments</p>
+            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 font-mono text-[10px] leading-4 text-slate-400">
+              {tool.arguments}
+            </pre>
+          </div>
+          {tool.result !== undefined && (
+            <div>
+              <p className="text-[9px] uppercase tracking-[0.14em] text-slate-600">Result</p>
+              <pre
+                className={`mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded p-2 font-mono text-[10px] leading-4 ${
+                  tool.isError === true
+                    ? "bg-rose-950/30 text-rose-200"
+                    : "bg-black/30 text-slate-400"
+                }`}
+              >
+                {tool.result}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const MessageCard = memo(function MessageCard({
   entry,
   nowMs,
   running = false,
   workspacePath,
   onOpenPreview,
+  onRetry,
+  onEdit,
+  onReviewChanges,
 }: {
   entry: ChatEntry;
   nowMs?: number;
   running?: boolean;
   workspacePath?: string;
   onOpenPreview?: (target: PreviewTarget) => void;
+  onRetry?: () => void;
+  onEdit?: () => void;
+  onReviewChanges?: () => void;
 }) {
   const preview = entry.preview;
   if (entry.role === "user") {
@@ -3068,23 +3239,34 @@ const MessageCard = memo(function MessageCard({
             <MarkdownMessage text={entry.text} />
           </div>
         )}
+        {entry.toolCalls !== undefined && entry.toolCalls.length > 0 && (
+          <div className="mt-3 space-y-1.5">
+            {entry.toolCalls.map((tool) => (
+              <ToolCallCard key={tool.id} tool={tool} />
+            ))}
+          </div>
+        )}
         {entry.tools !== undefined && entry.tools.length > 0 && (
-          <details className="mt-3 rounded-md border border-white/[0.05] bg-black/20 px-3 py-2">
-            <summary className="flex cursor-pointer items-center gap-1 text-[11px] text-slate-500">
-              <Wrench size={11} /> {entry.tools.length} tool event
-              {entry.tools.length === 1 ? "" : "s"}
-            </summary>
-            <div className="mt-2 space-y-1.5">
-              {entry.tools.map((tool, index) => (
-                <pre
-                  key={`${entry.id}-tool-${index}`}
-                  className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 font-mono text-[10px] leading-4 text-slate-500"
-                >
-                  {tool}
-                </pre>
-              ))}
-            </div>
-          </details>
+          <div className="mt-2 space-y-1">
+            {entry.tools.map((note, index) => (
+              <p
+                key={`${entry.id}-note-${index}`}
+                className="font-mono text-[10px] leading-4 text-slate-500"
+              >
+                {note}
+              </p>
+            ))}
+          </div>
+        )}
+        {onReviewChanges !== undefined && (
+          <button
+            type="button"
+            onClick={onReviewChanges}
+            className="mt-2 inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[10px] text-slate-400 transition-colors hover:border-emerald-400/25 hover:text-emerald-200"
+          >
+            <Wrench size={11} /> Review {entry.checkpointCount} file change
+            {entry.checkpointCount === 1 ? "" : "s"}
+          </button>
         )}
         {preview !== undefined && onOpenPreview !== undefined && (
           <button
