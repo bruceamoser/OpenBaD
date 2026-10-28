@@ -37,8 +37,8 @@ use openbad_tools::{
     CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
     LspService, McpServerChange, McpServerSpec, McpServerSummary, McpService, McpToolSummary,
     MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SessionEventView, SessionHistory,
-    SessionHistoryHit, SubagentInfo, SubagentRuntime, SubagentSpec, TerminalRead, TerminalService,
-    WorkspaceSearch,
+    SessionHistoryHit, SessionReads, SubagentInfo, SubagentRuntime, SubagentSpec, TerminalRead,
+    TerminalService, WorkspaceSearch, new_session_reads,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -94,6 +94,9 @@ pub struct AppState {
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<openbad_terminal::TerminalManager>,
     mcp: McpManagers,
+    /// Reads recorded per session, so a file read in one turn does not have to
+    /// be read again by the next one while it is unchanged.
+    session_reads: Arc<Mutex<HashMap<SessionId, SessionReads>>>,
 }
 
 /// How long a shown completion notification keeps pointing at its session.
@@ -1145,6 +1148,9 @@ struct SubagentSettings {
     approvals: Arc<dyn ApprovalGate>,
     /// The parent turn's event stream, used to surface child approvals.
     events: Channel<AgentEvent>,
+    /// The parent session's reads, so a child does not re-read what the parent
+    /// already inspected.
+    session_reads: SessionReads,
 }
 
 struct SubagentRunner {
@@ -1425,6 +1431,7 @@ async fn run_subagent(
             policy: subagent_policy(settings.policy, spec.allow_writes),
             max_steps: 0,
             stream: false,
+            session_reads: Some(Arc::clone(&settings.session_reads)),
             ..AgentConfig::default()
         },
     )
@@ -2191,7 +2198,12 @@ fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), 
         .map_err(|error| format!("store lock poisoned: {error}"))?;
     store
         .delete_session(session)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    drop(store);
+    if let Ok(mut records) = state.session_reads.lock() {
+        records.remove(&session);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -5263,6 +5275,13 @@ async fn chat(
     }
     let index_root = workspace_path.clone();
     let mcp_manager = state.mcp.get(Path::new(&workspace_path))?;
+    let session_reads = {
+        let mut records = state
+            .session_reads
+            .lock()
+            .map_err(|error| format!("session reads lock poisoned: {error}"))?;
+        Arc::clone(records.entry(session).or_insert_with(new_session_reads))
+    };
     let mut agent = default_agent(
         client,
         Arc::new(WorkspaceService::new(workspace_path.clone())),
@@ -5270,6 +5289,7 @@ async fn chat(
             policy,
             extra_instructions,
             max_steps: max_steps.unwrap_or(0).min(100_000),
+            session_reads: Some(Arc::clone(&session_reads)),
             ..AgentConfig::default()
         },
     );
@@ -5340,6 +5360,7 @@ async fn chat(
                     policy,
                     approvals: Arc::clone(&approvals),
                     events: on_event.clone(),
+                    session_reads: Arc::clone(&session_reads),
                 }),
                 active: Arc::clone(&state.subagent_cancels),
             }));
@@ -5829,6 +5850,7 @@ pub fn run() {
             subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
             mcp: McpManagers::default(),
+            session_reads: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(NotificationFocus::default())
         .on_window_event(|window, event| {

@@ -315,7 +315,7 @@ Rules:
 | Tool | Risk | Concurrency | Notes |
 | --- | --- | --- | --- |
 | `read_file` | read | safe | Path, optional line range; content-addressed |
-| `write_file` | write | serial | Requires a prior read in the session |
+| `write_file` | write | serial | Requires a prior read in the session; a read only counts while the file is unchanged |
 | `edit_file` | write | serial | Exact literal replacement; fails on ambiguity |
 | `apply_patch` | write | serial | Unified diff; atomic per file set |
 | `list_dir` | read | safe | Depth-limited |

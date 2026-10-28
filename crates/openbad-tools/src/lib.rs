@@ -1007,6 +1007,46 @@ pub trait SubagentRuntime: Send + Sync {
     fn cancel(&self, id: &str) -> Result<SubagentInfo, String>;
 }
 
+/// Size and modification time a file had when it was read.
+///
+/// A read from an earlier turn only satisfies the read-before-overwrite guard
+/// while the file still looks the same, so an external edit cannot be
+/// overwritten blindly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    len: u64,
+    modified_ms: Option<u128>,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis());
+        Some(Self {
+            len: metadata.len(),
+            modified_ms,
+        })
+    }
+}
+
+/// Files read during a session, with the stamp each had when it was read.
+///
+/// Shared across turns: the guard's contract is a prior read "in the session",
+/// so a file read in an earlier turn does not have to be read again — unless it
+/// changed since. The per-turn set inside [`ToolContext`] still drives the
+/// "holding N files this turn" accounting.
+pub type SessionReads = Arc<Mutex<HashMap<PathBuf, FileStamp>>>;
+
+/// A fresh session read record.
+#[must_use]
+pub fn new_session_reads() -> SessionReads {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 pub struct ToolContext {
     pub workspace: Arc<WorkspaceService>,
     pub allow_writes: bool,
@@ -1028,6 +1068,8 @@ pub struct ToolContext {
     pub vault: Option<Arc<Vault>>,
     turn: AtomicU32,
     read_paths: Mutex<HashSet<PathBuf>>,
+    /// Reads that survive across turns, with the stamp each file had.
+    session_reads: SessionReads,
     outside_grants: Vec<OutsideGrant>,
 }
 
@@ -1057,6 +1099,7 @@ impl Clone for ToolContext {
                     .map(|paths| paths.clone())
                     .unwrap_or_default(),
             ),
+            session_reads: Arc::clone(&self.session_reads),
             outside_grants: self.outside_grants.clone(),
         }
     }
@@ -1084,6 +1127,7 @@ impl ToolContext {
             vault: None,
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
+            session_reads: new_session_reads(),
             outside_grants: Vec::new(),
         }
     }
@@ -1181,13 +1225,37 @@ impl ToolContext {
         if let Ok(mut paths) = self.read_paths.lock() {
             paths.insert(path.to_path_buf());
         }
+        if let (Some(stamp), Ok(mut reads)) = (FileStamp::of(path), self.session_reads.lock()) {
+            reads.insert(path.to_path_buf(), stamp);
+        }
     }
 
     fn was_read(&self, path: &Path) -> bool {
-        self.read_paths
+        if self
+            .read_paths
             .lock()
             .map(|paths| paths.contains(path))
             .unwrap_or(false)
+        {
+            return true;
+        }
+        let recorded = self
+            .session_reads
+            .lock()
+            .ok()
+            .and_then(|reads| reads.get(path).copied());
+        match recorded {
+            Some(stamp) => FileStamp::of(path).is_some_and(|current| current == stamp),
+            None => false,
+        }
+    }
+
+    /// Share a session read record, so a read from an earlier turn still
+    /// satisfies the read-before-overwrite guard while the file is unchanged.
+    #[must_use]
+    pub fn with_session_reads(mut self, reads: SessionReads) -> Self {
+        self.session_reads = reads;
+        self
     }
 }
 
@@ -3797,6 +3865,9 @@ impl Tool for WriteFileTool {
         let checkpoint = checkpoint_before_write(context, &path)?;
         let _undo = record_undo(context, &path)?;
         atomic_write(&path, &content)?;
+        // The agent authored this content, so the session record now describes
+        // the file it holds; a later turn may overwrite it again.
+        context.mark_read(&path);
         let validation = match run_validators(context, &path).await {
             Ok(validation) => validation,
             Err(error) => {
@@ -15418,6 +15489,60 @@ mod tests {
 
     fn context(root: &Path) -> ToolContext {
         ToolContext::new(Arc::new(WorkspaceService::new(root)))
+    }
+
+    fn context_with_session(root: &Path, reads: SessionReads) -> ToolContext {
+        context(root).with_session_reads(reads)
+    }
+
+    #[tokio::test]
+    async fn a_read_from_an_earlier_turn_still_counts_while_the_file_is_unchanged() {
+        let directory = tempdir().expect("tempdir");
+        let file = directory.path().join("file.txt");
+        fs::write(&file, "old").expect("file");
+        let reads = new_session_reads();
+
+        let mut first_turn = context_with_session(directory.path(), Arc::clone(&reads));
+        first_turn.allow_writes = true;
+        ReadFileTool
+            .execute(json!({"path": "file.txt"}), &first_turn)
+            .await
+            .expect("read");
+
+        // A new turn: empty per-turn set, same session record.
+        let mut next_turn = context_with_session(directory.path(), Arc::clone(&reads));
+        next_turn.allow_writes = true;
+        WriteFileTool
+            .execute(
+                json!({"path": "file.txt", "content": "written"}),
+                &next_turn,
+            )
+            .await
+            .expect("an earlier read in the session satisfies the guard");
+        assert_eq!(fs::read_to_string(&file).expect("read"), "written");
+
+        // Writing the file marks it read, so the record still describes it.
+        let mut after_write = context_with_session(directory.path(), Arc::clone(&reads));
+        after_write.allow_writes = true;
+        WriteFileTool
+            .execute(
+                json!({"path": "file.txt", "content": "again"}),
+                &after_write,
+            )
+            .await
+            .expect("our own write keeps the record current");
+
+        // An external edit invalidates the record: the next turn must re-read.
+        fs::write(&file, "changed behind the agent's back").expect("external write");
+        let mut stale = context_with_session(directory.path(), Arc::clone(&reads));
+        stale.allow_writes = true;
+        assert!(
+            WriteFileTool
+                .execute(json!({"path": "file.txt", "content": "blind"}), &stale)
+                .await
+                .is_err(),
+            "a changed file must be read again before it is overwritten"
+        );
     }
 
     #[tokio::test]

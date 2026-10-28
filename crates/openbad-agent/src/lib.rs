@@ -16,8 +16,9 @@ use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
     CheckpointSink, LspService, McpService, MemoryStore, OutsideGrant, ProjectAreas,
-    RegistryWorkflowEngine, SessionHistory, SubagentRuntime, TerminalService, ToolContext,
-    ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
+    RegistryWorkflowEngine, SessionHistory, SessionReads, SubagentRuntime, TerminalService,
+    ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
+    new_session_reads,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde::{Deserialize, Serialize};
@@ -229,6 +230,10 @@ pub struct AgentConfig {
     pub retain_recent_ratio: f64,
     /// Completion budget for the compaction summary call.
     pub compact_max_tokens: u32,
+    /// Reads that outlive a single turn. The host keeps one per session so a
+    /// read from an earlier turn still satisfies the read-before-overwrite
+    /// guard while the file is unchanged; `None` starts a fresh record.
+    pub session_reads: Option<SessionReads>,
 }
 
 impl Default for AgentConfig {
@@ -246,6 +251,7 @@ impl Default for AgentConfig {
             compact_at_ratio: 0.8,
             retain_recent_ratio: 0.16,
             compact_max_tokens: 16_384,
+            session_reads: None,
         }
     }
 }
@@ -977,7 +983,12 @@ impl<T: HttpTransport> Agent<T> {
                 &self.tools,
             ))));
             context.set_outside_grants(self.outside_grants.clone());
-            context
+            context.with_session_reads(
+                self.config
+                    .session_reads
+                    .clone()
+                    .unwrap_or_else(new_session_reads),
+            )
         });
 
         let step_budget = if self.config.max_steps == 0 {
