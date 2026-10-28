@@ -335,6 +335,10 @@ const BUILTIN_SKILLS: &[&str] = &[
     include_str!("../assets/skills/github-releases-pages.md"),
     include_str!("../assets/skills/plugin-development.md"),
     include_str!("../assets/skills/asciidoc-rendering.md"),
+    include_str!("../assets/skills/pre-push-checks.md"),
+    include_str!("../assets/skills/error-handling.md"),
+    include_str!("../assets/skills/test-reliability.md"),
+    include_str!("../assets/skills/code-review.md"),
 ];
 
 #[must_use]
