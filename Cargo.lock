@@ -3022,7 +3022,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openbad-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3042,14 +3042,14 @@ dependencies = [
 
 [[package]]
 name = "openbad-autonomic"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "openbad-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arboard",
  "async-trait",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-governance"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "keyring",
  "openbad-core",
@@ -3113,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-harness"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "openbad-core",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-index"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "ignore",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-knowledge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "uuid",
@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3166,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-lsp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "directories",
  "reqwest 0.12.28",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-memory"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "openbad-core",
  "serde",
@@ -3200,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-terminal"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "portable-pty",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-tools"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-transfer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ignore",
  "openbad-core",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-update"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "directories",
  "reqwest 0.12.28",
@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-vault"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -3298,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "openbad-workspace"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "globset",
  "serde",
