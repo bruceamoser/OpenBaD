@@ -36,9 +36,10 @@ use openbad_store::types::{
 use openbad_tools::{
     CheckpointSink, KnowledgeDocumentRef, KnowledgeEntryRef, LspLocation as ToolLspLocation,
     LspService, McpServerChange, McpServerSpec, McpServerSummary, McpService, McpToolSummary,
-    MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, SessionEventView, SessionHistory,
-    SessionHistoryHit, SessionReads, SubagentInfo, SubagentRuntime, SubagentSpec, TerminalRead,
-    TerminalService, WorkspaceSearch, new_session_reads,
+    MemoryStore, OutsideGrant, ProjectAreas, ProjectRepoRef, QuestionAnswer, QuestionGate,
+    QuestionPrompt, QuestionRequest, SessionEventView, SessionHistory, SessionHistoryHit,
+    SessionReads, SubagentInfo, SubagentRuntime, SubagentSpec, TerminalRead, TerminalService,
+    WorkspaceSearch, new_session_reads,
 };
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,54 @@ pub struct AppState {
     /// Reads recorded per session, so a file read in one turn does not have to
     /// be read again by the next one while it is unchanged.
     session_reads: Arc<Mutex<HashMap<SessionId, SessionReads>>>,
+    /// Questions waiting for the human, keyed by request id.
+    pending_questions: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<QuestionAnswer>>>>,
+}
+
+/// Puts a question in front of the human and blocks until it is answered, so
+/// the answer is part of the tool result rather than a file the model has to
+/// remember to read a turn later.
+struct DesktopQuestions {
+    pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<QuestionAnswer>>>>,
+    cancel: Arc<AtomicBool>,
+    events: Channel<AgentEvent>,
+}
+
+#[async_trait::async_trait]
+impl QuestionGate for DesktopQuestions {
+    async fn ask(&self, request: &QuestionRequest) -> QuestionAnswer {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        match self.pending.lock() {
+            Ok(mut pending) => {
+                pending.insert(request.id.clone(), sender);
+            }
+            Err(_) => return QuestionAnswer::Cancelled,
+        }
+        let _ = self.events.send(AgentEvent::QuestionRequest {
+            request_id: request.id.clone(),
+            question: request.question.clone(),
+            options: request.options.clone(),
+            multi: request.multi,
+            context: request.context.clone(),
+        });
+        loop {
+            if self.cancel.load(Ordering::SeqCst) {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&request.id);
+                }
+                return QuestionAnswer::Cancelled;
+            }
+            match receiver.try_recv() {
+                Ok(answer) => return answer,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return QuestionAnswer::Cancelled;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
 }
 
 /// How long a shown completion notification keeps pointing at its session.
@@ -1151,6 +1200,9 @@ struct SubagentSettings {
     /// The parent session's reads, so a child does not re-read what the parent
     /// already inspected.
     session_reads: SessionReads,
+    /// The parent turn's question prompt, so a delegated question is shown
+    /// rather than queued out of sight.
+    questions: QuestionPrompt,
 }
 
 struct SubagentRunner {
@@ -1432,6 +1484,7 @@ async fn run_subagent(
             max_steps: 0,
             stream: false,
             session_reads: Some(Arc::clone(&settings.session_reads)),
+            questions: Some(settings.questions.clone()),
             ..AgentConfig::default()
         },
     )
@@ -1652,6 +1705,13 @@ pub enum AgentEvent {
         request_id: String,
         allowed: bool,
         decision: String,
+    },
+    QuestionRequest {
+        request_id: String,
+        question: String,
+        options: Vec<String>,
+        multi: bool,
+        context: Option<String>,
     },
 }
 
@@ -5039,6 +5099,33 @@ fn notify_turn_finished(
     Ok(())
 }
 
+/// Answer a question the turn is blocked on. An empty answer skips it.
+#[tauri::command]
+fn answer_question(
+    state: State<'_, AppState>,
+    request_id: String,
+    answer: Option<String>,
+) -> Result<(), String> {
+    let sender = state
+        .pending_questions
+        .lock()
+        .map_err(|error| format!("questions lock poisoned: {error}"))?
+        .remove(&request_id);
+    let Some(sender) = sender else {
+        // Already answered, cancelled, or from an older run.
+        return Ok(());
+    };
+    let response = match answer
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) => QuestionAnswer::Answered(text),
+        None => QuestionAnswer::Skipped,
+    };
+    let _ = sender.send(response);
+    Ok(())
+}
+
 /// Persist whether a session still has a turn the user has not looked at.
 #[tauri::command]
 fn mark_session_unread(
@@ -5290,6 +5377,11 @@ async fn chat(
             extra_instructions,
             max_steps: max_steps.unwrap_or(0).min(100_000),
             session_reads: Some(Arc::clone(&session_reads)),
+            questions: Some(QuestionPrompt::new(Arc::new(DesktopQuestions {
+                pending: Arc::clone(&state.pending_questions),
+                cancel: Arc::clone(&cancel),
+                events: on_event.clone(),
+            }))),
             ..AgentConfig::default()
         },
     );
@@ -5361,6 +5453,11 @@ async fn chat(
                     approvals: Arc::clone(&approvals),
                     events: on_event.clone(),
                     session_reads: Arc::clone(&session_reads),
+                    questions: QuestionPrompt::new(Arc::new(DesktopQuestions {
+                        pending: Arc::clone(&state.pending_questions),
+                        cancel: Arc::clone(&cancel),
+                        events: on_event.clone(),
+                    })),
                 }),
                 active: Arc::clone(&state.subagent_cancels),
             }));
@@ -5851,6 +5948,7 @@ pub fn run() {
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
             mcp: McpManagers::default(),
             session_reads: Arc::new(Mutex::new(HashMap::new())),
+            pending_questions: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(NotificationFocus::default())
         .on_window_event(|window, event| {
@@ -5894,6 +5992,7 @@ pub fn run() {
             clipboard::read_clipboard_image,
             cancel_chat,
             respond_to_approval,
+            answer_question,
             notify_turn_finished,
             mark_session_unread,
             workspace_approvals,

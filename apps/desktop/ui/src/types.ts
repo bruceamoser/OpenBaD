@@ -150,6 +150,14 @@ export type AgentEvent =
       request_id: string;
       allowed: boolean;
       decision: string;
+    }
+  | {
+      type: "question_request";
+      request_id: string;
+      question: string;
+      options: string[];
+      multi: boolean;
+      context: string | null;
     };
 
 export type PendingApproval = {
@@ -157,6 +165,15 @@ export type PendingApproval = {
   tool: string;
   risk: string;
   detail: string;
+};
+
+/** A question the turn is blocked on until the user answers. */
+export type PendingQuestion = {
+  requestId: string;
+  question: string;
+  options: string[];
+  multi: boolean;
+  context: string | null;
 };
 
 export type WorkspaceIndexSummary = {

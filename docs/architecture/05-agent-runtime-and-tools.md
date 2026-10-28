@@ -388,7 +388,7 @@ Implemented:
 | `context_rules` | write | List, pin, or exclude `.openbad/context.yaml` residency rules |
 | `list_context_rules` / `context_map` | read | Audit pinned/excluded rules and files loaded this turn |
 | `ledger` | write/read | Claims, known unknowns, and ruled-out findings in `.openbad/*.json` |
-| `ask_question` / `list_questions` | write/read | Queue structured human decisions in `.openbad/questions.json` |
+| `ask_question` / `list_questions` | write/read | Block on a structured human question, then read the log of `.openbad/questions.json` |
 | `canon` | write/read | Canon ledger, banned-phrase authoring/lint, and glossary lookup |
 | `write_skill` | write | Durable procedure with preconditions, steps, verification, and rollback |
 | `glossary_add` / `glossary_lookup` | write/read | Glossary terms, expansions, and aliases |
@@ -551,10 +551,11 @@ blast-radius preview and
 
 `plan_write` stores a draft in `.openbad/plan.json`; the prompt says not to
 execute it until a human approves it in Project → Plan. `plan_verify` runs a
-step's recipe/command and records pass/fail evidence. `ask_question` queues a decision with optional choices in
-`.openbad/questions.json` instead of guessing or stalling. The Project →
-Questions panel polls and writes the answer; the next system prompt includes
-pending and recently answered questions.
+step's recipe/command and records pass/fail evidence. `ask_question` blocks the
+turn on a decision with optional choices instead of guessing or stalling: the
+desktop host shows the question dialog, and the chosen answer comes back in the
+tool result. The exchange is also appended to `.openbad/questions.json`, which
+the Project → Questions panel lists as a log rather than an inbox.
 
 Every tool call appends a bounded JSONL record to `.openbad/audit.jsonl`:
 timestamp, turn, tool, argument/result BLAKE3 digests and 500-character

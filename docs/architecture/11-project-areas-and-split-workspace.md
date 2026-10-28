@@ -63,8 +63,9 @@ Claims and known unknowns live in `.openbad/claims.json` and
 Plan mode lives in `.openbad/plan.json`; drafts are approved in Project → Plan
 and steps carry executable `verify_with` checks.
 
-Structured questions live in `.openbad/questions.json` and are answered in the
-Project → Questions panel. The assistant reads the answer on its next turn.
+Structured questions block the turn until they are answered in the question
+dialog; every exchange is appended to `.openbad/questions.json`, and the
+Project → Questions panel lists that log.
 
 `.openbad/context.yaml` pins files that should stay resident and excludes paths
 that must never load. `.openbad/dead-ends.json` records negative knowledge so a
