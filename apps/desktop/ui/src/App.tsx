@@ -218,7 +218,40 @@ function sessionEntries(messages: SessionView["messages"]): ChatEntry[] {
     reasoning: item.reasoning ?? "",
     durationMs: item.duration_ms ?? undefined,
     status: item.interrupted ? "Stopped" : undefined,
+    toolCalls: item.tool_calls?.map((call) => ({
+      id: call.call_id,
+      name: call.name,
+      arguments: call.arguments,
+      status:
+        call.status === "failed" || call.status === "interrupted"
+          ? call.status
+          : call.status === "running"
+            ? "running"
+            : "settled",
+      result: call.result === "" ? undefined : call.result,
+      isError: call.is_error,
+      durationMs: call.duration_ms ?? undefined,
+    })),
   }));
+}
+
+/**
+ * Prefer the provider's call id; fall back to the name of an unfinished card
+ * for events recorded before call ids were carried.
+ */
+function findToolCall(
+  toolCalls: ToolCallView[],
+  callId: string | undefined,
+  name: string,
+  accept: (tool: ToolCallView) => boolean,
+): number {
+  if (callId !== undefined && callId !== "") {
+    const exact = toolCalls.findIndex((tool) => tool.id === callId);
+    if (exact >= 0) {
+      return exact;
+    }
+  }
+  return toolCalls.findIndex((tool) => tool.name === name && accept(tool));
 }
 
 function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
@@ -246,7 +279,7 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
     case "tool_call": {
       const toolCalls = [...(entry.toolCalls ?? [])];
       toolCalls.push({
-        id: `${event.step}-${toolCalls.length}`,
+        id: event.call_id !== undefined && event.call_id !== "" ? event.call_id : `${event.step}-${toolCalls.length}`,
         name: event.name,
         arguments: event.arguments,
         status: "queued",
@@ -276,9 +309,7 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
     }
     case "tool_status": {
       const toolCalls = [...(entry.toolCalls ?? [])];
-      const index = toolCalls.findIndex(
-        (tool) => tool.name === event.name && tool.status !== "settled",
-      );
+      const index = findToolCall(toolCalls, event.call_id, event.name, (tool) => tool.status !== "settled");
       if (index >= 0) {
         toolCalls[index] = {
           ...toolCalls[index],
@@ -299,9 +330,7 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
     }
     case "tool_result": {
       const toolCalls = [...(entry.toolCalls ?? [])];
-      const index = toolCalls.findIndex(
-        (tool) => tool.name === event.name && tool.result === undefined,
-      );
+      const index = findToolCall(toolCalls, event.call_id, event.name, (tool) => tool.result === undefined);
       if (index >= 0) {
         toolCalls[index] = {
           ...toolCalls[index],
@@ -3152,9 +3181,11 @@ function ToolCallCard({ tool }: { tool: ToolCallView }) {
       ? "Queued"
       : tool.status === "running"
         ? "Running…"
-        : tool.isError === true
-          ? "Failed"
-          : "Done";
+        : tool.status === "interrupted"
+          ? "Interrupted"
+          : tool.isError === true
+            ? "Failed"
+            : "Done";
   const tone =
     tool.isError === true
       ? "border-rose-500/30 bg-rose-500/[0.04]"
