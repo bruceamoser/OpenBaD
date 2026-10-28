@@ -237,7 +237,7 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-**Domain facades.** The registry contains 125 internal tools grouped into 18
+**Domain facades.** The registry contains 136 internal tools grouped into 18
 domains: artifacts, collaboration, context, exec, files, git, governance,
 knowledge, mcp, memory, orchestration, plan, plugins, repos, search, session,
 snapshots, and web. The model sees two stable tools per domain:
