@@ -1634,10 +1634,6 @@ export default function App() {
           ? {
               ...entry,
               text: reply.text || entry.text || "(no text returned)",
-              tools:
-                entry.tools !== undefined && entry.tools.length > 0
-                  ? entry.tools
-                  : reply.tool_trace,
               usage: reply.usage,
               durationMs: reply.duration_ms,
               status: `Done · ${reply.steps} step${reply.steps === 1 ? "" : "s"}`,
@@ -3645,6 +3641,13 @@ const MessageCard = memo(function MessageCard({
             </pre>
           </details>
         )}
+        {entry.toolCalls !== undefined && entry.toolCalls.length > 0 && (
+          <div className="mt-3 space-y-1.5">
+            {entry.toolCalls.map((tool) => (
+              <ToolCallCard key={tool.id} tool={tool} />
+            ))}
+          </div>
+        )}
         {entry.text.length > 0 && (
           <div className="mt-2 text-[13px] leading-6 text-obd-text">
             <MarkdownMessage text={entry.text} />
@@ -3690,13 +3693,6 @@ const MessageCard = memo(function MessageCard({
                 </li>
               ))}
             </ul>
-          </div>
-        )}
-        {entry.toolCalls !== undefined && entry.toolCalls.length > 0 && (
-          <div className="mt-3 space-y-1.5">
-            {entry.toolCalls.map((tool) => (
-              <ToolCallCard key={tool.id} tool={tool} />
-            ))}
           </div>
         )}
         {entry.tools !== undefined && entry.tools.length > 0 && (
