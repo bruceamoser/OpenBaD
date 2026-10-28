@@ -4562,6 +4562,9 @@ pub struct ChatInput {
     /// Explicit policy preset. Falls back to the boolean flags when absent.
     #[serde(default)]
     pub policy: Option<String>,
+    /// Ask, plan, or agent. Ask and plan override the access policy.
+    #[serde(default)]
+    pub mode: Option<String>,
     pub max_steps: Option<u32>,
     pub model: Option<String>,
     pub thinking: Option<bool>,
@@ -4623,6 +4626,7 @@ async fn chat(
         allow_writes,
         allow_commands,
         policy,
+        mode,
         max_steps,
         model,
         thinking,
@@ -4634,10 +4638,24 @@ async fn chat(
         return Err("message must not be empty".to_owned());
     }
     let started = std::time::Instant::now();
-    let policy = policy
-        .as_deref()
-        .and_then(ToolPolicy::from_access_mode)
-        .unwrap_or_else(|| ToolPolicy::from_flags(allow_writes, allow_commands));
+    let mode = mode.unwrap_or_else(|| "agent".to_owned());
+    let policy = match mode.as_str() {
+        "ask" => ToolPolicy::ReadOnly,
+        "plan" => ToolPolicy::WritesOnly,
+        _ => policy
+            .as_deref()
+            .and_then(ToolPolicy::from_access_mode)
+            .unwrap_or_else(|| ToolPolicy::from_flags(allow_writes, allow_commands)),
+    };
+    let extra_instructions = match mode.as_str() {
+        "ask" => Some(
+            "You are in Ask mode. Answer questions about the workspace and do not modify files or run commands; describe any change instead.".to_owned(),
+        ),
+        "plan" => Some(
+            "You are in Plan mode. Investigate the workspace and produce a concrete, ordered plan, using the plan tools to persist it. Do not run commands or change non-plan files.".to_owned(),
+        ),
+        _ => None,
+    };
     let workspace_path = PathBuf::from(workspace_path);
     if !workspace_path.is_dir() {
         return Err(format!(
@@ -4700,11 +4718,12 @@ async fn chat(
             }
         };
 
-        let access_mode = policy.access_mode();
         repair_interrupted_turn(&store, session)?;
-        store
-            .set_session_access_mode(session, access_mode)
-            .map_err(|error| error.to_string())?;
+        if mode == "agent" {
+            store
+                .set_session_access_mode(session, policy.access_mode())
+                .map_err(|error| error.to_string())?;
+        }
 
         let turn = store
             .load_turns(session)
@@ -4783,6 +4802,7 @@ async fn chat(
         Arc::new(WorkspaceService::new(workspace_path.clone())),
         AgentConfig {
             policy,
+            extra_instructions,
             max_steps: max_steps.unwrap_or(0).min(100_000),
             ..AgentConfig::default()
         },

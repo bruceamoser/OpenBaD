@@ -105,6 +105,7 @@ import type {
   AgentEvent,
   Artifact,
   ChatEntry,
+  ChatMode,
   FileCheckpointSummary,
   FoundationState,
   MemoryRecord,
@@ -345,6 +346,8 @@ export default function App() {
   const [showArchived, setShowArchived] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read");
+  const [chatMode, setChatMode] = useState<ChatMode>("agent");
+  const [toast, setToast] = useState<string | null>(null);
   const [model, setModel] = useState(preferences.model);
   const [thinking, setThinking] = useState(preferences.thinking);
   const [reasoningEffort, setReasoningEffort] = useState(preferences.reasoningEffort);
@@ -444,9 +447,11 @@ export default function App() {
       ),
     [entries],
   );
-  const allowWrites = permissionMode !== "read";
+  const effectivePolicy: PermissionMode =
+    chatMode === "ask" ? "read" : chatMode === "plan" ? "edit" : permissionMode;
+  const allowWrites = effectivePolicy !== "read";
   const allowCommands =
-    permissionMode === "full" || permissionMode === "ask-commands";
+    effectivePolicy === "full" || effectivePolicy === "ask-commands";
 
   const loadFoundation = useCallback(async () => {
     try {
@@ -566,6 +571,9 @@ export default function App() {
       void fetchApiKeyStatus()
         .then(setApiKeyStatus)
         .catch(() => setApiKeyStatus(false));
+      if (!document.hasFocus()) {
+        setToast("Turn finished");
+      }
       void loadFoundation();
       void loadSessions();
       void loadArchivedSessions();
@@ -1371,7 +1379,8 @@ export default function App() {
           message: text,
           allowWrites,
           allowCommands,
-          policy: permissionMode,
+          policy: effectivePolicy,
+          mode: chatMode,
           model,
           thinking,
           reasoningEffort,
@@ -1449,7 +1458,7 @@ export default function App() {
       );
       flushDeltas();
       run.sessionId = reply.session_id;
-      if (sessionId === null) {
+      if (sessionId === null && chatMode === "agent") {
         try {
           // Use the run's latest mode: the user may have approved tool access
           // or changed permissions while the first turn was streaming.
@@ -1504,6 +1513,9 @@ export default function App() {
         setSessionId(reply.session_id);
         setEntries([...run.entries]);
         setTotalDurationMs(run.totalDurationMs);
+      }
+      if (!document.hasFocus()) {
+        setToast("Turn finished");
       }
       void loadFoundation();
       void loadSessions();
@@ -1612,6 +1624,14 @@ export default function App() {
     setQueuedMessages(rest);
     void send(next);
   }, [busy, queuedMessages, send, workspacePath]);
+
+  useEffect(() => {
+    if (toast === null) {
+      return;
+    }
+    const handle = window.setTimeout(() => setToast(null), 5_000);
+    return () => window.clearTimeout(handle);
+  }, [toast]);
 
   const removeQueued = useCallback((index: number) => {
     setQueuedMessages((current) =>
@@ -2242,6 +2262,15 @@ export default function App() {
                           onArchive={() => void archiveSession(session, true)}
                           onDelete={() => void deleteSession(session)}
                           archived={false}
+                          status={
+                            session.id === sessionId
+                              ? pendingApproval !== null
+                                ? "approval"
+                                : busy
+                                  ? "running"
+                                  : undefined
+                              : undefined
+                          }
                         />
                       ))}
                       {projectArchivedSessions.length > 0 && (
@@ -2489,6 +2518,8 @@ export default function App() {
             busy={busy}
             stopRequested={stopRequested}
             permissionMode={permissionMode}
+            mode={chatMode}
+            onMode={setChatMode}
             model={model}
             thinking={thinking}
             accessNotice={accessNotice}
@@ -2586,6 +2617,15 @@ export default function App() {
           onApprove={() => void approveToolAccess()}
           onDeny={() => setToolApproval(null)}
         />
+      )}
+
+      {toast !== null && (
+        <div
+          role="status"
+          className="fixed bottom-4 right-4 z-40 rounded-md border border-emerald-400/30 bg-[#1f2833] px-3 py-2 text-[11px] text-emerald-100 shadow-lg"
+        >
+          {toast}
+        </div>
       )}
 
       <ApprovalRequestDialog
@@ -2835,6 +2875,7 @@ function SessionRow({
   onArchive,
   onDelete,
   archived,
+  status,
 }: {
   session: SessionSummary;
   active: boolean;
@@ -2849,6 +2890,7 @@ function SessionRow({
   onArchive: () => void;
   onDelete: () => void;
   archived: boolean;
+  status?: "running" | "approval";
 }) {
   if (editing) {
     return (
@@ -2883,6 +2925,14 @@ function SessionRow({
     >
       <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
         <MessageSquare size={12} className="shrink-0 text-slate-500" />
+        {status !== undefined && (
+          <span
+            aria-label={status === "approval" ? "Waiting for approval" : "Running"}
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+              status === "approval" ? "bg-amber-400" : "animate-pulse bg-emerald-400"
+            }`}
+          />
+        )}
         <span className="min-w-0 flex-1 truncate">{session.title ?? "Untitled session"}</span>
         {showProject && (
           <span className="max-w-[80px] truncate rounded bg-white/[0.05] px-1 py-0.5 text-[9px] text-slate-500">

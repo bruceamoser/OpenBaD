@@ -220,6 +220,8 @@ pub struct AgentConfig {
     pub spill_threshold_bytes: usize,
     pub stream: bool,
     pub system_prompt: Option<String>,
+    /// Mode-specific instructions appended to the assembled system prompt.
+    pub extra_instructions: Option<String>,
     /// Fraction of the context window that may be occupied by the prompt
     /// before older history is compacted. `0.0` disables compaction.
     pub compact_at_ratio: f64,
@@ -240,6 +242,7 @@ impl Default for AgentConfig {
             spill_threshold_bytes: 64 * 1024,
             stream: true,
             system_prompt: None,
+            extra_instructions: None,
             compact_at_ratio: 0.8,
             retain_recent_ratio: 0.16,
             compact_max_tokens: 16_384,
@@ -1548,7 +1551,10 @@ impl<T: HttpTransport> Agent<T> {
 
     fn system_prompt(&self) -> String {
         if let Some(prompt) = &self.config.system_prompt {
-            return prompt.clone();
+            return match &self.config.extra_instructions {
+                Some(extra) => format!("{prompt}\n\n{extra}"),
+                None => prompt.clone(),
+            };
         }
         let mut prompt = format!(
             "You are OpenBaD, a precise coding agent working in {}.\n\
