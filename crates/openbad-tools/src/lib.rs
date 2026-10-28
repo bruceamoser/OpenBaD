@@ -1033,6 +1033,56 @@ impl FileStamp {
     }
 }
 
+/// A question the model cannot answer itself, put to the human.
+pub struct QuestionRequest {
+    /// Matches the queued `.openbad/questions.json` id shape (`q-<millis>`).
+    pub id: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub multi: bool,
+    pub context: Option<String>,
+}
+
+/// What the human did with a question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionAnswer {
+    /// Answered, with the text to hand back to the model.
+    Answered(String),
+    /// The human dismissed it; the model should proceed without it.
+    Skipped,
+    /// The turn was cancelled while waiting.
+    Cancelled,
+}
+
+/// Blocks a turn until the human answers, so the answer is part of the tool
+/// result instead of something the model has to fetch a turn later.
+#[async_trait]
+pub trait QuestionGate: Send + Sync {
+    async fn ask(&self, request: &QuestionRequest) -> QuestionAnswer;
+}
+
+/// A gate handle that stays opaque in `Debug` output, so configurations that
+/// derive `Debug` do not have to constrain the gate itself.
+#[derive(Clone)]
+pub struct QuestionPrompt(Arc<dyn QuestionGate>);
+
+impl QuestionPrompt {
+    #[must_use]
+    pub fn new(gate: Arc<dyn QuestionGate>) -> Self {
+        Self(gate)
+    }
+
+    pub async fn ask(&self, request: &QuestionRequest) -> QuestionAnswer {
+        self.0.ask(request).await
+    }
+}
+
+impl std::fmt::Debug for QuestionPrompt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("QuestionPrompt")
+    }
+}
+
 /// Files read during a session, with the stamp each had when it was read.
 ///
 /// Shared across turns: the guard's contract is a prior read "in the session",
@@ -1070,6 +1120,9 @@ pub struct ToolContext {
     read_paths: Mutex<HashSet<PathBuf>>,
     /// Reads that survive across turns, with the stamp each file had.
     session_reads: SessionReads,
+    /// Where a blocking question goes. `None` (CLI, tests) keeps the queued
+    /// `.openbad/questions.json` fallback.
+    questions: Option<QuestionPrompt>,
     outside_grants: Vec<OutsideGrant>,
 }
 
@@ -1100,6 +1153,7 @@ impl Clone for ToolContext {
                     .unwrap_or_default(),
             ),
             session_reads: Arc::clone(&self.session_reads),
+            questions: self.questions.clone(),
             outside_grants: self.outside_grants.clone(),
         }
     }
@@ -1128,6 +1182,7 @@ impl ToolContext {
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             session_reads: new_session_reads(),
+            questions: None,
             outside_grants: Vec::new(),
         }
     }
@@ -1255,6 +1310,13 @@ impl ToolContext {
     #[must_use]
     pub fn with_session_reads(mut self, reads: SessionReads) -> Self {
         self.session_reads = reads;
+        self
+    }
+
+    /// Route `ask_question` to a blocking prompt instead of the queued file.
+    #[must_use]
+    pub fn with_questions(mut self, questions: QuestionPrompt) -> Self {
+        self.questions = Some(questions);
         self
     }
 }
@@ -11868,7 +11930,7 @@ impl Tool for AskQuestionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "ask_question",
-            "Queue a structured question for the human in Project → Questions. Use this when a decision blocks correctness instead of guessing. Continue other work or end the turn; the answer appears in the next prompt.",
+            "Ask the human a question and wait for the answer. Use it when a decision blocks correctness instead of guessing. The answer arrives in this tool result; the exchange is also recorded in Project → Questions.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -11915,26 +11977,67 @@ impl Tool for AskQuestionTool {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut questions = openbad_workspace::load_questions(context.workspace.root())
-            .map_err(|error| ToolError::Failed(error.to_string()))?;
-        let question = openbad_workspace::Question {
+        let request = QuestionRequest {
             id: format!("q-{}", now_millis()),
             question: text.trim().to_owned(),
-            options: options.clone(),
+            options,
             multi: optional_bool(&arguments, "multi").unwrap_or(false),
             context: optional_string(&arguments, "context"),
-            created_at: now_millis(),
-            answer: None,
-            answered_at: None,
         };
-        questions.push(question.clone());
+
+        // With a prompt attached the turn blocks: the answer comes back in this
+        // result instead of the human having to find a queue a turn later.
+        let outcome = match &context.questions {
+            Some(gate) => Some((gate.ask(&request).await, true)),
+            None => None,
+        };
+        let (answer, asked) = match outcome {
+            Some((QuestionAnswer::Answered(answer), _)) => (Some(answer), true),
+            Some((QuestionAnswer::Skipped, _)) => (None, true),
+            Some((QuestionAnswer::Cancelled, _)) => {
+                return Err(ToolError::Failed(
+                    "the question was cancelled by the user".to_owned(),
+                ));
+            }
+            None => (None, false),
+        };
+
+        // Keep the exchange on record either way, so Project → Questions is a
+        // log of what was asked and answered rather than an invisible inbox.
+        let mut questions = openbad_workspace::load_questions(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        questions.push(openbad_workspace::Question {
+            id: request.id.clone(),
+            question: request.question.clone(),
+            options: request.options.clone(),
+            multi: request.multi,
+            context: request.context.clone(),
+            created_at: now_millis(),
+            answer: answer.clone(),
+            answered_at: answer.as_ref().map(|_| now_millis()),
+        });
         openbad_workspace::save_questions(context.workspace.root(), &questions)
             .map_err(|error| ToolError::Failed(error.to_string()))?;
-        Ok(ToolResult::ok(format!(
-            "queued question {} for the human: {}\nAsk them to answer in Project → Questions, then continue in the next turn.",
-            question.id, question.question
-        ))
-        .with_metadata(json!({"id": question.id, "options": options})))
+
+        if !asked {
+            return Ok(ToolResult::ok(format!(
+                "queued question {} for the human: {}\nAsk them to answer in Project → Questions, then continue in the next turn.",
+                request.id, request.question
+            ))
+            .with_metadata(json!({"id": request.id, "options": request.options})));
+        }
+        match answer {
+            Some(answer) => Ok(ToolResult::ok(format!(
+                "The human answered \"{}\": {}",
+                request.question, answer
+            ))
+            .with_metadata(json!({"id": request.id, "answer": answer, "asked": true}))),
+            None => Ok(ToolResult::ok(format!(
+                "The human skipped \"{}\". Do not ask again this turn; proceed with a stated assumption or finish.",
+                request.question
+            ))
+            .with_metadata(json!({"id": request.id, "skipped": true}))),
+        }
     }
 }
 
@@ -16593,6 +16696,58 @@ invariants:
             .await
             .expect("invariants");
         assert!(invariants.content.contains("passed"));
+    }
+
+    struct AnsweringQuestions;
+
+    #[async_trait]
+    impl QuestionGate for AnsweringQuestions {
+        async fn ask(&self, request: &QuestionRequest) -> QuestionAnswer {
+            assert!(request.question.contains("database"));
+            QuestionAnswer::Answered("Postgres".to_owned())
+        }
+    }
+
+    struct SkippingQuestions;
+
+    #[async_trait]
+    impl QuestionGate for SkippingQuestions {
+        async fn ask(&self, _request: &QuestionRequest) -> QuestionAnswer {
+            QuestionAnswer::Skipped
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prompted_question_blocks_and_returns_the_answer() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        context = context.with_questions(QuestionPrompt::new(Arc::new(AnsweringQuestions)));
+
+        let asked = AskQuestionTool
+            .execute(
+                json!({"question": "Which database should we use?", "options": ["SQLite", "Postgres"]}),
+                &context,
+            )
+            .await
+            .expect("ask");
+        assert!(asked.content.contains("Postgres"), "{}", asked.content);
+        assert_eq!(asked.metadata["answer"], "Postgres");
+
+        // The exchange is still recorded for the Questions panel.
+        let listed = ListQuestionsTool
+            .execute(json!({"include_answered": true}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("ANSWERED: Postgres"));
+
+        context = context.with_questions(QuestionPrompt::new(Arc::new(SkippingQuestions)));
+        let skipped = AskQuestionTool
+            .execute(json!({"question": "Anything else?"}), &context)
+            .await
+            .expect("skip");
+        assert!(skipped.content.contains("skipped"), "{}", skipped.content);
+        assert_eq!(skipped.metadata["skipped"], true);
     }
 
     #[tokio::test]

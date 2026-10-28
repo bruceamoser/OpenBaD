@@ -866,6 +866,16 @@ export async function forkSession(
   };
 }
 
+/** Answer (or skip) the question a turn is blocked on. */
+export async function answerQuestion(
+  requestId: string,
+  answer: string | null,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("answer_question", { requestId, answer });
+  }
+}
+
 /** Persist whether a session still has a turn the user has not looked at. */
 export async function markSessionUnread(
   sessionId: string,

@@ -59,6 +59,7 @@ import {
   forgetMemory as forgetStoredMemory,
   loadWorkspaceApprovals as fetchWorkspaceApprovals,
   revokeWorkspaceApproval as revokePersistedApproval,
+  answerQuestion as submitQuestionAnswer,
   markSessionUnread as persistSessionUnread,
   notifyTurnFinished as raiseCompletionNotification,
   onNotificationOpened as subscribeToNotificationOpened,
@@ -127,6 +128,7 @@ import type {
   SessionSummary,
   SessionView,
   ToolApprovalRequest,
+  PendingQuestion,
   ToolCallView,
   UploadSource,
   Usage,
@@ -221,6 +223,7 @@ type BackgroundRun = {
   totalDurationMs: number;
   pendingToolApproval: ToolApprovalRequest | null;
   pendingApproval: PendingApproval | null;
+  pendingQuestion: PendingQuestion | null;
   pendingAccessRequest: OutsideAccessRequest | null;
   pendingPreview: PreviewTarget | null;
   error: string | null;
@@ -383,6 +386,8 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
         ...entry,
         status: event.allowed ? "Approved" : "Approval denied",
       };
+    case "question_request":
+      return { ...entry, status: "Waiting for an answer" };
     case "compaction":
       return {
         ...entry,
@@ -454,6 +459,7 @@ export default function App() {
   const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
   const [toolApproval, setToolApproval] = useState<ToolApprovalRequest | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
   const [toolApprovals, setToolApprovals] = useState<WorkspaceApproval[]>([]);
@@ -961,6 +967,7 @@ export default function App() {
       setAccessRequest(run?.pendingAccessRequest ?? null);
       setToolApproval(run?.pendingToolApproval ?? null);
       setPendingApproval(run?.pendingApproval ?? null);
+      setPendingQuestion(run?.pendingQuestion ?? null);
       setPreview(run?.pendingPreview ?? null);
       setBusy(run?.busy ?? false);
       setStopRequested(run?.stopRequested ?? false);
@@ -1473,6 +1480,7 @@ export default function App() {
       totalDurationMs,
       pendingToolApproval: null,
       pendingApproval: null,
+      pendingQuestion: null,
       pendingAccessRequest: null,
       pendingPreview: null,
       error: null,
@@ -1593,6 +1601,20 @@ export default function App() {
               setPendingApproval(null);
             }
           }
+          if (event.type === "question_request") {
+            const request: PendingQuestion = {
+              requestId: event.request_id,
+              question: event.question,
+              options: event.options,
+              multi: event.multi,
+              context: event.context,
+            };
+            current.pendingQuestion = request;
+            setAnnouncement("The assistant is waiting for an answer");
+            if (visibleRunRef.current === runKey) {
+              setPendingQuestion(request);
+            }
+          }
           const entryPreview = eventPreview;
           current.entries = current.entries.map((entry) => {
             const updated =
@@ -1661,6 +1683,10 @@ export default function App() {
         setTotalDurationMs(run.totalDurationMs);
       }
       setAnnouncement("Turn finished");
+      run.pendingQuestion = null;
+      if (visibleRunRef.current === runKey) {
+        setPendingQuestion(null);
+      }
       const finishedSessionId = reply.session_id;
       const onScreen = visibleRunRef.current === runKey;
       if (!document.hasFocus()) {
@@ -1698,6 +1724,10 @@ export default function App() {
     } catch (cause) {
       flushDeltas();
       setAnnouncement("Turn failed");
+      run.pendingQuestion = null;
+      if (visibleRunRef.current === runKey) {
+        setPendingQuestion(null);
+      }
       const message = describeError(cause);
       run.error = message;
       run.entries = run.entries.map((entry) =>
@@ -2937,6 +2967,19 @@ export default function App() {
         }}
       />
 
+      <QuestionDialog
+        request={pendingQuestion}
+        onAnswer={(answer) => {
+          const request = pendingQuestion;
+          setPendingQuestion(null);
+          if (request !== null) {
+            void submitQuestionAnswer(request.requestId, answer).catch((cause) =>
+              setError(describeError(cause)),
+            );
+          }
+        }}
+      />
+
       {shortcutsOpen && (
         <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
@@ -3890,18 +3933,18 @@ function SettingsDialog({
       aria-label="Settings"
       className="fixed inset-0 z-40 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
     >
-      <div className="flex h-[min(640px,80vh)] w-full max-w-3xl overflow-hidden rounded-xl border border-obd-line bg-obd-surface shadow-2xl">
+      <div className="relative flex h-[min(640px,80vh)] w-full max-w-3xl overflow-hidden rounded-xl border border-obd-line bg-obd-surface shadow-2xl">
+        <button
+          type="button"
+          aria-label="Close settings"
+          onClick={onClose}
+          className="absolute right-3 top-3 z-10 rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
+        >
+          <X size={14} />
+        </button>
         <div className="w-[180px] shrink-0 border-r border-obd-line bg-obd-inset p-3">
           <div className="flex items-center justify-between px-1">
             <p className="text-[12px] font-medium text-obd-body">Settings</p>
-            <button
-              type="button"
-              aria-label="Close settings"
-              onClick={onClose}
-              className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
-            >
-              <X size={14} />
-            </button>
           </div>
           <div className="mt-4 space-y-0.5">
             {tabs.map((item) => (
@@ -4720,6 +4763,118 @@ function ApprovalRequestDialog({
             onClick={() => onDecide("allow_workspace")}
           >
             Allow for workspace
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuestionDialog({
+  request,
+  onAnswer,
+}: {
+  request: PendingQuestion | null;
+  onAnswer: (answer: string | null) => void;
+}) {
+  const trapRef = useFocusTrap<HTMLDivElement>(request !== null);
+  const [text, setText] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  useEffect(() => {
+    setText("");
+    setPicked([]);
+  }, [request?.requestId]);
+  if (request === null) {
+    return null;
+  }
+  const toggle = (option: string) => {
+    setPicked((current) => {
+      if (request.multi) {
+        return current.includes(option)
+          ? current.filter((item) => item !== option)
+          : [...current, option];
+      }
+      return current[0] === option ? [] : [option];
+    });
+  };
+  const submit = () => {
+    const free = text.trim();
+    const parts = [...picked, ...(free.length > 0 && !picked.includes(free) ? [free] : [])];
+    if (parts.length === 0) {
+      return;
+    }
+    onAnswer(parts.join(", "));
+  };
+  return (
+    <div
+      ref={trapRef}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="The assistant has a question"
+    >
+      <div className="w-full max-w-lg rounded-lg border border-obd-info/40 bg-obd-surface p-5 text-obd-text shadow-xl">
+        <h2 className="text-sm font-semibold text-obd-info">The assistant has a question</h2>
+        <p className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-obd-text">
+          {request.question}
+        </p>
+        {request.context !== null && request.context.length > 0 && (
+          <p className="mt-2 rounded bg-obd-inset px-2 py-1.5 text-[11px] leading-5 text-obd-subtle">
+            {request.context}
+          </p>
+        )}
+        {request.options.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {request.options.map((option) => {
+              const selected = picked.includes(option);
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => toggle(option)}
+                  className={`rounded-md border px-2.5 py-1 text-[11px] ${
+                    selected
+                      ? "border-obd-accent/60 bg-obd-accent/10 text-obd-accent"
+                      : "border-obd-line bg-obd-raised text-obd-body hover:bg-obd-raised-strong"
+                  }`}
+                >
+                  {option}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <textarea
+          autoFocus
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+          aria-label="Your answer"
+          placeholder="Type an answer…"
+          rows={3}
+          className="mt-3 w-full resize-none rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 text-[12px] text-obd-text outline-none focus:border-obd-accent/40"
+        />
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => onAnswer(null)}
+            className="rounded border border-obd-faint px-3 py-1.5 text-xs text-obd-body hover:bg-obd-raised"
+          >
+            Skip
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={picked.length === 0 && text.trim().length === 0}
+            className="rounded border border-obd-accent/60 px-3 py-1.5 text-xs text-obd-accent hover:bg-obd-accent/10 disabled:opacity-40"
+          >
+            Answer
           </button>
         </div>
       </div>

@@ -16,8 +16,8 @@ use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
     CheckpointSink, LspService, McpService, MemoryStore, OutsideGrant, ProjectAreas,
-    RegistryWorkflowEngine, SessionHistory, SessionReads, SubagentRuntime, TerminalService,
-    ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
+    QuestionPrompt, RegistryWorkflowEngine, SessionHistory, SessionReads, SubagentRuntime,
+    TerminalService, ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
     new_session_reads,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
@@ -234,6 +234,9 @@ pub struct AgentConfig {
     /// read from an earlier turn still satisfies the read-before-overwrite
     /// guard while the file is unchanged; `None` starts a fresh record.
     pub session_reads: Option<SessionReads>,
+    /// Where `ask_question` blocks for a human answer. `None` keeps the queued
+    /// file fallback used by the CLI and tests.
+    pub questions: Option<QuestionPrompt>,
 }
 
 impl Default for AgentConfig {
@@ -252,6 +255,7 @@ impl Default for AgentConfig {
             retain_recent_ratio: 0.16,
             compact_max_tokens: 16_384,
             session_reads: None,
+            questions: None,
         }
     }
 }
@@ -983,12 +987,16 @@ impl<T: HttpTransport> Agent<T> {
                 &self.tools,
             ))));
             context.set_outside_grants(self.outside_grants.clone());
-            context.with_session_reads(
+            let context = context.with_session_reads(
                 self.config
                     .session_reads
                     .clone()
                     .unwrap_or_else(new_session_reads),
-            )
+            );
+            match &self.config.questions {
+                Some(questions) => context.with_questions(questions.clone()),
+                None => context,
+            }
         });
 
         let step_budget = if self.config.max_steps == 0 {

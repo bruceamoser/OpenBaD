@@ -2,9 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   BookOpen,
+  ChevronDown,
+  ChevronRight,
   Database,
   FileCode2,
+  Folder,
   FolderGit2,
+  FolderOpen,
   FolderPlus,
   Gauge,
   KeyRound,
@@ -264,6 +268,23 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       : files.filter((path) => path.toLowerCase().includes(needle));
   }, [fileQuery, files]);
 
+  const fileTree = useMemo(() => buildFileTree(visibleFiles), [visibleFiles]);
+  // Folders start open; a search expands everything so matches are visible.
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  const filteringFiles = fileQuery.trim().length > 0;
+  const isCollapsed = (path: string) => !filteringFiles && collapsedFolders.has(path);
+  const toggleFolder = (path: string) => {
+    setCollapsedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
   const openFile = (path: string) => {
     onArtifact({ kind: "file", title: path.split("/").at(-1) ?? path, uri: path });
   };
@@ -486,21 +507,16 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               {visibleFiles.length} file{visibleFiles.length === 1 ? "" : "s"} · click
               to open · drop documents to upload
             </p>
-            {visibleFiles.map((path) => (
-              <div
-                key={path}
-                className="flex items-center gap-1 rounded-md pr-1 hover:bg-obd-raised"
-              >
-                <button
-                  type="button"
-                  onClick={() => openFile(path)}
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left font-mono text-[10px] text-obd-muted hover:text-obd-text"
-                >
-                  <FileCode2 size={12} className="shrink-0 text-obd-subtle" />
-                  <span className="truncate">{path}</span>
-                </button>
-                <RevealButton workspacePath={workspacePath} path={path} />
-              </div>
+            {fileTree.map((node) => (
+              <FileTreeRow
+                key={node.path}
+                node={node}
+                depth={0}
+                collapsed={isCollapsed}
+                onToggle={toggleFolder}
+                onOpen={openFile}
+                workspacePath={workspacePath}
+              />
             ))}
             {visibleFiles.length === 0 && (
               <p className="px-1 py-3 text-[11px] text-obd-subtle">
@@ -1066,3 +1082,114 @@ function formatClock(value: number): string {
   });
 }
 
+type FileTreeNode = {
+  /** Display name for this row and the workspace-relative path to open. */
+  name: string;
+  path: string;
+  children: FileTreeNode[];
+};
+
+/** Group workspace-relative paths into folders, sorted folders-first. */
+function buildFileTree(paths: readonly string[]): FileTreeNode[] {
+  const root: FileTreeNode = { name: "", path: "", children: [] };
+  for (const path of paths) {
+    const segments = path.split("/").filter((segment) => segment.length > 0);
+    let node = root;
+    segments.forEach((segment, index) => {
+      const nodePath = segments.slice(0, index + 1).join("/");
+      let child = node.children.find((item) => item.name === segment);
+      if (child === undefined) {
+        child = { name: segment, path: nodePath, children: [] };
+        node.children.push(child);
+      }
+      node = child;
+    });
+  }
+  const sort = (nodes: FileTreeNode[]) => {
+    nodes.sort((left, right) => {
+      const leftFolder = left.children.length > 0;
+      const rightFolder = right.children.length > 0;
+      if (leftFolder !== rightFolder) {
+        return leftFolder ? -1 : 1;
+      }
+      return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+    });
+    nodes.forEach((item) => sort(item.children));
+  };
+  sort(root.children);
+  return root.children;
+}
+
+function FileTreeRow({
+  node,
+  depth,
+  collapsed,
+  onToggle,
+  onOpen,
+  workspacePath,
+}: {
+  node: FileTreeNode;
+  depth: number;
+  collapsed: (path: string) => boolean;
+  onToggle: (path: string) => void;
+  onOpen: (path: string) => void;
+  workspacePath: string;
+}) {
+  const folder = node.children.length > 0;
+  const closed = folder && collapsed(node.path);
+  return (
+    <>
+      <div
+        className="flex items-center gap-1 rounded-md pr-1 hover:bg-obd-raised"
+        style={{ paddingLeft: `${depth * 12}px` }}
+      >
+        {folder ? (
+          <button
+            type="button"
+            onClick={() => onToggle(node.path)}
+            aria-expanded={!closed}
+            aria-label={`${closed ? "Expand" : "Collapse"} ${node.name}`}
+            className="flex min-w-0 flex-1 items-center gap-1.5 px-1 py-1 text-left text-[10px] text-obd-muted hover:text-obd-text"
+          >
+            {closed ? (
+              <ChevronRight size={11} className="shrink-0 text-obd-subtle" />
+            ) : (
+              <ChevronDown size={11} className="shrink-0 text-obd-subtle" />
+            )}
+            {closed ? (
+              <Folder size={12} className="shrink-0 text-obd-subtle" />
+            ) : (
+              <FolderOpen size={12} className="shrink-0 text-obd-subtle" />
+            )}
+            <span className="truncate">{node.name}</span>
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => onOpen(node.path)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 px-1 py-1 text-left font-mono text-[10px] text-obd-muted hover:text-obd-text"
+            >
+              <FileCode2 size={12} className="shrink-0 text-obd-subtle" />
+              <span className="truncate">{node.name}</span>
+            </button>
+            <RevealButton workspacePath={workspacePath} path={node.path} />
+          </>
+        )}
+      </div>
+      {folder &&
+        !closed &&
+        node.children.map((child) => (
+          <FileTreeRow
+            key={child.path}
+            node={child}
+            depth={depth + 1}
+            collapsed={collapsed}
+            onToggle={onToggle}
+            onOpen={onOpen}
+            workspacePath={workspacePath}
+          />
+        ))}
+    </>
+  );
+}
