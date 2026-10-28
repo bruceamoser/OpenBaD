@@ -3684,6 +3684,45 @@ mod tests {
     }
 
     #[test]
+    fn step_end_counts_toward_the_turn() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("steps", "/tmp/openbad-step-count")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("steps"))
+            .expect("session");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::TurnStart).with_turn(1),
+            )
+            .expect("turn start");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::StepStart)
+                    .with_turn(1)
+                    .with_step(1)
+                    .with_payload(json!({"step": 1})),
+            )
+            .expect("step start");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::StepEnd)
+                    .with_turn(1)
+                    .with_step(1)
+                    .with_payload(json!({"step": 1, "cancelled": false})),
+            )
+            .expect("step end");
+
+        let turns = store.load_turns(session).expect("turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].steps, 1);
+    }
+
+    #[test]
     fn subagent_lifecycle_is_recorded() {
         let store = Store::open_in_memory().expect("store");
         let workspace = store

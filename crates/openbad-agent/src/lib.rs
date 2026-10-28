@@ -10,7 +10,7 @@ use openbad_llm::DeepSeekClient;
 use openbad_llm::chat::{
     ChatMessage, ChatRole, FunctionCall, StreamEvent, ToolCall, ToolCallDelta,
 };
-use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
+use openbad_llm::pricing::{CostBreakdown, PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
@@ -19,6 +19,7 @@ use openbad_tools::{
     ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -155,9 +156,71 @@ impl Default for AgentConfig {
     }
 }
 
+/// Token and cost accounting for one step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct StepUsage {
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl StepUsage {
+    fn from_usage(usage: &Usage, cost: &CostBreakdown) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
+            cost_usd: cost.total_usd(),
+        }
+    }
+}
+
+/// The durable outcome of one step. Emitted exactly once per started step,
+/// including steps that were cancelled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StepOutcome {
+    pub step: u32,
+    pub finish_reason: Option<String>,
+    pub tool_calls: usize,
+    pub usage: StepUsage,
+    pub duration_ms: u64,
+    pub cancelled: bool,
+}
+
+/// A provider attempt that never settled as an assistant message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttemptFailure {
+    pub step: u32,
+    pub attempt: u32,
+    pub message: String,
+    pub cancelled: bool,
+}
+
 /// Receives live progress from the agent. Implementations must not block.
 pub trait AgentObserver: Send + Sync {
+    /// Called when a step begins. Defaults to [`Self::on_step`] so existing
+    /// observers keep working.
+    fn on_step_start(&self, step: u32) {
+        self.on_step(step);
+    }
     fn on_step(&self, _step: u32) {}
+    fn on_step_end(&self, _outcome: &StepOutcome) {}
+    fn on_attempt_failed(&self, _failure: &AttemptFailure) {}
+    /// Called before a request is sent, whenever the header differs from the
+    /// previous step's header.
+    fn on_request(
+        &self,
+        _step: u32,
+        _envelope: &RequestEnvelope,
+        _message_count: usize,
+        _estimated_input_tokens: usize,
+    ) {
+    }
     fn on_reasoning(&self, _step: u32, _text: &str) {}
     fn on_content(&self, _step: u32, _text: &str) {}
     fn on_tool_call(&self, _step: u32, _call: &ToolCall) {}
@@ -180,6 +243,34 @@ pub trait AgentObserver: Send + Sync {
 struct NoopObserver;
 
 impl AgentObserver for NoopObserver {}
+
+fn report_step_end(
+    observer: &dyn AgentObserver,
+    step: u32,
+    finish_reason: Option<String>,
+    tool_calls: usize,
+    usage: StepUsage,
+    started: std::time::Instant,
+    cancelled: bool,
+) {
+    observer.on_step_end(&StepOutcome {
+        step,
+        finish_reason,
+        tool_calls,
+        usage,
+        duration_ms: started.elapsed().as_millis() as u64,
+        cancelled,
+    });
+}
+
+fn report_attempt_failed(observer: &dyn AgentObserver, step: u32, error: &AgentError) {
+    observer.on_attempt_failed(&AttemptFailure {
+        step,
+        attempt: 1,
+        message: error.to_string(),
+        cancelled: matches!(error, AgentError::Cancelled),
+    });
+}
 
 /// A checkpoint created by compacting an older span of the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,13 +655,15 @@ impl<T: HttpTransport> Agent<T> {
             self.config.max_steps
         };
         let mut visible_text = String::new();
+        let mut last_header: Option<RequestEnvelope> = None;
         for step in 1..=step_budget {
             context.set_turn(step);
             if observer.is_cancelled() {
                 self.close_terminals().await;
                 return Err(AgentError::Cancelled);
             }
-            observer.on_step(step);
+            let step_started = std::time::Instant::now();
+            observer.on_step_start(step);
             if let Some(steering) = &self.steering {
                 for message in steering.drain() {
                     let message = ChatMessage::user(message);
@@ -707,6 +800,15 @@ impl<T: HttpTransport> Agent<T> {
             }
             let available = context_window.saturating_sub(input_tokens + safety);
             if available == 0 {
+                report_step_end(
+                    observer,
+                    step,
+                    None,
+                    0,
+                    StepUsage::default(),
+                    step_started,
+                    false,
+                );
                 return Err(AgentError::ContextOverflow {
                     estimated_input: input_tokens,
                     context_window: self.config.context_window,
@@ -717,6 +819,7 @@ impl<T: HttpTransport> Agent<T> {
                 .max_output_tokens
                 .min(u32::try_from(available).unwrap_or(u32::MAX))
                 .max(1);
+            let message_count = request_messages.len();
             let request = self.client.build_request(
                 request_messages,
                 Some(tool_schemas.clone()),
@@ -737,25 +840,63 @@ impl<T: HttpTransport> Agent<T> {
                 )),
                 max_output_tokens,
             };
-            let frozen = request.freeze(envelope)?;
+            let header_changed = last_header.as_ref() != Some(&envelope);
+            let header = envelope.clone();
+            let frozen = match request.freeze(envelope) {
+                Ok(frozen) => frozen,
+                Err(error) => {
+                    report_step_end(
+                        observer,
+                        step,
+                        None,
+                        0,
+                        StepUsage::default(),
+                        step_started,
+                        false,
+                    );
+                    return Err(error.into());
+                }
+            };
+            if header_changed {
+                observer.on_request(step, &header, message_count, input_tokens);
+                last_header = Some(header);
+            }
 
-            let (mut assistant, finish_reason, response_usage) = if self.config.stream {
-                self.stream_step(frozen, observer, step).await?
-            } else {
-                let response = self.client.complete(frozen).await?;
-                emit_full_message(observer, step, &response.message);
-                (response.message, response.finish_reason, response.usage)
+            let step_result: Result<(ChatMessage, Option<String>, Usage), AgentError> =
+                if self.config.stream {
+                    self.stream_step(frozen, observer, step).await
+                } else {
+                    match self.client.complete(frozen).await {
+                        Ok(response) => {
+                            emit_full_message(observer, step, &response.message);
+                            Ok((response.message, response.finish_reason, response.usage))
+                        }
+                        Err(error) => Err(AgentError::Provider(error)),
+                    }
+                };
+            let (mut assistant, finish_reason, response_usage) = match step_result {
+                Ok(settled) => settled,
+                Err(error) => {
+                    report_attempt_failed(observer, step, &error);
+                    report_step_end(
+                        observer,
+                        step,
+                        None,
+                        0,
+                        StepUsage::default(),
+                        step_started,
+                        matches!(error, AgentError::Cancelled),
+                    );
+                    return Err(error);
+                }
             };
 
-            if let Some(pricing) = deepseek_pricing(self.client.model()) {
-                usage_totals.record(
-                    &response_usage,
-                    &pricing.cost(&response_usage, peak_pricing),
-                );
-            } else {
-                usage_totals.record(&response_usage, &Default::default());
-            }
+            let step_cost = deepseek_pricing(self.client.model())
+                .map(|pricing| pricing.cost(&response_usage, peak_pricing))
+                .unwrap_or_default();
+            usage_totals.record(&response_usage, &step_cost);
             observer.on_usage(&usage_totals);
+            let step_usage = StepUsage::from_usage(&response_usage, &step_cost);
 
             let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
             let text = assistant.content.clone().unwrap_or_default();
@@ -791,6 +932,15 @@ impl<T: HttpTransport> Agent<T> {
                     .map(|steering| steering.drain())
                     .unwrap_or_default();
                 if !pending.is_empty() {
+                    report_step_end(
+                        observer,
+                        step,
+                        finish_reason,
+                        tool_calls.len(),
+                        step_usage,
+                        step_started,
+                        false,
+                    );
                     if step == step_budget {
                         return Err(AgentError::MaxSteps(step_budget));
                     }
@@ -801,6 +951,15 @@ impl<T: HttpTransport> Agent<T> {
                     }
                     continue;
                 }
+                report_step_end(
+                    observer,
+                    step,
+                    finish_reason,
+                    tool_calls.len(),
+                    step_usage,
+                    step_started,
+                    false,
+                );
                 return Ok(AgentRun {
                     new_messages,
                     text: visible_text,
@@ -814,6 +973,15 @@ impl<T: HttpTransport> Agent<T> {
             while call_index < tool_calls.len() {
                 if observer.is_cancelled() {
                     self.close_terminals().await;
+                    report_step_end(
+                        observer,
+                        step,
+                        finish_reason,
+                        tool_calls.len(),
+                        step_usage,
+                        step_started,
+                        true,
+                    );
                     return Err(AgentError::Cancelled);
                 }
                 let mut batch_end = call_index + 1;
@@ -857,6 +1025,15 @@ impl<T: HttpTransport> Agent<T> {
                 call_index = batch_end;
             }
 
+            report_step_end(
+                observer,
+                step,
+                finish_reason,
+                tool_calls.len(),
+                step_usage,
+                step_started,
+                false,
+            );
             if step == step_budget {
                 return Err(AgentError::MaxSteps(step_budget));
             }
@@ -2748,5 +2925,198 @@ mod tests {
             "key=[redacted] and also [redacted]"
         );
         assert_eq!(redact_secrets(content, &["short".to_owned()]), content);
+    }
+
+    #[derive(Default)]
+    struct LifecycleObserver {
+        events: Mutex<Vec<String>>,
+        cancelled: AtomicBool,
+        cancel_on_step: Option<u32>,
+    }
+
+    impl AgentObserver for LifecycleObserver {
+        fn on_step_start(&self, step: u32) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("start:{step}"));
+            if self.cancel_on_step == Some(step) {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_step_end(&self, outcome: &StepOutcome) {
+            self.events.lock().expect("events").push(format!(
+                "end:{}:{}:{}",
+                outcome.step, outcome.tool_calls, outcome.cancelled
+            ));
+        }
+
+        fn on_attempt_failed(&self, failure: &AttemptFailure) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("attempt:{}:{}", failure.step, failure.cancelled));
+        }
+
+        fn on_request(
+            &self,
+            step: u32,
+            envelope: &RequestEnvelope,
+            message_count: usize,
+            _estimated_input_tokens: usize,
+        ) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("request:{step}:{message_count}:{}", envelope.model));
+        }
+
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    fn lifecycle_agent(
+        directory: &std::path::Path,
+        responses: Vec<HttpResponse>,
+    ) -> Agent<MockTransport> {
+        let transport = MockTransport {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory)),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_describe_each_step() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello from disk").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"The file says hello."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"#,
+                ),
+            ],
+        );
+        let observer = LifecycleObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await
+            .expect("run");
+
+        assert_eq!(run.steps, 2);
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec![
+                "start:1".to_owned(),
+                "request:1:2:deepseek-flash".to_owned(),
+                "end:1:1:false".to_owned(),
+                "start:2".to_owned(),
+                "end:2:0:false".to_owned(),
+            ],
+            "an unchanged request header is recorded once"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_attempt_is_recorded_without_an_assistant_message() {
+        let directory = tempdir().expect("tempdir");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![HttpResponse {
+                status: 400,
+                body: br#"{"error":"bad request"}"#.to_vec(),
+            }],
+        );
+        let observer = LifecycleObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await;
+
+        assert!(run.is_err());
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec![
+                "start:1".to_owned(),
+                "request:1:2:deepseek-flash".to_owned(),
+                "attempt:1:false".to_owned(),
+                "end:1:0:false".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_before_tools_closes_the_step() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )],
+        );
+        let observer = LifecycleObserver {
+            cancel_on_step: Some(1),
+            ..LifecycleObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec![
+                "start:1".to_owned(),
+                "request:1:2:deepseek-flash".to_owned(),
+                "end:1:1:true".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_closes_the_step() {
+        let directory = tempdir().expect("tempdir");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                context_window: 1,
+                ..AgentConfig::default()
+            },
+        );
+        let observer = LifecycleObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::ContextOverflow { .. })));
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec!["start:1".to_owned(), "end:1:0:false".to_owned()]
+        );
     }
 }

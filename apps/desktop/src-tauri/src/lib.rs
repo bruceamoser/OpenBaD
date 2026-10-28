@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use openbad_agent::{AgentConfig, AgentError, AgentObserver, SteeringInbox, default_agent};
+use openbad_agent::{
+    AgentConfig, AgentError, AgentObserver, AttemptFailure, SteeringInbox, StepOutcome,
+    default_agent,
+};
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
 #[cfg(feature = "keyring")]
@@ -19,7 +22,7 @@ use openbad_governance::secrets::KeychainSecretStore;
 #[cfg(not(feature = "keyring"))]
 use openbad_governance::secrets::MemorySecretStore;
 use openbad_governance::secrets::{Secret, SecretStore};
-use openbad_harness::ReasoningEffort;
+use openbad_harness::{ReasoningEffort, RequestEnvelope};
 use openbad_index::{IndexReport, WorkspaceIndexer};
 use openbad_llm::chat::{ChatMessage, ChatRole, ToolCall};
 use openbad_llm::{DeepSeekClient, FLASH_MODEL, ReqwestTransport, UsageTotals};
@@ -1511,11 +1514,77 @@ struct ChannelObserver {
     channel: Channel<AgentEvent>,
     cancel: Arc<AtomicBool>,
     compaction_reported: AtomicBool,
+    journal: Option<RunJournal>,
+}
+
+/// Durable lifecycle recording for the run that owns an observer. Live events
+/// remain ephemeral; these are the events that must survive a restart.
+struct RunJournal {
+    store: Arc<Mutex<Store>>,
+    session: SessionId,
+    turn: u32,
+}
+
+impl ChannelObserver {
+    fn record(&self, kind: SessionEventKind, step: Option<u32>, payload: Value) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let Ok(store) = journal.store.lock() else {
+            return;
+        };
+        let mut event = NewEvent::new(kind)
+            .with_turn(journal.turn)
+            .with_payload(payload);
+        if let Some(step) = step {
+            event = event.with_step(step);
+        }
+        let _ = store.append_event(journal.session, event);
+    }
 }
 
 impl AgentObserver for ChannelObserver {
-    fn on_step(&self, step: u32) {
+    fn on_step_start(&self, step: u32) {
         let _ = self.channel.send(AgentEvent::Step { step });
+        self.record(
+            SessionEventKind::StepStart,
+            Some(step),
+            json!({ "step": step }),
+        );
+    }
+
+    fn on_step_end(&self, outcome: &StepOutcome) {
+        let payload =
+            serde_json::to_value(outcome).unwrap_or_else(|_| json!({ "step": outcome.step }));
+        self.record(SessionEventKind::StepEnd, Some(outcome.step), payload);
+    }
+
+    fn on_attempt_failed(&self, failure: &AttemptFailure) {
+        let payload =
+            serde_json::to_value(failure).unwrap_or_else(|_| json!({ "step": failure.step }));
+        self.record(
+            SessionEventKind::AssistantAttempt,
+            Some(failure.step),
+            payload,
+        );
+    }
+
+    fn on_request(
+        &self,
+        step: u32,
+        envelope: &RequestEnvelope,
+        message_count: usize,
+        estimated_input_tokens: usize,
+    ) {
+        let mut payload = serde_json::to_value(envelope).unwrap_or_else(|_| json!({}));
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("messages".to_owned(), json!(message_count));
+            object.insert(
+                "estimated_input_tokens".to_owned(),
+                json!(estimated_input_tokens),
+            );
+        }
+        self.record(SessionEventKind::RequestHeader, Some(step), payload);
     }
 
     fn on_reasoning(&self, step: u32, text: &str) {
@@ -4481,6 +4550,11 @@ async fn chat(
         channel: on_event,
         cancel,
         compaction_reported: AtomicBool::new(false),
+        journal: Some(RunJournal {
+            store: Arc::clone(&state.store),
+            session,
+            turn,
+        }),
     };
     let outcome = agent.run_with_observer(history, &observer).await;
     run_guard.finish_steering();
