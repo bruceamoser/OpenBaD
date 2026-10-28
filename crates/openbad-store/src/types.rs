@@ -182,6 +182,8 @@ pub struct SessionSummary {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_turn: u32,
+    /// Set when a turn finished while the user was not looking at the session.
+    pub unread: bool,
     pub access_mode: String,
     /// Set when this session was forked; the sequence it branched before.
     pub forked_from_seq: Option<u64>,
