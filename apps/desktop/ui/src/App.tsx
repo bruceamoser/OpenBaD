@@ -348,6 +348,8 @@ export default function App() {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read");
   const [chatMode, setChatMode] = useState<ChatMode>("agent");
   const [toast, setToast] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [model, setModel] = useState(preferences.model);
   const [thinking, setThinking] = useState(preferences.thinking);
   const [reasoningEffort, setReasoningEffort] = useState(preferences.reasoningEffort);
@@ -571,6 +573,7 @@ export default function App() {
       void fetchApiKeyStatus()
         .then(setApiKeyStatus)
         .catch(() => setApiKeyStatus(false));
+      setAnnouncement("Turn finished");
       if (!document.hasFocus()) {
         setToast("Turn finished");
       }
@@ -1334,6 +1337,7 @@ export default function App() {
     runsRef.current.set(runKey, run);
     visibleRunRef.current = runKey;
     setEntries([...run.entries]);
+    setAnnouncement("Message sent");
 
     // Streaming deltas are frame-batched so a long answer repaints at most once
     // per frame instead of once per token.
@@ -1433,11 +1437,13 @@ export default function App() {
               detail: event.detail,
             };
             current.pendingApproval = request;
+            setAnnouncement(`Approval required for ${event.tool}`);
             if (visibleRunRef.current === runKey) {
               setPendingApproval(request);
             }
           }
           if (event.type === "approval_decision") {
+            setAnnouncement(event.allowed ? "Approval granted" : "Approval denied");
             current.pendingApproval = null;
             if (visibleRunRef.current === runKey) {
               setPendingApproval(null);
@@ -1514,6 +1520,7 @@ export default function App() {
         setEntries([...run.entries]);
         setTotalDurationMs(run.totalDurationMs);
       }
+      setAnnouncement("Turn finished");
       if (!document.hasFocus()) {
         setToast("Turn finished");
       }
@@ -1526,6 +1533,7 @@ export default function App() {
       window.setTimeout(() => setProjectRevision((value) => value + 1), 1_500);
     } catch (cause) {
       flushDeltas();
+      setAnnouncement("Turn failed");
       const message = describeError(cause);
       run.error = message;
       run.entries = run.entries.map((entry) =>
@@ -1857,6 +1865,9 @@ export default function App() {
       } else if (command && event.key.toLowerCase() === "b") {
         event.preventDefault();
         setSidebarOpen((open) => !open);
+      } else if (event.altKey && event.key.toLowerCase() === "t") {
+        event.preventDefault();
+        setTranscriptOpen(true);
       }
     };
     window.addEventListener("keydown", handleShortcut);
@@ -1938,6 +1949,11 @@ export default function App() {
           shortcut: "Ctrl B",
           checked: sidebarOpen,
           onSelect: () => setSidebarOpen((open) => !open),
+        },
+        {
+          label: "Read Transcript",
+          shortcut: "Alt T",
+          onSelect: () => setTranscriptOpen(true),
         },
         {
           label: "Toggle Project Panel",
@@ -2087,7 +2103,10 @@ export default function App() {
   );
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-[#151c25] text-slate-100">
+    <div className="flex h-screen flex-col overflow-hidden bg-[var(--obd-bg)] text-[var(--obd-text)]">
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
       <AppMenuBar menus={menus} />
       <main className="flex min-h-0 flex-1 overflow-hidden bg-[#151c25] text-slate-100">
       {sidebarOpen && (
@@ -2617,6 +2636,10 @@ export default function App() {
           onApprove={() => void approveToolAccess()}
           onDeny={() => setToolApproval(null)}
         />
+      )}
+
+      {transcriptOpen && (
+        <TranscriptDialog entries={entries} onClose={() => setTranscriptOpen(false)} />
       )}
 
       {toast !== null && (
@@ -3418,17 +3441,20 @@ const MessageCard = memo(function MessageCard({
 });
 
 function ShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
   const shortcuts = [
     ["Command menu", "Ctrl K"],
     ["New session", "Ctrl N"],
     ["Toggle sidebar", "Ctrl B"],
     ["Settings", "Ctrl ,"],
+    ["Read transcript", "Alt T"],
     ["Send message", "Enter"],
     ["New line", "Shift Enter"],
     ["Close menu or dialog", "Esc"],
   ];
   return (
     <div
+      ref={trapRef}
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"
@@ -4127,6 +4153,125 @@ function toolApprovalFromMetadata(metadata: unknown): ToolApprovalRequest | null
   return { tool: record.tool, risk: record.risk, reason: record.reason };
 }
 
+function useFocusTrap<T extends HTMLElement>(active: boolean) {
+  const ref = useRef<T | null>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!active || node === null) {
+      return;
+    }
+    const previous = document.activeElement as HTMLElement | null;
+    const focusable = () =>
+      Array.from(
+        node.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute("disabled"));
+    focusable()[0]?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") {
+        return;
+      }
+      const items = focusable();
+      if (items.length === 0) {
+        return;
+      }
+      const index = items.indexOf(document.activeElement as HTMLElement);
+      if (event.shiftKey && index <= 0) {
+        event.preventDefault();
+        items[items.length - 1].focus();
+      } else if (!event.shiftKey && index === items.length - 1) {
+        event.preventDefault();
+        items[0].focus();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => {
+      node.removeEventListener("keydown", onKeyDown);
+      previous?.focus();
+    };
+  }, [active]);
+  return ref;
+}
+
+function buildTranscript(entries: ChatEntry[]): string {
+  return entries
+    .map((entry) => {
+      const lines = [
+        entry.role === "user" ? "You:" : "Assistant:",
+        entry.text.length > 0 ? entry.text : "(no text)",
+      ];
+      if (entry.reasoning !== undefined && entry.reasoning.length > 0) {
+        lines.push(`Reasoning: ${entry.reasoning}`);
+      }
+      for (const tool of entry.toolCalls ?? []) {
+        lines.push(
+          `Tool ${tool.name} [${tool.status}${tool.isError === true ? ", failed" : ""}]: ${
+            tool.result ?? tool.arguments
+          }`,
+        );
+      }
+      if (entry.todos !== undefined && entry.todos.length > 0) {
+        lines.push(
+          `Todos: ${entry.todos.map((todo) => `${todo.state} ${todo.text}`).join("; ")}`,
+        );
+      }
+      if (entry.usage !== undefined) {
+        lines.push(
+          `Usage: ${entry.usage.input_tokens} in, ${entry.usage.output_tokens} out, $${entry.usage.cost_usd.toFixed(4)}`,
+        );
+      }
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
+
+function TranscriptDialog({
+  entries,
+  onClose,
+}: {
+  entries: ChatEntry[];
+  onClose: () => void;
+}) {
+  const ref = useFocusTrap<HTMLDivElement>(true);
+  const text = useMemo(() => buildTranscript(entries), [entries]);
+  return (
+    <div
+      ref={ref}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Transcript"
+    >
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border border-[var(--obd-border)] bg-[var(--obd-surface)] p-5 text-[var(--obd-text)] shadow-2xl">
+        <div className="flex items-center justify-between">
+          <h2 className="text-[14px] font-medium">Transcript</h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void navigator.clipboard.writeText(text)}
+              className="rounded border border-[var(--obd-border)] px-2 py-1 text-[11px] text-[var(--obd-muted)] hover:text-[var(--obd-text)]"
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close transcript"
+              className="rounded p-1 text-[var(--obd-muted)] hover:text-[var(--obd-text)]"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        </div>
+        <pre className="mt-3 flex-1 overflow-auto whitespace-pre-wrap rounded bg-black/20 p-3 font-mono text-[11px] leading-5">
+          {text}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
 function ApprovalRequestDialog({
   approval,
   onDecide,
@@ -4136,17 +4281,19 @@ function ApprovalRequestDialog({
     decision: "allow_once" | "allow_session" | "allow_workspace" | "deny",
   ) => void;
 }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(approval !== null);
   if (approval === null) {
     return null;
   }
   return (
     <div
+      ref={trapRef}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Approval required"
     >
-      <div className="w-full max-w-lg rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-xl">
+      <div className="w-full max-w-lg rounded-lg border border-amber-500/40 bg-[var(--obd-surface)] p-5 text-[var(--obd-text)] shadow-xl">
         <h2 className="text-sm font-semibold text-amber-200">Approval required</h2>
         <p className="mt-1 text-xs text-slate-400">
           <span className="font-mono text-slate-200">{approval.tool}</span>
