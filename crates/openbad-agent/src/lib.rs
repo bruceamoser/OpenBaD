@@ -618,6 +618,7 @@ impl<T: HttpTransport> Agent<T> {
                         // sessions from older builds). Summarize the old spans
                         // in window-sized chunks, each merging the previous
                         // checkpoint, until the whole range is covered.
+                        let original_messages = messages.clone();
                         let mut remaining = target_end;
                         let mut checkpoint_text = None;
                         let mut first_chunk = true;
@@ -671,26 +672,27 @@ impl<T: HttpTransport> Agent<T> {
                             }
                         }
                         let shadowed = target_end - remaining;
-                        if let Some(checkpoint_text) = checkpoint_text {
-                            let after_bytes = messages.iter().map(message_bytes).sum::<usize>();
-                            // A checkpoint that does not shrink the prompt is
-                            // not worth a cache break.
-                            if shadowed > 0 && after_bytes < before_bytes {
-                                observer.on_compaction(before_bytes, after_bytes);
-                                input_tokens =
-                                    request_tokens(&messages, tool_tokens) + catalog_tokens;
-                                compaction = Some(CompactionRecord {
-                                    summary: checkpoint_text,
-                                    shadowed_messages: shadowed,
-                                    new_messages_before: new_messages.len(),
-                                    before_bytes,
-                                    after_bytes,
-                                });
-                                if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
-                                    eprintln!(
-                                        "[agent] compacted {shadowed} messages ({before_bytes} -> {after_bytes} bytes)"
-                                    );
-                                }
+                        let after_bytes = messages.iter().map(message_bytes).sum::<usize>();
+                        // A checkpoint that does not shrink the prompt is not
+                        // worth a cache break. Restore the original history so
+                        // the request and what gets persisted stay identical.
+                        if shadowed == 0 || checkpoint_text.is_none() || after_bytes >= before_bytes
+                        {
+                            messages = original_messages;
+                        } else if let Some(checkpoint_text) = checkpoint_text {
+                            observer.on_compaction(before_bytes, after_bytes);
+                            input_tokens = request_tokens(&messages, tool_tokens) + catalog_tokens;
+                            compaction = Some(CompactionRecord {
+                                summary: checkpoint_text,
+                                shadowed_messages: shadowed,
+                                new_messages_before: new_messages.len(),
+                                before_bytes,
+                                after_bytes,
+                            });
+                            if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                                eprintln!(
+                                    "[agent] compacted {shadowed} messages ({before_bytes} -> {after_bytes} bytes)"
+                                );
                             }
                         }
                     }
