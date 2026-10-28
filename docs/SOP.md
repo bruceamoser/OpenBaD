@@ -74,7 +74,14 @@ Applies to all changes in `/home/bmoser/repos/OpenBaD`.
 5. Verify the release through the updater, not by deploying locally.
    `openbad-update` reads `repos/<repo>/releases/latest` and installs the
    platform asset, so only a published release is testable:
-   - Tag `vX.Y.Z` and push the tag. CI builds the Linux, macOS, and Windows assets.
+   - The version bump triggers the **Bundles** workflow on `main`, which builds
+     the Linux, macOS, and Windows bundles for that commit. It runs before you
+     tag, so the slow compile is off the critical path — a build on a tag always
+     starts cold, because GitHub does not share action caches across refs.
+   - Tag `vX.Y.Z` and push the tag. The **Release** workflow attaches the
+     bundles already built for that commit and publishes them, which takes about
+     two minutes. If it reports no Bundles run for the commit, build one first:
+     `gh workflow run bundles.yml --ref main`, then re-run the release job.
    - Verify the GitHub release exists with all expected assets and `SHA256SUMS`.
    - On a machine running the previous version, use the in-app updater to move
      to `X.Y.Z` and confirm it checks, downloads, installs, and restarts.

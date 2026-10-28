@@ -47,5 +47,8 @@ opt-level = 2
 [profile.release]
 opt-level = 3
 lto = "thin"
-codegen-units = 1
+# One codegen unit per crate serializes codegen and roughly doubles a cold
+# release build. 16 is already the default under thin LTO and the difference in
+# the shipped binary is noise for a desktop app.
+codegen-units = 16
 strip = "symbols"
