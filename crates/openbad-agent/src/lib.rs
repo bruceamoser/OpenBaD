@@ -74,16 +74,38 @@ const CHECKPOINT_PREAMBLE: &str = "This is an automatically generated checkpoint
 const CHECKPOINT_OPEN: &str = "<compacted-summary>";
 const CHECKPOINT_CLOSE: &str = "</compacted-summary>";
 
-/// Messages the human injects into a running turn. They are delivered before
-/// the next provider request, so they can redirect the agent without starting a
-/// second turn.
-#[derive(Default)]
-pub struct SteeringInbox {
-    active: AtomicBool,
-    pending: Mutex<VecDeque<String>>,
+/// A queued unit of work for a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxKind {
+    /// A user prompt that starts a new turn after the current one settles.
+    Prompt,
+    /// A user message that redirects the current turn at the next request.
+    Steering,
+    /// A runtime notice (for example, a settled subagent) consumed like steering.
+    Notice,
 }
 
-impl SteeringInbox {
+/// One inbox entry. The id is stable so a UI can reconcile its optimistic echo
+/// with the entry the agent actually consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxEntry {
+    pub id: Uuid,
+    pub kind: InboxKind,
+    pub text: String,
+}
+
+/// A run's single queue for prompts, steering, and notices.
+///
+/// Prompts are claimed one per turn; steering and notices are claimed before
+/// the next provider request so they redirect the running turn without starting
+/// a second one.
+#[derive(Default)]
+pub struct Inbox {
+    active: AtomicBool,
+    pending: Mutex<VecDeque<InboxEntry>>,
+}
+
+impl Inbox {
     pub fn begin(&self) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
@@ -100,22 +122,86 @@ impl SteeringInbox {
         self.active.load(Ordering::SeqCst)
     }
 
-    pub fn push(&self, message: String) -> bool {
+    pub fn push_prompt(&self, text: impl Into<String>) -> bool {
+        self.push(InboxKind::Prompt, text)
+    }
+
+    pub fn push_steering(&self, text: impl Into<String>) -> bool {
+        self.push(InboxKind::Steering, text)
+    }
+
+    pub fn push_notice(&self, text: impl Into<String>) -> bool {
+        self.push(InboxKind::Notice, text)
+    }
+
+    fn push(&self, kind: InboxKind, text: impl Into<String>) -> bool {
         if !self.is_active() {
             return false;
         }
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
-        pending.push_back(message);
+        pending.push_back(InboxEntry {
+            id: Uuid::now_v7(),
+            kind,
+            text: text.into(),
+        });
         true
     }
 
-    fn drain(&self) -> Vec<String> {
+    /// Claims every steering message and notice in insertion order. Prompts
+    /// stay queued for the next turn.
+    pub fn claim_steering(&self) -> Vec<InboxEntry> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return Vec::new();
+        };
+        let mut claimed = Vec::new();
+        pending.retain(|entry| {
+            if entry.kind == InboxKind::Prompt {
+                true
+            } else {
+                claimed.push(entry.clone());
+                false
+            }
+        });
+        claimed
+    }
+
+    /// Claims the next prompt, leaving steering and notices in place.
+    pub fn claim_prompt(&self) -> Option<InboxEntry> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return None;
+        };
+        let index = pending
+            .iter()
+            .position(|entry| entry.kind == InboxKind::Prompt)?;
+        pending.remove(index)
+    }
+
+    /// Claims the next entry of any kind, in insertion order.
+    pub fn claim_next(&self) -> Option<InboxEntry> {
+        self.pending.lock().ok()?.pop_front()
+    }
+
+    /// Drops every pending entry. Cancellation closes the queue with this.
+    pub fn discard_pending(&self) -> Vec<InboxEntry> {
         self.pending
             .lock()
             .map(|mut pending| pending.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pending
+            .lock()
+            .map(|pending| pending.len())
+            .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -392,7 +478,7 @@ pub struct Agent<T: HttpTransport> {
     mcp: Option<Arc<dyn McpService>>,
     terminal: Option<Arc<dyn TerminalService>>,
     outside_grants: Vec<OutsideGrant>,
-    steering: Option<Arc<SteeringInbox>>,
+    inbox: Option<Arc<Inbox>>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -419,7 +505,7 @@ impl<T: HttpTransport> Agent<T> {
             mcp: None,
             terminal: None,
             outside_grants: Vec::new(),
-            steering: None,
+            inbox: None,
             redactions: Vec::new(),
             config,
         }
@@ -487,8 +573,8 @@ impl<T: HttpTransport> Agent<T> {
     }
 
     #[must_use]
-    pub fn with_steering(mut self, steering: Arc<SteeringInbox>) -> Self {
-        self.steering = Some(steering);
+    pub fn with_inbox(mut self, inbox: Arc<Inbox>) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 
@@ -722,9 +808,9 @@ impl<T: HttpTransport> Agent<T> {
             let step_started = std::time::Instant::now();
             observer.on_step_start(step);
             let step_messages_start = new_messages.len();
-            if let Some(steering) = &self.steering {
-                for message in steering.drain() {
-                    let message = ChatMessage::user(message);
+            if let Some(inbox) = &self.inbox {
+                for entry in inbox.claim_steering() {
+                    let message = ChatMessage::user(entry.text);
                     messages.push(message.clone());
                     new_messages.push(message);
                 }
@@ -1026,9 +1112,9 @@ impl<T: HttpTransport> Agent<T> {
             if tool_calls.is_empty() {
                 settle_step(observer, step, false, &new_messages[step_messages_start..]);
                 let pending = self
-                    .steering
+                    .inbox
                     .as_ref()
-                    .map(|steering| steering.drain())
+                    .map(|inbox| inbox.claim_steering())
                     .unwrap_or_default();
                 if !pending.is_empty() {
                     report_step_end(
@@ -1043,8 +1129,8 @@ impl<T: HttpTransport> Agent<T> {
                     if step == step_budget {
                         return Err(AgentError::MaxSteps(step_budget));
                     }
-                    for message in pending {
-                        let message = ChatMessage::user(message);
+                    for entry in pending {
+                        let message = ChatMessage::user(entry.text);
                         messages.push(message.clone());
                         new_messages.push(message);
                     }
@@ -2569,12 +2655,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inbox_orders_prompts_and_steering_separately() {
+        let inbox = Inbox::default();
+        inbox.begin();
+        assert!(inbox.push_prompt("first"));
+        assert!(inbox.push_steering("steer one"));
+        assert!(inbox.push_prompt("second"));
+        assert!(inbox.push_steering("steer two"));
+        assert!(inbox.push_notice("notice"));
+
+        let steering = inbox.claim_steering();
+        assert_eq!(
+            steering
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["steer one", "steer two", "notice"],
+            "steering and notices are claimed in insertion order"
+        );
+        assert_eq!(
+            inbox.claim_prompt().map(|entry| entry.text),
+            Some("first".to_owned())
+        );
+        assert_eq!(
+            inbox.claim_prompt().map(|entry| entry.text),
+            Some("second".to_owned()),
+            "prompts keep their own FIFO order"
+        );
+        assert!(inbox.claim_prompt().is_none());
+        assert!(inbox.is_empty());
+    }
+
+    #[test]
+    fn inbox_rejects_entries_when_inactive_and_discards_on_demand() {
+        let inbox = Inbox::default();
+        assert!(!inbox.push_prompt("ignored"), "inactive inbox rejects work");
+        inbox.begin();
+        assert!(inbox.push_steering("one"));
+        assert!(inbox.push_prompt("two"));
+        assert_eq!(inbox.len(), 2);
+
+        let discarded = inbox.discard_pending();
+        assert_eq!(discarded.len(), 2);
+        assert_eq!(discarded[0].kind, InboxKind::Steering);
+        assert_eq!(discarded[1].kind, InboxKind::Prompt);
+        assert!(inbox.is_empty());
+
+        inbox.end();
+        assert!(!inbox.push_steering("closed"));
+    }
+
     struct SteeringTransport {
         responses: Mutex<VecDeque<HttpResponse>>,
         requests: Mutex<Vec<HttpRequest>>,
-        steering: Arc<SteeringInbox>,
+        inbox: Arc<Inbox>,
     }
-
     #[async_trait]
     impl HttpTransport for SteeringTransport {
         async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
@@ -2585,8 +2721,8 @@ mod tests {
             };
             if is_first {
                 assert!(
-                    self.steering
-                        .push("Please mention the second answer.".to_owned())
+                    self.inbox
+                        .push_steering("Please mention the second answer.".to_owned())
                 );
             }
             self.responses
@@ -2604,8 +2740,8 @@ mod tests {
     #[tokio::test]
     async fn steering_redirects_a_running_turn() {
         let directory = tempdir().expect("tempdir");
-        let steering = Arc::new(SteeringInbox::default());
-        steering.begin();
+        let inbox = Arc::new(Inbox::default());
+        inbox.begin();
         let transport = SteeringTransport {
             responses: Mutex::new(VecDeque::from([
                 response(
@@ -2616,7 +2752,7 @@ mod tests {
                 ),
             ])),
             requests: Mutex::new(Vec::new()),
-            steering: Arc::clone(&steering),
+            inbox: Arc::clone(&inbox),
         };
         let client = DeepSeekClient::new(transport, "sk-test");
         let agent = default_agent(
@@ -2627,12 +2763,12 @@ mod tests {
                 ..AgentConfig::default()
             },
         )
-        .with_steering(Arc::clone(&steering));
+        .with_inbox(Arc::clone(&inbox));
         let run = agent
             .run(vec![ChatMessage::user("start")])
             .await
             .expect("run");
-        steering.end();
+        inbox.end();
         assert_eq!(run.steps, 2);
         assert_eq!(run.text, "First answer.\n\nSecond answer.");
         assert!(run.new_messages.iter().any(|message| {

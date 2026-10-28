@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use openbad_agent::{
-    AgentConfig, AgentError, AgentObserver, AttemptFailure, CompactionRecord, SteeringInbox,
-    StepOutcome, StepSettlement, default_agent,
+    AgentConfig, AgentError, AgentObserver, AttemptFailure, CompactionRecord, Inbox, StepOutcome,
+    StepSettlement, default_agent,
 };
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
@@ -82,7 +82,7 @@ fn subagent_retention_ms() -> i64 {
 pub struct AppState {
     store: Arc<Mutex<Store>>,
     secrets: Box<dyn SecretStore>,
-    /// One cancellation token and steering inbox per UI-generated run id. The
+    /// One cancellation token and inbox per UI-generated run id. The
     /// registry also enforces one running turn per project.
     runs: Arc<Mutex<RunRegistry>>,
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -101,14 +101,14 @@ struct RunRegistry {
 struct RunEntry {
     workspace_path: PathBuf,
     cancel: Arc<AtomicBool>,
-    steering: Arc<SteeringInbox>,
+    inbox: Arc<Inbox>,
 }
 
 struct RunGuard {
     registry: Arc<Mutex<RunRegistry>>,
     run_id: String,
     cancel: Arc<AtomicBool>,
-    steering: Arc<SteeringInbox>,
+    inbox: Arc<Inbox>,
 }
 
 impl RunGuard {
@@ -116,20 +116,20 @@ impl RunGuard {
         Arc::clone(&self.cancel)
     }
 
-    fn steering(&self) -> Arc<SteeringInbox> {
-        Arc::clone(&self.steering)
+    fn inbox(&self) -> Arc<Inbox> {
+        Arc::clone(&self.inbox)
     }
 
-    /// Close steering as soon as the agent loop ends, before persistence work
+    /// Close the inbox as soon as the agent loop ends, before persistence work
     /// gives the UI a false "still running" window to steer into.
-    fn finish_steering(&self) {
-        self.steering.end();
+    fn finish_inbox(&self) {
+        self.inbox.end();
     }
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        self.steering.end();
+        self.inbox.end();
         if let Ok(mut registry) = self.registry.lock() {
             let matches = registry
                 .runs
@@ -168,21 +168,21 @@ fn begin_run(
     }
     let cancelled = runs.cancelled.remove(run_id);
     let cancel = Arc::new(AtomicBool::new(cancelled));
-    let steering = Arc::new(SteeringInbox::default());
-    steering.begin();
+    let inbox = Arc::new(Inbox::default());
+    inbox.begin();
     runs.runs.insert(
         run_id.to_owned(),
         RunEntry {
             workspace_path,
             cancel: Arc::clone(&cancel),
-            steering: Arc::clone(&steering),
+            inbox: Arc::clone(&inbox),
         },
     );
     Ok(RunGuard {
         registry: Arc::clone(registry),
         run_id: run_id.to_owned(),
         cancel,
-        steering,
+        inbox,
     })
 }
 
@@ -203,19 +203,19 @@ fn steer_registered_run(
     run_id: &str,
     message: &str,
 ) -> Result<bool, String> {
-    let steering = {
+    let inbox = {
         let registry = registry
             .lock()
             .map_err(|error| format!("run registry lock poisoned: {error}"))?;
         registry
             .runs
             .get(run_id)
-            .map(|entry| Arc::clone(&entry.steering))
+            .map(|entry| Arc::clone(&entry.inbox))
     };
-    let Some(steering) = steering else {
+    let Some(inbox) = inbox else {
         return Err("no active turn to steer".to_owned());
     };
-    Ok(steering.push(message.to_owned()))
+    Ok(inbox.push_steering(message.to_owned()))
 }
 
 /// Keeps one MCP manager per workspace so the settings UI, the chat loop, and
@@ -4650,7 +4650,7 @@ async fn chat(
             }));
     }
     agent = agent
-        .with_steering(run_guard.steering())
+        .with_inbox(run_guard.inbox())
         .with_redactions(redactions)
         .with_checkpoints(Arc::new(SessionCheckpoints {
             store: Arc::clone(&state.store),
@@ -4678,7 +4678,7 @@ async fn chat(
         }),
     };
     let outcome = agent.run_with_observer(history, &observer).await;
-    run_guard.finish_steering();
+    run_guard.finish_inbox();
     let run = match outcome {
         Ok(run) => run,
         Err(error) => {
@@ -4696,11 +4696,24 @@ async fn chat(
                 } else {
                     "error"
                 };
+                let discarded = if matches!(error, AgentError::Cancelled) {
+                    run_guard
+                        .inbox()
+                        .discard_pending()
+                        .into_iter()
+                        .map(|entry| entry.id.to_string())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 let _ = store.append_event(
                     session,
                     NewEvent::new(SessionEventKind::TurnEnd)
                         .with_turn(turn)
-                        .with_payload(json!({"reason": reason})),
+                        .with_payload(json!({
+                            "reason": reason,
+                            "discarded": discarded,
+                        })),
                 );
             }
             return Err(error.to_string());
@@ -5564,7 +5577,7 @@ mod tests {
             "the active inbox accepts more than one steering message"
         );
 
-        first.finish_steering();
+        first.finish_inbox();
         assert!(
             !steer_registered_run(&registry, "run-a", "too late").expect("registry entry"),
             "steering closes as soon as the agent loop returns"
