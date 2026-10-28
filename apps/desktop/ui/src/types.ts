@@ -73,7 +73,7 @@ export type ToolCallView = {
   id: string;
   name: string;
   arguments: string;
-  status: "queued" | "running" | "settled";
+  status: "queued" | "running" | "settled" | "failed" | "interrupted";
   durationMs?: number;
   result?: string;
   isError?: boolean;
@@ -109,10 +109,11 @@ export type AgentEvent =
   | { type: "step"; step: number }
   | { type: "reasoning"; step: number; text: string }
   | { type: "content"; step: number; text: string }
-  | { type: "tool_call"; step: number; name: string; arguments: string }
+  | { type: "tool_call"; step: number; call_id?: string; name: string; arguments: string }
   | {
       type: "tool_result";
       step: number;
+      call_id?: string;
       name: string;
       content: string;
       is_error: boolean;
@@ -123,6 +124,7 @@ export type AgentEvent =
   | {
       type: "tool_status";
       step: number;
+      call_id?: string;
       name: string;
       status: string;
       duration_ms: number | null;
@@ -227,6 +229,15 @@ export type SessionView = {
     reasoning: string | null;
     duration_ms?: number | null;
     interrupted?: boolean;
+    tool_calls?: {
+      call_id: string;
+      name: string;
+      arguments: string;
+      status: string;
+      result: string;
+      is_error: boolean;
+      duration_ms?: number | null;
+    }[];
   }[];
   total_duration_ms: number;
 };

@@ -1282,11 +1282,12 @@ impl AgentObserver for SubagentObserver {
     fn on_tool_result(
         &self,
         step: u32,
-        name: &str,
+        call: &openbad_llm::chat::ToolCall,
         content: &str,
         is_error: bool,
         _metadata: &Value,
     ) {
+        let name = call.function.name.as_str();
         let result = truncate_for_ui(content);
         update_subagent_record(
             &self.store,
@@ -1500,11 +1501,15 @@ pub enum AgentEvent {
     },
     ToolCall {
         step: u32,
+        #[serde(default)]
+        call_id: String,
         name: String,
         arguments: String,
     },
     ToolResult {
         step: u32,
+        #[serde(default)]
+        call_id: String,
         name: String,
         content: String,
         is_error: bool,
@@ -1519,6 +1524,8 @@ pub enum AgentEvent {
     },
     ToolStatus {
         step: u32,
+        #[serde(default)]
+        call_id: String,
         name: String,
         status: String,
         duration_ms: Option<u64>,
@@ -1541,6 +1548,16 @@ struct ChannelObserver {
     cancel: Arc<AtomicBool>,
     compaction_reported: AtomicBool,
     journal: Option<RunJournal>,
+    /// Per-call duration and error flag, keyed by tool call id. Settlement
+    /// folds these into the durable `tool/result` payload so a reloaded
+    /// transcript renders the same cards as the live one.
+    tool_outcomes: std::sync::Mutex<std::collections::HashMap<String, ToolOutcome>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ToolOutcome {
+    duration_ms: Option<u64>,
+    is_error: bool,
 }
 
 /// Durable lifecycle recording for the run that owns an observer. Live events
@@ -1609,6 +1626,11 @@ impl AgentObserver for ChannelObserver {
         let Some(journal) = &self.journal else {
             return;
         };
+        let outcomes = self
+            .tool_outcomes
+            .lock()
+            .map(|outcomes| outcomes.clone())
+            .unwrap_or_default();
         let Ok(store) = journal.store.lock() else {
             return;
         };
@@ -1625,10 +1647,17 @@ impl AgentObserver for ChannelObserver {
                         "reasoning_content": message.reasoning_content,
                         "tool_calls": message.tool_calls,
                     }),
-                    ChatRole::Tool => json!({
-                        "content": message.content.clone().unwrap_or_default(),
-                        "tool_call_id": message.tool_call_id,
-                    }),
+                    ChatRole::Tool => {
+                        let call_id = message.tool_call_id.clone().unwrap_or_default();
+                        let outcome = outcomes.get(&call_id).copied().unwrap_or_default();
+                        json!({
+                            "content": message.content.clone().unwrap_or_default(),
+                            "tool_call_id": call_id.clone(),
+                            "call_id": call_id,
+                            "duration_ms": outcome.duration_ms,
+                            "is_error": outcome.is_error,
+                        })
+                    }
                     _ => return None,
                 };
                 let kind = match message.role {
@@ -1651,10 +1680,22 @@ impl AgentObserver for ChannelObserver {
         let _ = store.append_events(journal.session, drafts);
     }
 
-    fn on_tool_status(&self, step: u32, name: &str, status: ToolStatus, duration_ms: Option<u64>) {
+    fn on_tool_status(
+        &self,
+        step: u32,
+        call: &openbad_llm::chat::ToolCall,
+        status: ToolStatus,
+        duration_ms: Option<u64>,
+    ) {
+        if let (ToolStatus::Settled, Some(duration_ms)) = (status, duration_ms) {
+            if let Ok(mut outcomes) = self.tool_outcomes.lock() {
+                outcomes.entry(call.id.clone()).or_default().duration_ms = Some(duration_ms);
+            }
+        }
         let _ = self.channel.send(AgentEvent::ToolStatus {
             step,
-            name: name.to_owned(),
+            call_id: call.id.clone(),
+            name: call.function.name.clone(),
             status: format!("{status:?}").to_lowercase(),
             duration_ms,
         });
@@ -1765,6 +1806,7 @@ impl AgentObserver for ChannelObserver {
     fn on_tool_call(&self, step: u32, call: &openbad_llm::chat::ToolCall) {
         let _ = self.channel.send(AgentEvent::ToolCall {
             step,
+            call_id: call.id.clone(),
             name: call.function.name.clone(),
             arguments: call.function.arguments.clone(),
         });
@@ -1773,14 +1815,18 @@ impl AgentObserver for ChannelObserver {
     fn on_tool_result(
         &self,
         step: u32,
-        name: &str,
+        call: &openbad_llm::chat::ToolCall,
         content: &str,
         is_error: bool,
         metadata: &Value,
     ) {
+        if let Ok(mut outcomes) = self.tool_outcomes.lock() {
+            outcomes.entry(call.id.clone()).or_default().is_error = is_error;
+        }
         let _ = self.channel.send(AgentEvent::ToolResult {
             step,
-            name: name.to_owned(),
+            call_id: call.id.clone(),
+            name: call.function.name.clone(),
             content: content.to_owned(),
             is_error,
             metadata: metadata.clone(),
@@ -1921,6 +1967,28 @@ pub struct UiMessage {
     /// The turn was cut short; this text is all that was delivered.
     #[serde(default)]
     pub interrupted: bool,
+    /// Tool calls made by this assistant message, joined with their results.
+    #[serde(default)]
+    pub tool_calls: Vec<UiToolCall>,
+}
+
+#[derive(Serialize)]
+pub struct UiToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+    /// `queued`, `running`, `settled`, `failed`, or `interrupted`.
+    pub status: String,
+    pub result: String,
+    pub is_error: bool,
+    pub duration_ms: Option<u64>,
+}
+
+struct StoredToolResult {
+    content: String,
+    is_error: bool,
+    duration_ms: Option<u64>,
+    interrupted: bool,
 }
 
 #[derive(Serialize)]
@@ -3745,10 +3813,58 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
         .load_messages(session)
         .map_err(|error| error.to_string())?;
     let turns = store.load_turns(session).unwrap_or_default();
-    let (turn_durations, total_duration_ms) = summarize_turn_durations(&turns);
+    let (messages, total_duration_ms) = build_ui_messages(&messages, &turns);
+    Ok(SessionView {
+        session_id,
+        messages,
+        total_duration_ms,
+    })
+}
+
+/// Pure transcript projection: stored messages and turns become the bubbles
+/// the UI renders, including the tool cards the live stream produced.
+fn build_ui_messages(
+    messages: &[SessionMessage],
+    turns: &[openbad_store::types::SessionTurn],
+) -> (Vec<UiMessage>, u64) {
+    let (turn_durations, total_duration_ms) = summarize_turn_durations(turns);
+    // Tool results are separate stored messages; the transcript shows them on
+    // the assistant message that requested them.
+    let mut tool_results: std::collections::HashMap<String, StoredToolResult> =
+        std::collections::HashMap::new();
+    for message in messages {
+        if message.role != "tool" || message.source.as_deref() == Some("compaction") {
+            continue;
+        }
+        let Some(call_id) = message.content.get("tool_call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        tool_results.insert(
+            call_id.to_owned(),
+            StoredToolResult {
+                content: message
+                    .content
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                is_error: message
+                    .content
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                duration_ms: message.content.get("duration_ms").and_then(Value::as_u64),
+                interrupted: message
+                    .content
+                    .get("interrupted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
+        );
+    }
     let mut ui_messages: Vec<UiMessage> = Vec::new();
     let mut ui_turns: Vec<Option<u32>> = Vec::new();
-    for message in &messages {
+    for message in messages {
         // Compaction checkpoints are model context, not chat bubbles. The
         // original messages remain in the transcript for audit.
         if message.source.as_deref() == Some("compaction") {
@@ -3779,6 +3895,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                     reasoning: None,
                     duration_ms: None,
                     interrupted: false,
+                    tool_calls: Vec::new(),
                 })
             }
             "assistant" => {
@@ -3786,23 +3903,77 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                 let Some(chat) = chat_message_from_session(message).ok() else {
                     continue;
                 };
+                let tool_calls = chat
+                    .tool_calls
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|call| {
+                        let result = tool_results.get(&call.id);
+                        UiToolCall {
+                            status: match result {
+                                Some(result) if result.interrupted => "interrupted",
+                                Some(result) if result.is_error => "failed",
+                                Some(_) => "settled",
+                                None => "queued",
+                            }
+                            .to_owned(),
+                            call_id: call.id,
+                            name: call.function.name,
+                            arguments: call.function.arguments,
+                            result: result.map(|item| item.content.clone()).unwrap_or_default(),
+                            is_error: result.map(|item| item.is_error).unwrap_or(false),
+                            duration_ms: result.and_then(|item| item.duration_ms),
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 Some(UiMessage {
                     role: "assistant".to_owned(),
                     text: chat
                         .content
                         .filter(|text| !text.is_empty())
-                        .unwrap_or_else(|| "(tool activity)".to_owned()),
+                        .unwrap_or_default(),
                     attachments: Vec::new(),
                     reasoning: chat.reasoning_content,
                     duration_ms: turn.and_then(|turn| turn_durations.get(&turn).copied()),
                     interrupted: false,
+                    tool_calls,
                 })
             }
             _ => None,
         };
         if let Some(ui) = ui {
-            ui_messages.push(ui);
-            ui_turns.push(message.turn);
+            // The live stream keeps one bubble per turn; stored messages arrive
+            // one per step, so consecutive assistant messages of the same turn
+            // merge here to reload the same transcript the user watched.
+            let same_turn = message.turn.is_some()
+                && ui.role == "assistant"
+                && ui_turns.last().copied().flatten() == message.turn
+                && ui_messages
+                    .last()
+                    .is_some_and(|last| last.role == "assistant");
+            if same_turn {
+                let last = ui_messages.last_mut().expect("checked above");
+                if !ui.text.is_empty() {
+                    if !last.text.is_empty() {
+                        last.text.push_str("\n\n");
+                    }
+                    last.text.push_str(&ui.text);
+                }
+                if let Some(reasoning) = ui.reasoning.filter(|text| !text.is_empty()) {
+                    match last.reasoning.as_mut() {
+                        Some(existing) if !existing.is_empty() => {
+                            existing.push_str("\n\n");
+                            existing.push_str(&reasoning);
+                        }
+                        Some(existing) => *existing = reasoning,
+                        None => last.reasoning = Some(reasoning),
+                    }
+                }
+                last.tool_calls.extend(ui.tool_calls);
+            } else {
+                ui_messages.push(ui);
+                ui_turns.push(message.turn);
+            }
         }
     }
     let interrupted_turns: HashSet<u32> = turns
@@ -3832,16 +4003,18 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                 reasoning: None,
                 duration_ms: None,
                 interrupted: true,
+                tool_calls: Vec::new(),
             });
             ui_turns.push(Some(last.turn));
         }
     }
+    for message in ui_messages.iter_mut() {
+        if message.role == "assistant" && message.text.is_empty() && message.tool_calls.is_empty() {
+            message.text = "(tool activity)".to_owned();
+        }
+    }
     keep_last_assistant_duration_per_turn(&mut ui_messages, &ui_turns);
-    Ok(SessionView {
-        session_id,
-        messages: ui_messages,
-        total_duration_ms,
-    })
+    (ui_messages, total_duration_ms)
 }
 
 fn summarize_turn_durations(
@@ -4893,6 +5066,7 @@ async fn chat(
         channel: on_event,
         cancel,
         compaction_reported: AtomicBool::new(false),
+        tool_outcomes: std::sync::Mutex::new(std::collections::HashMap::new()),
         journal: Some(RunJournal {
             store: Arc::clone(&state.store),
             session,
@@ -6233,6 +6407,7 @@ mod tests {
             reasoning: None,
             duration_ms: duration,
             interrupted: false,
+            tool_calls: Vec::new(),
         };
         let mut messages = vec![
             message("user", None),
@@ -6282,6 +6457,113 @@ mod tests {
         assert!(resolve_reveal_target(&root, &[reference.path().to_path_buf()], &absolute).is_ok());
         assert!(resolve_reveal_target(&root, &[], "missing.txt").is_err());
         assert!(resolve_reveal_target(&root, &[], "  ").is_err());
+    }
+
+    #[test]
+    fn reloaded_transcripts_keep_their_tool_cards() {
+        let session = SessionId::new();
+        let message = |seq: u64, step: u32, role: &str, content: Value| SessionMessage {
+            session_id: session,
+            seq,
+            turn: Some(1),
+            step: Some(step),
+            role: role.to_owned(),
+            content,
+            source: None,
+            created_at: 0,
+        };
+        let call = |id: &str, name: &str| {
+            json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": "{\"path\":\"a.txt\"}"},
+            })
+        };
+        let messages = vec![
+            message(1, 1, "user", json!({"content": "read it"})),
+            message(
+                2,
+                1,
+                "assistant",
+                json!({
+                    "content": "",
+                    "reasoning_content": null,
+                    "tool_calls": [call("call-ok", "read_file")],
+                }),
+            ),
+            message(
+                3,
+                1,
+                "tool",
+                json!({
+                    "content": "hello",
+                    "tool_call_id": "call-ok",
+                    "duration_ms": 42,
+                    "is_error": false,
+                }),
+            ),
+            message(
+                4,
+                2,
+                "assistant",
+                json!({
+                    "content": "",
+                    "reasoning_content": null,
+                    "tool_calls": [call("call-bad", "write_file")],
+                }),
+            ),
+            message(
+                5,
+                2,
+                "tool",
+                json!({
+                    "content": "error: denied",
+                    "tool_call_id": "call-bad",
+                    "duration_ms": 7,
+                    "is_error": true,
+                }),
+            ),
+            message(
+                6,
+                3,
+                "assistant",
+                json!({"content": "Done.", "reasoning_content": null, "tool_calls": null}),
+            ),
+        ];
+
+        let (ui, _) = build_ui_messages(&messages, &[]);
+
+        // One bubble per turn, exactly as the live stream renders it.
+        assert_eq!(ui.len(), 2);
+        let cards = ui[1]
+            .tool_calls
+            .iter()
+            .map(|call| {
+                (
+                    call.call_id.as_str(),
+                    call.name.as_str(),
+                    call.status.as_str(),
+                    call.result.as_str(),
+                    call.is_error,
+                    call.duration_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cards,
+            vec![
+                ("call-ok", "read_file", "settled", "hello", false, Some(42)),
+                (
+                    "call-bad",
+                    "write_file",
+                    "failed",
+                    "error: denied",
+                    true,
+                    Some(7)
+                ),
+            ]
+        );
+        assert_eq!(ui[1].text, "Done.");
     }
 
     #[test]

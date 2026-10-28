@@ -330,7 +330,7 @@ pub trait AgentObserver: Send + Sync {
     fn on_tool_status(
         &self,
         _step: u32,
-        _name: &str,
+        _call: &ToolCall,
         _status: ToolStatus,
         _duration_ms: Option<u64>,
     ) {
@@ -361,7 +361,7 @@ pub trait AgentObserver: Send + Sync {
     fn on_tool_result(
         &self,
         _step: u32,
-        _name: &str,
+        _call: &ToolCall,
         _content: &str,
         _is_error: bool,
         _metadata: &Value,
@@ -680,7 +680,7 @@ impl<T: HttpTransport> Agent<T> {
     ) -> String {
         let started = std::time::Instant::now();
         let name = call.function.name.as_str();
-        observer.on_tool_status(step, name, ToolStatus::Queued, None);
+        observer.on_tool_status(step, call, ToolStatus::Queued, None);
         let content = match serde_json::from_str::<Value>(&call.function.arguments) {
             Ok(arguments) => {
                 let risk = self
@@ -740,12 +740,12 @@ impl<T: HttpTransport> Agent<T> {
                 if let Some((reason, metadata)) = blocked {
                     observer.on_tool_status(
                         step,
-                        name,
+                        call,
                         ToolStatus::Settled,
                         Some(started.elapsed().as_millis() as u64),
                     );
                     let content = redact_secrets(&reason, &self.redactions);
-                    observer.on_tool_result(step, name, &content, true, &metadata);
+                    observer.on_tool_result(step, call, &content, true, &metadata);
                     content
                 } else {
                     // A per-call approval elevates only this invocation: the
@@ -756,11 +756,11 @@ impl<T: HttpTransport> Agent<T> {
                         call_context.allow_writes = true;
                         call_context.allow_commands = true;
                     }
-                    observer.on_tool_status(step, name, ToolStatus::Running, None);
+                    observer.on_tool_status(step, call, ToolStatus::Running, None);
                     let result = self.tools.execute(name, arguments, &call_context).await;
                     observer.on_tool_status(
                         step,
-                        name,
+                        call,
                         ToolStatus::Settled,
                         Some(started.elapsed().as_millis() as u64),
                     );
@@ -770,7 +770,7 @@ impl<T: HttpTransport> Agent<T> {
                                 &format!("error: {}", result.content),
                                 &self.redactions,
                             );
-                            observer.on_tool_result(step, name, &content, true, &result.metadata);
+                            observer.on_tool_result(step, call, &content, true, &result.metadata);
                             content
                         }
                         Ok(result) => {
@@ -779,13 +779,13 @@ impl<T: HttpTransport> Agent<T> {
                                 self.workspace.root(),
                                 self.config.spill_threshold_bytes,
                             );
-                            observer.on_tool_result(step, name, &content, false, &result.metadata);
+                            observer.on_tool_result(step, call, &content, false, &result.metadata);
                             content
                         }
                         Err(error) => {
                             let content =
                                 redact_secrets(&format!("error: {error}"), &self.redactions);
-                            observer.on_tool_result(step, name, &content, true, &Value::Null);
+                            observer.on_tool_result(step, call, &content, true, &Value::Null);
                             content
                         }
                     }
@@ -794,7 +794,7 @@ impl<T: HttpTransport> Agent<T> {
             Err(error) => {
                 observer.on_tool_status(
                     step,
-                    name,
+                    call,
                     ToolStatus::Settled,
                     Some(started.elapsed().as_millis() as u64),
                 );
@@ -802,7 +802,7 @@ impl<T: HttpTransport> Agent<T> {
                     &format!("error: invalid arguments for {name}: {error}"),
                     &self.redactions,
                 );
-                observer.on_tool_result(step, name, &content, true, &Value::Null);
+                observer.on_tool_result(step, call, &content, true, &Value::Null);
                 content
             }
         };
@@ -2267,7 +2267,7 @@ mod tests {
         fn on_tool_result(
             &self,
             _step: u32,
-            _name: &str,
+            _call: &ToolCall,
             _content: &str,
             is_error: bool,
             metadata: &Value,
@@ -2378,14 +2378,14 @@ mod tests {
         fn on_tool_status(
             &self,
             _step: u32,
-            name: &str,
+            call: &ToolCall,
             status: ToolStatus,
             _duration_ms: Option<u64>,
         ) {
             self.statuses
                 .lock()
                 .expect("statuses")
-                .push((name.to_owned(), status));
+                .push((call.function.name.clone(), status));
         }
 
         fn on_approval_decision(
@@ -3205,7 +3205,7 @@ mod tests {
         fn on_tool_result(
             &self,
             _step: u32,
-            _name: &str,
+            _call: &ToolCall,
             _content: &str,
             _is_error: bool,
             metadata: &Value,
