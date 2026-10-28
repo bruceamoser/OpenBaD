@@ -48,6 +48,12 @@ enum WriteCommand {
         session: NewSession,
         reply: SyncSender<Result<SessionId, StoreError>>,
     },
+    ForkSession {
+        source: SessionId,
+        at_user_seq: u64,
+        title: Option<String>,
+        reply: SyncSender<Result<SessionId, StoreError>>,
+    },
     RenameWorkspace {
         workspace_id: WorkspaceId,
         name: String,
@@ -990,6 +996,25 @@ impl Store {
         self.write(|reply| WriteCommand::AppendEvents {
             session_id,
             drafts,
+            reply,
+        })
+    }
+
+    /// Copy the session's history before `at_user_seq` into a new session.
+    ///
+    /// `at_user_seq` must be the sequence of a `user/message` event: forking
+    /// there can never split a tool round trip, because every tool result
+    /// follows its assistant message inside the same turn.
+    pub fn fork_session(
+        &self,
+        source: SessionId,
+        at_user_seq: u64,
+        title: Option<String>,
+    ) -> Result<SessionId, StoreError> {
+        self.write(|reply| WriteCommand::ForkSession {
+            source,
+            at_user_seq,
+            title,
             reply,
         })
     }
@@ -2972,6 +2997,14 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             WriteCommand::CreateSession { session, reply } => {
                 let _ = reply.send(create_session(&connection, session));
             }
+            WriteCommand::ForkSession {
+                source,
+                at_user_seq,
+                title,
+                reply,
+            } => {
+                let _ = reply.send(fork_session(&mut connection, source, at_user_seq, title));
+            }
             WriteCommand::RenameWorkspace {
                 workspace_id,
                 name,
@@ -3537,6 +3570,97 @@ fn create_session(connection: &Connection, session: NewSession) -> Result<Sessio
     Ok(id)
 }
 
+fn fork_session(
+    connection: &mut Connection,
+    source: SessionId,
+    at_user_seq: u64,
+    title: Option<String>,
+) -> Result<SessionId, StoreError> {
+    let transaction = connection.transaction()?;
+    let forkable: Option<String> = transaction
+        .query_row(
+            "SELECT kind FROM session_events WHERE session_id = ?1 AND seq = ?2",
+            params![
+                source.to_string(),
+                i64::try_from(at_user_seq).unwrap_or(i64::MAX)
+            ],
+            |row| row.get(0),
+        )
+        .ok();
+    if forkable.as_deref() != Some(SessionEventKind::UserMessage.as_str()) {
+        return Err(StoreError::Conflict(
+            "a fork must start at a user message".to_owned(),
+        ));
+    }
+
+    let (workspace_id, source_title): (Option<String>, Option<String>) = transaction.query_row(
+        "SELECT workspace_id, title FROM sessions WHERE id = ?1",
+        [source.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let target = SessionId::new();
+    let now = now_millis();
+    let title = title.or_else(|| source_title.map(|title| format!("{title} (edited)")));
+    transaction.execute(
+        "INSERT INTO sessions (id, workspace_id, title, created_at, updated_at, forked_from_seq)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+        params![
+            target.to_string(),
+            workspace_id,
+            title,
+            now,
+            i64::try_from(at_user_seq).unwrap_or(i64::MAX)
+        ],
+    )?;
+
+    // Copy the history in order so projections see the same stream the source
+    // built, then point the copy at its origin.
+    let events = projections::load_events(&transaction, Some(source))?;
+    let mut last_turn = 0_u32;
+    for event in events.into_iter().filter(|event| event.seq < at_user_seq) {
+        last_turn = last_turn.max(event.turn.unwrap_or(0));
+        let search_text = event_search_text(&event.kind, &event.payload);
+        let payload_json = serde_json::to_string(&event.payload)?;
+        transaction.execute(
+            "INSERT INTO session_events
+             (id, session_id, seq, turn, step, kind, surface, payload_json, search_text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                Uuid::now_v7().to_string(),
+                target.to_string(),
+                i64::try_from(event.seq).unwrap_or(i64::MAX),
+                event.turn.map(i64::from),
+                event.step.map(i64::from),
+                event.kind.as_str(),
+                i64::from(event.surface),
+                payload_json,
+                search_text,
+                event.created_at,
+            ],
+        )?;
+        projections::apply(
+            &transaction,
+            &SessionEvent {
+                id: Uuid::now_v7(),
+                session_id: target,
+                seq: event.seq,
+                turn: event.turn,
+                step: event.step,
+                kind: event.kind,
+                surface: event.surface,
+                payload: event.payload,
+                created_at: event.created_at,
+            },
+        )?;
+    }
+    transaction.execute(
+        "UPDATE sessions SET last_turn = ?2 WHERE id = ?1",
+        params![target.to_string(), i64::from(last_turn)],
+    )?;
+    transaction.commit()?;
+    Ok(target)
+}
+
 fn event_search_text(kind: &SessionEventKind, payload: &Value) -> Option<String> {
     if !kind.is_surface() {
         return None;
@@ -3745,6 +3869,102 @@ mod tests {
             store.schema_version().expect("version"),
             "0015_session_message_surface"
         );
+    }
+
+    #[test]
+    fn forking_at_a_user_message_copies_only_the_earlier_history() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("fork", "/tmp/openbad-fork")
+            .expect("workspace");
+        let source = store
+            .create_session(Some(workspace), Some("fork source"))
+            .expect("session");
+        let events = vec![
+            NewEvent::new(SessionEventKind::TurnStart).with_turn(1),
+            NewEvent::new(SessionEventKind::UserMessage)
+                .with_turn(1)
+                .with_step(1)
+                .with_payload(json!({"content": "first"})),
+            NewEvent::new(SessionEventKind::AssistantMessage)
+                .with_turn(1)
+                .with_step(1)
+                .with_payload(json!({"content": "first answer"})),
+            NewEvent::new(SessionEventKind::TurnEnd)
+                .with_turn(1)
+                .with_payload(json!({"reason": "stop"})),
+            NewEvent::new(SessionEventKind::TurnStart).with_turn(2),
+            NewEvent::new(SessionEventKind::UserMessage)
+                .with_turn(2)
+                .with_step(1)
+                .with_payload(json!({"content": "second"})),
+        ];
+        store.append_events(source, events).expect("source events");
+        let second_user_seq = store
+            .load_events(source)
+            .expect("events")
+            .into_iter()
+            .find(|event| {
+                event.kind == SessionEventKind::UserMessage
+                    && event.payload.get("content").and_then(Value::as_str) == Some("second")
+            })
+            .expect("second user message")
+            .seq;
+
+        let fork = store
+            .fork_session(source, second_user_seq, Some("edited".to_owned()))
+            .expect("fork");
+
+        let surface = |session| {
+            store
+                .load_surface_messages(session)
+                .expect("surface")
+                .into_iter()
+                .map(|message| message.content.get("content").cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            surface(fork),
+            vec![json!("first"), json!("first answer")],
+            "the fork keeps the history before the edited message"
+        );
+        assert_eq!(
+            surface(source),
+            vec![json!("first"), json!("first answer"), json!("second")],
+            "the source is untouched"
+        );
+        let summary = store
+            .list_sessions(10)
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.id == fork)
+            .expect("fork summary");
+        assert_eq!(summary.title.as_deref(), Some("edited"));
+    }
+
+    #[test]
+    fn forking_outside_a_user_message_is_rejected() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("fork", "/tmp/openbad-fork-invalid")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("fork source"))
+            .expect("session");
+        let assistant = store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::AssistantMessage)
+                    .with_turn(1)
+                    .with_step(1)
+                    .with_payload(json!({"content": "answer"})),
+            )
+            .expect("assistant message");
+
+        let error = store
+            .fork_session(session, assistant.seq, None)
+            .expect_err("assistant messages are not fork points");
+        assert!(matches!(error, StoreError::Conflict(_)));
     }
 
     #[test]
