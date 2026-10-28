@@ -1427,12 +1427,12 @@ impl ToolRegistry {
         if !self.grouped {
             return self.tools.values().map(|tool| tool.definition()).collect();
         }
-        let mut domains: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut domains: BTreeMap<&'static str, Vec<&str>> = BTreeMap::new();
         for name in self.tools.keys() {
-            *domains.entry(tool_domain(name)).or_default() += 1;
+            domains.entry(tool_domain(name)).or_default().push(name);
         }
         let mut definitions = Vec::with_capacity(domains.len() * 2);
-        for domain in domains.keys() {
+        for (domain, names) in &domains {
             // A real tool that ends in `_list` (the vault metadata tool) takes
             // precedence over the synthetic domain catalog. The synthetic
             // endpoint is only used when no such tool is registered.
@@ -1442,7 +1442,7 @@ impl ToolRegistry {
             } else {
                 definitions.push(domain_list_definition(domain));
             }
-            definitions.push(domain_run_definition(domain));
+            definitions.push(domain_run_definition(domain, names));
         }
         definitions
     }
@@ -1522,21 +1522,24 @@ impl ToolRegistry {
                 return finish_result(Ok(ToolResult::ok(self.domain_catalog(domain)?)), context);
             }
             if let Some(domain) = name.strip_suffix("_run") {
+                let available = self.domain_names(domain).join(", ");
+                let shape = format!(
+                    "expected {{\"tool\": <name>, \"arguments\": {{...}}}}; {domain} tools: {available}"
+                );
                 let tool_name = arguments
                     .get("tool")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        ToolError::InvalidArgument("missing string argument: tool".to_owned())
-                    })?;
+                    .ok_or_else(|| ToolError::InvalidArgument(shape.clone()))?;
                 if tool_domain(tool_name) != domain {
                     return Err(ToolError::InvalidArgument(format!(
-                        "tool {tool_name} is not in the {domain} domain"
+                        "tool {tool_name} is not in the {domain} domain; {domain} tools: {available}"
                     )));
                 }
-                let arguments = arguments
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let arguments = match arguments.get("arguments") {
+                    None => json!({}),
+                    Some(value) if value.is_object() => value.clone(),
+                    Some(_) => return Err(ToolError::InvalidArgument(shape)),
+                };
                 let tool = self.tools.get(tool_name).ok_or_else(|| {
                     ToolError::InvalidArgument(format!("unknown tool: {tool_name}"))
                 })?;
@@ -1548,6 +1551,18 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| ToolError::InvalidArgument(format!("unknown tool: {name}")))?;
         finish_result(tool.execute(arguments, context).await, context)
+    }
+
+    /// Names registered in a domain, sorted, for catalogs and error messages.
+    fn domain_names(&self, domain: &str) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .tools
+            .keys()
+            .filter(|name| tool_domain(name) == domain)
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        names
     }
 
     fn domain_catalog(&self, domain: &str) -> Result<String, ToolError> {
@@ -1628,19 +1643,30 @@ fn domain_list_definition(domain: &str) -> ToolDefinition {
     }))
 }
 
-fn domain_run_definition(domain: &str) -> ToolDefinition {
+fn domain_run_definition(domain: &str, tools: &[&str]) -> ToolDefinition {
+    let mut names = tools.to_vec();
+    names.sort_unstable();
     let description = if domain == "vault" {
         "Run vault_exec to run a command with a named vault secret in OPENBAD_VAULT_SECRET. Call vault_list for secret metadata. Secret values are never returned to the model.".to_owned()
     } else {
+        // The names and the exact shape belong in the description: a model that
+        // has to call `_list` first often guesses instead, and a wrong key or a
+        // name from another domain costs a whole failed step.
         format!(
-            "Run a tool from the {domain} domain. Call {domain}_list first to discover tool names and input schemas."
+            "Run a tool from the {domain} domain: {}. Pass {{\"tool\": <name>, \"arguments\": {{...}}}}, where arguments is a JSON object matching that tool's schema; call {domain}_list for the full schemas.",
+            names.join(", ")
         )
+    };
+    let tool_schema = if names.is_empty() {
+        json!({"type": "string"})
+    } else {
+        json!({"type": "string", "enum": names})
     };
     ToolDefinition::new(format!("{domain}_run"), description, RiskLevel::Execute).with_schema(
         json!({
             "type": "object",
             "properties": {
-                "tool": {"type": "string"},
+                "tool": tool_schema,
                 "arguments": {"type": "object"}
             },
             "required": ["tool"],
@@ -18728,6 +18754,67 @@ invariants:
             .await
             .expect("snapshot list");
         assert!(snapshots.content.contains("baseline"));
+    }
+
+    #[test]
+    fn domain_run_schemas_name_their_tools_and_errors_list_them() {
+        let registry = ToolRegistry::with_builtin_tools();
+        let exec = registry
+            .definitions()
+            .into_iter()
+            .find(|tool| tool.name == "exec_run")
+            .expect("exec_run");
+        let enum_names = exec.input_schema["properties"]["tool"]["enum"]
+            .as_array()
+            .expect("enum")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(enum_names.contains(&"run_command"), "{enum_names:?}");
+        assert!(
+            exec.description.contains("run_command"),
+            "description should name the tools: {}",
+            exec.description
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_domain_call_says_what_it_expected() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let registry = ToolRegistry::with_builtin_tools();
+
+        let missing = registry
+            .execute("exec_run", json!({"shell": "bash"}), &context)
+            .await
+            .expect_err("missing tool");
+        let message = format!("{missing}");
+        assert!(message.contains("run_command"), "{message}");
+
+        let wrong_domain = registry
+            .execute(
+                "exec_run",
+                json!({"tool": "git_status", "arguments": {}}),
+                &context,
+            )
+            .await
+            .expect_err("wrong domain");
+        let message = format!("{wrong_domain}");
+        assert!(message.contains("git_status"), "{message}");
+        assert!(message.contains("exec tools"), "{message}");
+
+        let bad_arguments = registry
+            .execute(
+                "exec_run",
+                json!({"tool": "run_command", "arguments": "ls"}),
+                &context,
+            )
+            .await
+            .expect_err("arguments must be an object");
+        let message = format!("{bad_arguments}");
+        assert!(message.contains("expected"), "{message}");
+        assert!(message.contains(r#""arguments""#), "{message}");
     }
 
     #[tokio::test]
