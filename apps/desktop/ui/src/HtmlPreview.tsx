@@ -23,14 +23,14 @@ export default function HtmlPreview({
             onClick={() => setMode(value)}
             className={`rounded px-2 py-1 text-[10px] capitalize ${
               mode === value
-                ? "bg-emerald-400/15 text-emerald-200"
-                : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]"
+                ? "bg-obd-accent/15 text-obd-accent"
+                : "bg-obd-raised text-obd-muted hover:bg-obd-raised-strong"
             }`}
           >
             {value}
           </button>
         ))}
-        <span className="ml-auto self-center text-[9px] text-slate-500">
+        <span className="ml-auto self-center text-[9px] text-obd-subtle">
           scripts are disabled
         </span>
       </div>
@@ -41,7 +41,7 @@ export default function HtmlPreview({
           sandbox=""
           referrerPolicy="no-referrer"
           data-testid="html-preview"
-          className="min-h-[420px] w-full flex-1 rounded-lg border border-white/10 bg-white"
+          className="min-h-[420px] w-full flex-1 rounded-lg border border-obd-line bg-obd-canvas"
         />
       ) : (
         <CodeView code={content} path={path} />

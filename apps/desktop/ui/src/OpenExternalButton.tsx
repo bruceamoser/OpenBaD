@@ -33,7 +33,7 @@ export default function OpenExternalButton({
         role="alert"
         title={error}
         aria-label={`Could not open the file: ${error}`}
-        className={`inline-flex shrink-0 items-center text-amber-300 ${className ?? ""}`}
+        className={`inline-flex shrink-0 items-center text-obd-warning ${className ?? ""}`}
       >
         <CircleAlert size={11} />
       </span>
@@ -46,7 +46,7 @@ export default function OpenExternalButton({
       title={`${label}: ${path}`}
       aria-label={label}
       onClick={(event) => void open(event)}
-      className={`shrink-0 rounded p-0.5 text-slate-500 hover:bg-white/10 hover:text-slate-200 ${className ?? ""}`}
+      className={`shrink-0 rounded p-0.5 text-obd-subtle hover:bg-obd-raised-strong hover:text-obd-text ${className ?? ""}`}
     >
       <ExternalLink size={11} />
     </button>

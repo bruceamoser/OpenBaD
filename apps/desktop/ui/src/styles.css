@@ -1,15 +1,51 @@
 @import "tailwindcss";
+/* Code highlighting follows the same appearance as the rest of the app; only
+   one of these sheets applies at a time. */
+@import "highlight.js/styles/github-dark.css" (prefers-color-scheme: dark);
+@import "highlight.js/styles/github.css" (prefers-color-scheme: light);
 
+/* Design tokens. Every color in the app resolves through one of these, so a
+   theme is defined entirely by the two blocks below -- there are no hardcoded
+   palette values in components. Light mode follows the OS appearance. */
 :root {
   color-scheme: dark;
+
+  /* Surfaces, from the page outward. */
   --obd-bg: #171f29;
   --obd-surface: #1f2833;
-  --obd-surface-raised: #263340;
+  --obd-raised: #263340;
+  --obd-raised-strong: #2e3d4c;
+  /* Recessed panels and modal scrims. */
+  --obd-inset: rgba(0, 0, 0, 0.22);
+  --obd-scrim: rgba(6, 10, 15, 0.72);
+
+  /* Text, strongest to faintest. */
+  --obd-strong: #f1f5f9;
   --obd-text: #e6edf3;
+  --obd-body: #cbd5e1;
   --obd-muted: #94a3b8;
-  --obd-border: rgba(255, 255, 255, 0.08);
+  --obd-subtle: #64748b;
+  --obd-faint: #475569;
+
+  /* Hairlines. */
+  --obd-line: rgba(255, 255, 255, 0.08);
+
+  /* Document canvases (HTML, PDF, artifact bodies) are white in both themes
+     because the documents themselves assume white paper. */
+  --obd-canvas: #ffffff;
+
+  /* Status hues. */
   --obd-accent: #34d399;
+  --obd-warning: #fbbf24;
   --obd-danger: #fb7185;
+  --obd-info: #38bdf8;
+
+  /* Ink for text drawn on a solid status fill. */
+  --obd-on-accent: #06281d;
+  --obd-on-warning: #2a1a02;
+  --obd-on-danger: #2d0710;
+  --obd-on-info: #04212e;
+
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -20,17 +56,66 @@
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
+
     --obd-bg: #f8fafc;
     --obd-surface: #ffffff;
-    --obd-surface-raised: #f1f5f9;
-    --obd-text: #0f172a;
+    --obd-raised: #f1f5f9;
+    --obd-raised-strong: #e2e8f0;
+    --obd-inset: rgba(15, 23, 42, 0.05);
+    --obd-scrim: rgba(15, 23, 42, 0.38);
+
+    --obd-strong: #0f172a;
+    --obd-text: #1e293b;
+    --obd-body: #334155;
     --obd-muted: #475569;
-    --obd-border: rgba(15, 23, 42, 0.12);
-    --obd-accent: #059669;
-    --obd-danger: #dc2626;
+    --obd-subtle: #64748b;
+    --obd-faint: #94a3b8;
+
+    --obd-line: rgba(15, 23, 42, 0.12);
+
+    /* Darker hues keep AA contrast as text on light surfaces. */
+    --obd-accent: #047857;
+    --obd-warning: #b45309;
+    --obd-danger: #b91c1c;
+    --obd-info: #0369a1;
+
+    --obd-on-accent: #ffffff;
+    --obd-on-warning: #ffffff;
+    --obd-on-danger: #ffffff;
+    --obd-on-info: #ffffff;
   }
 }
 
+/* Expose the tokens to Tailwind so `bg-obd-surface`, `text-obd-muted`,
+   `border-obd-line` and friends generate utilities that follow the theme. */
+@theme {
+  --color-obd-bg: var(--obd-bg);
+  --color-obd-surface: var(--obd-surface);
+  --color-obd-raised: var(--obd-raised);
+  --color-obd-raised-strong: var(--obd-raised-strong);
+  --color-obd-inset: var(--obd-inset);
+  --color-obd-scrim: var(--obd-scrim);
+
+  --color-obd-strong: var(--obd-strong);
+  --color-obd-text: var(--obd-text);
+  --color-obd-body: var(--obd-body);
+  --color-obd-muted: var(--obd-muted);
+  --color-obd-subtle: var(--obd-subtle);
+  --color-obd-faint: var(--obd-faint);
+
+  --color-obd-line: var(--obd-line);
+  --color-obd-canvas: var(--obd-canvas);
+
+  --color-obd-accent: var(--obd-accent);
+  --color-obd-warning: var(--obd-warning);
+  --color-obd-danger: var(--obd-danger);
+  --color-obd-info: var(--obd-info);
+
+  --color-obd-on-accent: var(--obd-on-accent);
+  --color-obd-on-warning: var(--obd-on-warning);
+  --color-obd-on-danger: var(--obd-on-danger);
+  --color-obd-on-info: var(--obd-on-info);
+}
 html,
 body,
 #root {
@@ -48,7 +133,7 @@ code {
 
 
 .markdown-body {
-  color: #cbd5e1;
+  color: var(--obd-body);
   font-size: 12px;
   line-height: 1.75;
 }
@@ -57,7 +142,7 @@ code {
 .markdown-body h2,
 .markdown-body h3 {
   margin: 1.1em 0 0.45em;
-  color: #f1f5f9;
+  color: var(--obd-strong);
   font-weight: 600;
   line-height: 1.35;
 }
@@ -92,24 +177,24 @@ code {
 }
 
 .markdown-body a {
-  color: #6ee7b7;
+  color: var(--obd-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .markdown-body code {
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--obd-line);
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--obd-inset);
   padding: 0.08em 0.3em;
   font-size: 0.92em;
 }
 
 .markdown-body pre {
   overflow-x: auto;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--obd-line);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--obd-inset);
   padding: 10px;
 }
 
@@ -120,8 +205,8 @@ code {
 }
 
 .markdown-body blockquote {
-  border-left: 2px solid rgba(110, 231, 183, 0.4);
-  color: #94a3b8;
+  border-left: 2px solid color-mix(in srgb, var(--obd-accent) 55%, transparent);
+  color: var(--obd-muted);
   padding-left: 10px;
 }
 
@@ -132,21 +217,21 @@ code {
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--obd-line);
   padding: 5px 7px;
   text-align: left;
 }
 
 .markdown-body th {
-  background: rgba(255, 255, 255, 0.04);
-  color: #e2e8f0;
+  background: var(--obd-raised);
+  color: var(--obd-text);
 }
 
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
   margin: 0.9em 0 0.4em;
-  color: #e2e8f0;
+  color: var(--obd-text);
   font-weight: 600;
 }
 
@@ -161,7 +246,7 @@ code {
 
 .markdown-body hr {
   border: 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  border-top: 1px solid var(--obd-line);
   margin: 1.1em 0;
 }
 
@@ -174,19 +259,19 @@ code {
 }
 
 .markdown-body del {
-  color: #94a3b8;
+  color: var(--obd-muted);
 }
 
 .markdown-body input[type="checkbox"] {
-  accent-color: #34d399;
+  accent-color: var(--obd-accent);
   margin-right: 0.4em;
 }
 
 .markdown-body .footnotes {
   margin-top: 1.2em;
-  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  border-top: 1px solid var(--obd-line);
   padding-top: 0.7em;
-  color: #94a3b8;
+  color: var(--obd-muted);
   font-size: 11px;
 }
 
@@ -225,7 +310,7 @@ code {
 .markdown-table-wrap {
   margin: 0.75em 0;
   overflow-x: auto;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--obd-line);
   border-radius: 8px;
 }
 
@@ -259,11 +344,11 @@ code {
   top: 7px;
   right: 7px;
   z-index: 1;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--obd-line);
   border-radius: 5px;
-  background: rgba(10, 13, 17, 0.82);
+  background: var(--obd-scrim);
   padding: 2px 7px;
-  color: #94a3b8;
+  color: var(--obd-muted);
   font-size: 10px;
   opacity: 0;
   transition: opacity 120ms ease;
@@ -275,25 +360,25 @@ code {
 }
 
 .markdown-copy:hover {
-  color: #e2e8f0;
+  color: var(--obd-text);
 }
 
 .mermaid-diagram {
   margin: 0.85em 0;
   overflow: hidden;
-  border: 1px solid rgba(52, 211, 153, 0.2);
+  border: 1px solid color-mix(in srgb, var(--obd-accent) 30%, transparent);
   border-radius: 9px;
-  background: #151c25;
+  background: var(--obd-surface);
 }
 
 .mermaid-diagram-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(52, 211, 153, 0.05);
+  border-bottom: 1px solid var(--obd-line);
+  background: color-mix(in srgb, var(--obd-accent) 8%, transparent);
   padding: 5px 9px;
-  color: #6ee7b7;
+  color: var(--obd-accent);
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.06em;
@@ -301,7 +386,7 @@ code {
 }
 
 .mermaid-diagram-status {
-  color: #64748b;
+  color: var(--obd-subtle);
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
@@ -329,18 +414,18 @@ code {
 .mermaid-diagram-error {
   margin: 0;
   padding: 12px 14px;
-  color: #64748b;
+  color: var(--obd-subtle);
   font-size: 11px;
 }
 
 .mermaid-diagram-error {
-  color: #fca5a5;
+  color: var(--obd-danger);
 }
 
 .mermaid-diagram-source {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--obd-line);
   padding: 6px 10px;
-  color: #64748b;
+  color: var(--obd-subtle);
   font-size: 10px;
 }
 
@@ -353,7 +438,7 @@ code {
   max-height: 180px;
   overflow: auto;
   border: 0;
-  background: rgba(0, 0, 0, 0.24);
+  background: var(--obd-inset);
 }
 
 .chat-markdown pre:has(.mermaid-diagram) {
@@ -491,10 +576,11 @@ code {
   overflow-y: hidden;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.4) rgba(255, 255, 255, 0.04);
+  scrollbar-color: color-mix(in srgb, var(--obd-muted) 60%, transparent)
+    var(--obd-raised);
   overscroll-behavior-x: contain;
   padding: 6px 8px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--obd-line);
 }
 
 .panel-tab-strip::-webkit-scrollbar {
@@ -503,16 +589,16 @@ code {
 
 .panel-tab-strip::-webkit-scrollbar-track {
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--obd-raised);
 }
 
 .panel-tab-strip::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.3);
+  background: color-mix(in srgb, var(--obd-muted) 45%, transparent);
 }
 
 .panel-tab-strip::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.5);
+  background: color-mix(in srgb, var(--obd-muted) 70%, transparent);
 }
 
 .panel-tab-row {

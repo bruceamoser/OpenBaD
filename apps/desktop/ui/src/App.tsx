@@ -2220,22 +2220,22 @@ export default function App() {
         {announcement}
       </div>
       <AppMenuBar menus={menus} />
-      <main className="flex min-h-0 flex-1 overflow-hidden bg-[#151c25] text-slate-100">
+      <main className="flex min-h-0 flex-1 overflow-hidden bg-obd-surface text-obd-strong">
       {sidebarOpen && (
-        <aside className="flex w-[276px] shrink-0 flex-col border-r border-white/[0.07] bg-[#1b232e]">
-          <div className="flex h-14 items-center gap-2 border-b border-white/[0.06] px-3">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-400/15 text-[11px] font-bold text-emerald-300">
+        <aside className="flex w-[276px] shrink-0 flex-col border-r border-obd-line bg-obd-surface">
+          <div className="flex h-14 items-center gap-2 border-b border-obd-line px-3">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-obd-accent/15 text-[11px] font-bold text-obd-accent">
               OB
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-[13px] font-semibold tracking-tight">OpenBaD</p>
-              <p className="truncate text-[10px] text-slate-500">coding harness</p>
+              <p className="truncate text-[10px] text-obd-subtle">coding harness</p>
             </div>
             <button
               type="button"
               aria-label="Collapse sidebar"
               onClick={() => setSidebarOpen(false)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+              className="rounded-md p-1.5 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
             >
               <PanelLeftClose size={15} />
             </button>
@@ -2245,12 +2245,12 @@ export default function App() {
             <button
               type="button"
               onClick={newSession}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-[12px] font-medium text-emerald-200 hover:bg-emerald-400/15"
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-obd-accent/30 bg-obd-accent/10 px-3 py-2 text-[12px] font-medium text-obd-accent hover:bg-obd-accent/15"
             >
               <Plus size={14} /> New session
             </button>
-            <label className="mt-3 flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
-              <Search size={13} className="shrink-0 text-slate-500" />
+            <label className="mt-3 flex items-center gap-2 rounded-md border border-obd-line bg-obd-inset px-2.5 py-1.5">
+              <Search size={13} className="shrink-0 text-obd-subtle" />
               <input
                 ref={sessionSearchRef}
                 type="search"
@@ -2258,21 +2258,21 @@ export default function App() {
                 onChange={(event) => setSessionQuery(event.target.value)}
                 placeholder="Search sessions"
                 aria-label="Search sessions"
-                className="min-w-0 flex-1 bg-transparent text-[11px] text-slate-300 outline-none placeholder:text-slate-500"
+                className="min-w-0 flex-1 bg-transparent text-[11px] text-obd-body outline-none placeholder:text-obd-subtle"
               />
             </label>
           </div>
 
           <div className="flex-1 overflow-y-auto px-2 pb-3">
             <div className="mb-1 flex items-center justify-between px-2 py-1">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-obd-subtle">
                 Projects
               </p>
               <button
                 type="button"
                 aria-label="New project"
                 onClick={() => setProjectDialogOpen(true)}
-                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+                className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
               >
                 <Plus size={13} />
               </button>
@@ -2287,22 +2287,22 @@ export default function App() {
                     onClick={() => selectProject(project)}
                     className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] ${
                       isActive
-                        ? "bg-white/[0.06] text-slate-100"
-                        : "text-slate-400 hover:bg-white/[0.03] hover:text-slate-200"
+                        ? "bg-obd-raised-strong text-obd-strong"
+                        : "text-obd-muted hover:bg-obd-raised hover:text-obd-text"
                     }`}
                   >
                     {isActive ? (
-                      <ChevronDown size={13} className="shrink-0 text-slate-500" />
+                      <ChevronDown size={13} className="shrink-0 text-obd-subtle" />
                     ) : (
-                      <ChevronRight size={13} className="shrink-0 text-slate-500" />
+                      <ChevronRight size={13} className="shrink-0 text-obd-subtle" />
                     )}
                     {isActive ? (
-                      <FolderOpen size={14} className="shrink-0 text-emerald-300" />
+                      <FolderOpen size={14} className="shrink-0 text-obd-accent" />
                     ) : (
-                      <Folder size={14} className="shrink-0 text-slate-500" />
+                      <Folder size={14} className="shrink-0 text-obd-subtle" />
                     )}
                     <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                    <span className="font-mono text-[10px] text-slate-500">
+                    <span className="font-mono text-[10px] text-obd-subtle">
                       {project.session_count}
                     </span>
                   </button>
@@ -2364,16 +2364,16 @@ export default function App() {
                           onOpen={openGitRepo}
                         />
                       </div>
-                      <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                      <p className="px-2 pb-1 pt-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-obd-subtle">
                         Sessions
                       </p>
                     </div>
                   )}
 
                   {isActive && (
-                    <div className="ml-4 space-y-0.5 border-l border-white/[0.06] pl-2">
+                    <div className="ml-4 space-y-0.5 border-l border-obd-line pl-2">
                       {visibleSessions.length === 0 && (
-                        <p className="px-2 py-1.5 text-[11px] text-slate-500">
+                        <p className="px-2 py-1.5 text-[11px] text-obd-subtle">
                           {sessionQuery.trim().length > 0 ? "No matches" : "No sessions"}
                         </p>
                       )}
@@ -2408,7 +2408,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setShowArchived((value) => !value)}
-                          className="mt-1 flex w-full items-center gap-1 rounded px-2 py-1 text-[10px] text-slate-500 hover:text-slate-400"
+                          className="mt-1 flex w-full items-center gap-1 rounded px-2 py-1 text-[10px] text-obd-subtle hover:text-obd-muted"
                         >
                           {showArchived ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                           Archived ({projectArchivedSessions.length})
@@ -2440,11 +2440,11 @@ export default function App() {
             })}
           </div>
 
-          <div className="border-t border-white/[0.06] p-2">
-            <div className="flex items-center gap-2 px-2 py-1 text-[10px] text-slate-500">
+          <div className="border-t border-obd-line p-2">
+            <div className="flex items-center gap-2 px-2 py-1 text-[10px] text-obd-subtle">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  apiKeyStatus ? "bg-emerald-400" : "bg-amber-400"
+                  apiKeyStatus ? "bg-obd-accent" : "bg-obd-warning"
                 }`}
               />
               {apiKeyStatus ? "DeepSeek connected" : "API key needed"}
@@ -2457,25 +2457,25 @@ export default function App() {
       )}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] px-4">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-obd-line px-4">
           {!sidebarOpen && (
             <button
               type="button"
               aria-label="Open sidebar"
               onClick={() => setSidebarOpen(true)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+              className="rounded-md p-1.5 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
             >
               <PanelLeftOpen size={16} />
             </button>
           )}
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+            <div className="flex items-center gap-1.5 text-[11px] text-obd-subtle">
               <Folder size={12} />
               <span className="truncate">{activeProject?.name ?? "No project"}</span>
               {activeProject !== null && (
                 <>
-                  <span className="text-slate-500">/</span>
-                  <span className="truncate font-mono text-[10px] text-slate-500">
+                  <span className="text-obd-subtle">/</span>
+                  <span className="truncate font-mono text-[10px] text-obd-subtle">
                     {activeProject.path}
                   </span>
                   <RevealButton
@@ -2486,13 +2486,13 @@ export default function App() {
                 </>
               )}
             </div>
-            <h1 className="truncate text-[13px] font-medium text-slate-200">{currentTitle}</h1>
+            <h1 className="truncate text-[13px] font-medium text-obd-text">{currentTitle}</h1>
             {lineageSource !== null && (
               <button
                 type="button"
                 onClick={() => void openLineageSource()}
                 title="Open the conversation this one branched from"
-                className="mt-0.5 inline-flex items-center gap-1 rounded border border-white/[0.07] bg-white/[0.02] px-1.5 py-0.5 text-[9px] text-slate-400 transition-colors hover:border-emerald-400/25 hover:text-emerald-200"
+                className="mt-0.5 inline-flex items-center gap-1 rounded border border-obd-line bg-obd-raised px-1.5 py-0.5 text-[9px] text-obd-muted transition-colors hover:border-obd-accent/25 hover:text-obd-accent"
               >
                 <GitBranch size={9} />
                 Forked from {lineageSource.title ?? "another session"}
@@ -2500,32 +2500,32 @@ export default function App() {
             )}
             {activeSession !== null && (
               <p
-                className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px] text-slate-500"
+                className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px] text-obd-subtle"
                 title="Elapsed time since this chat started, and the total time spent running turns"
               >
                 <Clock3 size={10} className="shrink-0" />
                 <span data-testid="chat-elapsed">
                   {formatDuration(Math.max(0, nowMs - activeSession.created_at))}
                 </span>
-                <span className="text-slate-500">elapsed</span>
-                <span className="text-slate-500">·</span>
+                <span className="text-obd-subtle">elapsed</span>
+                <span className="text-obd-subtle">·</span>
                 <span data-testid="chat-total">
                   {formatDuration(totalDurationMs + (busy ? runningMs(entries, nowMs) : 0))}
                 </span>
-                <span className="text-slate-500">total</span>
+                <span className="text-obd-subtle">total</span>
               </p>
             )}
           </div>
           {sessionUsage.input_tokens + sessionUsage.output_tokens > 0 && (
             <div
-              className="shrink-0 text-right text-[10px] leading-4 text-slate-500"
+              className="shrink-0 text-right text-[10px] leading-4 text-obd-subtle"
               title="Cumulative tokens and cost for this session"
             >
               <p className="font-mono">
                 {formatCompactTokens(sessionUsage.input_tokens + sessionUsage.cache_read_tokens)} in
                 · {formatCompactTokens(sessionUsage.output_tokens)} out
               </p>
-              <p className="font-mono text-slate-500">
+              <p className="font-mono text-obd-subtle">
                 ${sessionUsage.cost_usd.toFixed(4)} · {cacheHitShare(sessionUsage).toFixed(0)}%
                 cached
               </p>
@@ -2536,11 +2536,11 @@ export default function App() {
         <div
           {...chatDrop.zoneProps}
           className={`relative flex min-h-0 flex-1 flex-col ${
-            chatDrop.active ? "ring-2 ring-inset ring-emerald-400/30" : ""
+            chatDrop.active ? "ring-2 ring-inset ring-obd-accent/30" : ""
           }`}
         >
           {chatDrop.active && (
-            <div className="pointer-events-none absolute inset-0 z-20 flex items-start justify-center bg-emerald-400/[0.04] pt-6 text-[12px] font-medium text-emerald-200">
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-start justify-center bg-obd-accent/[0.04] pt-6 text-[12px] font-medium text-obd-accent">
               Drop files to attach them to the chat
             </div>
           )}
@@ -2558,13 +2558,13 @@ export default function App() {
             <div className="mx-auto w-full max-w-3xl space-y-6 px-5 py-6">
               {entries.length === 0 && (
                 <div className="pt-16">
-                  <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-emerald-400/20 bg-emerald-400/10 text-emerald-300">
+                  <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-obd-accent/20 bg-obd-accent/10 text-obd-accent">
                     <Bot size={22} />
                   </div>
-                  <h2 className="mt-4 text-center text-lg font-medium tracking-tight text-slate-200">
+                  <h2 className="mt-4 text-center text-lg font-medium tracking-tight text-obd-text">
                     {activeProject === null ? "Open a project to begin" : "What are we building?"}
                   </h2>
-                  <p className="mx-auto mt-1 max-w-md text-center text-[12px] leading-5 text-slate-500">
+                  <p className="mx-auto mt-1 max-w-md text-center text-[12px] leading-5 text-obd-subtle">
                     {activeProject === null
                       ? "Choose a project directory so the agent has a workspace and a place to keep session context."
                       : "Ask about the codebase, request a change, or run a check. Read and search tools run freely; edits and commands follow the access mode."}
@@ -2574,7 +2574,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setProjectDialogOpen(true)}
-                        className="flex items-center gap-1.5 rounded-md bg-emerald-400 px-3 py-2 text-[12px] font-medium text-emerald-950 hover:bg-emerald-300"
+                        className="flex items-center gap-1.5 rounded-md bg-obd-accent px-3 py-2 text-[12px] font-medium text-obd-on-accent hover:bg-obd-accent"
                       >
                         <Plus size={14} /> New project
                       </button>
@@ -2590,7 +2590,7 @@ export default function App() {
                           key={suggestion}
                           type="button"
                           onClick={() => composerRef.current?.setDraft(suggestion)}
-                          className="rounded-full border border-white/[0.07] bg-white/[0.02] px-3 py-1.5 text-[11px] text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
+                          className="rounded-full border border-obd-line bg-obd-raised px-3 py-1.5 text-[11px] text-obd-muted hover:bg-obd-raised-strong hover:text-obd-text"
                         >
                           {suggestion}
                         </button>
@@ -2646,7 +2646,7 @@ export default function App() {
               })}
 
               {busy && (
-                <div className="flex items-center gap-2 text-[12px] text-emerald-300">
+                <div className="flex items-center gap-2 text-[12px] text-obd-accent">
                   <Loader2 size={14} className="animate-spin" />
                   Working through the workspace…
                 </div>
@@ -2658,7 +2658,7 @@ export default function App() {
                 type="button"
                 aria-label="Jump to latest"
                 onClick={jumpToLatest}
-                className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-white/[0.1] bg-[#151921]/95 px-3 py-1.5 text-[11px] font-medium text-slate-200 shadow-lg backdrop-blur hover:bg-[#1b202a]"
+                className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-obd-line bg-obd-surface/95 px-3 py-1.5 text-[11px] font-medium text-obd-text shadow-lg backdrop-blur hover:bg-obd-surface"
               >
                 <ArrowDown size={12} /> Jump to latest
               </button>
@@ -2720,7 +2720,7 @@ export default function App() {
             aria-label="Resize project panel"
             aria-orientation="vertical"
             onPointerDown={startPanelResize}
-            className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-emerald-400/30"
+            className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-obd-accent/30"
           />
           <div
             className="flex min-h-0 shrink-0 overflow-hidden"
@@ -2786,7 +2786,7 @@ export default function App() {
       {toast !== null && (
         <div
           role="status"
-          className="fixed bottom-4 right-4 z-40 rounded-md border border-emerald-400/30 bg-[#1f2833] px-3 py-2 text-[11px] text-emerald-100 shadow-lg"
+          className="fixed bottom-4 right-4 z-40 rounded-md border border-obd-accent/30 bg-obd-surface px-3 py-2 text-[11px] text-obd-accent shadow-lg"
         >
           {toast}
         </div>
@@ -2880,32 +2880,32 @@ export default function App() {
           role="dialog"
           aria-modal="true"
           aria-label="Merge project bundle"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
         >
-          <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
-            <h2 className="text-[14px] font-medium text-slate-100">
+          <div className="w-full max-w-md rounded-xl border border-obd-line bg-obd-surface p-5 shadow-2xl">
+            <h2 className="text-[14px] font-medium text-obd-strong">
               Merge this bundle into {activeProject.name}?
             </h2>
-            <p className="mt-2 text-[11px] leading-5 text-slate-400">
+            <p className="mt-2 text-[11px] leading-5 text-obd-muted">
               Files that exist in both places are overwritten, files that only
               exist locally are kept, and imported chats are appended as new
               sessions.
             </p>
-            <p className="mt-2 break-all font-mono text-[9px] text-slate-500">
+            <p className="mt-2 break-all font-mono text-[9px] text-obd-subtle">
               {mergeBundle}
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setMergeBundle(null)}
-                className="rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+                className="rounded-md border border-obd-line bg-obd-raised px-3 py-1.5 text-[11px] text-obd-text hover:bg-obd-raised-strong"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={() => void confirmMergeImport()}
-                className="rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300"
+                className="rounded-md bg-obd-accent px-3 py-1.5 text-[11px] font-medium text-obd-on-accent hover:bg-obd-accent"
               >
                 Merge bundle
               </button>
@@ -2919,13 +2919,13 @@ export default function App() {
           role="dialog"
           aria-modal="true"
           aria-label="New project"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
         >
-          <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
+          <div className="w-full max-w-md rounded-xl border border-obd-line bg-obd-surface p-5 shadow-2xl">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-[14px] font-medium">New project</h2>
-                <p className="mt-0.5 text-[11px] text-slate-500">
+                <p className="mt-0.5 text-[11px] text-obd-subtle">
                   A project owns one workspace. Name it and OpenBaD creates the
                   folder for you.
                 </p>
@@ -2934,12 +2934,12 @@ export default function App() {
                 type="button"
                 aria-label="Close"
                 onClick={() => setProjectDialogOpen(false)}
-                className="rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+                className="rounded-md p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
               >
                 <X size={15} />
               </button>
             </div>
-            <label className="mt-4 block text-[10px] uppercase tracking-wider text-slate-500">
+            <label className="mt-4 block text-[10px] uppercase tracking-wider text-obd-subtle">
               Project name
             </label>
             <input
@@ -2953,13 +2953,13 @@ export default function App() {
               }}
               aria-label="Project name"
               placeholder="My project"
-              className="mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-emerald-400/40"
+              className="mt-1 w-full rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 text-[12px] text-obd-text outline-none focus:border-obd-accent/40"
             />
-            <div className="mt-3 rounded-md border border-white/[0.06] bg-black/20 px-2.5 py-2">
-              <p className="text-[9px] uppercase tracking-wider text-slate-500">
+            <div className="mt-3 rounded-md border border-obd-line bg-obd-inset px-2.5 py-2">
+              <p className="text-[9px] uppercase tracking-wider text-obd-subtle">
                 Workspace location
               </p>
-              <p className="mt-1 break-all font-mono text-[10px] leading-4 text-slate-500">
+              <p className="mt-1 break-all font-mono text-[10px] leading-4 text-obd-subtle">
                 {workspacesDir.length > 0
                   ? `${workspacesDir}/${projectSlugPreview(newProjectName)}`
                   : "Resolving the default workspaces directory…"}
@@ -2969,7 +2969,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setProjectDialogOpen(false)}
-                className="rounded-md px-3 py-1.5 text-[11px] text-slate-400 hover:bg-white/5"
+                className="rounded-md px-3 py-1.5 text-[11px] text-obd-muted hover:bg-obd-raised"
               >
                 Cancel
               </button>
@@ -2977,7 +2977,7 @@ export default function App() {
                 type="button"
                 onClick={() => void createProject()}
                 disabled={newProjectName.trim().length === 0}
-                className="rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-30"
+                className="rounded-md bg-obd-accent px-3 py-1.5 text-[11px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-30"
               >
                 Create project
               </button>
@@ -3009,8 +3009,8 @@ function ProjectAreaButton({
       onClick={onClick}
       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] ${
         active
-          ? "bg-emerald-400/10 text-emerald-200"
-          : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+          ? "bg-obd-accent/10 text-obd-accent"
+          : "text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
       }`}
     >
       {icon}
@@ -3018,7 +3018,7 @@ function ProjectAreaButton({
       {pulse && (
         <span
           aria-label="Background work running"
-          className="ml-auto h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400"
+          className="ml-auto h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-obd-accent"
         />
       )}
     </button>
@@ -3058,7 +3058,7 @@ function SessionRow({
 }) {
   if (editing) {
     return (
-      <div className="flex items-center gap-1 rounded-md bg-white/[0.06] px-1.5 py-1">
+      <div className="flex items-center gap-1 rounded-md bg-obd-raised-strong px-1.5 py-1">
         <input
           autoFocus
           value={draft}
@@ -3073,10 +3073,10 @@ function SessionRow({
               onCancel();
             }
           }}
-          className="min-w-0 flex-1 bg-transparent text-[11px] text-slate-200 outline-none"
+          className="min-w-0 flex-1 bg-transparent text-[11px] text-obd-text outline-none"
         />
         <button type="button" aria-label="Save name" onClick={onCommit}>
-          <Check size={12} className="text-emerald-300" />
+          <Check size={12} className="text-obd-accent" />
         </button>
       </div>
     );
@@ -3084,26 +3084,26 @@ function SessionRow({
   return (
     <div
       className={`group flex items-center gap-1.5 rounded-md px-1.5 py-1.5 text-[11px] ${
-        active ? "bg-emerald-400/10 text-emerald-200" : "text-slate-400 hover:bg-white/[0.04]"
+        active ? "bg-obd-accent/10 text-obd-accent" : "text-obd-muted hover:bg-obd-raised"
       }`}
     >
       <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-        <MessageSquare size={12} className="shrink-0 text-slate-500" />
+        <MessageSquare size={12} className="shrink-0 text-obd-subtle" />
         {status !== undefined && (
           <span
             aria-label={status === "approval" ? "Waiting for approval" : "Running"}
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-              status === "approval" ? "bg-amber-400" : "animate-pulse bg-emerald-400"
+              status === "approval" ? "bg-obd-warning" : "animate-pulse bg-obd-accent"
             }`}
           />
         )}
         <span className="min-w-0 flex-1 truncate">{session.title ?? "Untitled session"}</span>
         {showProject && (
-          <span className="max-w-[80px] truncate rounded bg-white/[0.05] px-1 py-0.5 text-[9px] text-slate-500">
+          <span className="max-w-[80px] truncate rounded bg-obd-raised-strong px-1 py-0.5 text-[9px] text-obd-subtle">
             {session.workspace_path?.split("/").filter(Boolean).at(-1) ?? "project"}
           </span>
         )}
-        <span className="shrink-0 font-mono text-[9px] text-slate-500">
+        <span className="shrink-0 font-mono text-[9px] text-obd-subtle">
           {formatRelativeTime(session.updated_at)}
         </span>
       </button>
@@ -3114,7 +3114,7 @@ function SessionRow({
           event.stopPropagation();
           onStartRename();
         }}
-        className="hidden shrink-0 rounded p-0.5 text-slate-500 hover:text-slate-300 group-hover:block"
+        className="hidden shrink-0 rounded p-0.5 text-obd-subtle hover:text-obd-body group-hover:block"
       >
         <Pencil size={11} />
       </button>
@@ -3126,7 +3126,7 @@ function SessionRow({
           event.stopPropagation();
           onArchive();
         }}
-        className="hidden shrink-0 rounded p-0.5 text-slate-500 hover:text-slate-300 group-hover:block"
+        className="hidden shrink-0 rounded p-0.5 text-obd-subtle hover:text-obd-body group-hover:block"
       >
         {archived ? <ArchiveRestore size={11} /> : <Archive size={11} />}
       </button>
@@ -3138,7 +3138,7 @@ function SessionRow({
           event.stopPropagation();
           onDelete();
         }}
-        className="hidden shrink-0 rounded p-0.5 text-slate-500 hover:text-rose-300 group-hover:block"
+        className="hidden shrink-0 rounded p-0.5 text-obd-subtle hover:text-obd-danger group-hover:block"
       >
         <Trash2 size={11} />
       </button>
@@ -3175,8 +3175,8 @@ function CopyMessageButton({
       }}
       className={
         showLabel
-          ? "inline-flex items-center gap-1 rounded border border-white/[0.06] px-1.5 py-1 text-[10px] text-slate-500 hover:border-white/[0.12] hover:text-slate-300"
-          : "ml-1 rounded p-0.5 text-slate-500 hover:text-slate-300 focus-visible:text-slate-300"
+          ? "inline-flex items-center gap-1 rounded border border-obd-line px-1.5 py-1 text-[10px] text-obd-subtle hover:border-obd-line hover:text-obd-body"
+          : "ml-1 rounded p-0.5 text-obd-subtle hover:text-obd-body focus-visible:text-obd-body"
       }
     >
       {copied ? <Check size={11} /> : <Copy size={11} />}
@@ -3227,24 +3227,24 @@ function TransferDialog({
       role="dialog"
       aria-modal="true"
       aria-label={done ? state.title : "Project transfer"}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-obd-line bg-obd-surface p-5 shadow-2xl">
         <div className="flex items-start gap-2">
           {state.phase === "running" && (
-            <Loader2 size={16} className="mt-0.5 shrink-0 animate-spin text-emerald-300" />
+            <Loader2 size={16} className="mt-0.5 shrink-0 animate-spin text-obd-accent" />
           )}
           {state.phase === "done" && (
-            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-300" />
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-obd-accent" />
           )}
           {state.phase === "error" && (
-            <CircleAlert size={16} className="mt-0.5 shrink-0 text-rose-300" />
+            <CircleAlert size={16} className="mt-0.5 shrink-0 text-obd-danger" />
           )}
           <div className="min-w-0">
-            <h2 className="text-[14px] font-medium text-slate-100">
+            <h2 className="text-[14px] font-medium text-obd-strong">
               {state.phase === "running" ? "Project transfer" : state.title}
             </h2>
-            <p className="mt-1 text-[11px] leading-5 text-slate-400">
+            <p className="mt-1 text-[11px] leading-5 text-obd-muted">
               {state.phase === "running" && state.label}
               {state.phase === "error" && state.message}
               {state.phase === "done" && (
@@ -3257,14 +3257,14 @@ function TransferDialog({
               )}
             </p>
             {done && state.report.warnings.length > 0 && (
-              <ul className="mt-2 space-y-1 text-[10px] leading-4 text-amber-300/90">
+              <ul className="mt-2 space-y-1 text-[10px] leading-4 text-obd-warning/90">
                 {state.report.warnings.map((warning) => (
                   <li key={warning}>• {warning}</li>
                 ))}
               </ul>
             )}
             {done && (
-              <p className="mt-2 break-all font-mono text-[9px] text-slate-500">
+              <p className="mt-2 break-all font-mono text-[9px] text-obd-subtle">
                 {state.report.path}
               </p>
             )}
@@ -3275,7 +3275,7 @@ function TransferDialog({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+              className="rounded-md border border-obd-line bg-obd-raised px-3 py-1.5 text-[11px] text-obd-text hover:bg-obd-raised-strong"
             >
               Close
             </button>
@@ -3300,14 +3300,14 @@ function ToolCallCard({ tool }: { tool: ToolCallView }) {
             : "Done";
   const tone =
     tool.isError === true
-      ? "border-rose-500/30 bg-rose-500/[0.04]"
-      : "border-white/[0.06] bg-black/20";
+      ? "border-obd-danger/30 bg-obd-danger/[0.04]"
+      : "border-obd-line bg-obd-inset";
   const chip =
     tool.isError === true
-      ? "text-rose-300"
+      ? "text-obd-danger"
       : tool.status === "running"
-        ? "text-emerald-300"
-        : "text-slate-500";
+        ? "text-obd-accent"
+        : "text-obd-subtle";
   return (
     <div className={`rounded-md border px-3 py-2 ${tone}`}>
       <button
@@ -3316,35 +3316,35 @@ function ToolCallCard({ tool }: { tool: ToolCallView }) {
         aria-expanded={open}
         className="flex w-full items-center gap-2 text-left"
       >
-        <Wrench size={11} className="shrink-0 text-slate-500" />
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300">
+        <Wrench size={11} className="shrink-0 text-obd-subtle" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-obd-body">
           {tool.name}
         </span>
         <span className={`text-[9px] uppercase tracking-[0.12em] ${chip}`}>{label}</span>
         {tool.durationMs !== undefined && (
-          <span className="font-mono text-[9px] text-slate-600">{tool.durationMs}ms</span>
+          <span className="font-mono text-[9px] text-obd-faint">{tool.durationMs}ms</span>
         )}
         <ChevronDown
           size={11}
-          className={`shrink-0 text-slate-600 transition-transform ${open ? "rotate-180" : ""}`}
+          className={`shrink-0 text-obd-faint transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
       {open && (
         <div className="mt-2 space-y-2">
           <div>
-            <p className="text-[9px] uppercase tracking-[0.14em] text-slate-600">Arguments</p>
-            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 font-mono text-[10px] leading-4 text-slate-400">
+            <p className="text-[9px] uppercase tracking-[0.14em] text-obd-faint">Arguments</p>
+            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-obd-inset p-2 font-mono text-[10px] leading-4 text-obd-muted">
               {tool.arguments}
             </pre>
           </div>
           {tool.result !== undefined && (
             <div>
-              <p className="text-[9px] uppercase tracking-[0.14em] text-slate-600">Result</p>
+              <p className="text-[9px] uppercase tracking-[0.14em] text-obd-faint">Result</p>
               <pre
                 className={`mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded p-2 font-mono text-[10px] leading-4 ${
                   tool.isError === true
-                    ? "bg-rose-950/30 text-rose-200"
-                    : "bg-black/30 text-slate-400"
+                    ? "bg-obd-danger/30 text-obd-danger"
+                    : "bg-obd-inset text-obd-muted"
                 }`}
               >
                 {tool.result}
@@ -3380,9 +3380,9 @@ const MessageCard = memo(function MessageCard({
   if (entry.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-xl border border-emerald-400/15 bg-emerald-400/[0.06] px-4 py-3 text-[13px] leading-6 text-slate-100">
+        <div className="max-w-[85%] rounded-xl border border-obd-accent/15 bg-obd-accent/[0.06] px-4 py-3 text-[13px] leading-6 text-obd-strong">
           {entry.steering && (
-            <p className="mb-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-emerald-300/80">
+            <p className="mb-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-obd-accent/80">
               Steering
             </p>
           )}
@@ -3391,7 +3391,7 @@ const MessageCard = memo(function MessageCard({
               {entry.attachments.map((attachment, index) => (
                 <span
                   key={`${attachment.name}-${index}`}
-                  className="flex items-center gap-1 rounded border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] text-emerald-100"
+                  className="flex items-center gap-1 rounded border border-obd-accent/20 bg-obd-accent/10 px-1.5 py-0.5 text-[10px] text-obd-accent"
                 >
                   <button
                     type="button"
@@ -3438,7 +3438,7 @@ const MessageCard = memo(function MessageCard({
                   type="button"
                   onClick={onEdit}
                   title="Edit and resend as a new branch"
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-emerald-200/70 transition-colors hover:bg-emerald-400/10 hover:text-emerald-100"
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-obd-accent/70 transition-colors hover:bg-obd-accent/10 hover:text-obd-accent"
                 >
                   <Pencil size={10} />
                   Edit
@@ -3453,20 +3453,20 @@ const MessageCard = memo(function MessageCard({
   }
   return (
     <div className="group/message flex gap-3">
-      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-slate-400">
+      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-obd-line bg-obd-raised text-obd-muted">
         <Bot size={13} />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 text-[10px] text-slate-500">
-          <span className="font-medium text-slate-400">OpenBaD</span>
+        <div className="flex items-center gap-2 text-[10px] text-obd-subtle">
+          <span className="font-medium text-obd-muted">OpenBaD</span>
           {entry.status !== undefined && <span>· {entry.status}</span>}
           {running && entry.startedAt !== undefined && nowMs !== undefined && (
-            <span className="font-mono text-slate-500" data-testid="turn-running">
+            <span className="font-mono text-obd-subtle" data-testid="turn-running">
               · {formatDuration(Math.max(0, nowMs - entry.startedAt))}
             </span>
           )}
           {!running && entry.durationMs !== undefined && (
-            <span className="font-mono text-slate-500" data-testid="turn-duration">
+            <span className="font-mono text-obd-subtle" data-testid="turn-duration">
               · {formatDuration(entry.durationMs)}
             </span>
           )}
@@ -3478,7 +3478,7 @@ const MessageCard = memo(function MessageCard({
               type="button"
               onClick={onRetry}
               title="Retry this turn"
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-slate-400 transition-colors hover:bg-white/[0.05] hover:text-slate-200"
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-obd-muted transition-colors hover:bg-obd-raised-strong hover:text-obd-text"
             >
               <RotateCcw size={10} />
               Retry
@@ -3486,21 +3486,21 @@ const MessageCard = memo(function MessageCard({
           )}
         </div>
         {entry.reasoning !== undefined && entry.reasoning.length > 0 && (
-          <details className="mt-2 rounded-md border border-white/[0.05] bg-black/20 px-3 py-2">
-            <summary className="cursor-pointer text-[11px] text-slate-500">Reasoning</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-4 text-slate-500">
+          <details className="mt-2 rounded-md border border-obd-line bg-obd-inset px-3 py-2">
+            <summary className="cursor-pointer text-[11px] text-obd-subtle">Reasoning</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-4 text-obd-subtle">
               {entry.reasoning}
             </pre>
           </details>
         )}
         {entry.text.length > 0 && (
-          <div className="mt-2 text-[13px] leading-6 text-slate-200">
+          <div className="mt-2 text-[13px] leading-6 text-obd-text">
             <MarkdownMessage text={entry.text} />
           </div>
         )}
         {entry.todos !== undefined && entry.todos.length > 0 && (
-          <div className="mt-3 rounded-md border border-white/[0.06] bg-black/20 px-3 py-2">
-            <p className="text-[10px] text-slate-500">
+          <div className="mt-3 rounded-md border border-obd-line bg-obd-inset px-3 py-2">
+            <p className="text-[10px] text-obd-subtle">
               Todos ({entry.todos.filter((todo) => todo.state === "done").length}/
               {entry.todos.length})
             </p>
@@ -3510,12 +3510,12 @@ const MessageCard = memo(function MessageCard({
                   <span
                     className={
                       todo.state === "done"
-                        ? "text-emerald-400"
+                        ? "text-obd-accent"
                         : todo.state === "doing"
-                          ? "text-sky-300"
+                          ? "text-obd-info"
                           : todo.state === "blocked"
-                            ? "text-amber-300"
-                            : "text-slate-600"
+                            ? "text-obd-warning"
+                            : "text-obd-faint"
                     }
                   >
                     {todo.state === "done"
@@ -3529,8 +3529,8 @@ const MessageCard = memo(function MessageCard({
                   <span
                     className={
                       todo.state === "done"
-                        ? "text-slate-500 line-through"
-                        : "text-slate-300"
+                        ? "text-obd-subtle line-through"
+                        : "text-obd-body"
                     }
                   >
                     {todo.text}
@@ -3552,7 +3552,7 @@ const MessageCard = memo(function MessageCard({
             {entry.tools.map((note, index) => (
               <p
                 key={`${entry.id}-note-${index}`}
-                className="font-mono text-[10px] leading-4 text-slate-500"
+                className="font-mono text-[10px] leading-4 text-obd-subtle"
               >
                 {note}
               </p>
@@ -3563,7 +3563,7 @@ const MessageCard = memo(function MessageCard({
           <button
             type="button"
             onClick={onReviewChanges}
-            className="mt-2 inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[10px] text-slate-400 transition-colors hover:border-emerald-400/25 hover:text-emerald-200"
+            className="mt-2 inline-flex items-center gap-1 rounded-md border border-obd-line bg-obd-raised px-2 py-1 text-[10px] text-obd-muted transition-colors hover:border-obd-accent/25 hover:text-obd-accent"
           >
             <Wrench size={11} /> Review {entry.checkpointCount} file change
             {entry.checkpointCount === 1 ? "" : "s"}
@@ -3573,14 +3573,14 @@ const MessageCard = memo(function MessageCard({
           <button
             type="button"
             onClick={() => onOpenPreview(preview)}
-            className="mt-2 inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[10px] text-slate-400 transition-colors hover:border-emerald-400/25 hover:text-emerald-200"
+            className="mt-2 inline-flex items-center gap-1 rounded-md border border-obd-line bg-obd-raised px-2 py-1 text-[10px] text-obd-muted transition-colors hover:border-obd-accent/25 hover:text-obd-accent"
           >
             <Eye size={11} />
             {preview.kind === "git" ? "Open source control" : "Reopen preview"}
           </button>
         )}
         {entry.usage !== undefined && (
-          <p className="mt-2 font-mono text-[10px] text-slate-500">
+          <p className="mt-2 font-mono text-[10px] text-obd-subtle">
             {entry.usage.input_tokens.toLocaleString()} in ·{" "}
             {entry.usage.cache_read_tokens.toLocaleString()} cached (
             {cacheHitShare(entry.usage).toFixed(0)}%) · {entry.usage.output_tokens.toLocaleString()}{" "}
@@ -3623,17 +3623,17 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl"
+        className="w-full max-w-sm rounded-xl border border-obd-line bg-obd-surface p-5 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-[14px] font-medium">Keyboard shortcuts</h2>
-            <p className="mt-0.5 text-[11px] text-slate-500">
+            <p className="mt-0.5 text-[11px] text-obd-subtle">
               Menus carry project actions; the canvas stays yours.
             </p>
           </div>
@@ -3641,7 +3641,7 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
             type="button"
             aria-label="Close keyboard shortcuts"
             onClick={onClose}
-            className="rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+            className="rounded-md p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
           >
             <X size={15} />
           </button>
@@ -3650,10 +3650,10 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
           {shortcuts.map(([label, keys]) => (
             <div
               key={label}
-              className="flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] text-slate-300 hover:bg-white/[0.03]"
+              className="flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] text-obd-body hover:bg-obd-raised"
             >
               <span>{label}</span>
-              <span className="rounded border border-white/[0.08] bg-black/30 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+              <span className="rounded border border-obd-line bg-obd-inset px-1.5 py-0.5 font-mono text-[9px] text-obd-subtle">
                 {keys}
               </span>
             </div>
@@ -3731,17 +3731,17 @@ function SettingsDialog({
       role="dialog"
       aria-modal="true"
       aria-label="Settings"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
     >
-      <div className="flex h-[min(640px,80vh)] w-full max-w-3xl overflow-hidden rounded-xl border border-white/10 bg-[#1f2833] shadow-2xl">
-        <div className="w-[180px] shrink-0 border-r border-white/[0.06] bg-black/10 p-3">
+      <div className="flex h-[min(640px,80vh)] w-full max-w-3xl overflow-hidden rounded-xl border border-obd-line bg-obd-surface shadow-2xl">
+        <div className="w-[180px] shrink-0 border-r border-obd-line bg-obd-inset p-3">
           <div className="flex items-center justify-between px-1">
-            <p className="text-[12px] font-medium text-slate-300">Settings</p>
+            <p className="text-[12px] font-medium text-obd-body">Settings</p>
             <button
               type="button"
               aria-label="Close settings"
               onClick={onClose}
-              className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+              className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
             >
               <X size={14} />
             </button>
@@ -3754,8 +3754,8 @@ function SettingsDialog({
                 onClick={() => onTab(item.id)}
                 className={`w-full rounded-md px-2 py-1.5 text-left text-[11px] ${
                   tab === item.id
-                    ? "bg-white/[0.08] text-slate-200"
-                    : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+                    ? "bg-obd-raised-strong text-obd-text"
+                    : "text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
                 }`}
               >
                 {item.label}
@@ -3772,20 +3772,20 @@ function SettingsDialog({
                   value={model}
                   aria-label="Model route"
                   onChange={(event) => onModel(event.target.value)}
-                  className="w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-emerald-400/40"
+                  className="w-full rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 text-[12px] text-obd-text outline-none focus:border-obd-accent/40"
                 >
                   <option value="deepseek-flash">deepseek-flash · fast</option>
                   <option value="deepseek-v4-pro">deepseek-v4-pro · reasoning</option>
                 </select>
               </Section>
               <Section title="Thinking" description="Reasoning effort for this route.">
-                <label className="flex items-center justify-between text-[12px] text-slate-300">
+                <label className="flex items-center justify-between text-[12px] text-obd-body">
                   <span>Enable thinking</span>
                   <input
                     type="checkbox"
                     checked={thinking}
                     onChange={(event) => onThinking(event.target.checked)}
-                    className="accent-emerald-400"
+                    className="accent-obd-accent"
                   />
                 </label>
                 <select
@@ -3793,7 +3793,7 @@ function SettingsDialog({
                   aria-label="Reasoning effort"
                   onChange={(event) => onReasoningEffort(event.target.value)}
                   disabled={!thinking}
-                  className="mt-3 w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-emerald-400/40 disabled:opacity-40"
+                  className="mt-3 w-full rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 text-[12px] text-obd-text outline-none focus:border-obd-accent/40 disabled:opacity-40"
                 >
                   <option value="low">low effort</option>
                   <option value="high">high effort</option>
@@ -3820,28 +3820,28 @@ function SettingsDialog({
                   onClick={() => onPermissionMode(id)}
                   className={`w-full rounded-lg border p-3 text-left ${
                     permissionMode === id
-                      ? "border-emerald-400/30 bg-emerald-400/[0.06]"
-                      : "border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04]"
+                      ? "border-obd-accent/30 bg-obd-accent/[0.06]"
+                      : "border-obd-line bg-obd-raised hover:bg-obd-raised"
                   }`}
                 >
-                  <div className="flex items-center gap-2 text-[12px] text-slate-200">
-                    <Shield size={14} className={permissionMode === id ? "text-emerald-300" : "text-slate-500"} />
+                  <div className="flex items-center gap-2 text-[12px] text-obd-text">
+                    <Shield size={14} className={permissionMode === id ? "text-obd-accent" : "text-obd-subtle"} />
                     {label}
-                    {permissionMode === id && <Check size={13} className="ml-auto text-emerald-300" />}
+                    {permissionMode === id && <Check size={13} className="ml-auto text-obd-accent" />}
                   </div>
-                  <p className="mt-1 text-[11px] leading-5 text-slate-500">{description}</p>
+                  <p className="mt-1 text-[11px] leading-5 text-obd-subtle">{description}</p>
                 </button>
               ))}
-              <p className="px-1 text-[11px] leading-5 text-slate-500">
+              <p className="px-1 text-[11px] leading-5 text-obd-subtle">
                 Access mode is remembered per session, so returning to a session restores
                 the mode it last used. New sessions start read-only.
               </p>
               <div className="pt-2">
-                <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-obd-subtle">
                   Outside workspace
                 </p>
                 {accessGrants.length === 0 ? (
-                  <p className="px-1 text-[11px] leading-5 text-slate-500">
+                  <p className="px-1 text-[11px] leading-5 text-obd-subtle">
                     No external filesystem grants. The assistant can ask for one when a
                     task needs a path outside this project.
                   </p>
@@ -3850,17 +3850,17 @@ function SettingsDialog({
                     {accessGrants.map((grant) => (
                       <div
                         key={grant.id}
-                        className="flex items-start gap-2 rounded-md border border-white/[0.07] bg-white/[0.02] p-2.5"
+                        className="flex items-start gap-2 rounded-md border border-obd-line bg-obd-raised p-2.5"
                       >
                         <div className="min-w-0 flex-1">
-                          <p className="break-all font-mono text-[10px] text-slate-300">
+                          <p className="break-all font-mono text-[10px] text-obd-body">
                             {grant.path}
                           </p>
-                          <p className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-500">
+                          <p className="mt-0.5 text-[9px] uppercase tracking-wide text-obd-subtle">
                             {grant.write_access ? "read and write" : "read only"}
                           </p>
                           {grant.reason.length > 0 && (
-                            <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                            <p className="mt-1 text-[10px] leading-4 text-obd-subtle">
                               {grant.reason}
                             </p>
                           )}
@@ -3869,7 +3869,7 @@ function SettingsDialog({
                           type="button"
                           aria-label={`Revoke access to ${grant.path}`}
                           onClick={() => onRevokeAccess(grant)}
-                          className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
+                          className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-warning"
                         >
                           <Trash2 size={11} />
                         </button>
@@ -3890,13 +3890,13 @@ function SettingsDialog({
                     value={apiKeyInput}
                     onChange={(event) => onApiKeyInput(event.target.value)}
                     placeholder="sk-…"
-                    className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2.5 py-2 font-mono text-[11px] text-slate-200 outline-none focus:border-emerald-400/40"
+                    className="min-w-0 flex-1 rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 font-mono text-[11px] text-obd-text outline-none focus:border-obd-accent/40"
                   />
                   <button
                     type="button"
                     onClick={onSaveApiKey}
                     disabled={apiKeyInput.trim().length === 0}
-                    className="rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-30"
+                    className="rounded-md bg-obd-accent px-3 py-1.5 text-[11px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-30"
                   >
                     Save
                   </button>
@@ -3905,7 +3905,7 @@ function SettingsDialog({
                   <button
                     type="button"
                     onClick={onClearApiKey}
-                    className="mt-3 text-[11px] text-amber-300 hover:underline"
+                    className="mt-3 text-[11px] text-obd-warning hover:underline"
                   >
                     Remove stored key
                   </button>
@@ -3927,12 +3927,12 @@ function SettingsDialog({
                     value={projectNameDraft}
                     aria-label="Project display name"
                     onChange={(event) => onProjectNameDraft(event.target.value)}
-                    className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[12px] text-slate-200 outline-none focus:border-emerald-400/40"
+                    className="min-w-0 flex-1 rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 text-[12px] text-obd-text outline-none focus:border-obd-accent/40"
                   />
                   <button
                     type="button"
                     onClick={onSaveProjectName}
-                    className="rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+                    className="rounded-md border border-obd-line bg-obd-raised px-3 py-1.5 text-[11px] text-obd-text hover:bg-obd-raised-strong"
                   >
                     Rename
                   </button>
@@ -3941,7 +3941,7 @@ function SettingsDialog({
               <button
                 type="button"
                 onClick={onAddProject}
-                className="flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-[11px] text-slate-300 hover:bg-white/[0.06]"
+                className="flex items-center gap-1.5 rounded-md border border-obd-line bg-obd-raised px-3 py-2 text-[11px] text-obd-body hover:bg-obd-raised-strong"
               >
                 <Plus size={13} /> Create another project
               </button>
@@ -3949,7 +3949,7 @@ function SettingsDialog({
                 type="button"
                 onClick={onRemoveProject}
                 disabled={activeProject === null}
-                className="flex items-center gap-1.5 rounded-md border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-[11px] text-amber-300 hover:bg-amber-400/10 disabled:opacity-30"
+                className="flex items-center gap-1.5 rounded-md border border-obd-warning/20 bg-obd-warning/[0.04] px-3 py-2 text-[11px] text-obd-warning hover:bg-obd-warning/10 disabled:opacity-30"
               >
                 <Trash2 size={13} /> Remove project
               </button>
@@ -3959,7 +3959,7 @@ function SettingsDialog({
           {tab === "about" && (
             <div className="max-w-md space-y-3">
               <Section title="OpenBaD Desktop" description="A DeepSeek-first coding harness.">
-                <div className="space-y-1 font-mono text-[11px] text-slate-400">
+                <div className="space-y-1 font-mono text-[11px] text-obd-muted">
                   <p>version {foundation.kind === "ready" ? foundation.foundation.app_version : "—"}</p>
                   <p>schema {foundation.kind === "ready" ? foundation.foundation.doctor.schema_version : "—"}</p>
                   <p>integrity {foundation.kind === "ready" ? foundation.foundation.doctor.integrity : "—"}</p>
@@ -4045,15 +4045,15 @@ function CommandPalette({
       role="dialog"
       aria-modal="true"
       aria-label="Command menu"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-6 pt-[15vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-obd-scrim p-6 pt-[15vh] backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-[#1f2833] shadow-2xl"
+        className="w-full max-w-lg overflow-hidden rounded-xl border border-obd-line bg-obd-surface shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-2.5">
-          <Search size={14} className="text-slate-500" />
+        <div className="flex items-center gap-2 border-b border-obd-line px-3 py-2.5">
+          <Search size={14} className="text-obd-subtle" />
           <input
             autoFocus
             value={query}
@@ -4065,26 +4065,26 @@ function CommandPalette({
             }}
             aria-label="Command search"
             placeholder="Type a command…"
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-slate-200 outline-none placeholder:text-slate-500"
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-obd-text outline-none placeholder:text-obd-subtle"
           />
-          <span className="rounded border border-white/[0.08] px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+          <span className="rounded border border-obd-line px-1.5 py-0.5 font-mono text-[9px] text-obd-subtle">
             esc
           </span>
         </div>
         <div className="max-h-80 overflow-y-auto p-1.5">
           {filtered.length === 0 && (
-            <p className="px-2 py-3 text-[11px] text-slate-500">No matching commands.</p>
+            <p className="px-2 py-3 text-[11px] text-obd-subtle">No matching commands.</p>
           )}
           {filtered.map((action) => (
             <button
               key={action.label}
               type="button"
               onClick={action.run}
-              className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-[12px] text-slate-300 hover:bg-white/[0.06] hover:text-slate-100"
+              className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-[12px] text-obd-body hover:bg-obd-raised-strong hover:text-obd-strong"
             >
               <span>{action.label}</span>
               {action.hint !== "" && (
-                <span className="font-mono text-[9px] text-slate-500">{action.hint}</span>
+                <span className="font-mono text-[9px] text-obd-subtle">{action.hint}</span>
               )}
             </button>
           ))}
@@ -4104,10 +4104,10 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-      <h3 className="text-[12px] font-medium text-slate-200">{title}</h3>
+    <section className="rounded-lg border border-obd-line bg-obd-raised p-3">
+      <h3 className="text-[12px] font-medium text-obd-text">{title}</h3>
       {description !== undefined && (
-        <p className="mt-0.5 text-[11px] leading-5 text-slate-500">{description}</p>
+        <p className="mt-0.5 text-[11px] leading-5 text-obd-subtle">{description}</p>
       )}
       <div className="mt-3">{children}</div>
     </section>
@@ -4409,7 +4409,7 @@ function TranscriptDialog({
   return (
     <div
       ref={ref}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Transcript"
@@ -4435,7 +4435,7 @@ function TranscriptDialog({
             </button>
           </div>
         </div>
-        <pre className="mt-3 flex-1 overflow-auto whitespace-pre-wrap rounded bg-black/20 p-3 font-mono text-[11px] leading-5">
+        <pre className="mt-3 flex-1 overflow-auto whitespace-pre-wrap rounded bg-obd-inset p-3 font-mono text-[11px] leading-5">
           {text}
         </pre>
       </div>
@@ -4459,45 +4459,45 @@ function ApprovalRequestDialog({
   return (
     <div
       ref={trapRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Approval required"
     >
-      <div className="w-full max-w-lg rounded-lg border border-amber-500/40 bg-[var(--obd-surface)] p-5 text-[var(--obd-text)] shadow-xl">
-        <h2 className="text-sm font-semibold text-amber-200">Approval required</h2>
-        <p className="mt-1 text-xs text-slate-400">
-          <span className="font-mono text-slate-200">{approval.tool}</span>
+      <div className="w-full max-w-lg rounded-lg border border-obd-warning/40 bg-[var(--obd-surface)] p-5 text-[var(--obd-text)] shadow-xl">
+        <h2 className="text-sm font-semibold text-obd-warning">Approval required</h2>
+        <p className="mt-1 text-xs text-obd-muted">
+          <span className="font-mono text-obd-text">{approval.tool}</span>
           <span> · {approval.risk} risk</span>
         </p>
-        <pre className="mt-3 max-h-40 overflow-auto rounded bg-slate-950 p-2 text-[11px] text-slate-300">
+        <pre className="mt-3 max-h-40 overflow-auto rounded bg-obd-bg p-2 text-[11px] text-obd-body">
           {approval.detail}
         </pre>
         <div className="mt-4 flex flex-wrap justify-end gap-2">
           <button
             type="button"
-            className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+            className="rounded border border-obd-faint px-3 py-1.5 text-xs text-obd-body hover:bg-obd-raised"
             onClick={() => onDecide("deny")}
           >
             Skip
           </button>
           <button
             type="button"
-            className="rounded border border-slate-600 px-3 py-1.5 text-xs text-slate-100 hover:bg-slate-800"
+            className="rounded border border-obd-faint px-3 py-1.5 text-xs text-obd-strong hover:bg-obd-raised"
             onClick={() => onDecide("allow_once")}
           >
             Allow once
           </button>
           <button
             type="button"
-            className="rounded border border-slate-600 px-3 py-1.5 text-xs text-slate-100 hover:bg-slate-800"
+            className="rounded border border-obd-faint px-3 py-1.5 text-xs text-obd-strong hover:bg-obd-raised"
             onClick={() => onDecide("allow_session")}
           >
             Allow for session
           </button>
           <button
             type="button"
-            className="rounded border border-emerald-600/60 px-3 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/40"
+            className="rounded border border-obd-accent/60 px-3 py-1.5 text-xs text-obd-accent hover:bg-obd-accent/40"
             onClick={() => onDecide("allow_workspace")}
           >
             Allow for workspace
@@ -4522,23 +4522,23 @@ function ToolApprovalDialog({
       role="dialog"
       aria-modal="true"
       aria-label="Tool approval request"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-obd-line bg-obd-surface p-5 shadow-2xl">
         <div className="flex items-start gap-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 text-amber-300">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-obd-warning/20 bg-obd-warning/10 text-obd-warning">
             <Shield size={16} />
           </div>
           <div>
             <h2 className="text-[14px] font-medium">Approve this tool?</h2>
-            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+            <p className="mt-1 text-[11px] leading-5 text-obd-subtle">
               {request.reason}. Approval applies to this session.
             </p>
           </div>
         </div>
-        <div className="mt-4 flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/30 px-2.5 py-2">
-          <span className="font-mono text-[11px] text-slate-300">{request.tool}</span>
-          <span className="ml-auto rounded border border-amber-400/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-amber-300">
+        <div className="mt-4 flex items-center gap-2 rounded-md border border-obd-line bg-obd-inset px-2.5 py-2">
+          <span className="font-mono text-[11px] text-obd-body">{request.tool}</span>
+          <span className="ml-auto rounded border border-obd-warning/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-obd-warning">
             {request.risk}
           </span>
         </div>
@@ -4546,14 +4546,14 @@ function ToolApprovalDialog({
           <button
             type="button"
             onClick={onDeny}
-            className="rounded-md border border-white/10 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/5"
+            className="rounded-md border border-obd-line px-3 py-1.5 text-[11px] text-obd-body hover:bg-obd-raised"
           >
             Deny
           </button>
           <button
             type="button"
             onClick={onApprove}
-            className="rounded-md border border-emerald-400/30 bg-emerald-400/15 px-3 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-400/20"
+            className="rounded-md border border-obd-accent/30 bg-obd-accent/15 px-3 py-1.5 text-[11px] font-medium text-obd-accent hover:bg-obd-accent/20"
           >
             Approve for session
           </button>
@@ -4577,16 +4577,16 @@ function AccessRequestDialog({
       role="dialog"
       aria-modal="true"
       aria-label="Filesystem access request"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-obd-scrim p-6 backdrop-blur-sm"
     >
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#1f2833] p-5 shadow-2xl">
+      <div className="w-full max-w-md rounded-xl border border-obd-line bg-obd-surface p-5 shadow-2xl">
         <div className="flex items-start gap-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 text-amber-300">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-obd-warning/20 bg-obd-warning/10 text-obd-warning">
             <Shield size={16} />
           </div>
           <div>
             <h2 className="text-[14px] font-medium">Allow access outside the workspace?</h2>
-            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+            <p className="mt-1 text-[11px] leading-5 text-obd-subtle">
               OpenBaD asked for {request.write ? "read and write" : "read-only"} access.
               The grant applies to this project until you revoke it.
               {request.write &&
@@ -4594,22 +4594,22 @@ function AccessRequestDialog({
             </p>
           </div>
         </div>
-        <p className="mt-4 break-all rounded-md border border-white/[0.07] bg-black/30 px-2.5 py-2 font-mono text-[10px] text-slate-300">
+        <p className="mt-4 break-all rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 font-mono text-[10px] text-obd-body">
           {request.path}
         </p>
-        <p className="mt-2 text-[11px] leading-5 text-slate-500">{request.reason}</p>
+        <p className="mt-2 text-[11px] leading-5 text-obd-subtle">{request.reason}</p>
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onDeny}
-            className="rounded-md border border-white/10 px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/5"
+            className="rounded-md border border-obd-line px-3 py-1.5 text-[11px] text-obd-body hover:bg-obd-raised"
           >
             Deny
           </button>
           <button
             type="button"
             onClick={onGrant}
-            className="rounded-md border border-emerald-400/30 bg-emerald-400/15 px-3 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-400/20"
+            className="rounded-md border border-obd-accent/30 bg-obd-accent/15 px-3 py-1.5 text-[11px] font-medium text-obd-accent hover:bg-obd-accent/20"
           >
             Grant access
           </button>

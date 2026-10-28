@@ -95,9 +95,9 @@ export default function ArtifactViewer({
   if (artifact === null) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-4 py-12 text-center">
-        <Layers size={22} className="text-slate-500" />
-        <p className="text-[11px] text-slate-500">Nothing open yet.</p>
-        <p className="max-w-[220px] text-[10px] leading-4 text-slate-500">
+        <Layers size={22} className="text-obd-subtle" />
+        <p className="text-[11px] text-obd-subtle">Nothing open yet.</p>
+        <p className="max-w-[220px] text-[10px] leading-4 text-obd-subtle">
           Open a file, knowledge document, or retrieval hit. Assistant-presented
           artifacts appear here too.
         </p>
@@ -107,28 +107,28 @@ export default function ArtifactViewer({
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 py-12 text-[11px] text-slate-500">
+      <div className="flex h-full items-center justify-center gap-2 py-12 text-[11px] text-obd-subtle">
         <Loader2 size={13} className="animate-spin" /> Loading preview…
       </div>
     );
   }
 
   if (error !== null) {
-    return <p className="p-2 text-[10px] leading-4 text-amber-300">{error}</p>;
+    return <p className="p-2 text-[10px] leading-4 text-obd-warning">{error}</p>;
   }
 
   if (artifact.kind === "web") {
     return (
       <div className="flex h-full min-h-[460px] flex-col">
         <div className="mb-2 flex shrink-0 items-center gap-2">
-          <span className="truncate font-mono text-[9px] text-slate-500">
+          <span className="truncate font-mono text-[9px] text-obd-subtle">
             {artifact.uri}
           </span>
           <a
             href={artifact.uri}
             target="_blank"
             rel="noreferrer"
-            className="ml-auto shrink-0 text-[9px] text-emerald-300 hover:underline"
+            className="ml-auto shrink-0 text-[9px] text-obd-accent hover:underline"
           >
             Open externally
           </a>
@@ -139,7 +139,7 @@ export default function ArtifactViewer({
             src={artifact.uri}
             sandbox="allow-scripts allow-forms allow-popups"
             referrerPolicy="no-referrer"
-            className="min-h-0 w-full flex-1 rounded-lg border border-white/10 bg-white"
+            className="min-h-0 w-full flex-1 rounded-lg border border-obd-line bg-obd-canvas"
           />
         )}
       </div>
@@ -156,7 +156,7 @@ export default function ArtifactViewer({
         ? artifact.uri
         : null);
     return (
-      <div className="flex h-full items-center justify-center rounded-lg border border-white/[0.06] bg-black/30 p-2">
+      <div className="flex h-full items-center justify-center rounded-lg border border-obd-line bg-obd-inset p-2">
         {source !== null && source !== undefined ? (
           <img
             src={source}
@@ -164,7 +164,7 @@ export default function ArtifactViewer({
             className="max-h-[70vh] max-w-full object-contain"
           />
         ) : (
-          <p className="text-[10px] text-slate-500">No image data available.</p>
+          <p className="text-[10px] text-obd-subtle">No image data available.</p>
         )}
       </div>
     );
@@ -182,7 +182,7 @@ export default function ArtifactViewer({
     const extracted = file?.content ?? "";
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-slate-500">
+        <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-obd-subtle">
           <span>Extracted text</span>
           <span>· {formatFileSize(file?.size ?? 0)}</span>
           {file?.truncated === true && <span>· truncated</span>}
@@ -190,7 +190,7 @@ export default function ArtifactViewer({
         {extracted.trim().length === 0 ? (
           <EmptyPreview message="No text could be extracted from this document." />
         ) : (
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-5 text-slate-300">
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-obd-line bg-obd-inset p-2 font-mono text-[10px] leading-5 text-obd-body">
             {extracted}
           </pre>
         )}
@@ -208,7 +208,7 @@ export default function ArtifactViewer({
       return <EmptyPreview message="No inline media data is available." />;
     }
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.06] bg-black/30 p-3">
+      <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-obd-line bg-obd-inset p-3">
         {previewKind === "audio" ? (
           <audio controls src={source} className="w-full">
             <track kind="captions" />
@@ -218,7 +218,7 @@ export default function ArtifactViewer({
             <track kind="captions" />
           </video>
         )}
-        <p className="font-mono text-[9px] text-slate-500">
+        <p className="font-mono text-[9px] text-obd-subtle">
           {file?.mime} · {formatFileSize(file?.size ?? 0)}
         </p>
       </div>
@@ -248,7 +248,7 @@ export default function ArtifactViewer({
   if (artifact.kind === "file" && markdown !== null && !isMarkdownArtifact(artifact)) {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-slate-500">
+        <div className="mb-2 flex shrink-0 items-center gap-2 font-mono text-[9px] text-obd-subtle">
           <span className="truncate">{file?.path ?? artifact.uri}</span>
           <span>· {formatFileSize(file?.size ?? 0)}</span>
           {file?.truncated === true && <span>· truncated</span>}
@@ -277,7 +277,7 @@ export default function ArtifactViewer({
     );
   }
 
-  return <p className="text-[10px] text-slate-500">No preview content available.</p>;
+  return <p className="text-[10px] text-obd-subtle">No preview content available.</p>;
 }
 
 function PdfPreview({
@@ -301,8 +301,8 @@ function PdfPreview({
           onClick={() => setMode("rendered")}
           className={`rounded px-2 py-1 text-[10px] ${
             mode === "rendered"
-              ? "bg-emerald-400/15 text-emerald-200"
-              : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08] disabled:opacity-40"
+              ? "bg-obd-accent/15 text-obd-accent"
+              : "bg-obd-raised text-obd-muted hover:bg-obd-raised-strong disabled:opacity-40"
           }`}
         >
           Rendered
@@ -312,13 +312,13 @@ function PdfPreview({
           onClick={() => setMode("text")}
           className={`rounded px-2 py-1 text-[10px] ${
             mode === "text"
-              ? "bg-emerald-400/15 text-emerald-200"
-              : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]"
+              ? "bg-obd-accent/15 text-obd-accent"
+              : "bg-obd-raised text-obd-muted hover:bg-obd-raised-strong"
           }`}
         >
           Text
         </button>
-        <span className="ml-auto font-mono text-[9px] text-slate-500">
+        <span className="ml-auto font-mono text-[9px] text-obd-subtle">
           {formatFileSize(file?.size ?? 0)}
         </span>
       </div>
@@ -327,7 +327,7 @@ function PdfPreview({
       ) : extracted.trim().length === 0 ? (
         <EmptyPreview message="This PDF has no extractable text; it may be a scanned document. Use Open in system viewer." />
       ) : (
-        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[10px] leading-5 text-slate-300">
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-lg border border-obd-line bg-obd-inset p-2 font-mono text-[10px] leading-5 text-obd-body">
           {extracted}
         </pre>
       )}
@@ -343,9 +343,9 @@ function isHtmlArtifact(artifact: Artifact): boolean {
 
 function EmptyPreview({ message }: { message: string }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-white/[0.08] px-4 py-12 text-center">
-      <Layers size={20} className="text-slate-500" />
-      <p className="max-w-[260px] text-[10px] leading-4 text-slate-500">{message}</p>
+    <div className="flex h-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-obd-line px-4 py-12 text-center">
+      <Layers size={20} className="text-obd-subtle" />
+      <p className="max-w-[260px] text-[10px] leading-4 text-obd-subtle">{message}</p>
     </div>
   );
 }
@@ -387,8 +387,8 @@ function SheetTable({
               onClick={() => setActive(index)}
               className={`rounded px-2 py-1 text-[10px] ${
                 index === active
-                  ? "bg-emerald-400/15 text-emerald-200"
-                  : "bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]"
+                  ? "bg-obd-accent/15 text-obd-accent"
+                  : "bg-obd-raised text-obd-muted hover:bg-obd-raised-strong"
               }`}
             >
               {item.name}
@@ -396,7 +396,7 @@ function SheetTable({
           ))}
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-white/[0.06]">
+      <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-obd-line">
         <table className="min-w-full border-collapse text-[10px]">
           <tbody>
             {sheet.rows.map((row, rowIndex) => (
@@ -404,17 +404,17 @@ function SheetTable({
                 key={`${sheet.name}-row-${rowIndex}`}
                 className={
                   rowIndex === 0
-                    ? "bg-white/[0.06] text-slate-200"
-                    : "text-slate-400 odd:bg-white/[0.02]"
+                    ? "bg-obd-raised-strong text-obd-text"
+                    : "text-obd-muted odd:bg-obd-raised"
                 }
               >
-                <th className="sticky left-0 z-[1] border-b border-white/[0.06] bg-[#1b232e] px-2 py-1 text-right font-mono text-[9px] font-normal text-slate-500">
+                <th className="sticky left-0 z-[1] border-b border-obd-line bg-obd-surface px-2 py-1 text-right font-mono text-[9px] font-normal text-obd-subtle">
                   {rowIndex + 1}
                 </th>
                 {row.map((cell, cellIndex) => (
                   <td
                     key={`${sheet.name}-${rowIndex}-${cellIndex}`}
-                    className="max-w-[280px] truncate border-b border-white/[0.04] px-2 py-1 font-mono"
+                    className="max-w-[280px] truncate border-b border-obd-line px-2 py-1 font-mono"
                   >
                     {cell}
                   </td>
@@ -425,7 +425,7 @@ function SheetTable({
         </table>
       </div>
       {(truncated || sheet.truncated) && (
-        <p className="shrink-0 text-[9px] text-amber-300">
+        <p className="shrink-0 text-[9px] text-obd-warning">
           Preview truncated to the first rows and columns. Open in system viewer for
           the full sheet.
         </p>
@@ -447,21 +447,21 @@ function isMarkdownArtifact(artifact: Artifact): boolean {
 
 function DiffView({ content }: { content: string }) {
   if (content.length === 0) {
-    return <p className="text-[10px] text-slate-500">No diff content available.</p>;
+    return <p className="text-[10px] text-obd-subtle">No diff content available.</p>;
   }
   return (
-    <pre className="overflow-x-auto rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[9px] leading-4">
+    <pre className="overflow-x-auto rounded-lg border border-obd-line bg-obd-inset p-2 font-mono text-[9px] leading-4">
       {content.split("\n").map((line, index) => (
         <span
           key={`${index}-${line.slice(0, 12)}`}
           className={
             line.startsWith("+")
-              ? "block text-emerald-300"
+              ? "block text-obd-accent"
               : line.startsWith("-")
-                ? "block text-rose-300"
+                ? "block text-obd-danger"
                 : line.startsWith("@@")
-                  ? "block text-sky-300"
-                  : "block text-slate-500"
+                  ? "block text-obd-info"
+                  : "block text-obd-subtle"
           }
         >
           {line.length === 0 ? " " : line}

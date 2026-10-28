@@ -377,10 +377,10 @@ function ChatComposer({
   };
 
   return (
-    <div className="shrink-0 border-t border-white/[0.06] bg-[#161e27]/95 px-4 py-3">
+    <div className="shrink-0 border-t border-obd-line bg-obd-surface/95 px-4 py-3">
       <div className="mx-auto max-w-3xl">
         {accessNotice !== null && (
-          <div className="mb-2 flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-[11px] text-emerald-200">
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-obd-accent/20 bg-obd-accent/10 px-3 py-2 text-[11px] text-obd-accent">
             <Shield size={13} className="mt-0.5 shrink-0" />
             <span className="flex-1">{accessNotice}</span>
             <button type="button" onClick={onDismissAccessNotice}>
@@ -389,7 +389,7 @@ function ChatComposer({
           </div>
         )}
         {error !== null && (
-          <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200">
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-obd-warning/20 bg-obd-warning/10 px-3 py-2 text-[11px] text-obd-warning">
             <CircleAlert size={13} className="mt-0.5 shrink-0" />
             <span className="flex-1">{error}</span>
             <button type="button" onClick={onDismissError}>
@@ -398,9 +398,9 @@ function ChatComposer({
           </div>
         )}
         {branchNotice !== undefined && branchNotice !== null && (
-          <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-2.5 py-2">
-            <GitBranch size={11} className="mt-0.5 shrink-0 text-amber-300" />
-            <p className="min-w-0 flex-1 text-[10px] leading-4 text-amber-100/80">
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-obd-warning/20 bg-obd-warning/[0.06] px-2.5 py-2">
+            <GitBranch size={11} className="mt-0.5 shrink-0 text-obd-warning" />
+            <p className="min-w-0 flex-1 text-[10px] leading-4 text-obd-warning/80">
               {branchNotice}
             </p>
             {onCancelBranch !== undefined && (
@@ -408,7 +408,7 @@ function ChatComposer({
                 type="button"
                 aria-label="Cancel branching"
                 onClick={onCancelBranch}
-                className="rounded p-0.5 text-amber-200/70 hover:text-amber-100"
+                className="rounded p-0.5 text-obd-warning/70 hover:text-obd-warning"
               >
                 <X size={10} />
               </button>
@@ -416,24 +416,24 @@ function ChatComposer({
           </div>
         )}
         {queuedMessages.length > 0 && (
-          <div className="mb-2 rounded-md border border-white/[0.08] bg-white/[0.02] px-2.5 py-2">
-            <p className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+          <div className="mb-2 rounded-md border border-obd-line bg-obd-raised px-2.5 py-2">
+            <p className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-obd-subtle">
               <ListPlus size={11} /> Queued · {queuedMessages.length}
             </p>
             <div className="mt-1 space-y-1">
               {queuedMessages.map((queued, index) => (
                 <div
                   key={`queued-${index}-${queued.slice(0, 24)}`}
-                  className="flex items-start gap-2 rounded bg-black/20 px-2 py-1"
+                  className="flex items-start gap-2 rounded bg-obd-inset px-2 py-1"
                 >
-                  <span className="min-w-0 flex-1 whitespace-pre-wrap text-[10px] leading-4 text-slate-400">
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap text-[10px] leading-4 text-obd-muted">
                     {queued}
                   </span>
                   <button
                     type="button"
                     aria-label={`Remove queued message ${index + 1}`}
                     onClick={() => onRemoveQueued(index)}
-                    className="rounded p-0.5 text-slate-500 hover:text-amber-300"
+                    className="rounded p-0.5 text-obd-subtle hover:text-obd-warning"
                   >
                     <X size={10} />
                   </button>
@@ -445,14 +445,14 @@ function ChatComposer({
         <div
           {...drop.zoneProps}
           onPaste={handlePaste}
-          className={`relative rounded-xl border bg-[#212b37] shadow-lg shadow-black/20 transition-colors ${
+          className={`relative rounded-xl border bg-obd-surface shadow-lg shadow-black/20 transition-colors ${
             drop.active
-              ? "border-emerald-400/60 ring-2 ring-emerald-400/20"
-              : "border-white/[0.09]"
+              ? "border-obd-accent/60 ring-2 ring-obd-accent/20"
+              : "border-obd-line"
           }`}
         >
           {drop.active && (
-            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-emerald-400/10 text-[12px] font-medium text-emerald-100">
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-obd-accent/10 text-[12px] font-medium text-obd-accent">
               Drop files to attach
             </div>
           )}
@@ -461,7 +461,7 @@ function ChatComposer({
               {attachments.map((attachment, index) => (
                 <span
                   key={`${attachment.path ?? attachment.name}-${index}`}
-                  className="flex max-w-full items-center gap-1 rounded border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[10px] text-emerald-100"
+                  className="flex max-w-full items-center gap-1 rounded border border-obd-accent/20 bg-obd-accent/10 px-1.5 py-0.5 text-[10px] text-obd-accent"
                 >
                   {attachment.previewUrl !== undefined ? (
                     <img
@@ -484,7 +484,7 @@ function ChatComposer({
                         current.filter((_, position) => position !== index),
                       );
                     }}
-                    className="rounded p-0.5 text-emerald-300/70 hover:text-emerald-100"
+                    className="rounded p-0.5 text-obd-accent/70 hover:text-obd-accent"
                   >
                     <X size={9} />
                   </button>
@@ -531,7 +531,7 @@ function ChatComposer({
                 ? "Ask OpenBaD, or paste files and images…"
                 : "Add a project to start…"
             }
-            className="block w-full resize-none bg-transparent px-3.5 pt-3 text-[13px] leading-5 text-slate-100 outline-none placeholder:text-slate-500"
+            className="block w-full resize-none bg-transparent px-3.5 pt-3 text-[13px] leading-5 text-obd-strong outline-none placeholder:text-obd-subtle"
           />
           <div className="flex items-center gap-1.5 px-2 pb-2 pt-1">
             <button
@@ -540,16 +540,16 @@ function ChatComposer({
               disabled={workspacePath.length === 0}
               aria-label="Attach files"
               title="Attach files"
-              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04] hover:text-slate-300 disabled:opacity-30"
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-30"
             >
               <Paperclip size={12} />
             </button>
-            <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04]">
+            <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-obd-subtle hover:bg-obd-raised">
               <select
                 value={mode}
                 onChange={(event) => onMode(event.target.value as ChatMode)}
                 aria-label="Chat mode"
-                className="bg-transparent text-[11px] text-slate-400 outline-none"
+                className="bg-transparent text-[11px] text-obd-muted outline-none"
               >
                 <option value="ask">Ask</option>
                 <option value="plan">Plan</option>
@@ -557,13 +557,13 @@ function ChatComposer({
               </select>
             </label>
             {mode === "agent" && (
-              <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04]">
+              <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-obd-subtle hover:bg-obd-raised">
                 <Shield size={12} />
                 <select
                   value={permissionMode}
                   onChange={(event) => onPermissionMode(event.target.value as AccessMode)}
                   aria-label="Access mode"
-                  className="bg-transparent text-[11px] text-slate-400 outline-none"
+                  className="bg-transparent text-[11px] text-obd-muted outline-none"
                 >
                   <option value="read">Read only</option>
                   <option value="edit">Can edit</option>
@@ -576,7 +576,7 @@ function ChatComposer({
             <button
               type="button"
               onClick={onOpenSettings}
-              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
             >
               <Bot size={12} />
               <span
@@ -585,9 +585,9 @@ function ChatComposer({
               >
                 {model}
               </span>
-              {thinking && <span className="text-emerald-400/70">thinking</span>}
+              {thinking && <span className="text-obd-accent/70">thinking</span>}
             </button>
-            <span className="ml-auto text-[10px] text-slate-500">
+            <span className="ml-auto text-[10px] text-obd-subtle">
               {busy
                 ? "Enter to steer · Shift+Enter for a newline"
                 : "Enter to send · Shift+Enter for a newline"}
@@ -599,7 +599,7 @@ function ChatComposer({
                   aria-label="Steer current turn"
                   onClick={steer}
                   disabled={draft.trim().length === 0}
-                  className="ml-1 flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1.5 text-[11px] text-emerald-200 disabled:opacity-30"
+                  className="ml-1 flex items-center gap-1 rounded-md border border-obd-accent/30 bg-obd-accent/10 px-2.5 py-1.5 text-[11px] text-obd-accent disabled:opacity-30"
                 >
                   <Send size={12} /> Steer
                 </button>
@@ -608,7 +608,7 @@ function ChatComposer({
                   aria-label="Queue message"
                   onClick={queue}
                   disabled={draft.trim().length === 0}
-                  className="flex items-center gap-1 rounded-md border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-300 disabled:opacity-30"
+                  className="flex items-center gap-1 rounded-md border border-obd-line px-2.5 py-1.5 text-[11px] text-obd-body disabled:opacity-30"
                 >
                   <ListPlus size={12} /> Queue
                 </button>
@@ -616,7 +616,7 @@ function ChatComposer({
                   type="button"
                   onClick={onStop}
                   disabled={stopRequested}
-                  className="flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-200 disabled:opacity-40"
+                  className="flex items-center gap-1 rounded-md border border-obd-warning/30 bg-obd-warning/10 px-2.5 py-1.5 text-[11px] text-obd-warning disabled:opacity-40"
                 >
                   <Square size={12} /> {stopRequested ? "Stopping…" : "Stop"}
                 </button>
@@ -629,7 +629,7 @@ function ChatComposer({
                   (draft.trim().length === 0 && attachments.length === 0) ||
                   workspacePath.length === 0
                 }
-                className="ml-1 flex items-center gap-1 rounded-md bg-emerald-400 px-2.5 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-30"
+                className="ml-1 flex items-center gap-1 rounded-md bg-obd-accent px-2.5 py-1.5 text-[11px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <Send size={12} /> Send
               </button>

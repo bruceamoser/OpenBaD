@@ -115,11 +115,11 @@ function serverDetail(server: McpServer): string {
 }
 
 const fieldClass =
-  "w-full rounded-md border border-white/10 bg-black/30 px-2.5 py-2 text-[11px] text-slate-200 outline-none focus:border-emerald-400/40";
+  "w-full rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 text-[11px] text-obd-text outline-none focus:border-obd-accent/40";
 const labelClass =
-  "mb-1 block text-[10px] uppercase tracking-wider text-slate-500";
+  "mb-1 block text-[10px] uppercase tracking-wider text-obd-subtle";
 const buttonClass =
-  "rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10 disabled:opacity-40";
+  "rounded-md border border-obd-line bg-obd-raised px-3 py-1.5 text-[11px] text-obd-text hover:bg-obd-raised-strong disabled:opacity-40";
 
 export default function McpSettings({ workspacePath }: { workspacePath: string }) {
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -262,8 +262,8 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
     <div className="max-w-2xl space-y-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-[12px] font-medium text-slate-200">MCP servers</p>
-          <p className="mt-0.5 text-[11px] text-slate-500">
+          <p className="text-[12px] font-medium text-obd-text">MCP servers</p>
+          <p className="mt-0.5 text-[11px] text-obd-subtle">
             Servers are defined once globally. Each project chooses which ones
             it enables in <code>.openbad/mcp.yaml</code>. The model can add,
             change, and toggle servers through the mcp domain.
@@ -275,7 +275,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
             aria-label="Reload MCP servers"
             onClick={() => void load()}
             disabled={loading}
-            className="rounded-md border border-white/10 bg-white/5 p-1.5 text-slate-400 hover:bg-white/10 hover:text-slate-200 disabled:opacity-40"
+            className="rounded-md border border-obd-line bg-obd-raised p-1.5 text-obd-muted hover:bg-obd-raised-strong hover:text-obd-text disabled:opacity-40"
           >
             <RefreshCw size={13} className={loading ? "animate-spin" : undefined} />
           </button>
@@ -297,7 +297,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
       </div>
 
       {workspacePath.length === 0 && (
-        <p role="status" className="text-[11px] text-amber-300">
+        <p role="status" className="text-[11px] text-obd-warning">
           Open a project to manage which MCP servers it enables.
         </p>
       )}
@@ -305,7 +305,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
       {error !== null && (
         <div
           role="alert"
-          className="flex items-start gap-2 rounded-md border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-[11px] text-rose-200"
+          className="flex items-start gap-2 rounded-md border border-obd-danger/20 bg-obd-danger/[0.06] px-3 py-2 text-[11px] text-obd-danger"
         >
           <CircleAlert size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
@@ -314,7 +314,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
       {notice !== null && error === null && (
         <div
           role="status"
-          className="flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 text-[11px] text-emerald-200"
+          className="flex items-start gap-2 rounded-md border border-obd-accent/20 bg-obd-accent/[0.06] px-3 py-2 text-[11px] text-obd-accent"
         >
           <Check size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{notice}</span>
@@ -328,7 +328,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
             event.preventDefault();
             void submit();
           }}
-          className="space-y-3 rounded-lg border border-white/10 bg-white/[0.02] p-3"
+          className="space-y-3 rounded-lg border border-obd-line bg-obd-raised p-3"
         >
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -437,7 +437,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
               onChange={(event) => update({ env: event.target.value })}
               className={`${fieldClass} font-mono`}
             />
-            <p className="mt-1 text-[10px] text-slate-500">
+            <p className="mt-1 text-[10px] text-obd-subtle">
               Values stay on this machine and are never shown to the model.
             </p>
           </div>
@@ -473,7 +473,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
             </div>
           </div>
 
-          <label className="flex items-center gap-2 text-[11px] text-slate-400">
+          <label className="flex items-center gap-2 text-[11px] text-obd-muted">
             <input
               type="checkbox"
               checked={form.enabled}
@@ -486,7 +486,7 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
             <button
               type="submit"
               disabled={busy === "save"}
-              className="rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
+              className="rounded-md bg-obd-accent px-3 py-1.5 text-[11px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-40"
             >
               <span className="flex items-center gap-1.5">
                 {busy === "save" && <Loader2 size={12} className="animate-spin" />}
@@ -512,12 +512,12 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
 
       <div className="space-y-2">
         {loading && servers.length === 0 && (
-          <p className="flex items-center gap-2 text-[11px] text-slate-500">
+          <p className="flex items-center gap-2 text-[11px] text-obd-subtle">
             <Loader2 size={12} className="animate-spin" /> Loading MCP servers…
           </p>
         )}
         {!loading && servers.length === 0 && workspacePath.length > 0 && (
-          <p className="rounded-lg border border-dashed border-white/10 px-3 py-4 text-[11px] text-slate-500">
+          <p className="rounded-lg border border-dashed border-obd-line px-3 py-4 text-[11px] text-obd-subtle">
             No MCP servers are defined yet. Add one here or ask the model to add
             it with the mcp domain; definitions are shared by every project.
           </p>
@@ -525,24 +525,24 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
         {servers.map((server) => (
           <div
             key={server.name}
-            className="rounded-lg border border-white/10 bg-white/[0.02] p-3"
+            className="rounded-lg border border-obd-line bg-obd-raised p-3"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="flex items-center gap-2 text-[12px] text-slate-200">
+                <p className="flex items-center gap-2 text-[12px] text-obd-text">
                   <span className="truncate">{server.name}</span>
-                  <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-400">
+                  <span className="rounded bg-obd-raised-strong px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-obd-muted">
                     {server.transport}
                   </span>
-                  <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-500">
+                  <span className="rounded bg-obd-raised-strong px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-obd-subtle">
                     global
                   </span>
                 </p>
-                <p className="mt-0.5 break-all font-mono text-[10px] text-slate-500">
+                <p className="mt-0.5 break-all font-mono text-[10px] text-obd-subtle">
                   {serverDetail(server)}
                 </p>
                 {server.allowed_tools.length > 0 && (
-                  <p className="mt-0.5 text-[10px] text-slate-500">
+                  <p className="mt-0.5 text-[10px] text-obd-subtle">
                     Allowed: {server.allowed_tools.join(", ")}
                   </p>
                 )}
@@ -550,8 +550,8 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
               <span
                 className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider ${
                   server.enabled
-                    ? "bg-emerald-400/10 text-emerald-300"
-                    : "bg-white/[0.06] text-slate-500"
+                    ? "bg-obd-accent/10 text-obd-accent"
+                    : "bg-obd-raised-strong text-obd-subtle"
                 }`}
               >
                 {server.enabled ? "Enabled here" : "Not enabled"}
@@ -561,10 +561,10 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
             {tools[server.name] !== undefined && (
               <div
                 role="status"
-                className="mt-2 rounded-md border border-white/10 bg-black/20 px-2.5 py-2"
+                className="mt-2 rounded-md border border-obd-line bg-obd-inset px-2.5 py-2"
               >
                 {tools[server.name].length === 0 ? (
-                  <p className="text-[10px] text-slate-500">
+                  <p className="text-[10px] text-obd-subtle">
                     Reachable, but no allowed tools.
                   </p>
                 ) : (
@@ -572,11 +572,11 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
                     {tools[server.name].map((tool) => (
                       <li
                         key={`${tool.server}/${tool.name}`}
-                        className="font-mono text-[10px] text-slate-400"
+                        className="font-mono text-[10px] text-obd-muted"
                       >
                         {tool.server}/{tool.name}
                         {tool.description.length > 0 && (
-                          <span className="ml-2 font-sans text-slate-500">
+                          <span className="ml-2 font-sans text-obd-subtle">
                             {tool.description}
                           </span>
                         )}
@@ -630,8 +630,8 @@ export default function McpSettings({ workspacePath }: { workspacePath: string }
                 disabled={busy !== null}
                 className={`rounded-md border px-3 py-1.5 text-[11px] ${
                   confirmDelete === server.name
-                    ? "border-rose-400/40 bg-rose-400/10 text-rose-200"
-                    : "border-white/10 bg-white/5 text-amber-300 hover:bg-white/10"
+                    ? "border-obd-danger/40 bg-obd-danger/10 text-obd-danger"
+                    : "border-obd-line bg-obd-raised text-obd-warning hover:bg-obd-raised-strong"
                 }`}
               >
                 <span className="flex items-center gap-1">

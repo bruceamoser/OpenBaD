@@ -83,3 +83,6 @@ jobs:
 
       - name: Documentation links
         run: python3 scripts/check_docs.py
+
+      - name: Theme tokens
+        run: python3 scripts/check_theme_tokens.py
