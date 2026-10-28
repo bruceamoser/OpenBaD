@@ -66,27 +66,27 @@ export default function PreviewPane({
         aria-label="Resize preview pane"
         aria-orientation="vertical"
         onPointerDown={onResizeStart}
-        className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-emerald-400/30"
+        className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-obd-accent/30"
       />
       <aside
         aria-label="Preview"
         data-testid="preview-pane"
         data-preview-kind={target.kind}
-        className="flex min-h-0 shrink-0 flex-col border-l border-white/[0.08] bg-[#1b232e]"
+        className="flex min-h-0 shrink-0 flex-col border-l border-obd-line bg-obd-surface"
         style={{
           width: `clamp(300px, ${width}px, calc(100vw - ${reserved}px))`,
         }}
       >
-        <div className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] px-3.5">
+        <div className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-obd-line px-3.5">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-slate-500">
+            <span className="shrink-0 text-obd-subtle">
               {artifact === null ? <GitBranch size={12} /> : kindIcon(artifact.kind)}
             </span>
             <div className="min-w-0">
-              <p className="truncate text-[12px] font-medium text-slate-200">
+              <p className="truncate text-[12px] font-medium text-obd-text">
                 {title}
               </p>
-              <p className="truncate font-mono text-[9px] text-slate-500">
+              <p className="truncate font-mono text-[9px] text-obd-subtle">
                 {subtitle}
               </p>
             </div>
@@ -97,12 +97,12 @@ export default function PreviewPane({
                 <OpenExternalButton
                   workspacePath={workspacePath}
                   path={artifact.uri}
-                  className="p-1.5 hover:bg-white/10"
+                  className="p-1.5 hover:bg-obd-raised-strong"
                 />
                 <RevealButton
                   workspacePath={workspacePath}
                   path={artifact.uri}
-                  className="p-1.5 hover:bg-white/10"
+                  className="p-1.5 hover:bg-obd-raised-strong"
                 />
               </>
             )}
@@ -110,7 +110,7 @@ export default function PreviewPane({
               type="button"
               aria-label="Close preview"
               onClick={onClose}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+              className="rounded-md p-1.5 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
             >
               <X size={15} />
             </button>

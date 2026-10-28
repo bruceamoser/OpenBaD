@@ -37,10 +37,10 @@ function duration(agent: ProjectAgent): string {
 }
 
 const statusStyles: Record<string, string> = {
-  running: "bg-sky-400/10 text-sky-200",
-  completed: "bg-emerald-400/10 text-emerald-200",
-  failed: "bg-rose-400/10 text-rose-200",
-  cancelled: "bg-amber-400/10 text-amber-200",
+  running: "bg-obd-info/10 text-obd-info",
+  completed: "bg-obd-accent/10 text-obd-accent",
+  failed: "bg-obd-danger/10 text-obd-danger",
+  cancelled: "bg-obd-warning/10 text-obd-warning",
 };
 
 function StatusIcon({ status }: { status: string }) {
@@ -104,8 +104,8 @@ export default function AgentsPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between border-b border-white/[0.06] px-3 py-2">
-        <p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
+      <div className="flex items-center justify-between border-b border-obd-line px-3 py-2">
+        <p className="text-[10px] uppercase tracking-[0.16em] text-obd-subtle">
           {agents.length} agent{agents.length === 1 ? "" : "s"}
           {running ? " · live" : ""}
         </p>
@@ -113,26 +113,26 @@ export default function AgentsPanel({
           type="button"
           onClick={() => void refresh()}
           aria-label="Refresh subagents"
-          className="rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+          className="rounded-md p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
         >
           <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
         </button>
       </div>
       {error !== null && (
-        <p className="border-b border-rose-400/20 bg-rose-400/5 px-3 py-2 text-[11px] text-rose-200">
+        <p className="border-b border-obd-danger/20 bg-obd-danger/5 px-3 py-2 text-[11px] text-obd-danger">
           {error}
         </p>
       )}
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2.5">
         {agents.length === 0 && !loading && (
-          <div className="rounded-lg border border-dashed border-white/10 p-3 text-[11px] leading-5 text-slate-500">
-            <p className="mb-1 font-medium text-slate-300">No subagents yet</p>
+          <div className="rounded-lg border border-dashed border-obd-line p-3 text-[11px] leading-5 text-obd-subtle">
+            <p className="mb-1 font-medium text-obd-body">No subagents yet</p>
             Ask the assistant to delegate a task. It can call the{" "}
-            <code className="rounded bg-white/5 px-1 text-[10px] text-slate-300">
+            <code className="rounded bg-obd-raised px-1 text-[10px] text-obd-body">
               subagent
             </code>{" "}
-            tool with <code className="text-slate-300">action: "spawn"</code>, then
-            collect results with <code className="text-slate-300">action: "status"</code>.
+            tool with <code className="text-obd-body">action: "spawn"</code>, then
+            collect results with <code className="text-obd-body">action: "status"</code>.
             Workers share this project&apos;s workspace and access mode. Finished
             workers are removed automatically after a short retention window.
           </div>
@@ -140,28 +140,28 @@ export default function AgentsPanel({
         {agents.map((agent) => (
           <article
             key={agent.id}
-            className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2.5"
+            className="rounded-lg border border-obd-line bg-obd-raised p-2.5"
           >
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <p className="truncate text-[12px] font-medium text-slate-200">
+                <p className="truncate text-[12px] font-medium text-obd-text">
                   {agent.title}
                 </p>
-                <p className="mt-0.5 truncate text-[10px] text-slate-500">
+                <p className="mt-0.5 truncate text-[10px] text-obd-subtle">
                   {agent.model} · {agent.steps} steps · {duration(agent)} ·{" "}
                   {relativeTime(agent.created_at)}
                 </p>
               </div>
               <span
                 className={`flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wide ${
-                  statusStyles[agent.status] ?? "bg-white/5 text-slate-400"
+                  statusStyles[agent.status] ?? "bg-obd-raised text-obd-muted"
                 }`}
               >
                 <StatusIcon status={agent.status} />
                 {agent.status}
               </span>
             </div>
-            <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-[11px] leading-4 text-slate-400">
+            <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-[11px] leading-4 text-obd-muted">
               {agent.task}
             </p>
             {agent.result.trim().length > 0 && (
@@ -174,21 +174,21 @@ export default function AgentsPanel({
                     content: agent.result,
                   })
                 }
-                className="mt-2 flex items-center gap-1 rounded-md bg-white/[0.04] px-2 py-1 text-[10px] text-slate-300 hover:bg-white/[0.08]"
+                className="mt-2 flex items-center gap-1 rounded-md bg-obd-raised px-2 py-1 text-[10px] text-obd-body hover:bg-obd-raised-strong"
               >
                 <ArrowUpRight size={11} /> Open result
               </button>
             )}
             {agent.error !== null && (
-              <p className="mt-2 whitespace-pre-wrap rounded bg-rose-400/5 p-1.5 text-[10px] text-rose-200">
+              <p className="mt-2 whitespace-pre-wrap rounded bg-obd-danger/5 p-1.5 text-[10px] text-obd-danger">
                 {agent.error}
               </p>
             )}
-            <details className="mt-2 text-[10px] text-slate-500">
-              <summary className="cursor-pointer select-none hover:text-slate-300">
+            <details className="mt-2 text-[10px] text-obd-subtle">
+              <summary className="cursor-pointer select-none hover:text-obd-body">
                 Activity log
               </summary>
-              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-1.5 text-[9px] leading-4 text-slate-400">
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-obd-inset p-1.5 text-[9px] leading-4 text-obd-muted">
                 {agent.log.trim() || "No activity recorded."}
               </pre>
             </details>
@@ -196,7 +196,7 @@ export default function AgentsPanel({
               <button
                 type="button"
                 onClick={() => void cancel(agent.id)}
-                className="mt-2 flex items-center gap-1 rounded-md border border-rose-400/20 px-2 py-1 text-[10px] text-rose-200 hover:bg-rose-400/10"
+                className="mt-2 flex items-center gap-1 rounded-md border border-obd-danger/20 px-2 py-1 text-[10px] text-obd-danger hover:bg-obd-danger/10"
               >
                 <Ban size={11} /> Cancel
               </button>

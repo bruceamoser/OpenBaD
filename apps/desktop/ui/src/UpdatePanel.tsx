@@ -83,9 +83,9 @@ export default function UpdatePanel({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-obd-subtle">
           Current version:{" "}
-          <span className="font-mono text-slate-300">
+          <span className="font-mono text-obd-body">
             {currentVersion ?? "unknown"}
           </span>
         </p>
@@ -94,7 +94,7 @@ export default function UpdatePanel({
           aria-label="Check for updates"
           onClick={() => void check()}
           disabled={checking || installing}
-          className="flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10 disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-md border border-obd-line bg-obd-raised px-3 py-1.5 text-[11px] text-obd-text hover:bg-obd-raised-strong disabled:opacity-40"
         >
           {checking ? (
             <Loader2 size={12} className="animate-spin" />
@@ -108,7 +108,7 @@ export default function UpdatePanel({
       {error !== null && (
         <div
           role="alert"
-          className="flex items-start gap-2 rounded-md border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-[11px] text-rose-200"
+          className="flex items-start gap-2 rounded-md border border-obd-danger/20 bg-obd-danger/[0.06] px-3 py-2 text-[11px] text-obd-danger"
         >
           <CircleAlert size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
@@ -118,7 +118,7 @@ export default function UpdatePanel({
       {outcome !== null && (
         <div
           role="status"
-          className="flex items-start gap-2 rounded-md border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 text-[11px] text-emerald-200"
+          className="flex items-start gap-2 rounded-md border border-obd-accent/20 bg-obd-accent/[0.06] px-3 py-2 text-[11px] text-obd-accent"
         >
           <CheckCircle2 size={13} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-words">{outcomeMessage(outcome)}</span>
@@ -130,23 +130,23 @@ export default function UpdatePanel({
           {status.kind === "up_to_date" && (
             <p
               role="status"
-              className="flex items-center gap-2 text-[11px] text-emerald-200"
+              className="flex items-center gap-2 text-[11px] text-obd-accent"
             >
               <CheckCircle2 size={13} /> OpenBaD {status.latest} is up to date.
             </p>
           )}
           {status.kind === "no_release" && (
-            <p role="status" className="text-[11px] text-slate-400">
+            <p role="status" className="text-[11px] text-obd-muted">
               No releases have been published yet.
             </p>
           )}
           {status.kind === "available" && (
-            <div className="space-y-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-3">
+            <div className="space-y-2 rounded-lg border border-obd-accent/20 bg-obd-accent/[0.04] p-3">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-[12px] text-emerald-200">
+                <p className="text-[12px] text-obd-accent">
                   OpenBaD {status.latest} is available
                 </p>
-                <span className="font-mono text-[10px] text-slate-500">
+                <span className="font-mono text-[10px] text-obd-subtle">
                   {status.asset.name}
                   {status.asset.size === null
                     ? ""
@@ -154,7 +154,7 @@ export default function UpdatePanel({
                 </span>
               </div>
               {status.release.notes.trim().length > 0 && (
-                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md border border-white/10 bg-black/20 px-2.5 py-2 font-sans text-[11px] text-slate-400">
+                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md border border-obd-line bg-obd-inset px-2.5 py-2 font-sans text-[11px] text-obd-muted">
                   {status.release.notes}
                 </pre>
               )}
@@ -163,7 +163,7 @@ export default function UpdatePanel({
                 aria-label={`Download and install ${status.latest}`}
                 onClick={() => void install(status.latest)}
                 disabled={installing}
-                className="flex items-center gap-1.5 rounded-md bg-emerald-400 px-3 py-1.5 text-[11px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
+                className="flex items-center gap-1.5 rounded-md bg-obd-accent px-3 py-1.5 text-[11px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-40"
               >
                 {installing ? (
                   <Loader2 size={12} className="animate-spin" />
@@ -172,7 +172,7 @@ export default function UpdatePanel({
                 )}
                 {installing ? "Downloading and installing…" : "Download and install"}
               </button>
-              <p className="text-[10px] text-slate-500">
+              <p className="text-[10px] text-obd-subtle">
                 AppImages are replaced in place and the app restarts. Platform
                 installers are saved and opened for you. Release checksums are
                 verified when published.

@@ -279,19 +279,19 @@ export default function ProjectPanel(props: ProjectPanelProps) {
   return (
     <aside
       aria-label="Project workspace"
-      className="flex min-h-0 w-full shrink-0 flex-col border-l border-white/[0.08] bg-[#1b232e]"
+      className="flex min-h-0 w-full shrink-0 flex-col border-l border-obd-line bg-obd-surface"
     >
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.06] px-3.5">
+      <div className="flex h-14 shrink-0 items-center justify-between border-b border-obd-line px-3.5">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <p className="truncate text-[12px] font-medium text-slate-200">{title}</p>
+            <p className="truncate text-[12px] font-medium text-obd-text">{title}</p>
             <span
               aria-label="Refreshes when the window regains focus and after actions"
               title="Refreshes on focus and after actions"
-              className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-500/50"
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-obd-subtle/50"
             />
           </div>
-          <p className="truncate text-[10px] text-slate-500">
+          <p className="truncate text-[10px] text-obd-subtle">
             {project?.name ?? "No project"}
             {overview !== null &&
               ` · ${overview.repos} references · ${overview.knowledge_documents} docs`}
@@ -303,7 +303,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             aria-label="Import project bundle"
             title="Merge an OpenBaD project bundle into this project"
             onClick={onImportBundle}
-            className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-emerald-300"
+            className="rounded-md p-1.5 text-obd-subtle hover:bg-obd-raised hover:text-obd-accent"
           >
             <PackageOpen size={14} />
           </button>
@@ -311,7 +311,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
             type="button"
             aria-label="Close project panel"
             onClick={onClose}
-            className="rounded-md p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-300"
+            className="rounded-md p-1.5 text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
           >
             <X size={15} />
           </button>
@@ -330,8 +330,8 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               onClick={() => onTab(item.id)}
               className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[10px] ${
                 tab === item.id
-                  ? "bg-white/[0.08] text-slate-200"
-                  : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+                  ? "bg-obd-raised-strong text-obd-text"
+                  : "text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
               }`}
             >
               {item.label}
@@ -341,7 +341,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       </div>
 
       {dataError !== null && (
-        <p className="shrink-0 border-b border-white/[0.06] px-3 py-2 text-[10px] leading-4 text-amber-300">
+        <p className="shrink-0 border-b border-obd-line px-3 py-2 text-[10px] leading-4 text-obd-warning">
           {dataError}
         </p>
       )}
@@ -349,11 +349,11 @@ export default function ProjectPanel(props: ProjectPanelProps) {
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {tab === "overview" && (
           <div className="space-y-3">
-            <div className="rounded-xl border border-white/[0.07] bg-gradient-to-br from-emerald-400/[0.07] to-transparent p-3">
-              <p className="text-[11px] font-medium text-slate-200">
+            <div className="rounded-xl border border-obd-line bg-gradient-to-br from-obd-accent/[0.07] to-transparent p-3">
+              <p className="text-[11px] font-medium text-obd-text">
                 {project?.name ?? "Project"}
               </p>
-              <p className="mt-1 break-all font-mono text-[10px] leading-4 text-slate-500">
+              <p className="mt-1 break-all font-mono text-[10px] leading-4 text-obd-subtle">
                 {project?.path}
               </p>
             </div>
@@ -379,19 +379,19 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 icon={<Database size={12} />}
               />
             </div>
-            <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-              <div className="flex items-center gap-2 text-[11px] text-slate-300">
-                <BookOpen size={13} className="text-sky-300" /> Project manifest
+            <div className="rounded-lg border border-obd-line bg-obd-raised p-3">
+              <div className="flex items-center gap-2 text-[11px] text-obd-body">
+                <BookOpen size={13} className="text-obd-info" /> Project manifest
               </div>
               {manifest === null ? (
-                <p className="mt-2 text-[10px] leading-4 text-slate-500">
-                  Add <code className="text-slate-400">.openbad/project.yaml</code> to
+                <p className="mt-2 text-[10px] leading-4 text-obd-subtle">
+                  Add <code className="text-obd-muted">.openbad/project.yaml</code> to
                   declare named tasks, verification recipes, validators, scope, and
                   invariants.
                 </p>
               ) : (
-                <div className="mt-2 space-y-1 text-[10px] leading-4 text-slate-500">
-                  <p className="text-[11px] text-slate-300">
+                <div className="mt-2 space-y-1 text-[10px] leading-4 text-obd-subtle">
+                  <p className="text-[11px] text-obd-body">
                     {manifest.name ?? "Unnamed project"}
                   </p>
                   {manifest.description !== null &&
@@ -407,11 +407,11 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 </div>
               )}
             </div>
-            <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-              <div className="flex items-center gap-2 text-[11px] text-slate-300">
-                <Gauge size={13} className="text-emerald-300" /> Project context
+            <div className="rounded-lg border border-obd-line bg-obd-raised p-3">
+              <div className="flex items-center gap-2 text-[11px] text-obd-body">
+                <Gauge size={13} className="text-obd-accent" /> Project context
               </div>
-              <p className="mt-2 text-[11px] leading-5 text-slate-500">
+              <p className="mt-2 text-[11px] leading-5 text-obd-subtle">
                 Chat owns the left side. Workspace, reference folders, knowledge,
                 retrieval, and memory stay scoped to this project and open here
                 without competing with the conversation.
@@ -420,7 +420,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 type="button"
                 onClick={onRefreshIndex}
                 disabled={indexing}
-                className="mt-3 flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                className="mt-3 flex items-center gap-1.5 rounded-md border border-obd-line bg-obd-raised px-2.5 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
               >
                 {indexing ? (
                   <Loader2 size={11} className="animate-spin" />
@@ -437,11 +437,11 @@ export default function ProjectPanel(props: ProjectPanelProps) {
           <div
             {...workspaceDrop.zoneProps}
             className={`relative min-h-full space-y-2 rounded-lg transition-shadow ${
-              workspaceDrop.active ? "ring-2 ring-emerald-400/40" : ""
+              workspaceDrop.active ? "ring-2 ring-obd-accent/40" : ""
             }`}
           >
             {workspaceDrop.active && (
-              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-emerald-400/10 text-[11px] font-medium text-emerald-100">
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-obd-accent/10 text-[11px] font-medium text-obd-accent">
                 Drop documents to add them to the workspace
               </div>
             )}
@@ -450,7 +450,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 type="button"
                 onClick={() => void chooseWorkspaceFiles()}
                 disabled={uploading || workspacePath.length === 0}
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-2.5 py-2 text-[10px] text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.05] hover:text-emerald-200 disabled:opacity-40"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-dashed border-obd-line bg-obd-raised px-2.5 py-2 text-[10px] text-obd-body hover:border-obd-accent/30 hover:bg-obd-accent/[0.05] hover:text-obd-accent disabled:opacity-40"
               >
                 {uploading ? (
                   <Loader2 size={12} className="animate-spin" />
@@ -463,7 +463,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
                 type="button"
                 onClick={onRefreshIndex}
                 disabled={indexing}
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-40"
               >
                 {indexing ? (
                   <Loader2 size={10} className="animate-spin" />
@@ -474,7 +474,7 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               </button>
             </div>
             {workspaceNotice !== null && (
-              <p className="px-1 text-[10px] text-emerald-300">{workspaceNotice}</p>
+              <p className="px-1 text-[10px] text-obd-accent">{workspaceNotice}</p>
             )}
             <SearchField
               value={fileQuery}
@@ -482,33 +482,33 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               placeholder="Filter workspace files"
               label="Filter files"
             />
-            <p className="px-1 text-[10px] text-slate-500">
+            <p className="px-1 text-[10px] text-obd-subtle">
               {visibleFiles.length} file{visibleFiles.length === 1 ? "" : "s"} · click
               to open · drop documents to upload
             </p>
             {visibleFiles.map((path) => (
               <div
                 key={path}
-                className="flex items-center gap-1 rounded-md pr-1 hover:bg-white/[0.04]"
+                className="flex items-center gap-1 rounded-md pr-1 hover:bg-obd-raised"
               >
                 <button
                   type="button"
                   onClick={() => openFile(path)}
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left font-mono text-[10px] text-slate-400 hover:text-slate-200"
+                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left font-mono text-[10px] text-obd-muted hover:text-obd-text"
                 >
-                  <FileCode2 size={12} className="shrink-0 text-slate-500" />
+                  <FileCode2 size={12} className="shrink-0 text-obd-subtle" />
                   <span className="truncate">{path}</span>
                 </button>
                 <RevealButton workspacePath={workspacePath} path={path} />
               </div>
             ))}
             {visibleFiles.length === 0 && (
-              <p className="px-1 py-3 text-[11px] text-slate-500">
+              <p className="px-1 py-3 text-[11px] text-obd-subtle">
                 No files yet. Add or create a file in this workspace.
               </p>
             )}
             {(indexError !== null || indexSummary === null) && (
-              <p className="px-1 text-[10px] text-slate-500">
+              <p className="px-1 text-[10px] text-obd-subtle">
                 {indexError ?? "The workspace index is empty."}
               </p>
             )}
@@ -702,24 +702,24 @@ function ReferencesPanel({
     <div
       {...drop.zoneProps}
       className={`relative min-h-full space-y-2 rounded-lg transition-shadow ${
-        drop.active ? "ring-2 ring-emerald-400/40" : ""
+        drop.active ? "ring-2 ring-obd-accent/40" : ""
       }`}
     >
       {drop.active && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-emerald-400/10 text-[11px] font-medium text-emerald-100">
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-obd-accent/10 text-[11px] font-medium text-obd-accent">
           Drop documents to add them to references
         </div>
       )}
       {repos.map((repo) => (
         <div
           key={repo.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"
+          className="rounded-lg border border-obd-line bg-obd-raised p-2.5"
         >
           <div className="flex items-start gap-2">
-            <FolderGit2 size={13} className="mt-0.5 shrink-0 text-emerald-300" />
+            <FolderGit2 size={13} className="mt-0.5 shrink-0 text-obd-accent" />
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[11px] text-slate-200">{repo.name}</p>
-              <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-slate-500">
+              <p className="truncate text-[11px] text-obd-text">{repo.name}</p>
+              <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-obd-subtle">
                 {repo.path}
               </p>
             </div>
@@ -727,13 +727,13 @@ function ReferencesPanel({
               workspacePath={workspacePath}
               path={repo.path}
               label="Show reference folder"
-              className="p-1 hover:bg-white/5"
+              className="p-1 hover:bg-obd-raised"
             />
             <button
               type="button"
               aria-label={`Remove ${repo.name}`}
               onClick={() => void remove(repo)}
-              className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
+              className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-warning"
             >
               <Trash2 size={11} />
             </button>
@@ -750,8 +750,8 @@ function ReferencesPanel({
             }
             className={`mt-1.5 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] uppercase tracking-wide transition-colors ${
               repo.read_only
-                ? "border-white/10 text-slate-500 hover:border-emerald-400/30 hover:text-emerald-200"
-                : "border-emerald-400/25 bg-emerald-400/[0.06] text-emerald-200"
+                ? "border-obd-line text-obd-subtle hover:border-obd-accent/30 hover:text-obd-accent"
+                : "border-obd-accent/25 bg-obd-accent/[0.06] text-obd-accent"
             } disabled:opacity-40`}
           >
             {permissionBusy === repo.id && <Loader2 size={9} className="animate-spin" />}
@@ -760,7 +760,7 @@ function ReferencesPanel({
         </div>
       ))}
       {repos.length === 0 && (
-        <p className="px-1 py-2 text-[11px] leading-4 text-slate-500">
+        <p className="px-1 py-2 text-[11px] leading-4 text-obd-subtle">
           Reference folders are project sources the assistant can inspect. Make
           one editable when you want the assistant to change its files.
         </p>
@@ -769,7 +769,7 @@ function ReferencesPanel({
         type="button"
         onClick={() => void choose()}
         disabled={uploading}
-        className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-2.5 py-2 text-[10px] text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.05] hover:text-emerald-200 disabled:opacity-40"
+        className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-obd-line bg-obd-raised px-2.5 py-2 text-[10px] text-obd-body hover:border-obd-accent/30 hover:bg-obd-accent/[0.05] hover:text-obd-accent disabled:opacity-40"
       >
         {uploading ? (
           <Loader2 size={12} className="animate-spin" />
@@ -781,11 +781,11 @@ function ReferencesPanel({
       <button
         type="button"
         onClick={() => void add()}
-        className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-white/[0.12] bg-white/[0.02] px-2.5 py-2 text-[10px] text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.05] hover:text-emerald-200"
+        className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-obd-line bg-obd-raised px-2.5 py-2 text-[10px] text-obd-body hover:border-obd-accent/30 hover:bg-obd-accent/[0.05] hover:text-obd-accent"
       >
         <FolderPlus size={12} /> Add reference folder…
       </button>
-      {notice !== null && <p className="text-[10px] text-emerald-300">{notice}</p>}
+      {notice !== null && <p className="text-[10px] text-obd-accent">{notice}</p>}
     </div>
   );
 }
@@ -803,13 +803,13 @@ function MemoryPanel({
 }) {
   return (
     <div className="space-y-2">
-      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-500">
+      <p className="px-1 pb-1 text-[10px] leading-4 text-obd-subtle">
         Memory snippets: short durable preferences, gotchas, constraints, and decisions.
         They are full-text indexed and injected when relevant. Use Knowledge for
         documents.
       </p>
       {memories.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-500">No saved memories yet.</p>
+        <p className="px-1 py-2 text-[11px] text-obd-subtle">No saved memories yet.</p>
       )}
       {memories.map((memory) => (
         <div
@@ -824,14 +824,14 @@ function MemoryPanel({
               onOpen(memory);
             }
           }}
-          className="cursor-pointer rounded-lg border border-white/[0.07] bg-white/[0.02] p-3 hover:border-emerald-400/20 hover:bg-white/[0.04]"
+          className="cursor-pointer rounded-lg border border-obd-line bg-obd-raised p-3 hover:border-obd-accent/20 hover:bg-obd-raised"
         >
-          <p className="text-[11px] leading-5 text-slate-300">
-            {memory.pinned && <span className="mr-1 text-emerald-300">★</span>}
+          <p className="text-[11px] leading-5 text-obd-body">
+            {memory.pinned && <span className="mr-1 text-obd-accent">★</span>}
             {memory.content}
           </p>
           <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="truncate font-mono text-[9px] text-slate-500">
+            <span className="truncate font-mono text-[9px] text-obd-subtle">
               {memory.scope} · {memory.author}
               {memory.origin_turn !== null ? ` · turn ${memory.origin_turn}` : ""} ·{" "}
               {memory.tags.length > 0 ? memory.tags.join(", ") : "untagged"}
@@ -842,7 +842,7 @@ function MemoryPanel({
                 event.stopPropagation();
                 onForgetMemory(memory.id);
               }}
-              className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
+              className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-warning"
               aria-label="Forget memory"
             >
               <Trash2 size={11} />
@@ -850,7 +850,7 @@ function MemoryPanel({
           </div>
         </div>
       ))}
-      {memoryError !== null && <p className="text-[10px] text-amber-300">{memoryError}</p>}
+      {memoryError !== null && <p className="text-[10px] text-obd-warning">{memoryError}</p>}
     </div>
   );
 }
@@ -879,30 +879,30 @@ function CheckpointsPanel({
   return (
     <div className="space-y-2">
       {sessionId === null && (
-        <p className="px-1 py-2 text-[11px] text-slate-500">
+        <p className="px-1 py-2 text-[11px] text-obd-subtle">
           Start a session to see file checkpoints.
         </p>
       )}
       {sessionId !== null && checkpoints.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-500">No checkpoints yet.</p>
+        <p className="px-1 py-2 text-[11px] text-obd-subtle">No checkpoints yet.</p>
       )}
       {checkpoints.map((checkpoint) => (
         <div
           key={checkpoint.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3"
+          className="rounded-lg border border-obd-line bg-obd-raised p-3"
         >
-          <p className="truncate font-mono text-[10px] text-slate-400">
+          <p className="truncate font-mono text-[10px] text-obd-muted">
             {checkpoint.path}
           </p>
           <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="text-[9px] text-slate-500">
+            <span className="text-[9px] text-obd-subtle">
               {formatBytes(checkpoint.bytes)} · {formatClock(checkpoint.created_at)}
             </span>
             <div className="flex gap-1">
               <button
                 type="button"
                 onClick={() => onShowDiff(checkpoint.id)}
-                className="rounded border border-white/[0.08] px-2 py-1 text-[10px] text-slate-400 hover:bg-white/5"
+                className="rounded border border-obd-line px-2 py-1 text-[10px] text-obd-muted hover:bg-obd-raised"
               >
                 {checkpointDiffId === checkpoint.id ? "Hide" : "Diff"}
               </button>
@@ -910,24 +910,24 @@ function CheckpointsPanel({
                 type="button"
                 onClick={() => onRestore(checkpoint.id)}
                 disabled={restoringCheckpoint !== null}
-                className="rounded border border-white/[0.08] px-2 py-1 text-[10px] text-slate-400 hover:bg-white/5 disabled:opacity-40"
+                className="rounded border border-obd-line px-2 py-1 text-[10px] text-obd-muted hover:bg-obd-raised disabled:opacity-40"
               >
                 {restoringCheckpoint === checkpoint.id ? "Restoring…" : "Restore"}
               </button>
             </div>
           </div>
           {checkpointDiffId === checkpoint.id && checkpointDiffText.length > 0 && (
-            <pre className="mt-2 max-h-56 overflow-auto rounded bg-black/30 p-2 font-mono text-[9px] leading-4 text-slate-500">
+            <pre className="mt-2 max-h-56 overflow-auto rounded bg-obd-inset p-2 font-mono text-[9px] leading-4 text-obd-subtle">
               {checkpointDiffText}
             </pre>
           )}
         </div>
       ))}
       {checkpointNotice !== null && (
-        <p className="text-[10px] text-emerald-300">{checkpointNotice}</p>
+        <p className="text-[10px] text-obd-accent">{checkpointNotice}</p>
       )}
       {checkpointError !== null && (
-        <p className="text-[10px] text-amber-300">{checkpointError}</p>
+        <p className="text-[10px] text-obd-warning">{checkpointError}</p>
       )}
     </div>
   );
@@ -946,27 +946,27 @@ function DiagnosticsPanel({
 }) {
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
-        <div className="flex items-center gap-2 text-[11px] text-slate-300">
+      <div className="rounded-lg border border-obd-line bg-obd-raised p-3">
+        <div className="flex items-center gap-2 text-[11px] text-obd-body">
           <KeyRound
             size={13}
-            className={apiKeyStatus ? "text-emerald-300" : "text-amber-300"}
+            className={apiKeyStatus ? "text-obd-accent" : "text-obd-warning"}
           />
           DeepSeek key
-          <span className="ml-auto text-[10px] text-slate-500">
+          <span className="ml-auto text-[10px] text-obd-subtle">
             {apiKeyStatus ? "ready" : "missing"}
           </span>
         </div>
         <button
           type="button"
           onClick={() => onOpenSettings("secrets")}
-          className="mt-2 text-[10px] text-emerald-300 hover:underline"
+          className="mt-2 text-[10px] text-obd-accent hover:underline"
         >
           Manage key
         </button>
       </div>
       {foundation.kind === "ready" && (
-        <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3 font-mono text-[9px] leading-5 text-slate-400">
+        <div className="rounded-lg border border-obd-line bg-obd-raised p-3 font-mono text-[9px] leading-5 text-obd-muted">
           <p>schema {foundation.foundation.doctor.schema_version}</p>
           <p>integrity {foundation.foundation.doctor.integrity}</p>
           <p>database {formatBytes(foundation.foundation.doctor.database_bytes)}</p>
@@ -978,7 +978,7 @@ function DiagnosticsPanel({
         </div>
       )}
       {foundation.kind === "error" && (
-        <p className="text-[10px] text-amber-300">{foundation.message}</p>
+        <p className="text-[10px] text-obd-warning">{foundation.message}</p>
       )}
     </div>
   );
@@ -994,12 +994,12 @@ function Stat({
   icon: ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
-      <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-slate-500">
+    <div className="rounded-lg border border-obd-line bg-obd-raised p-2.5">
+      <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-obd-subtle">
         {icon}
         {label}
       </div>
-      <p className="mt-1 text-[16px] font-medium text-slate-200">
+      <p className="mt-1 text-[16px] font-medium text-obd-text">
         {value.toLocaleString()}
       </p>
     </div>
@@ -1018,15 +1018,15 @@ function SearchField({
   label: string;
 }) {
   return (
-    <label className="flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
-      <Search size={11} className="shrink-0 text-slate-500" />
+    <label className="flex items-center gap-2 rounded-md border border-obd-line bg-obd-inset px-2.5 py-1.5">
+      <Search size={11} className="shrink-0 text-obd-subtle" />
       <input
         type="search"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         aria-label={label}
-        className="min-w-0 flex-1 bg-transparent text-[10px] text-slate-300 outline-none placeholder:text-slate-500"
+        className="min-w-0 flex-1 bg-transparent text-[10px] text-obd-body outline-none placeholder:text-obd-subtle"
       />
     </label>
   );

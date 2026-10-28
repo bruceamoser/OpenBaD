@@ -67,7 +67,7 @@ export default function PdfViewer({
           canvas.style.width = `${Math.floor(viewport.width)}px`;
           canvas.style.height = `${Math.floor(viewport.height)}px`;
           canvas.className =
-            "mx-auto mb-2 rounded border border-white/10 bg-white shadow-lg shadow-black/30";
+            "mx-auto mb-2 rounded border border-obd-line bg-obd-canvas shadow-lg shadow-black/30";
           container.appendChild(canvas);
           await page.render({
             canvas,
@@ -98,27 +98,27 @@ export default function PdfViewer({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
-      <div className="flex shrink-0 items-center gap-2 font-mono text-[9px] text-slate-500">
+      <div className="flex shrink-0 items-center gap-2 font-mono text-[9px] text-obd-subtle">
         <span>{title}</span>
         {pages > 0 && <span>· {pages} page{pages === 1 ? "" : "s"}</span>}
         {pages > MAX_RENDERED_PAGES && (
           <span>· first {MAX_RENDERED_PAGES} rendered</span>
         )}
         {rendering && (
-          <span className="flex items-center gap-1 text-slate-500">
+          <span className="flex items-center gap-1 text-obd-subtle">
             <Loader2 size={10} className="animate-spin" /> rendering
           </span>
         )}
       </div>
       {error !== null && (
-        <p role="alert" className="text-[10px] leading-4 text-amber-300">
+        <p role="alert" className="text-[10px] leading-4 text-obd-warning">
           {error}
         </p>
       )}
-      <div className="relative min-h-0 flex-1 overflow-auto rounded-lg bg-black/30 p-2">
+      <div className="relative min-h-0 flex-1 overflow-auto rounded-lg bg-obd-inset p-2">
         <div ref={containerRef} data-testid="pdf-pages" />
         {rendering && pages === 0 && error === null && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-slate-500">
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-obd-subtle">
             <Loader2 size={13} className="animate-spin" /> Loading PDF…
           </div>
         )}

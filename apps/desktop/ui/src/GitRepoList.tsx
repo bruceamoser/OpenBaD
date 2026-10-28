@@ -140,13 +140,13 @@ export default function GitRepoList({
           type="button"
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((value) => !value)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body"
         >
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
           <GitBranch size={12} />
           <span className="truncate">Source Control</span>
           {summaries !== null && visible.length > 0 && (
-            <span className="ml-auto font-mono text-[9px] text-slate-500">
+            <span className="ml-auto font-mono text-[9px] text-obd-subtle">
               {visible.length}
             </span>
           )}
@@ -158,7 +158,7 @@ export default function GitRepoList({
             title="Refresh source control repositories"
             onClick={() => void load(true)}
             disabled={loading}
-            className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
+            className="shrink-0 rounded-md p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-40"
           >
             <RefreshCw size={11} className={busy ? "animate-spin" : ""} />
           </button>
@@ -168,14 +168,14 @@ export default function GitRepoList({
       {!collapsed && (
         <div id="source-control-repos" className="mt-0.5 space-y-0.5">
           {error !== null && (
-            <div className="mx-1 flex items-start gap-1.5 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-2 py-1.5 text-[10px] leading-4 text-amber-200">
+            <div className="mx-1 flex items-start gap-1.5 rounded-md border border-obd-warning/20 bg-obd-warning/[0.06] px-2 py-1.5 text-[10px] leading-4 text-obd-warning">
               <CircleAlert size={11} className="mt-0.5 shrink-0" />
               <p className="min-w-0 flex-1 break-words">{error}</p>
             </div>
           )}
 
           {summaries === null && error === null && (
-            <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-slate-500">
+            <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-obd-subtle">
               <Loader2 size={11} className="animate-spin" /> Reading repositories…
             </div>
           )}
@@ -189,23 +189,23 @@ export default function GitRepoList({
                 type="button"
                 title={summary.path}
                 onClick={() => onOpen(summary.path, summary.name)}
-                className="flex w-full items-start gap-1.5 rounded-md px-2 py-1 text-left hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400/60"
+                className="flex w-full items-start gap-1.5 rounded-md px-2 py-1 text-left hover:bg-obd-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-obd-accent/60"
               >
                 <FolderGit2
                   size={11}
-                  className="mt-0.5 shrink-0 text-emerald-300/80"
+                  className="mt-0.5 shrink-0 text-obd-accent/80"
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1">
-                    <span className="truncate text-[11px] text-slate-300">
+                    <span className="truncate text-[11px] text-obd-body">
                       {summary.name || (isWorkspace ? projectName : "repository")}
                     </span>
-                    <span className="shrink-0 rounded bg-white/[0.05] px-1 text-[8px] uppercase tracking-wide text-slate-500">
+                    <span className="shrink-0 rounded bg-obd-raised-strong px-1 text-[8px] uppercase tracking-wide text-obd-subtle">
                       {isWorkspace ? "workspace" : "reference"}
                     </span>
                   </span>
                   <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[9px]">
-                    <span className="flex items-center gap-1 text-slate-500">
+                    <span className="flex items-center gap-1 text-obd-subtle">
                       <GitBranch size={9} className="shrink-0" />
                       <span className="max-w-[110px] truncate">
                         {summary.detached
@@ -214,15 +214,15 @@ export default function GitRepoList({
                       </span>
                     </span>
                     {summary.error !== null ? (
-                      <span className="text-amber-300" title={summary.error}>
+                      <span className="text-obd-warning" title={summary.error}>
                         {summary.isRepo ? "status unavailable" : "not a repository"}
                       </span>
                     ) : summary.isRepo ? (
                       <span
                         className={
                           summary.dirty > 0
-                            ? "font-medium text-amber-300"
-                            : "text-emerald-300/80"
+                            ? "font-medium text-obd-warning"
+                            : "text-obd-accent/80"
                         }
                       >
                         {summary.dirty > 0
@@ -230,10 +230,10 @@ export default function GitRepoList({
                           : "clean"}
                       </span>
                     ) : (
-                      <span className="text-amber-300">not a repository</span>
+                      <span className="text-obd-warning">not a repository</span>
                     )}
                     {meta?.read_only === true && (
-                      <span className="text-slate-600">read-only</span>
+                      <span className="text-obd-faint">read-only</span>
                     )}
                   </span>
                 </span>
@@ -242,13 +242,13 @@ export default function GitRepoList({
           })}
 
           {summaries !== null && visible.length === 0 && error === null && (
-            <p className="px-2 py-1 text-[10px] leading-4 text-slate-500">
+            <p className="px-2 py-1 text-[10px] leading-4 text-obd-subtle">
               No Git repositories yet.
             </p>
           )}
 
           {skipped > 0 && (
-            <p className="px-2 py-0.5 text-[9px] leading-4 text-slate-500">
+            <p className="px-2 py-0.5 text-[9px] leading-4 text-obd-subtle">
               {skipped} reference{skipped === 1 ? "" : "s"} hidden: not a Git
               repository.
             </p>

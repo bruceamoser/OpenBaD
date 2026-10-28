@@ -301,7 +301,7 @@ export default function GitRepoScreen({
 
   if (workspacePath.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-white/10 p-3 text-[11px] leading-5 text-slate-500">
+      <div className="rounded-lg border border-dashed border-obd-line p-3 text-[11px] leading-5 text-obd-subtle">
         Open a project to inspect repositories and source control.
       </div>
     );
@@ -309,16 +309,16 @@ export default function GitRepoScreen({
 
   return (
     <div className="space-y-2.5">
-      <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+      <div className="rounded-lg border border-obd-line bg-obd-raised p-2.5">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <FolderGit2 size={12} className="shrink-0 text-emerald-300" />
-              <p className="truncate text-[11px] font-medium text-slate-200">
+              <FolderGit2 size={12} className="shrink-0 text-obd-accent" />
+              <p className="truncate text-[11px] font-medium text-obd-text">
                 {repoName}
               </p>
             </div>
-            <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-slate-500">
+            <p className="mt-0.5 break-all font-mono text-[9px] leading-4 text-obd-subtle">
               {repoPath}
             </p>
           </div>
@@ -328,7 +328,7 @@ export default function GitRepoScreen({
             title="Refresh repository status"
             onClick={() => void refresh(true)}
             disabled={loading || busy !== null}
-            className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
+            className="shrink-0 rounded-md p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-40"
           >
             <RefreshCw
               size={13}
@@ -339,14 +339,14 @@ export default function GitRepoScreen({
       </div>
 
       {error !== null && (
-        <div className="flex items-start gap-1.5 rounded-lg border border-amber-400/20 bg-amber-400/[0.06] px-2.5 py-2 text-[10px] leading-4 text-amber-200">
+        <div className="flex items-start gap-1.5 rounded-lg border border-obd-warning/20 bg-obd-warning/[0.06] px-2.5 py-2 text-[10px] leading-4 text-obd-warning">
           <CircleAlert size={12} className="mt-0.5 shrink-0" />
           <p className="min-w-0 flex-1 break-words">{error}</p>
         </div>
       )}
 
       {notice !== null && (
-        <div className="flex items-start gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.06] px-2.5 py-2 text-[10px] leading-4 text-emerald-200">
+        <div className="flex items-start gap-1.5 rounded-lg border border-obd-accent/20 bg-obd-accent/[0.06] px-2.5 py-2 text-[10px] leading-4 text-obd-accent">
           <CircleCheck size={12} className="mt-0.5 shrink-0" />
           <pre className="max-h-24 min-w-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-4">
             {notice}
@@ -355,18 +355,18 @@ export default function GitRepoScreen({
       )}
 
       {status === null && (
-        <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-4 text-center">
+        <div className="rounded-lg border border-obd-line bg-obd-raised px-3 py-4 text-center">
           {loading || refreshing || error === null ? (
-            <div className="flex items-center justify-center gap-2 text-[10px] text-slate-500">
+            <div className="flex items-center justify-center gap-2 text-[10px] text-obd-subtle">
               <Loader2 size={13} className="animate-spin" /> Reading repository…
             </div>
           ) : (
             <>
-              <CircleAlert size={18} className="mx-auto text-amber-300" />
-              <p className="mt-2 text-[11px] font-medium text-slate-200">
+              <CircleAlert size={18} className="mx-auto text-obd-warning" />
+              <p className="mt-2 text-[11px] font-medium text-obd-text">
                 Repository status unavailable
               </p>
-              <p className="mt-1 text-[10px] leading-4 text-slate-500">
+              <p className="mt-1 text-[10px] leading-4 text-obd-subtle">
                 Check that the folder exists and that Git is installed and on
                 PATH.
               </p>
@@ -374,7 +374,7 @@ export default function GitRepoScreen({
                 type="button"
                 onClick={() => void refresh(false)}
                 disabled={loading}
-                className="mt-2 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                className="mt-2 rounded-md border border-obd-line bg-obd-raised px-2.5 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
               >
                 Retry
               </button>
@@ -384,26 +384,26 @@ export default function GitRepoScreen({
       )}
 
       {status !== null && !status.isRepo && (
-        <div className="rounded-lg border border-dashed border-white/[0.12] bg-white/[0.02] px-3 py-4 text-center">
-          <FolderGit2 size={20} className="mx-auto text-slate-500" />
-          <p className="mt-2 text-[11px] font-medium text-slate-200">
+        <div className="rounded-lg border border-dashed border-obd-line bg-obd-raised px-3 py-4 text-center">
+          <FolderGit2 size={20} className="mx-auto text-obd-subtle" />
+          <p className="mt-2 text-[11px] font-medium text-obd-text">
             Not a Git repository
           </p>
-          <p className="mt-1 break-all font-mono text-[9px] leading-4 text-slate-500">
+          <p className="mt-1 break-all font-mono text-[9px] leading-4 text-obd-subtle">
             {status.path}
           </p>
-          <p className="mt-2 text-[10px] leading-4 text-slate-500">
+          <p className="mt-2 text-[10px] leading-4 text-obd-subtle">
             Initialize Git to track changes, stage files, and commit from
             OpenBaD.
           </p>
           {status.error !== null && (
-            <p className="mt-1 text-[10px] text-amber-300">{status.error}</p>
+            <p className="mt-1 text-[10px] text-obd-warning">{status.error}</p>
           )}
           <button
             type="button"
             onClick={() => void initializeRepo()}
             disabled={isBusy}
-            className="mt-2.5 inline-flex items-center gap-1.5 rounded-md bg-emerald-400 px-2.5 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
+            className="mt-2.5 inline-flex items-center gap-1.5 rounded-md bg-obd-accent px-2.5 py-1.5 text-[10px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-40"
           >
             {busy === "init" ? (
               <Loader2 size={12} className="animate-spin" />
@@ -416,26 +416,26 @@ export default function GitRepoScreen({
       )}
       {status !== null && status.isRepo && (
         <div className="space-y-2.5">
-          <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
+          <div className="rounded-xl border border-obd-line bg-obd-raised p-3">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <GitBranch size={13} className="shrink-0 text-emerald-300" />
-                  <p className="truncate text-[12px] font-medium text-slate-200">
+                  <GitBranch size={13} className="shrink-0 text-obd-accent" />
+                  <p className="truncate text-[12px] font-medium text-obd-text">
                     {currentBranch.length > 0 ? currentBranch : "No branch"}
                   </p>
                   {status.detached && (
-                    <span className="shrink-0 rounded bg-amber-400/15 px-1 py-0.5 text-[8px] uppercase tracking-wide text-amber-300">
+                    <span className="shrink-0 rounded bg-obd-warning/15 px-1 py-0.5 text-[8px] uppercase tracking-wide text-obd-warning">
                       detached
                     </span>
                   )}
                   {operation !== null && (
-                    <span className="shrink-0 rounded bg-amber-400/15 px-1 py-0.5 text-[8px] uppercase tracking-wide text-amber-300">
+                    <span className="shrink-0 rounded bg-obd-warning/15 px-1 py-0.5 text-[8px] uppercase tracking-wide text-obd-warning">
                       {operation}
                     </span>
                   )}
                 </div>
-                <p className="mt-0.5 truncate font-mono text-[9px] text-slate-500">
+                <p className="mt-0.5 truncate font-mono text-[9px] text-obd-subtle">
                   {hasUpstream
                     ? `tracking ${status.upstream}`
                     : "no upstream configured"}
@@ -446,22 +446,22 @@ export default function GitRepoScreen({
             <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[9px]">
               <span
                 title={`${status.ahead} commits ahead of upstream`}
-                className="flex items-center gap-0.5 rounded bg-white/[0.04] px-1.5 py-0.5 text-slate-400"
+                className="flex items-center gap-0.5 rounded bg-obd-raised px-1.5 py-0.5 text-obd-muted"
               >
                 <ArrowUp size={10} /> {status.ahead} ahead
               </span>
               <span
                 title={`${status.behind} commits behind upstream`}
-                className="flex items-center gap-0.5 rounded bg-white/[0.04] px-1.5 py-0.5 text-slate-400"
+                className="flex items-center gap-0.5 rounded bg-obd-raised px-1.5 py-0.5 text-obd-muted"
               >
                 <ArrowDown size={10} /> {status.behind} behind
               </span>
               {!status.hasCommits && (
-                <span className="rounded bg-white/[0.04] px-1.5 py-0.5 text-slate-500">
+                <span className="rounded bg-obd-raised px-1.5 py-0.5 text-obd-subtle">
                   no commits yet
                 </span>
               )}
-              <span className="truncate text-slate-500">
+              <span className="truncate text-obd-subtle">
                 {status.remotes.length > 0
                   ? status.remotes.map((remote) => remote.name).join(", ")
                   : "no remotes"}
@@ -476,7 +476,7 @@ export default function GitRepoScreen({
                 title={
                   hasRemotes ? "Fetch from remotes" : "No remotes configured"
                 }
-                className="flex items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-1.5 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                className="flex items-center justify-center gap-1 rounded-md border border-obd-line bg-obd-raised px-1.5 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
               >
                 <RefreshCw
                   size={11}
@@ -497,7 +497,7 @@ export default function GitRepoScreen({
                       ? "Finish the in-progress operation first"
                       : "Pull with fast-forward only"
                 }
-                className="flex items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-1.5 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                className="flex items-center justify-center gap-1 rounded-md border border-obd-line bg-obd-raised px-1.5 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
               >
                 <ArrowDown size={11} />
                 {busy === "pull" ? "Pulling…" : "Pull"}
@@ -523,17 +523,17 @@ export default function GitRepoScreen({
                           ? "Push to upstream"
                           : "Push and set upstream"
                 }
-                className="flex items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-1.5 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                className="flex items-center justify-center gap-1 rounded-md border border-obd-line bg-obd-raised px-1.5 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
               >
                 <ArrowUp size={11} />
                 {busy === "push" ? "Pushing…" : "Push"}
               </button>
             </div>
 
-            <div className="mt-2.5 border-t border-white/[0.06] pt-2.5">
+            <div className="mt-2.5 border-t border-obd-line pt-2.5">
               <label
                 htmlFor="git-checkout-branch"
-                className="text-[9px] uppercase tracking-wide text-slate-500"
+                className="text-[9px] uppercase tracking-wide text-obd-subtle"
               >
                 Checkout local branch
               </label>
@@ -545,16 +545,16 @@ export default function GitRepoScreen({
                   disabled={
                     isBusy || operation !== null || localBranches.length === 0
                   }
-                  className="min-w-0 flex-1 rounded-md border border-white/[0.08] bg-black/20 px-2 py-1.5 text-[10px] text-slate-300 outline-none focus:border-emerald-400/40 disabled:opacity-40"
+                  className="min-w-0 flex-1 rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] text-obd-body outline-none focus:border-obd-accent/40 disabled:opacity-40"
                 >
-                  <option value="" className="bg-[#1b232e]">
+                  <option value="" className="bg-obd-surface">
                     Select a branch…
                   </option>
                   {localBranches.map((branch) => (
                     <option
                       key={branch.name}
                       value={branch.name}
-                      className="bg-[#1b232e]"
+                      className="bg-obd-surface"
                     >
                       {branch.name}
                       {branch.current ? " (current)" : ""}
@@ -570,7 +570,7 @@ export default function GitRepoScreen({
                     checkoutTarget === status.branch ||
                     operation !== null
                   }
-                  className="shrink-0 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                  className="shrink-0 rounded-md border border-obd-line bg-obd-raised px-2 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
                 >
                   Checkout
                 </button>
@@ -580,7 +580,7 @@ export default function GitRepoScreen({
             <div className="mt-2">
               <label
                 htmlFor="git-new-branch"
-                className="text-[9px] uppercase tracking-wide text-slate-500"
+                className="text-[9px] uppercase tracking-wide text-obd-subtle"
               >
                 Create branch
               </label>
@@ -597,7 +597,7 @@ export default function GitRepoScreen({
                   }}
                   placeholder="feature/my-branch"
                   disabled={isBusy || operation !== null}
-                  className="min-w-0 flex-1 rounded-md border border-white/[0.08] bg-black/20 px-2 py-1.5 font-mono text-[10px] text-slate-300 outline-none placeholder:text-slate-600 focus:border-emerald-400/40 disabled:opacity-40"
+                  className="min-w-0 flex-1 rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 font-mono text-[10px] text-obd-body outline-none placeholder:text-obd-faint focus:border-obd-accent/40 disabled:opacity-40"
                 />
                 <button
                   type="button"
@@ -607,7 +607,7 @@ export default function GitRepoScreen({
                     newBranch.trim().length === 0 ||
                     operation !== null
                   }
-                  className="flex shrink-0 items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+                  className="flex shrink-0 items-center gap-1 rounded-md border border-obd-line bg-obd-raised px-2 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
                 >
                   {busy === "create-branch" ? (
                     <Loader2 size={11} className="animate-spin" />
@@ -621,13 +621,13 @@ export default function GitRepoScreen({
           </div>
 
           {operation !== null && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.06] px-2.5 py-2 text-[10px] leading-4 text-amber-200">
+            <div className="flex items-start gap-2 rounded-lg border border-obd-warning/20 bg-obd-warning/[0.06] px-2.5 py-2 text-[10px] leading-4 text-obd-warning">
               <TriangleAlert size={13} className="mt-0.5 shrink-0" />
               <div>
                 <p className="font-medium">
                   {operationLabel(operation)} in progress
                 </p>
-                <p className="mt-0.5 text-amber-200/80">
+                <p className="mt-0.5 text-obd-warning/80">
                   {operationHelp(operation)}
                 </p>
               </div>
@@ -635,11 +635,11 @@ export default function GitRepoScreen({
           )}
 
           {operation === null && status.ahead > 0 && status.behind > 0 && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.06] px-2.5 py-2 text-[10px] leading-4 text-amber-200">
+            <div className="flex items-start gap-2 rounded-lg border border-obd-warning/20 bg-obd-warning/[0.06] px-2.5 py-2 text-[10px] leading-4 text-obd-warning">
               <TriangleAlert size={13} className="mt-0.5 shrink-0" />
               <div>
                 <p className="font-medium">Branches have diverged</p>
-                <p className="mt-0.5 text-amber-200/80">
+                <p className="mt-0.5 text-obd-warning/80">
                   Local and upstream branches have diverged. A fast-forward
                   pull will fail; merge or rebase from a terminal, then push.
                 </p>
@@ -673,12 +673,12 @@ export default function GitRepoScreen({
             }
           />
 
-          <section className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
+          <section className="rounded-lg border border-obd-line bg-obd-raised p-3">
             <label
               htmlFor="git-commit-message"
-              className="flex items-center gap-1.5 text-[11px] font-medium text-slate-300"
+              className="flex items-center gap-1.5 text-[11px] font-medium text-obd-body"
             >
-              <Check size={12} className="text-emerald-300" /> Commit message
+              <Check size={12} className="text-obd-accent" /> Commit message
             </label>
             <textarea
               id="git-commit-message"
@@ -687,15 +687,15 @@ export default function GitRepoScreen({
               rows={3}
               placeholder="Describe your changes"
               disabled={isBusy || commitBlocked}
-              className="mt-1.5 w-full resize-y rounded-md border border-white/[0.08] bg-black/20 px-2 py-1.5 text-[10px] leading-5 text-slate-300 outline-none placeholder:text-slate-600 focus:border-emerald-400/40 disabled:opacity-40"
+              className="mt-1.5 w-full resize-y rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] leading-5 text-obd-body outline-none placeholder:text-obd-faint focus:border-obd-accent/40 disabled:opacity-40"
             />
-            <label className="mt-2 flex items-center gap-1.5 text-[10px] text-slate-400">
+            <label className="mt-2 flex items-center gap-1.5 text-[10px] text-obd-muted">
               <input
                 type="checkbox"
                 checked={stageAll}
                 onChange={(event) => setStageAll(event.target.checked)}
                 disabled={isBusy || commitBlocked}
-                className="h-3 w-3 accent-emerald-400"
+                className="h-3 w-3 accent-obd-accent"
               />
               Stage all changes before committing
             </label>
@@ -703,7 +703,7 @@ export default function GitRepoScreen({
               type="button"
               onClick={() => void commitChanges()}
               disabled={!canCommit || isBusy || commitBlocked}
-              className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-emerald-400 px-2.5 py-2 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-40"
+              className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-obd-accent px-2.5 py-2 text-[10px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-40"
             >
               {busy === "commit" ? (
                 <Loader2 size={12} className="animate-spin" />
@@ -713,13 +713,13 @@ export default function GitRepoScreen({
               {busy === "commit" ? "Committing…" : "Commit"}
             </button>
             {stagedFiles.length === 0 && !stageAll && (
-              <p className="mt-2 text-[9px] leading-4 text-slate-500">
+              <p className="mt-2 text-[9px] leading-4 text-obd-subtle">
                 No staged changes. Stage files above or enable “Stage all
                 changes”.
               </p>
             )}
             {commitBlocked && (
-              <p className="mt-2 text-[9px] leading-4 text-amber-300">
+              <p className="mt-2 text-[9px] leading-4 text-obd-warning">
                 Finish or abort the in-progress {operationLabel(operation ?? "")}{" "}
                 from a terminal before committing.
               </p>
@@ -727,24 +727,24 @@ export default function GitRepoScreen({
           </section>
 
           {status.lastCommit !== null && (
-            <section className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
+            <section className="rounded-lg border border-obd-line bg-obd-raised p-3">
               <div className="flex items-center justify-between gap-2">
-                <p className="text-[9px] uppercase tracking-wide text-slate-500">
+                <p className="text-[9px] uppercase tracking-wide text-obd-subtle">
                   Last commit
                 </p>
-                <span className="shrink-0 font-mono text-[9px] text-slate-500">
+                <span className="shrink-0 font-mono text-[9px] text-obd-subtle">
                   {status.lastCommit.shortHash}
                 </span>
               </div>
-              <p className="mt-1 text-[11px] leading-5 text-slate-300">
+              <p className="mt-1 text-[11px] leading-5 text-obd-body">
                 {status.lastCommit.subject}
               </p>
-              <p className="mt-1 text-[9px] text-slate-500">
+              <p className="mt-1 text-[9px] text-obd-subtle">
                 {status.lastCommit.author} ·{" "}
                 {formatCommitDate(status.lastCommit.date)}
               </p>
               {status.lastCommit.refs.trim().length > 0 && (
-                <p className="mt-1 truncate font-mono text-[9px] text-emerald-300/80">
+                <p className="mt-1 truncate font-mono text-[9px] text-obd-accent/80">
                   {status.lastCommit.refs}
                 </p>
               )}
@@ -778,11 +778,11 @@ function ChangeSection({
   onToggleAll: () => void;
 }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.02]">
-      <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] px-2.5 py-1.5">
-        <p className="text-[10px] uppercase tracking-[0.12em] text-slate-500">
+    <section className="overflow-hidden rounded-lg border border-obd-line bg-obd-raised">
+      <div className="flex items-center justify-between gap-2 border-b border-obd-line px-2.5 py-1.5">
+        <p className="text-[10px] uppercase tracking-[0.12em] text-obd-subtle">
           {title}
-          <span className="ml-1.5 rounded bg-white/[0.06] px-1 py-0.5 text-[9px] tracking-normal text-slate-400">
+          <span className="ml-1.5 rounded bg-obd-raised-strong px-1 py-0.5 text-[9px] tracking-normal text-obd-muted">
             {files.length}
           </span>
         </p>
@@ -790,15 +790,15 @@ function ChangeSection({
           type="button"
           onClick={onToggleAll}
           disabled={busy || files.length === 0}
-          className="rounded px-1.5 py-0.5 text-[9px] text-slate-500 hover:bg-white/5 hover:text-slate-300 disabled:opacity-40"
+          className="rounded px-1.5 py-0.5 text-[9px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-40"
         >
           {stagedView ? "Unstage all" : "Stage all"}
         </button>
       </div>
       {files.length === 0 ? (
-        <p className="px-2.5 py-2 text-[10px] text-slate-500">{emptyLabel}</p>
+        <p className="px-2.5 py-2 text-[10px] text-obd-subtle">{emptyLabel}</p>
       ) : (
-        <ul className="divide-y divide-white/[0.04]">
+        <ul className="divide-y divide-obd-line">
           {files.map((file) => {
             const key = `${stagedView ? "staged" : "worktree"}:${file.path}`;
             return (
@@ -812,15 +812,15 @@ function ChangeSection({
                       : file.path
                   }
                   aria-label={`Show diff for ${file.path}`}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-left font-mono text-[10px] text-slate-400 hover:text-slate-200"
+                  className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-left font-mono text-[10px] text-obd-muted hover:text-obd-text"
                 >
                   {diffPath === key ? (
                     <Loader2
                       size={11}
-                      className="shrink-0 animate-spin text-emerald-300"
+                      className="shrink-0 animate-spin text-obd-accent"
                     />
                   ) : (
-                    <FileCode2 size={11} className="shrink-0 text-slate-500" />
+                    <FileCode2 size={11} className="shrink-0 text-obd-subtle" />
                   )}
                   <span className="min-w-0 flex-1 truncate">{file.path}</span>
                   <span
@@ -838,7 +838,7 @@ function ChangeSection({
                   disabled={busy}
                   aria-label={`${stagedView ? "Unstage" : "Stage"} ${file.path}`}
                   title={stagedView ? "Unstage file" : "Stage file"}
-                  className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-slate-200 disabled:opacity-40"
+                  className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-text disabled:opacity-40"
                 >
                   {stagedView ? <Minus size={11} /> : <Plus size={11} />}
                 </button>
@@ -861,16 +861,16 @@ function changeLetter(file: GitFileChange, staged: boolean): string {
 
 function changeTone(file: GitFileChange, staged: boolean): string {
   if (!staged && file.untracked) {
-    return "text-emerald-300";
+    return "text-obd-accent";
   }
   const status = (staged ? file.indexStatus : file.worktreeStatus).trim();
   if (status === "D") {
-    return "text-rose-300";
+    return "text-obd-danger";
   }
   if (status === "A" || status === "?") {
-    return "text-emerald-300";
+    return "text-obd-accent";
   }
-  return staged ? "text-sky-300" : "text-amber-300";
+  return staged ? "text-obd-info" : "text-obd-warning";
 }
 
 function errorMessage(cause: unknown): string {

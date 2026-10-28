@@ -257,22 +257,22 @@ export function KnowledgePanel({
     <div
       {...drop.zoneProps}
       className={`relative min-h-full space-y-2 rounded-lg transition-shadow ${
-        drop.active ? "ring-2 ring-emerald-400/40" : ""
+        drop.active ? "ring-2 ring-obd-accent/40" : ""
       }`}
     >
       {drop.active && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-emerald-400/10 text-[11px] font-medium text-emerald-100">
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-obd-accent/10 text-[11px] font-medium text-obd-accent">
           Drop documents to add them to knowledge
         </div>
       )}
-      <p className="px-1 pb-1 text-[10px] leading-4 text-slate-500">
+      <p className="px-1 pb-1 text-[10px] leading-4 text-obd-subtle">
         Knowledge documents: long-form notes, decisions, references, procedures, and
         findings. They are chunked, full-text indexed, and cited by document. Use Memory
         for short atomic snippets.
       </p>
       <SearchField value={query} onChange={setQuery} label="Filter knowledge" />
       {loading && knowledge.length === 0 && (
-        <p className="flex items-center gap-1.5 px-1 py-2 text-[10px] text-slate-500">
+        <p className="flex items-center gap-1.5 px-1 py-2 text-[10px] text-obd-subtle">
           <Loader2 size={11} className="animate-spin" /> Loading knowledge…
         </p>
       )}
@@ -284,7 +284,7 @@ export function KnowledgePanel({
         return (
         <div
           key={document.id}
-          className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"
+          className="rounded-lg border border-obd-line bg-obd-raised p-2.5"
         >
           <div className="flex items-start gap-1">
           <button
@@ -292,8 +292,8 @@ export function KnowledgePanel({
             onClick={() => open(document)}
             className="block min-w-0 flex-1 text-left"
           >
-            <p className="truncate text-[11px] text-slate-200">{document.title}</p>
-            <p className="mt-0.5 truncate font-mono text-[9px] text-slate-500">
+            <p className="truncate text-[11px] text-obd-text">{document.title}</p>
+            <p className="mt-0.5 truncate font-mono text-[9px] text-obd-subtle">
               {document.kind} · {document.chunks} chunk
               {document.chunks === 1 ? "" : "s"} · {formatBytes(document.characters)}
             </p>
@@ -301,27 +301,27 @@ export function KnowledgePanel({
               <span
                 className={
                   document.confidence === "verified"
-                    ? "rounded bg-emerald-400/15 px-1 py-0.5 text-emerald-300"
+                    ? "rounded bg-obd-accent/15 px-1 py-0.5 text-obd-accent"
                     : document.confidence === "uncertain"
-                      ? "rounded bg-amber-400/15 px-1 py-0.5 text-amber-300"
-                      : "rounded bg-white/[0.06] px-1 py-0.5 text-slate-400"
+                      ? "rounded bg-obd-warning/15 px-1 py-0.5 text-obd-warning"
+                      : "rounded bg-obd-raised-strong px-1 py-0.5 text-obd-muted"
                 }
               >
                 {document.confidence}
               </span>
               {stale.has(document.id) && (
-                <span className="rounded bg-amber-400/15 px-1 py-0.5 text-amber-300">
+                <span className="rounded bg-obd-warning/15 px-1 py-0.5 text-obd-warning">
                   source changed
                 </span>
               )}
               {document.review_status !== "accepted" && (
-                <span className="rounded bg-sky-400/15 px-1 py-0.5 text-sky-300">
+                <span className="rounded bg-obd-info/15 px-1 py-0.5 text-obd-info">
                   {document.review_status}
                 </span>
               )}
             </p>
             {document.tags.length > 0 && (
-              <p className="mt-1 truncate text-[9px] text-emerald-300/70">
+              <p className="mt-1 truncate text-[9px] text-obd-accent/70">
                 {document.tags.join(" · ")}
               </p>
             )}
@@ -335,7 +335,7 @@ export function KnowledgePanel({
           )}
           </div>
           <div className="mt-1.5 flex items-center justify-between gap-2">
-            <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-slate-500">
+            <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-obd-subtle">
               {document.source ?? "project note"}
             </span>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -345,7 +345,7 @@ export function KnowledgePanel({
                 title="Download Markdown"
                 onClick={() => void download(document)}
                 disabled={exportingId === document.id}
-                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-emerald-300 disabled:opacity-40"
+                className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-accent disabled:opacity-40"
               >
                 {exportingId === document.id ? (
                   <Loader2 size={11} className="animate-spin" />
@@ -358,7 +358,7 @@ export function KnowledgePanel({
                 aria-label={`Export ${document.title} as PDF`}
                 title="Print / save as PDF"
                 onClick={() => void print(document)}
-                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-emerald-300"
+                className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-accent"
               >
                 <Printer size={11} />
               </button>
@@ -366,7 +366,7 @@ export function KnowledgePanel({
                 type="button"
                 aria-label={`Delete ${document.title}`}
                 onClick={() => void remove(document)}
-                className="rounded p-1 text-slate-500 hover:bg-white/5 hover:text-amber-300"
+                className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-warning"
               >
                 <Trash2 size={11} />
               </button>
@@ -376,7 +376,7 @@ export function KnowledgePanel({
         );
       })}
       {!loading && visible.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-500">
+        <p className="px-1 py-2 text-[11px] text-obd-subtle">
           {knowledge.length === 0
             ? "No knowledge yet. Add a note, upload documents, or import a file."
             : "No matching documents."}
@@ -386,7 +386,7 @@ export function KnowledgePanel({
         <button
           type="button"
           onClick={() => setComposing((value) => !value)}
-          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06]"
+          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-obd-line bg-obd-raised px-2 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong"
         >
           <Plus size={11} /> Note
         </button>
@@ -394,7 +394,7 @@ export function KnowledgePanel({
           type="button"
           onClick={() => void choose()}
           disabled={uploading || workspacePath.length === 0}
-          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06] disabled:opacity-40"
+          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-obd-line bg-obd-raised px-2 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong disabled:opacity-40"
         >
           {uploading ? (
             <Loader2 size={11} className="animate-spin" />
@@ -406,13 +406,13 @@ export function KnowledgePanel({
         <button
           type="button"
           onClick={() => setImporting((value) => !value)}
-          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1.5 text-[10px] text-slate-300 hover:bg-white/[0.06]"
+          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-obd-line bg-obd-raised px-2 py-1.5 text-[10px] text-obd-body hover:bg-obd-raised-strong"
         >
           <BookOpen size={11} /> Import
         </button>
       </div>
       {importing && (
-        <div className="space-y-1.5 rounded-lg border border-white/[0.08] bg-black/20 p-2.5">
+        <div className="space-y-1.5 rounded-lg border border-obd-line bg-obd-inset p-2.5">
           <input
             value={importPath}
             onChange={(event) => setImportPath(event.target.value)}
@@ -423,26 +423,26 @@ export function KnowledgePanel({
             }}
             aria-label="Knowledge import path"
             placeholder="/home/you/docs/architecture.md"
-            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 font-mono text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+            className="w-full rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 font-mono text-[10px] text-obd-text outline-none focus:border-obd-accent/40"
           />
           <button
             type="button"
             onClick={() => void importFile(importPath.trim())}
             disabled={importPath.trim().length === 0}
-            className="w-full rounded-md border border-white/10 bg-white/[0.04] px-2 py-1.5 text-[10px] text-slate-200 hover:bg-white/[0.08] disabled:opacity-30"
+            className="w-full rounded-md border border-obd-line bg-obd-raised px-2 py-1.5 text-[10px] text-obd-text hover:bg-obd-raised-strong disabled:opacity-30"
           >
             Import UTF-8 file
           </button>
         </div>
       )}
       {composing && (
-        <div className="space-y-1.5 rounded-lg border border-white/[0.08] bg-black/20 p-2.5">
+        <div className="space-y-1.5 rounded-lg border border-obd-line bg-obd-inset p-2.5">
           <input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             aria-label="Knowledge title"
             placeholder="Title"
-            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+            className="w-full rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] text-obd-text outline-none focus:border-obd-accent/40"
           />
           <textarea
             value={content}
@@ -450,20 +450,20 @@ export function KnowledgePanel({
             aria-label="Knowledge content"
             rows={5}
             placeholder="Durable context the assistant should retrieve later…"
-            className="w-full resize-y rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] leading-4 text-slate-200 outline-none focus:border-emerald-400/40"
+            className="w-full resize-y rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] leading-4 text-obd-text outline-none focus:border-obd-accent/40"
           />
           <input
             value={tags}
             onChange={(event) => setTags(event.target.value)}
             aria-label="Knowledge tags"
             placeholder="tags, comma separated"
-            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+            className="w-full rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] text-obd-text outline-none focus:border-obd-accent/40"
           />
           <select
             value={kind}
             onChange={(event) => setKind(event.target.value)}
             aria-label="Knowledge kind"
-            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+            className="w-full rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] text-obd-text outline-none focus:border-obd-accent/40"
           >
             <option value="note">Note</option>
             <option value="decision">Decision</option>
@@ -478,7 +478,7 @@ export function KnowledgePanel({
             value={confidence}
             onChange={(event) => setConfidence(event.target.value)}
             aria-label="Knowledge confidence"
-            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[10px] text-slate-200 outline-none focus:border-emerald-400/40"
+            className="w-full rounded-md border border-obd-line bg-obd-inset px-2 py-1.5 text-[10px] text-obd-text outline-none focus:border-obd-accent/40"
           >
             <option value="inferred">Inferred — reasonable, not verified</option>
             <option value="verified">Verified — checked against source</option>
@@ -488,14 +488,14 @@ export function KnowledgePanel({
             type="button"
             onClick={() => void save()}
             disabled={content.trim().length === 0}
-            className="w-full rounded-md bg-emerald-400 px-2 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-30"
+            className="w-full rounded-md bg-obd-accent px-2 py-1.5 text-[10px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-30"
           >
             Save to project knowledge
           </button>
         </div>
       )}
-      {notice !== null && <p className="text-[10px] text-emerald-300">{notice}</p>}
-      {error !== null && <p className="text-[10px] text-amber-300">{error}</p>}
+      {notice !== null && <p className="text-[10px] text-obd-accent">{notice}</p>}
+      {error !== null && <p className="text-[10px] text-obd-warning">{error}</p>}
       {printDocument !== null &&
         createPortal(
           <div className="knowledge-print">
@@ -574,33 +574,33 @@ export function RetrievalPanel({
           }}
           aria-label="Retrieval query"
           placeholder="Ask the project corpus…"
-          className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-2.5 py-1.5 text-[11px] text-slate-200 outline-none focus:border-emerald-400/40"
+          className="min-w-0 flex-1 rounded-md border border-obd-line bg-obd-inset px-2.5 py-1.5 text-[11px] text-obd-text outline-none focus:border-obd-accent/40"
         />
         <button
           type="button"
           onClick={() => void search()}
           disabled={loading || query.trim().length === 0}
-          className="rounded-md bg-emerald-400 px-2.5 py-1.5 text-[10px] font-medium text-emerald-950 hover:bg-emerald-300 disabled:opacity-30"
+          className="rounded-md bg-obd-accent px-2.5 py-1.5 text-[10px] font-medium text-obd-on-accent hover:bg-obd-accent disabled:opacity-30"
         >
           {loading ? "…" : "Search"}
         </button>
       </div>
-      <p className="px-1 text-[10px] leading-4 text-slate-500">
+      <p className="px-1 text-[10px] leading-4 text-obd-subtle">
         Retrieval fuses knowledge chunks, indexed code, and durable memory. Hits
         carry locators the assistant can cite.
       </p>
       {hits === null && (
-        <p className="px-1 py-2 text-[11px] text-slate-500">
+        <p className="px-1 py-2 text-[11px] text-obd-subtle">
           Run a query to inspect what the project can retrieve.
         </p>
       )}
       {hits !== null && hits.length === 0 && (
-        <p className="px-1 py-2 text-[11px] text-slate-500">No matches.</p>
+        <p className="px-1 py-2 text-[11px] text-obd-subtle">No matches.</p>
       )}
       {hits?.map((hit) => (
         <div
           key={`${hit.source}-${hit.locator}`}
-          className="flex items-start gap-1 rounded-lg border border-white/[0.07] bg-white/[0.02] pr-1 hover:border-white/[0.14] hover:bg-white/[0.04]"
+          className="flex items-start gap-1 rounded-lg border border-obd-line bg-obd-raised pr-1 hover:border-obd-line hover:bg-obd-raised"
         >
         <button
           type="button"
@@ -611,23 +611,23 @@ export function RetrievalPanel({
             <span
               className={`rounded px-1 py-0.5 text-[8px] uppercase tracking-wide ${
                 hit.source === "knowledge"
-                  ? "bg-sky-400/10 text-sky-300"
+                  ? "bg-obd-info/10 text-obd-info"
                   : hit.source === "memory"
-                    ? "bg-violet-400/10 text-violet-300"
-                    : "bg-emerald-400/10 text-emerald-300"
+                    ? "bg-obd-info/10 text-obd-info"
+                    : "bg-obd-accent/10 text-obd-accent"
               }`}
             >
               {hit.source}
             </span>
             {hit.source === "code" ? (
-              <FileCode2 size={10} className="text-slate-500" />
+              <FileCode2 size={10} className="text-obd-subtle" />
             ) : null}
-            <span className="truncate text-[10px] text-slate-300">{hit.title}</span>
+            <span className="truncate text-[10px] text-obd-body">{hit.title}</span>
           </div>
-          <p className="mt-1 line-clamp-3 text-[10px] leading-4 text-slate-500">
+          <p className="mt-1 line-clamp-3 text-[10px] leading-4 text-obd-subtle">
             {hit.snippet}
           </p>
-          <p className="mt-1 truncate font-mono text-[8px] text-slate-500">
+          <p className="mt-1 truncate font-mono text-[8px] text-obd-subtle">
             {hit.locator}
           </p>
         </button>
@@ -640,7 +640,7 @@ export function RetrievalPanel({
         )}
         </div>
       ))}
-      {error !== null && <p className="text-[10px] text-amber-300">{error}</p>}
+      {error !== null && <p className="text-[10px] text-obd-warning">{error}</p>}
     </div>
   );
 }
@@ -655,15 +655,15 @@ function SearchField({
   label: string;
 }) {
   return (
-    <label className="flex items-center gap-2 rounded-md border border-white/[0.07] bg-black/20 px-2.5 py-1.5">
-      <Search size={11} className="shrink-0 text-slate-500" />
+    <label className="flex items-center gap-2 rounded-md border border-obd-line bg-obd-inset px-2.5 py-1.5">
+      <Search size={11} className="shrink-0 text-obd-subtle" />
       <input
         type="search"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder="Filter knowledge"
         aria-label={label}
-        className="min-w-0 flex-1 bg-transparent text-[10px] text-slate-300 outline-none placeholder:text-slate-500"
+        className="min-w-0 flex-1 bg-transparent text-[10px] text-obd-body outline-none placeholder:text-obd-subtle"
       />
     </label>
   );

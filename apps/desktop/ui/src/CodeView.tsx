@@ -145,11 +145,11 @@ export default function CodeView({
   );
 
   return (
-    <div className="flex h-full min-h-0 overflow-auto rounded-lg border border-white/[0.06] bg-black/30">
+    <div className="flex h-full min-h-0 overflow-auto rounded-lg border border-obd-line bg-obd-inset">
       <pre
         aria-hidden="true"
         data-testid="line-numbers"
-        className="sticky left-0 z-[1] shrink-0 select-none border-r border-white/[0.06] bg-[#161d26] px-2 py-2 text-right font-mono text-[10px] leading-5 text-slate-600"
+        className="sticky left-0 z-[1] shrink-0 select-none border-r border-obd-line bg-obd-surface px-2 py-2 text-right font-mono text-[10px] leading-5 text-obd-faint"
       >
         {gutter}
       </pre>

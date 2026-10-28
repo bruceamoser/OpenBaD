@@ -7,32 +7,68 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
 
-let mermaidLoader: Promise<typeof import("mermaid").default> | null = null;
+type ColorScheme = "dark" | "light";
 
-function loadMermaid(): Promise<typeof import("mermaid").default> {
-  mermaidLoader ??= import("mermaid").then((module) => {
-    const mermaid = module.default;
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "dark",
-      fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-      themeVariables: {
-        background: "#151c25",
-        primaryColor: "#13231f",
-        primaryTextColor: "#e6edf3",
-        primaryBorderColor: "#34d399",
-        lineColor: "#64748b",
-        secondaryColor: "#111827",
-        tertiaryColor: "#0f172a",
-      },
+const lightQuery = "(prefers-color-scheme: light)";
+
+function currentScheme(): ColorScheme {
+  return window.matchMedia(lightQuery).matches ? "light" : "dark";
+}
+
+/** Re-renders when the OS appearance changes. */
+function useColorScheme(): ColorScheme {
+  const [scheme, setScheme] = useState<ColorScheme>(currentScheme);
+  useEffect(() => {
+    const query = window.matchMedia(lightQuery);
+    const update = () => setScheme(query.matches ? "light" : "dark");
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return scheme;
+}
+
+/** Reads a design token so diagrams match the current theme. */
+function token(name: string, fallback: string): string {
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  return value.length > 0 ? value : fallback;
+}
+
+const mermaidLoaders = new Map<ColorScheme, Promise<typeof import("mermaid").default>>();
+
+/** Mermaid keeps one global config, so it is initialized per scheme and the
+    diagrams re-render when the scheme changes. */
+function loadMermaid(scheme: ColorScheme): Promise<typeof import("mermaid").default> {
+  let loader = mermaidLoaders.get(scheme);
+  if (loader === undefined) {
+    loader = import("mermaid").then((module) => {
+      const mermaid = module.default;
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: scheme === "dark" ? "dark" : "default",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        themeVariables: {
+          background: token("--obd-surface", "#1f2833"),
+          primaryColor: token("--obd-raised", "#263340"),
+          primaryTextColor: token("--obd-text", "#e6edf3"),
+          primaryBorderColor: token("--obd-accent", "#34d399"),
+          lineColor: token("--obd-muted", "#94a3b8"),
+          secondaryColor: token("--obd-raised-strong", "#2e3d4c"),
+          tertiaryColor: token("--obd-bg", "#171f29"),
+          textColor: token("--obd-body", "#cbd5e1"),
+          mainBkg: token("--obd-raised", "#263340"),
+          nodeBorder: token("--obd-accent", "#34d399"),
+        },
+      });
+      return mermaid;
     });
-    return mermaid;
-  });
-  return mermaidLoader;
+    mermaidLoaders.set(scheme, loader);
+  }
+  return loader;
 }
 
 function describeError(cause: unknown): string {
@@ -46,6 +82,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
   const [svg, setSvg] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [rendering, setRendering] = useState(false);
+  const scheme = useColorScheme();
 
   useEffect(() => {
     const source = chart.trim();
@@ -59,7 +96,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
     setRendering(true);
     const timer = window.setTimeout(async () => {
       try {
-        const mermaid = await loadMermaid();
+        const mermaid = await loadMermaid(scheme);
         const renderId = `openbad-mermaid-${idBase}-${sequence.current++}`;
         const result = await mermaid.render(renderId, source);
         if (!cancelled) {
@@ -81,7 +118,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [chart, idBase]);
+  }, [chart, idBase, scheme]);
 
   return (
     <div className="mermaid-diagram" data-rendering={rendering}>
