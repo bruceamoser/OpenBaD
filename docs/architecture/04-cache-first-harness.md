@@ -390,10 +390,10 @@ deliberate cache break, so it must be rare and well-timed.
 
 ```rust
 pub struct CompactionPolicy {
-    pub compact_at: f32,          // default 0.85 of usable context
+    pub compact_at: f32,          // default 0.80 of usable context
     pub hard_limit: f32,          // default 0.95
-    pub keep_recent_turns: usize, // default 8
-    pub keep_recent_tokens: usize,// default 15% of usable context
+    pub keep_recent_turns: usize, // default 1 (previous + current turn)
+    pub keep_recent_tokens: usize,// default 16% of usable context
     pub min_turns_between: u32,   // default 10
 }
 ```
@@ -414,9 +414,11 @@ Compaction triggers when:
 The range MUST:
 
 - start at a turn boundary,
-- end at a turn boundary,
+- end at a turn boundary; only a single turn larger than the summarizer
+  window may end at a tool-pair boundary,
 - preserve tool call/result pairs,
 - leave at least `keep_recent_turns` and `keep_recent_tokens`,
+- keep the previous and current user turns verbatim,
 - not split a reasoning/message pair,
 - prefer the oldest 40–70% of history.
 

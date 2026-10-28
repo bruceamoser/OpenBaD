@@ -207,6 +207,7 @@ CREATE TABLE session_messages (
     role        TEXT NOT NULL,
     content_json TEXT NOT NULL,
     source      TEXT,
+    surface     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     PRIMARY KEY (session_id, seq)
 );

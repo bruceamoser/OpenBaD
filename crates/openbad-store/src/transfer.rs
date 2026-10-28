@@ -133,6 +133,14 @@ pub struct MessageRow {
     pub content_json: String,
     pub source: Option<String>,
     pub created_at: i64,
+    /// `0` for messages shadowed by a compaction checkpoint. Bundles written
+    /// before compacted surfaces existed default to visible.
+    #[serde(default = "visible_surface")]
+    pub surface: i64,
+}
+
+fn visible_surface() -> i64 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,7 +339,7 @@ fn export_events(connection: &Connection, session: &str) -> Result<Vec<EventRow>
 
 fn export_messages(connection: &Connection, session: &str) -> Result<Vec<MessageRow>, StoreError> {
     let mut statement = connection.prepare(
-        "SELECT seq, turn, step, role, content_json, source, created_at
+        "SELECT seq, turn, step, role, content_json, source, created_at, surface
          FROM session_messages WHERE session_id = ?1 ORDER BY seq ASC",
     )?;
     let rows = statement.query_map([session], |row| {
@@ -343,6 +351,7 @@ fn export_messages(connection: &Connection, session: &str) -> Result<Vec<Message
             content_json: row.get(4)?,
             source: row.get(5)?,
             created_at: row.get(6)?,
+            surface: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -661,8 +670,8 @@ pub(crate) fn import_workspace_state(
         for message in &bundle.messages {
             counts.messages += transaction.execute(
                 "INSERT OR IGNORE INTO session_messages
-                    (session_id, seq, turn, step, role, content_json, source, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    (session_id, seq, turn, step, role, content_json, source, created_at, surface)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     final_id,
                     message.seq,
@@ -672,6 +681,7 @@ pub(crate) fn import_workspace_state(
                     message.content_json,
                     message.source,
                     message.created_at,
+                    message.surface,
                 ],
             )? as u64;
         }
