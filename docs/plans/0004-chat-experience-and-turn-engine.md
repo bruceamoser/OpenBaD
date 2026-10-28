@@ -447,3 +447,4 @@ Dependency: B may start in parallel with A once P9-01 lands. C depends on A and 
 | --- | --- |
 | 2026-10-27 | Proposed after a three-way review of OpenBaD, DeepSeek Harness, and VS Code chat. |
 | 2026-10-27 | Phase A (#832) landed: step lifecycle events, atomic step settlement, interrupted anchors, crash repair, replay equivalence, unified inbox, and per-session concurrency. Prompt-queue consumption is wired with the composer work in P9-25 because the UI must own the queued entry. |
+| 2026-10-27 | Phase B (#833) landed: four-stage tool pipeline with live status, a fail-closed approval gate with per-call decisions and session/workspace scopes, policy presets persisted per session, and a bounded parallel tool pool. |
