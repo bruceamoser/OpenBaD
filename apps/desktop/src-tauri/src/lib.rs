@@ -2008,6 +2008,9 @@ struct StoredToolResult {
 #[derive(Serialize)]
 pub struct SessionView {
     pub session_id: String,
+    /// The session this one was forked from, when it was.
+    pub forked_from_session: Option<String>,
+    pub forked_from_seq: Option<u64>,
     pub messages: Vec<UiMessage>,
     /// Sum of every completed turn duration, in milliseconds.
     pub total_duration_ms: u64,
@@ -3832,8 +3835,11 @@ fn view_for(store: &Store, session: SessionId) -> Result<SessionView, String> {
         .map_err(|error| error.to_string())?;
     let turns = store.load_turns(session).unwrap_or_default();
     let (messages, total_duration_ms) = build_ui_messages(&messages, &turns);
+    let origin = store.session_fork_origin(session).unwrap_or(None);
     Ok(SessionView {
         session_id: session.to_string(),
+        forked_from_session: origin.map(|(source, _)| source.to_string()),
+        forked_from_seq: origin.map(|(_, seq)| seq),
         messages,
         total_duration_ms,
     })
@@ -5867,10 +5873,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(
-            payload.doctor.schema_version,
-            "0015_session_message_surface"
-        );
+        assert_eq!(payload.doctor.schema_version, "0016_session_fork");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

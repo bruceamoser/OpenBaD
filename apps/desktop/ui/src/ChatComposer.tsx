@@ -12,6 +12,7 @@ import {
   Bot,
   CircleAlert,
   FileText,
+  GitBranch,
   Image as ImageIcon,
   ListPlus,
   Paperclip,
@@ -44,6 +45,9 @@ type ChatComposerProps = {
   accessNotice: string | null;
   error: string | null;
   queuedMessages: string[];
+  /** Shown while an edited message will branch the conversation on send. */
+  branchNotice?: string | null;
+  onCancelBranch?: () => void;
   onPermissionMode: (mode: AccessMode) => void;
   onMode: (mode: ChatMode) => void;
   onOpenSettings: () => void;
@@ -143,6 +147,8 @@ function ChatComposer({
   accessNotice,
   error,
   queuedMessages,
+  branchNotice,
+  onCancelBranch,
   onPermissionMode,
   onOpenSettings,
   onDismissAccessNotice,
@@ -389,6 +395,24 @@ function ChatComposer({
             <button type="button" onClick={onDismissError}>
               <X size={13} />
             </button>
+          </div>
+        )}
+        {branchNotice !== undefined && branchNotice !== null && (
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-2.5 py-2">
+            <GitBranch size={11} className="mt-0.5 shrink-0 text-amber-300" />
+            <p className="min-w-0 flex-1 text-[10px] leading-4 text-amber-100/80">
+              {branchNotice}
+            </p>
+            {onCancelBranch !== undefined && (
+              <button
+                type="button"
+                aria-label="Cancel branching"
+                onClick={onCancelBranch}
+                className="rounded p-0.5 text-amber-200/70 hover:text-amber-100"
+              >
+                <X size={10} />
+              </button>
+            )}
           </div>
         )}
         {queuedMessages.length > 0 && (

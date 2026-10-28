@@ -1019,6 +1019,33 @@ impl Store {
         })
     }
 
+    /// The session this one was forked from and the sequence it branched at.
+    pub fn session_fork_origin(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<(SessionId, u64)>, StoreError> {
+        let connection = self.reader()?;
+        let row = connection
+            .query_row(
+                "SELECT forked_from_session, forked_from_seq FROM sessions WHERE id = ?1",
+                [session_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .ok();
+        let Some((Some(source), Some(seq))) = row else {
+            return Ok(None);
+        };
+        let source = Uuid::parse_str(&source)
+            .map(SessionId::from)
+            .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+        Ok(u64::try_from(seq).ok().map(|seq| (source, seq)))
+    }
+
     /// Reads all project-scoped state for a transfer bundle.
     pub fn export_workspace_state(
         &self,
@@ -1070,7 +1097,7 @@ impl Store {
                     s.updated_at,
                     COALESCE((SELECT MAX(t.turn) FROM session_turns t
                               WHERE t.session_id = s.id), s.last_turn, 0),
-                    s.metadata_json
+                    s.metadata_json, s.forked_from_seq, s.forked_from_session
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.deleted_at IS NULL AND s.status != 'archived'
@@ -1088,6 +1115,8 @@ impl Store {
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
 
@@ -1103,6 +1132,8 @@ impl Store {
                 updated_at,
                 last_turn,
                 metadata_json,
+                forked_from_seq,
+                forked_from_session,
             ) = row?;
             sessions.push(SessionSummary {
                 id: SessionId::from(
@@ -1123,6 +1154,14 @@ impl Store {
                 updated_at,
                 last_turn: last_turn as u32,
                 access_mode: access_mode_from_metadata(&metadata_json),
+                forked_from_seq: forked_from_seq.and_then(|seq| u64::try_from(seq).ok()),
+                forked_from_session: forked_from_session
+                    .map(|value| {
+                        Uuid::parse_str(&value)
+                            .map(SessionId::from)
+                            .map_err(|error| StoreError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?,
             });
         }
         Ok(sessions)
@@ -1390,7 +1429,7 @@ impl Store {
                     s.updated_at,
                     COALESCE((SELECT MAX(t.turn) FROM session_turns t
                               WHERE t.session_id = s.id), s.last_turn, 0),
-                    s.metadata_json
+                    s.metadata_json, s.forked_from_seq, s.forked_from_session
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.deleted_at IS NULL AND s.status = 'archived'
@@ -1408,6 +1447,8 @@ impl Store {
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
         let mut sessions = Vec::new();
@@ -1422,6 +1463,8 @@ impl Store {
                 updated_at,
                 last_turn,
                 metadata_json,
+                forked_from_seq,
+                forked_from_session,
             ) = row?;
             sessions.push(SessionSummary {
                 id: SessionId::from(
@@ -1442,6 +1485,14 @@ impl Store {
                 updated_at,
                 last_turn: last_turn as u32,
                 access_mode: access_mode_from_metadata(&metadata_json),
+                forked_from_seq: forked_from_seq.and_then(|seq| u64::try_from(seq).ok()),
+                forked_from_session: forked_from_session
+                    .map(|value| {
+                        Uuid::parse_str(&value)
+                            .map(SessionId::from)
+                            .map_err(|error| StoreError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?,
             });
         }
         Ok(sessions)
@@ -1481,7 +1532,7 @@ impl Store {
                     s.updated_at,
                     COALESCE((SELECT MAX(t.turn) FROM session_turns t
                               WHERE t.session_id = s.id), s.last_turn, 0),
-                    s.metadata_json
+                    s.metadata_json, s.forked_from_seq, s.forked_from_session
              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.deleted_at IS NULL
@@ -1504,6 +1555,8 @@ impl Store {
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
 
@@ -1519,6 +1572,8 @@ impl Store {
                 updated_at,
                 last_turn,
                 metadata_json,
+                forked_from_seq,
+                forked_from_session,
             ) = row?;
             sessions.push(SessionSummary {
                 id: SessionId::from(
@@ -1539,6 +1594,14 @@ impl Store {
                 updated_at,
                 last_turn: last_turn as u32,
                 access_mode: access_mode_from_metadata(&metadata_json),
+                forked_from_seq: forked_from_seq.and_then(|seq| u64::try_from(seq).ok()),
+                forked_from_session: forked_from_session
+                    .map(|value| {
+                        Uuid::parse_str(&value)
+                            .map(SessionId::from)
+                            .map_err(|error| StoreError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?,
             });
         }
         Ok(sessions)
@@ -3602,14 +3665,16 @@ fn fork_session(
     let now = now_millis();
     let title = title.or_else(|| source_title.map(|title| format!("{title} (edited)")));
     transaction.execute(
-        "INSERT INTO sessions (id, workspace_id, title, created_at, updated_at, forked_from_seq)
-         VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+        "INSERT INTO sessions
+             (id, workspace_id, title, created_at, updated_at, forked_from_seq, forked_from_session)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
         params![
             target.to_string(),
             workspace_id,
             title,
             now,
-            i64::try_from(at_user_seq).unwrap_or(i64::MAX)
+            i64::try_from(at_user_seq).unwrap_or(i64::MAX),
+            source.to_string()
         ],
     )?;
 
@@ -3867,7 +3932,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0015_session_message_surface"
+            "0016_session_fork"
         );
     }
 
@@ -3940,6 +4005,8 @@ mod tests {
             .find(|session| session.id == fork)
             .expect("fork summary");
         assert_eq!(summary.title.as_deref(), Some("edited"));
+        assert_eq!(summary.forked_from_seq, Some(second_user_seq));
+        assert_eq!(summary.forked_from_session, Some(source));
     }
 
     #[test]
