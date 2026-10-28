@@ -315,6 +315,42 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.0
+
+Minor release on top of 0.2.2. The chat fixes from 0.2.3's scope ship here
+rather than separately, together with three new capabilities.
+
+**Chat.** The Workspace tab is a folder tree (folders first, indented,
+collapsible, search expands matches) instead of a flat file list. The settings
+dialog's close control is in the standard top-right corner. `ask_question` now
+blocks: the desktop host shows a question dialog and returns the answer in the
+tool result, for parent and delegated runs alike, instead of queueing into an
+inbox nobody opened. The exchange is still logged to `.openbad/questions.json`,
+which Project → Questions now presents as a log.
+
+**Skills.** Four engineering-process skills ship in the binary next to the four
+capability skills and are indexed in every prompt: `pre-push-checks`,
+`error-handling`, `test-reliability`, and `code-review`.
+
+**Goals.** `.openbad/goal.json` holds one durable objective per workspace with
+timestamps and progress notes; an open goal is re-summarised into every system
+prompt, and `create_goal`/`get_goal`/`update_goal` manage it. Creating a second
+objective while one is open is refused.
+
+**Team board.** `.openbad/team.json` is a shared board of units of work with
+stable ids, a state, an owner, and a result, so a parent can divide work between
+subagents and see what is outstanding: `team_task_create`, `team_task_list`,
+`team_task_update`, `team_task_get`.
+
+**Plan.** Plan 0005 proposes code mode (one model-written program calling tool
+bindings) and records the two decisions it needs first: the interpreter and the
+approval contract for a program that blocks mid-run. Nothing implemented.
+
+**Earlier than 0.3.0 but after 0.2.2.** The read-before-overwrite guard now
+remembers reads per session rather than per turn, `write_file` refreshes that
+record after a successful write, and the transcript no longer repeats every tool
+result below the message or renders cards after the text.
+
 ## v0.2.2
 
 Fix release on top of 0.2.1. The domain proxies (`exec_run`, `files_run`, …)
