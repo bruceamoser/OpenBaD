@@ -48,11 +48,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tauri system dependencies
-        uses: awalsh128/cache-apt-pkgs-action@v1
+      - name: Prepare the apt archive cache
+        run: sudo chown -R "$USER" /var/cache/apt/archives
+
+      - name: Restore cached apt archives
+        uses: actions/cache@v4
         with:
-          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgtk-3-dev libdbus-1-dev pkg-config patchelf xvfb
-          version: 1.0
+          path: /var/cache/apt/archives
+          key: apt-archives-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-archives-${{ runner.os }}-
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            pkg-config \
+            patchelf \
+            xvfb
 
       - name: Install the WebKit web driver
         run: |
@@ -92,11 +110,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tauri system dependencies
-        uses: awalsh128/cache-apt-pkgs-action@v1
+      - name: Prepare the apt archive cache
+        run: sudo chown -R "$USER" /var/cache/apt/archives
+
+      - name: Restore cached apt archives
+        uses: actions/cache@v4
         with:
-          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgtk-3-dev libdbus-1-dev pkg-config patchelf xvfb
-          version: 1.0
+          path: /var/cache/apt/archives
+          key: apt-archives-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-archives-${{ runner.os }}-
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            pkg-config \
+            patchelf \
+            xvfb
 
       - uses: pnpm/action-setup@v4
         with:
@@ -129,11 +165,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tauri system dependencies
-        uses: awalsh128/cache-apt-pkgs-action@v1
+      - name: Prepare the apt archive cache
+        run: sudo chown -R "$USER" /var/cache/apt/archives
+
+      - name: Restore cached apt archives
+        uses: actions/cache@v4
         with:
-          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgtk-3-dev libdbus-1-dev pkg-config patchelf xvfb
-          version: 1.0
+          path: /var/cache/apt/archives
+          key: apt-archives-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-archives-${{ runner.os }}-
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            pkg-config \
+            patchelf \
+            xvfb
 
       - name: Install the WebKit web driver
         run: |
