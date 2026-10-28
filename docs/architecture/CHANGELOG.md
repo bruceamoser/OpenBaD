@@ -315,6 +315,20 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.2
+
+Fix release on top of 0.3.1. A steering message now renders where it arrived:
+the live transcript used to keep one assistant entry for the whole turn, so a
+message sent mid-turn could only be appended after it, at the bottom of the
+answer, even though the persisted transcript already had it in the right place.
+The current segment is closed on receipt and a new one opens after the card.
+
+Releases also stopped compiling on the tag. GitHub scopes action caches to the
+ref that saved them, so a build on a `v*` tag always started from an empty
+target and recompiled the workspace three times before publishing. The build now
+runs in the `Bundles` workflow on the version bump (where caches exist) and the
+tag only publishes the artifacts: about two minutes instead of fifteen.
+
 ## v0.3.1
 
 Fix release on top of 0.3.0. A long command payload sometimes comes back from
