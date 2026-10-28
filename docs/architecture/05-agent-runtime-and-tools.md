@@ -522,10 +522,14 @@ The GitHub surface is:
 | `search` | repos, issues, prs, code, commits |
 | `api` | generic `gh api` with method, fields, JSON body, pagination, and jq |
 
-Four skills ship inside the binary and are indexed in every prompt:
-`github-workflow`, `github-releases-pages`, `plugin-development`, and
-`asciidoc-rendering`. A workspace skill with the same name overrides the
-built-in.
+Eight skills ship inside the binary and are indexed in every prompt. Four are
+capability skills: `github-workflow`, `github-releases-pages`,
+`plugin-development`, and `asciidoc-rendering`. Four are engineering-process
+skills that travel with any project: `pre-push-checks` (which checks prove a
+change, and how to report them), `error-handling` (detect, retry, surface),
+`test-reliability` (determinism under clocks, ports, and global state), and
+`code-review` (what to look for in a diff and how to report a finding). A
+workspace skill with the same name overrides the built-in.
 
 `.openbad/context.yaml` declares `pinned` and `excluded` globs. Excluded paths
 are refused by direct reads and filtered from list, grep, glob, symbol, and
