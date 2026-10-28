@@ -23,7 +23,7 @@ import {
 
 import { pickFiles, readClipboardImage } from "./backend";
 import { droppedToUploads, fileName, filesToUploads, useFileDropZone } from "./dropzone";
-import type { AccessMode, ClipboardImage, UploadSource } from "./types";
+import type { AccessMode, ChatMode, ClipboardImage, UploadSource } from "./types";
 import { useDraftHistory } from "./useDraftHistory";
 
 export type ChatComposerHandle = {
@@ -38,12 +38,14 @@ type ChatComposerProps = {
   busy: boolean;
   stopRequested: boolean;
   permissionMode: AccessMode;
+  mode: ChatMode;
   model: string;
   thinking: boolean;
   accessNotice: string | null;
   error: string | null;
   queuedMessages: string[];
   onPermissionMode: (mode: AccessMode) => void;
+  onMode: (mode: ChatMode) => void;
   onOpenSettings: () => void;
   onDismissAccessNotice: () => void;
   onDismissError: () => void;
@@ -134,6 +136,8 @@ function ChatComposer({
   busy,
   stopRequested,
   permissionMode,
+  mode,
+  onMode,
   model,
   thinking,
   accessNotice,
@@ -517,25 +521,46 @@ function ChatComposer({
               <Paperclip size={12} />
             </button>
             <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04]">
-              <Shield size={12} />
               <select
-                value={permissionMode}
-                onChange={(event) => onPermissionMode(event.target.value as AccessMode)}
-                aria-label="Access mode"
+                value={mode}
+                onChange={(event) => onMode(event.target.value as ChatMode)}
+                aria-label="Chat mode"
                 className="bg-transparent text-[11px] text-slate-400 outline-none"
               >
-                <option value="read">Read only</option>
-                <option value="edit">Can edit</option>
-                <option value="full">Full access</option>
+                <option value="ask">Ask</option>
+                <option value="plan">Plan</option>
+                <option value="agent">Agent</option>
               </select>
             </label>
+            {mode === "agent" && (
+              <label className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04]">
+                <Shield size={12} />
+                <select
+                  value={permissionMode}
+                  onChange={(event) => onPermissionMode(event.target.value as AccessMode)}
+                  aria-label="Access mode"
+                  className="bg-transparent text-[11px] text-slate-400 outline-none"
+                >
+                  <option value="read">Read only</option>
+                  <option value="edit">Can edit</option>
+                  <option value="ask-writes">Ask before writes</option>
+                  <option value="ask-commands">Ask before commands</option>
+                  <option value="full">Full access</option>
+                </select>
+              </label>
+            )}
             <button
               type="button"
               onClick={onOpenSettings}
               className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-slate-500 hover:bg-white/[0.04] hover:text-slate-300"
             >
               <Bot size={12} />
-              <span className="max-w-[150px] truncate">{model}</span>
+              <span
+                className="max-w-[150px] truncate"
+                title={`${model} · 1M-token context${thinking ? " · thinking on" : ""}`}
+              >
+                {model}
+              </span>
               {thinking && <span className="text-emerald-400/70">thinking</span>}
             </button>
             <span className="ml-auto text-[10px] text-slate-500">

@@ -197,6 +197,8 @@ export type WorkspaceSummary = {
   session_count: number;
 };
 
+export type ChatMode = "ask" | "plan" | "agent";
+
 export type AccessMode =
   | "read"
   | "edit"

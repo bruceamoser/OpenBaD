@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   AccessMode,
+  ChatMode,
   AgentEvent,
   ChatReply,
   ClipboardImage,
@@ -1735,6 +1736,7 @@ export type ChatInput = {
   allowWrites: boolean;
   allowCommands: boolean;
   policy: AccessMode;
+  mode: ChatMode;
   model: string;
   thinking: boolean;
   reasoningEffort: string;
@@ -1767,6 +1769,7 @@ export async function chat(
         allowWrites: input.allowWrites,
         allowCommands: input.allowCommands,
         policy: input.policy,
+        mode: input.mode,
         model: input.model,
         thinking: input.thinking,
         reasoningEffort: input.reasoningEffort,
