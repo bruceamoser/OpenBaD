@@ -1469,6 +1469,9 @@ impl ToolRegistry {
         registry.register(RunRecipeTool);
         registry.register(TodoWriteTool);
         registry.register(TodoReadTool);
+        registry.register(CreateGoalTool);
+        registry.register(GetGoalTool);
+        registry.register(UpdateGoalTool);
         registry.register(WriteHandoffTool);
         registry.register(WriteSkillTool);
         registry.register(ListSkillsTool);
@@ -1811,9 +1814,8 @@ fn tool_domain(name: &str) -> &'static str {
             "knowledge"
         }
         "plan_read" | "plan_update_step" | "plan_verify" | "plan_write" | "todo_read"
-        | "todo_write" | "run_task" | "list_recipes" | "list_gates" | "run_gate" | "run_recipe" => {
-            "plan"
-        }
+        | "todo_write" | "create_goal" | "get_goal" | "update_goal" | "run_task"
+        | "list_recipes" | "list_gates" | "run_gate" | "run_recipe" => "plan",
         "adr_list" | "adr_read" | "adr_write" | "assert_project" | "canon" | "check_invariants"
         | "ledger" | "yaml_query" => "governance",
         "context_map" | "context_report" | "context_rules" => "context",
@@ -13006,6 +13008,140 @@ impl Tool for TodoReadTool {
     }
 }
 
+struct CreateGoalTool;
+
+#[async_trait]
+impl Tool for CreateGoalTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "create_goal",
+            "Record the workspace's durable goal in .openbad/goal.json: one objective that outlives this turn and is re-read into every later prompt. Use it when the human states what the work is ultimately for, not for per-step todos. One goal at a time; close the current one with update_goal before creating another.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "One line stating the objective."},
+                "detail": {"type": "string", "description": "Optional: why it matters or how done is judged."}
+            },
+            "required": ["title"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::Failed(
+                "writes are disabled in this context".to_owned(),
+            ));
+        }
+        let title = required_string(&arguments, "title")?;
+        let detail = optional_string(&arguments, "detail");
+        let goal =
+            openbad_workspace::create_goal(context.workspace.root(), &title, detail.as_deref())
+                .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(openbad_workspace::goal_summary(&goal, 0))
+            .with_metadata(json!({"id": goal.id, "status": goal.status.as_str()})))
+    }
+}
+
+struct GetGoalTool;
+
+#[async_trait]
+impl Tool for GetGoalTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "get_goal",
+            "Read the workspace goal with its recent progress notes. The active goal is already in your prompt; use this for the full note history or to check whether a goal exists at all.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "notes": {"type": "integer", "minimum": 0, "maximum": 100, "description": "How many recent progress notes to include. Defaults to 10."}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let notes = optional_usize(&arguments, "notes").unwrap_or(10).min(100);
+        match openbad_workspace::load_goal(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+        {
+            None => Ok(ToolResult::ok("no goal recorded in this workspace")),
+            Some(goal) => Ok(
+                ToolResult::ok(openbad_workspace::goal_summary(&goal, notes)).with_metadata(
+                    json!({
+                        "id": goal.id,
+                        "status": goal.status.as_str(),
+                        "progress": goal.progress.len()
+                    }),
+                ),
+            ),
+        }
+    }
+}
+
+struct UpdateGoalTool;
+
+#[async_trait]
+impl Tool for UpdateGoalTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "update_goal",
+            "Change the workspace goal's status or append a progress note. Statuses: active, paused, done, abandoned. Mark it done only when the objective is actually met; record what was learned as a note so a later session does not repeat the work.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["active", "paused", "done", "abandoned"]},
+                "note": {"type": "string", "description": "One line of progress or a decision, appended with a timestamp."},
+                "title": {"type": "string", "description": "Replace the objective line when the goal was mis-stated."}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::Failed(
+                "writes are disabled in this context".to_owned(),
+            ));
+        }
+        let status = optional_string(&arguments, "status");
+        let note = optional_string(&arguments, "note");
+        let title = optional_string(&arguments, "title");
+        if status.is_none() && note.is_none() && title.is_none() {
+            return Err(ToolError::Failed(
+                "update_goal needs at least one of status, note, or title".to_owned(),
+            ));
+        }
+        let goal = openbad_workspace::update_goal(
+            context.workspace.root(),
+            status.as_deref(),
+            note.as_deref(),
+            title.as_deref(),
+        )
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(openbad_workspace::goal_summary(&goal, 3))
+            .with_metadata(json!({"id": goal.id, "status": goal.status.as_str()})))
+    }
+}
+
 struct WriteHandoffTool;
 
 #[async_trait]
@@ -16752,6 +16888,54 @@ invariants:
             .expect("skip");
         assert!(skipped.content.contains("skipped"), "{}", skipped.content);
         assert_eq!(skipped.metadata["skipped"], true);
+    }
+
+    #[tokio::test]
+    async fn goal_tools_create_read_and_close_one_objective() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        let created = CreateGoalTool
+            .execute(
+                json!({"title": "Ship the search rewrite", "detail": "Index first"}),
+                &context,
+            )
+            .await
+            .expect("create");
+        assert!(created.content.contains("active"), "{}", created.content);
+        let first = created.metadata["id"].as_str().expect("id").to_owned();
+
+        // A second objective is refused while the first is open.
+        assert!(
+            CreateGoalTool
+                .execute(json!({"title": "Something else"}), &context)
+                .await
+                .is_err()
+        );
+
+        UpdateGoalTool
+            .execute(json!({"note": "Indexed 400 files"}), &context)
+            .await
+            .expect("note");
+        let read = GetGoalTool
+            .execute(json!({}), &context)
+            .await
+            .expect("read");
+        assert!(
+            read.content.contains("Indexed 400 files"),
+            "{}",
+            read.content
+        );
+        assert_eq!(read.metadata["progress"], 1);
+
+        let closed = UpdateGoalTool
+            .execute(json!({"status": "done", "note": "Merged"}), &context)
+            .await
+            .expect("close");
+        assert!(closed.content.contains("done"), "{}", closed.content);
+        assert_eq!(closed.metadata["id"], first.as_str());
+        assert!(UpdateGoalTool.execute(json!({}), &context).await.is_err());
     }
 
     #[tokio::test]

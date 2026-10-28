@@ -447,6 +447,7 @@ Implemented:
 | `list_gates` / `run_gate` | read/command | Run an ordered verification gate with evidence |
 | `todo_write` | write | Replace the durable project todo list in `.openbad/todos.json` |
 | `todo_read` | read | Read the project todo list |
+| `create_goal` / `get_goal` / `update_goal` | write/read/write | The workspace's durable goal in `.openbad/goal.json`: one objective at a time, its progress notes, and its status (`active`, `paused`, `done`, `abandoned`). An open goal is re-read into every system prompt |
 | `write_handoff` | write | Write a handoff summary to `.openbad/handoff.md` |
 
 The desktop implementation backs project tools with `StoreProjectAreas`, which
