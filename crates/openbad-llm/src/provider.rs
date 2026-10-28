@@ -83,6 +83,8 @@ pub enum ProviderError {
     InvalidResponse(String),
     #[error("provider does not support capability: {0}")]
     Unsupported(String),
+    #[error("provider request was cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]

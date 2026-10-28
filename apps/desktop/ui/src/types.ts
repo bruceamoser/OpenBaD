@@ -122,6 +122,13 @@ export type AgentEvent =
   | { type: "usage"; usage: Usage }
   | { type: "compaction"; before_bytes: number; after_bytes: number }
   | {
+      type: "attempt_failed";
+      step: number;
+      attempt: number;
+      message: string;
+      retry_in_ms: number | null;
+    }
+  | {
       type: "tool_status";
       step: number;
       call_id?: string;

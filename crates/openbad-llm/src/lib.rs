@@ -19,5 +19,5 @@ pub use provider::{
     CacheMode, FrozenRequest, ModelProvider, ProviderCapabilities, ProviderError, Usage,
 };
 pub use replay::{DerivedMessage, derive_messages};
-pub use retry::{RetryPolicy, is_retryable};
+pub use retry::{RequestAttempts, RetryPolicy, is_retryable};
 pub use transport::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};

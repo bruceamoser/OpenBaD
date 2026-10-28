@@ -1733,6 +1733,8 @@ export type ChatInput = {
   sessionId: string | null;
   workspacePath: string;
   message: string;
+  /** Re-run the failed turn without appending another user message. */
+  resume?: boolean;
   allowWrites: boolean;
   allowCommands: boolean;
   policy: AccessMode;
@@ -1766,6 +1768,7 @@ export async function chat(
         sessionId: input.sessionId,
         workspacePath: input.workspacePath,
         message: input.message,
+        resume: input.resume ?? false,
         allowWrites: input.allowWrites,
         allowCommands: input.allowCommands,
         policy: input.policy,
