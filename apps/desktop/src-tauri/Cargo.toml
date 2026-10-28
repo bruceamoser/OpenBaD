@@ -43,6 +43,7 @@ openbad-governance = { path = "../../../crates/openbad-governance" }
 similar = "2"
 base64 = "0.22"
 async-trait = "0.1"
+tokio = { version = "1", features = ["time"] }
 calamine = "0.35.0"
 zip = { version = "7.3.0", default-features = false, features = ["deflate"] }
 pdf-extract = "0.12.1"

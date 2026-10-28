@@ -1734,11 +1734,22 @@ export type ChatInput = {
   message: string;
   allowWrites: boolean;
   allowCommands: boolean;
+  policy: AccessMode;
   model: string;
   thinking: boolean;
   reasoningEffort: string;
   attachments: UploadSource[];
 };
+
+export async function respondToApproval(
+  requestId: string,
+  decision: "allow_once" | "allow_session" | "allow_workspace" | "deny",
+): Promise<void> {
+  if (!isTauri) {
+    return;
+  }
+  await invoke("respond_to_approval", { requestId, decision });
+}
 
 export async function chat(
   input: ChatInput,
@@ -1755,6 +1766,7 @@ export async function chat(
         message: input.message,
         allowWrites: input.allowWrites,
         allowCommands: input.allowCommands,
+        policy: input.policy,
         model: input.model,
         thinking: input.thinking,
         reasoningEffort: input.reasoningEffort,

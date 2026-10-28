@@ -75,6 +75,7 @@ import {
   restoreCheckpoint as restoreStoredCheckpoint,
   saveApiKey as persistApiKey,
   quitApp,
+  respondToApproval,
   pickDirectory,
   pickImportBundle,
   pickSaveFile,
@@ -109,6 +110,7 @@ import type {
   MemoryRecord,
   OutsideAccessGrant,
   OutsideAccessRequest,
+  PendingApproval,
   PreviewTarget,
   ProjectAreaCounts,
   ProjectExportReport,
@@ -192,6 +194,7 @@ type BackgroundRun = {
   follow: boolean;
   totalDurationMs: number;
   pendingToolApproval: ToolApprovalRequest | null;
+  pendingApproval: PendingApproval | null;
   pendingAccessRequest: OutsideAccessRequest | null;
   pendingPreview: PreviewTarget | null;
   error: string | null;
@@ -255,6 +258,23 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
       };
     case "usage":
       return { ...entry, usage: event.usage };
+    case "tool_status":
+      return {
+        ...entry,
+        status:
+          event.status === "running"
+            ? `Running ${event.name}…`
+            : event.status === "settled"
+              ? `${event.name} finished`
+              : `Queued ${event.name}`,
+      };
+    case "approval_request":
+      return { ...entry, status: `Waiting for approval: ${event.tool}` };
+    case "approval_decision":
+      return {
+        ...entry,
+        status: event.allowed ? "Approved" : "Approval denied",
+      };
     case "compaction":
       return {
         ...entry,
@@ -315,6 +335,7 @@ export default function App() {
   const [areaCounts, setAreaCounts] = useState<ProjectAreaCounts | null>(null);
   const [accessRequest, setAccessRequest] = useState<OutsideAccessRequest | null>(null);
   const [toolApproval, setToolApproval] = useState<ToolApprovalRequest | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
@@ -379,7 +400,8 @@ export default function App() {
     [entries],
   );
   const allowWrites = permissionMode !== "read";
-  const allowCommands = permissionMode === "full";
+  const allowCommands =
+    permissionMode === "full" || permissionMode === "ask-commands";
 
   const loadFoundation = useCallback(async () => {
     try {
@@ -768,6 +790,7 @@ export default function App() {
       setPermissionMode(run?.permissionMode ?? "read");
       setAccessRequest(run?.pendingAccessRequest ?? null);
       setToolApproval(run?.pendingToolApproval ?? null);
+      setPendingApproval(run?.pendingApproval ?? null);
       setPreview(run?.pendingPreview ?? null);
       setBusy(run?.busy ?? false);
       setStopRequested(run?.stopRequested ?? false);
@@ -1250,6 +1273,7 @@ export default function App() {
       follow: followRef.current,
       totalDurationMs,
       pendingToolApproval: null,
+      pendingApproval: null,
       pendingAccessRequest: null,
       pendingPreview: null,
       error: null,
@@ -1267,6 +1291,7 @@ export default function App() {
           message: text,
           allowWrites,
           allowCommands,
+          policy: permissionMode,
           model,
           thinking,
           reasoningEffort,
@@ -1303,6 +1328,24 @@ export default function App() {
               if (visibleRunRef.current === runKey) {
                 setToolApproval(nextToolApproval);
               }
+            }
+          }
+          if (event.type === "approval_request") {
+            const request: PendingApproval = {
+              requestId: event.request_id,
+              tool: event.tool,
+              risk: event.risk,
+              detail: event.detail,
+            };
+            current.pendingApproval = request;
+            if (visibleRunRef.current === runKey) {
+              setPendingApproval(request);
+            }
+          }
+          if (event.type === "approval_decision") {
+            current.pendingApproval = null;
+            if (visibleRunRef.current === runKey) {
+              setPendingApproval(null);
             }
           }
           const entryPreview = eventPreview;
@@ -2428,6 +2471,17 @@ export default function App() {
         />
       )}
 
+      <ApprovalRequestDialog
+        approval={pendingApproval}
+        onDecide={(decision) => {
+          const request = pendingApproval;
+          setPendingApproval(null);
+          if (request !== null) {
+            void respondToApproval(request.requestId, decision);
+          }
+        }}
+      />
+
       {shortcutsOpen && (
         <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
@@ -3261,7 +3315,9 @@ function SettingsDialog({
                 [
                   ["read", "Read only", "Inspect files, search, and read Git state. No mutations."],
                   ["edit", "Can edit", "Write and patch files. Commands remain blocked."],
-                  ["full", "Full access", "Edit files and run commands. Use for tests and builds."],
+                  ["ask-writes", "Ask before writes", "Ask before each file mutation. Commands remain blocked."],
+                  ["ask-commands", "Ask before commands", "Write files freely; ask before commands and network access."],
+                  ["full", "Full access", "Edit files and run commands without asking. Use for trusted work."],
                 ] as [PermissionMode, string, string][]
               ).map(([id, label, description]) => (
                 <button
@@ -3766,6 +3822,69 @@ function toolApprovalFromMetadata(metadata: unknown): ToolApprovalRequest | null
     return null;
   }
   return { tool: record.tool, risk: record.risk, reason: record.reason };
+}
+
+function ApprovalRequestDialog({
+  approval,
+  onDecide,
+}: {
+  approval: PendingApproval | null;
+  onDecide: (
+    decision: "allow_once" | "allow_session" | "allow_workspace" | "deny",
+  ) => void;
+}) {
+  if (approval === null) {
+    return null;
+  }
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Approval required"
+    >
+      <div className="w-full max-w-lg rounded-lg border border-amber-500/40 bg-slate-900 p-5 shadow-xl">
+        <h2 className="text-sm font-semibold text-amber-200">Approval required</h2>
+        <p className="mt-1 text-xs text-slate-400">
+          <span className="font-mono text-slate-200">{approval.tool}</span>
+          <span> · {approval.risk} risk</span>
+        </p>
+        <pre className="mt-3 max-h-40 overflow-auto rounded bg-slate-950 p-2 text-[11px] text-slate-300">
+          {approval.detail}
+        </pre>
+        <div className="mt-4 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+            onClick={() => onDecide("deny")}
+          >
+            Skip
+          </button>
+          <button
+            type="button"
+            className="rounded border border-slate-600 px-3 py-1.5 text-xs text-slate-100 hover:bg-slate-800"
+            onClick={() => onDecide("allow_once")}
+          >
+            Allow once
+          </button>
+          <button
+            type="button"
+            className="rounded border border-slate-600 px-3 py-1.5 text-xs text-slate-100 hover:bg-slate-800"
+            onClick={() => onDecide("allow_session")}
+          >
+            Allow for session
+          </button>
+          <button
+            type="button"
+            className="rounded border border-emerald-600/60 px-3 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/40"
+            onClick={() => onDecide("allow_workspace")}
+          >
+            Allow for workspace
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ToolApprovalDialog({

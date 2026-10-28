@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use openbad_agent::{
-    AgentConfig, AgentError, AgentObserver, AttemptFailure, CompactionRecord, Inbox, StepOutcome,
-    StepSettlement, default_agent,
+    AgentConfig, AgentError, AgentObserver, ApprovalGate, AttemptFailure, CompactionRecord, Inbox,
+    StepOutcome, StepSettlement, ToolStatus, default_agent,
 };
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
@@ -22,6 +22,7 @@ use openbad_governance::secrets::KeychainSecretStore;
 #[cfg(not(feature = "keyring"))]
 use openbad_governance::secrets::MemorySecretStore;
 use openbad_governance::secrets::{Secret, SecretStore};
+use openbad_governance::{ApprovalDecision, ApprovalRequest, ToolPolicy};
 use openbad_harness::{ReasoningEffort, RequestEnvelope};
 use openbad_index::{IndexReport, WorkspaceIndexer};
 use openbad_llm::chat::{ChatMessage, ChatRole, ToolCall};
@@ -85,9 +86,19 @@ pub struct AppState {
     /// One cancellation token and inbox per UI-generated run id. The
     /// registry also enforces one running turn per session.
     runs: Arc<Mutex<RunRegistry>>,
+    /// Standing approvals granted for a session or workspace.
+    approvals: Arc<Mutex<ApprovalCache>>,
+    /// In-flight approval prompts, keyed by request id.
+    pending_approvals: Arc<Mutex<HashMap<Uuid, std::sync::mpsc::Sender<ApprovalDecision>>>>,
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<openbad_terminal::TerminalManager>,
     mcp: McpManagers,
+}
+
+#[derive(Default)]
+struct ApprovalCache {
+    sessions: HashMap<(SessionId, String), ApprovalDecision>,
+    workspaces: HashMap<(String, String), ApprovalDecision>,
 }
 
 #[derive(Default)]
@@ -1314,8 +1325,7 @@ async fn run_subagent(
         client,
         workspace,
         AgentConfig {
-            allow_writes: spec.allow_writes,
-            allow_commands: spec.allow_commands,
+            policy: ToolPolicy::from_flags(spec.allow_writes, spec.allow_commands),
             max_steps: 0,
             stream: false,
             ..AgentConfig::default()
@@ -1507,6 +1517,23 @@ pub enum AgentEvent {
         before_bytes: usize,
         after_bytes: usize,
     },
+    ToolStatus {
+        step: u32,
+        name: String,
+        status: String,
+        duration_ms: Option<u64>,
+    },
+    ApprovalRequest {
+        request_id: String,
+        tool: String,
+        risk: String,
+        detail: String,
+    },
+    ApprovalDecision {
+        request_id: String,
+        allowed: bool,
+        decision: String,
+    },
 }
 
 struct ChannelObserver {
@@ -1624,6 +1651,59 @@ impl AgentObserver for ChannelObserver {
         let _ = store.append_events(journal.session, drafts);
     }
 
+    fn on_tool_status(&self, step: u32, name: &str, status: ToolStatus, duration_ms: Option<u64>) {
+        let _ = self.channel.send(AgentEvent::ToolStatus {
+            step,
+            name: name.to_owned(),
+            status: format!("{status:?}").to_lowercase(),
+            duration_ms,
+        });
+    }
+
+    fn on_approval_request(&self, step: u32, request: &ApprovalRequest) {
+        let risk = format!("{:?}", request.risk).to_lowercase();
+        let _ = self.channel.send(AgentEvent::ApprovalRequest {
+            request_id: request.id.to_string(),
+            tool: request.title.clone(),
+            risk: risk.clone(),
+            detail: request.detail.clone(),
+        });
+        self.record(
+            SessionEventKind::ApprovalRequest,
+            Some(step),
+            json!({
+                "request_id": request.id.to_string(),
+                "tool": request.title,
+                "risk": risk,
+                "detail": request.detail,
+            }),
+        );
+    }
+
+    fn on_approval_decision(
+        &self,
+        step: u32,
+        request: &ApprovalRequest,
+        decision: ApprovalDecision,
+    ) {
+        let name = format!("{decision:?}").to_lowercase();
+        let _ = self.channel.send(AgentEvent::ApprovalDecision {
+            request_id: request.id.to_string(),
+            allowed: decision.is_allowed(),
+            decision: name.clone(),
+        });
+        self.record(
+            SessionEventKind::ApprovalDecision,
+            Some(step),
+            json!({
+                "request_id": request.id.to_string(),
+                "tool": request.title,
+                "allowed": decision.is_allowed(),
+                "decision": name,
+            }),
+        );
+    }
+
     fn on_compaction_settled(&self, record: &CompactionRecord) {
         let Some(journal) = &self.journal else {
             return;
@@ -1722,6 +1802,96 @@ impl AgentObserver for ChannelObserver {
 
     fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+/// Approval gate for the desktop app. It waits for the UI, but never longer
+/// than the run: cancellation wins over a pending prompt.
+struct DesktopApprovals {
+    pending: Arc<Mutex<HashMap<Uuid, std::sync::mpsc::Sender<ApprovalDecision>>>>,
+    cancel: Arc<AtomicBool>,
+    cache: Arc<Mutex<ApprovalCache>>,
+    session: SessionId,
+    workspace: String,
+}
+
+impl DesktopApprovals {
+    fn cached(&self, tool: &str) -> Option<ApprovalDecision> {
+        let cache = self.cache.lock().ok()?;
+        cache
+            .sessions
+            .get(&(self.session, tool.to_owned()))
+            .or_else(|| {
+                cache
+                    .workspaces
+                    .get(&(self.workspace.clone(), tool.to_owned()))
+            })
+            .copied()
+    }
+
+    fn register(&self, id: Uuid, sender: std::sync::mpsc::Sender<ApprovalDecision>) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        pending.insert(id, sender);
+        true
+    }
+
+    fn forget(&self, id: Uuid) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&id);
+        }
+    }
+
+    fn remember(&self, tool: &str, decision: ApprovalDecision) {
+        let Ok(mut cache) = self.cache.lock() else {
+            return;
+        };
+        match decision {
+            ApprovalDecision::AllowSession => {
+                cache
+                    .sessions
+                    .insert((self.session, tool.to_owned()), decision);
+            }
+            ApprovalDecision::AllowWorkspace => {
+                cache
+                    .workspaces
+                    .insert((self.workspace.clone(), tool.to_owned()), decision);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalGate for DesktopApprovals {
+    async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
+        if let Some(decision) = self.cached(&request.title) {
+            return decision;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        if !self.register(request.id, sender) {
+            return ApprovalDecision::Expired;
+        }
+
+        loop {
+            if self.cancel.load(Ordering::SeqCst) {
+                self.forget(request.id);
+                return ApprovalDecision::Cancelled;
+            }
+            match receiver.try_recv() {
+                Ok(decision) => {
+                    self.remember(&request.title, decision);
+                    return decision;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return ApprovalDecision::Expired;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
     }
 }
 
@@ -4389,6 +4559,9 @@ pub struct ChatInput {
     pub message: String,
     pub allow_writes: bool,
     pub allow_commands: bool,
+    /// Explicit policy preset. Falls back to the boolean flags when absent.
+    #[serde(default)]
+    pub policy: Option<String>,
     pub max_steps: Option<u32>,
     pub model: Option<String>,
     pub thinking: Option<bool>,
@@ -4411,6 +4584,32 @@ fn steer_chat(state: State<'_, AppState>, run_id: String, message: String) -> Re
 }
 
 #[tauri::command]
+fn respond_to_approval(
+    state: State<'_, AppState>,
+    request_id: String,
+    decision: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&request_id)
+        .map_err(|error| format!("invalid approval request id: {error}"))?;
+    let decision = match decision.as_str() {
+        "allow_once" => ApprovalDecision::AllowOnce,
+        "allow_session" => ApprovalDecision::AllowSession,
+        "allow_workspace" => ApprovalDecision::AllowWorkspace,
+        "deny" => ApprovalDecision::Deny,
+        other => return Err(format!("unknown approval decision: {other}")),
+    };
+    let sender = state
+        .pending_approvals
+        .lock()
+        .map_err(|error| format!("approval lock poisoned: {error}"))?
+        .remove(&id)
+        .ok_or_else(|| "no approval request with that id".to_owned())?;
+    sender
+        .send(decision)
+        .map_err(|_| "the approval request expired".to_owned())
+}
+
+#[tauri::command]
 async fn chat(
     state: State<'_, AppState>,
     request: ChatInput,
@@ -4423,6 +4622,7 @@ async fn chat(
         message,
         allow_writes,
         allow_commands,
+        policy,
         max_steps,
         model,
         thinking,
@@ -4434,6 +4634,10 @@ async fn chat(
         return Err("message must not be empty".to_owned());
     }
     let started = std::time::Instant::now();
+    let policy = policy
+        .as_deref()
+        .and_then(ToolPolicy::from_access_mode)
+        .unwrap_or_else(|| ToolPolicy::from_flags(allow_writes, allow_commands));
     let workspace_path = PathBuf::from(workspace_path);
     if !workspace_path.is_dir() {
         return Err(format!(
@@ -4496,13 +4700,7 @@ async fn chat(
             }
         };
 
-        let access_mode = if allow_commands {
-            "full"
-        } else if allow_writes {
-            "edit"
-        } else {
-            "read"
-        };
+        let access_mode = policy.access_mode();
         repair_interrupted_turn(&store, session)?;
         store
             .set_session_access_mode(session, access_mode)
@@ -4584,8 +4782,7 @@ async fn chat(
         client,
         Arc::new(WorkspaceService::new(workspace_path.clone())),
         AgentConfig {
-            allow_writes,
-            allow_commands,
+            policy,
             max_steps: max_steps.unwrap_or(0).min(100_000),
             ..AgentConfig::default()
         },
@@ -4650,6 +4847,13 @@ async fn chat(
     }
     agent = agent
         .with_inbox(run_guard.inbox())
+        .with_approvals(Arc::new(DesktopApprovals {
+            pending: Arc::clone(&state.pending_approvals),
+            cancel: Arc::clone(&cancel),
+            cache: Arc::clone(&state.approvals),
+            session,
+            workspace: workspace_path.to_string_lossy().into_owned(),
+        }))
         .with_redactions(redactions)
         .with_checkpoints(Arc::new(SessionCheckpoints {
             store: Arc::clone(&state.store),
@@ -5125,6 +5329,8 @@ pub fn run() {
             store: Arc::new(Mutex::new(store)),
             secrets: secret_store(),
             runs: Arc::new(Mutex::new(RunRegistry::default())),
+            approvals: Arc::new(Mutex::new(ApprovalCache::default())),
+            pending_approvals: Arc::new(Mutex::new(HashMap::new())),
             subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
             mcp: McpManagers::default(),
@@ -5155,6 +5361,7 @@ pub fn run() {
             clear_api_key,
             clipboard::read_clipboard_image,
             cancel_chat,
+            respond_to_approval,
             steer_chat,
             api_key_status,
             mcp_servers,
@@ -5585,6 +5792,34 @@ mod tests {
             .expect("session is free after the run guard drops");
         drop(replacement);
         assert!(steer_registered_run(&registry, "run-a", "late").is_err());
+    }
+
+    #[test]
+    fn approval_cache_scopes_decisions() {
+        let approvals = DesktopApprovals {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            cache: Arc::new(Mutex::new(ApprovalCache::default())),
+            session: SessionId::from(Uuid::nil()),
+            workspace: "/tmp/approval-workspace".to_owned(),
+        };
+
+        assert!(approvals.cached("shell").is_none());
+        approvals.remember("shell", ApprovalDecision::AllowOnce);
+        assert!(
+            approvals.cached("shell").is_none(),
+            "allow once must not become a standing approval"
+        );
+        approvals.remember("shell", ApprovalDecision::AllowSession);
+        assert_eq!(
+            approvals.cached("shell"),
+            Some(ApprovalDecision::AllowSession)
+        );
+        approvals.remember("write_file", ApprovalDecision::AllowWorkspace);
+        assert_eq!(
+            approvals.cached("write_file"),
+            Some(ApprovalDecision::AllowWorkspace)
+        );
     }
 
     #[test]

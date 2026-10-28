@@ -100,7 +100,34 @@ export type AgentEvent =
       metadata: unknown;
     }
   | { type: "usage"; usage: Usage }
-  | { type: "compaction"; before_bytes: number; after_bytes: number };
+  | { type: "compaction"; before_bytes: number; after_bytes: number }
+  | {
+      type: "tool_status";
+      step: number;
+      name: string;
+      status: string;
+      duration_ms: number | null;
+    }
+  | {
+      type: "approval_request";
+      request_id: string;
+      tool: string;
+      risk: string;
+      detail: string;
+    }
+  | {
+      type: "approval_decision";
+      request_id: string;
+      allowed: boolean;
+      decision: string;
+    };
+
+export type PendingApproval = {
+  requestId: string;
+  tool: string;
+  risk: string;
+  detail: string;
+};
 
 export type WorkspaceIndexSummary = {
   files: number;
@@ -151,7 +178,12 @@ export type WorkspaceSummary = {
   session_count: number;
 };
 
-export type AccessMode = "read" | "edit" | "full";
+export type AccessMode =
+  | "read"
+  | "edit"
+  | "ask-writes"
+  | "ask-commands"
+  | "full";
 
 export type SessionSummary = {
   id: string;
