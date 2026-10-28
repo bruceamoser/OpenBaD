@@ -94,13 +94,40 @@ pub fn apply(transaction: &Transaction<'_>, event: &SessionEvent) -> Result<(), 
         | SessionEventKind::AssistantMessage
         | SessionEventKind::ToolResult
         | SessionEventKind::CompactionSummary => {
+            if event.kind == SessionEventKind::CompactionSummary {
+                // The checkpoint replaces a prefix of the surface. Keep the
+                // original rows for the transcript and audit, but stop
+                // replaying them to the model. Every older checkpoint is also
+                // absorbed by the new one.
+                match event
+                    .payload
+                    .get("shadowed_through_seq")
+                    .and_then(serde_json::Value::as_i64)
+                {
+                    Some(cutoff) => {
+                        transaction.execute(
+                            "UPDATE session_messages SET surface = 0
+                             WHERE session_id = ?1 AND surface = 1
+                               AND (seq <= ?2 OR source = 'compaction')",
+                            params![event.session_id.to_string(), cutoff],
+                        )?;
+                    }
+                    None => {
+                        transaction.execute(
+                            "UPDATE session_messages SET surface = 0
+                             WHERE session_id = ?1 AND surface = 1 AND seq < ?2",
+                            params![event.session_id.to_string(), event.seq as i64],
+                        )?;
+                    }
+                }
+            }
             let role = match event.kind {
                 SessionEventKind::UserMessage => "user",
                 SessionEventKind::SystemMessage => "system",
                 SessionEventKind::DeveloperMessage => "developer",
                 SessionEventKind::AssistantMessage => "assistant",
                 SessionEventKind::ToolResult => "tool",
-                SessionEventKind::CompactionSummary => "system",
+                SessionEventKind::CompactionSummary => "user",
                 _ => unreachable!("message match arm"),
             };
             let content_json = serde_json::to_string(&event.payload)?;
@@ -110,8 +137,8 @@ pub fn apply(transaction: &Transaction<'_>, event: &SessionEvent) -> Result<(), 
                 .and_then(serde_json::Value::as_str);
             transaction.execute(
                 "INSERT OR REPLACE INTO session_messages
-                 (session_id, seq, turn, step, role, content_json, source, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (session_id, seq, turn, step, role, content_json, source, surface, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
                 params![
                     event.session_id.to_string(),
                     event.seq as i64,
@@ -204,10 +231,30 @@ pub fn load_messages(
     connection: &Connection,
     session_id: SessionId,
 ) -> Result<Vec<SessionMessage>, StoreError> {
-    let mut statement = connection.prepare(
+    query_messages(connection, session_id, false)
+}
+
+/// Load only the messages currently on the model-visible surface.
+pub fn load_surface_messages(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<Vec<SessionMessage>, StoreError> {
+    query_messages(connection, session_id, true)
+}
+
+fn query_messages(
+    connection: &Connection,
+    session_id: SessionId,
+    surface_only: bool,
+) -> Result<Vec<SessionMessage>, StoreError> {
+    let sql = if surface_only {
         "SELECT seq, turn, step, role, content_json, source, created_at
-         FROM session_messages WHERE session_id = ?1 ORDER BY seq ASC",
-    )?;
+         FROM session_messages WHERE session_id = ?1 AND surface = 1 ORDER BY seq ASC"
+    } else {
+        "SELECT seq, turn, step, role, content_json, source, created_at
+         FROM session_messages WHERE session_id = ?1 ORDER BY seq ASC"
+    };
+    let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map([session_id.to_string()], |row| {
         Ok((
             row.get::<_, i64>(0)?,

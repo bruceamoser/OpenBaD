@@ -1510,6 +1510,7 @@ pub enum AgentEvent {
 struct ChannelObserver {
     channel: Channel<AgentEvent>,
     cancel: Arc<AtomicBool>,
+    compaction_reported: AtomicBool,
 }
 
 impl AgentObserver for ChannelObserver {
@@ -1561,7 +1562,7 @@ impl AgentObserver for ChannelObserver {
     }
 
     fn on_compaction(&self, before_bytes: usize, after_bytes: usize) {
-        if after_bytes < before_bytes {
+        if after_bytes < before_bytes && !self.compaction_reported.swap(true, Ordering::Relaxed) {
             let _ = self.channel.send(AgentEvent::Compaction {
                 before_bytes,
                 after_bytes,
@@ -3424,6 +3425,11 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
     let mut ui_messages: Vec<UiMessage> = Vec::new();
     let mut ui_turns: Vec<Option<u32>> = Vec::new();
     for message in &messages {
+        // Compaction checkpoints are model context, not chat bubbles. The
+        // original messages remain in the transcript for audit.
+        if message.source.as_deref() == Some("compaction") {
+            continue;
+        }
         let ui = match message.role.as_str() {
             "user" => {
                 let payload = &message.content;
@@ -4319,7 +4325,7 @@ async fn chat(
             .map_err(|error| error.to_string())?
             .len() as u32
             + 1;
-        let mut history = load_history(&store, session)?;
+        let (mut history, surface_seqs) = load_history(&store, session)?;
         store
             .append_event(
                 session,
@@ -4355,10 +4361,16 @@ async fn chat(
             .ok()
             .and_then(|workspace: WorkspaceId| store.workspace_index_summary(workspace).ok())
             .is_some_and(|summary| summary.files > 0);
-        (session, workspace_id, (history, user_id), turn, indexed)
+        (
+            session,
+            workspace_id,
+            (history, user_id, surface_seqs),
+            turn,
+            indexed,
+        )
     };
 
-    let (history, user_id) = history;
+    let (history, user_id, surface_seqs) = history;
     let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
     let model_name = model.unwrap_or_else(|| FLASH_MODEL.to_owned());
@@ -4468,6 +4480,7 @@ async fn chat(
     let observer = ChannelObserver {
         channel: on_event,
         cancel,
+        compaction_reported: AtomicBool::new(false),
     };
     let outcome = agent.run_with_observer(history, &observer).await;
     run_guard.finish_steering();
@@ -4499,7 +4512,16 @@ async fn chat(
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
 
-        for message in &run.new_messages {
+        let mut compaction_written = false;
+        for (index, message) in run.new_messages.iter().enumerate() {
+            if !compaction_written {
+                if let Some(compaction) = &run.compaction {
+                    if compaction.new_messages_before == index {
+                        persist_compaction(&store, session, turn, compaction, &surface_seqs)?;
+                        compaction_written = true;
+                    }
+                }
+            }
             match message.role {
                 ChatRole::User => {
                     store
@@ -4549,6 +4571,11 @@ async fn chat(
                         .map_err(|error| error.to_string())?;
                 }
                 _ => {}
+            }
+        }
+        if !compaction_written {
+            if let Some(compaction) = &run.compaction {
+                persist_compaction(&store, session, turn, compaction, &surface_seqs)?;
             }
         }
 
@@ -4642,14 +4669,88 @@ fn ensure_user_id(store: &Store) -> Result<String, String> {
     Ok(value)
 }
 
-fn load_history(store: &Store, session: SessionId) -> Result<Vec<ChatMessage>, String> {
+/// Load the model-visible history and, in the same order, the store sequence
+/// of each message. Checkpoints map to `None` because they are always shadowed
+/// as a set when a newer checkpoint replaces them.
+fn load_history(
+    store: &Store,
+    session: SessionId,
+) -> Result<(Vec<ChatMessage>, Vec<Option<u64>>), String> {
     let messages = store
-        .load_messages(session)
+        .load_surface_messages(session)
         .map_err(|error| error.to_string())?;
-    messages
+    let entries = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, message)| !(*index == 0 && message.role == "system"))
+        .map(|(_, message)| {
+            (message.source.as_deref() != Some("compaction")).then_some(message.seq)
+        })
+        .collect();
+    let history = messages
         .iter()
         .map(chat_message_from_session)
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((history, entries))
+}
+
+/// The store sequence through which a checkpoint shadows messages. Older
+/// checkpoints are shadowed by the projection regardless of this value.
+fn shadowed_through_seq(entries: &[Option<u64>], shadowed_messages: usize) -> u64 {
+    entries
+        .iter()
+        .take(shadowed_messages)
+        .filter_map(|seq| *seq)
+        .max()
+        .unwrap_or(0)
+}
+
+fn persist_compaction(
+    store: &Store,
+    session: SessionId,
+    turn: u32,
+    compaction: &openbad_agent::CompactionRecord,
+    surface_seqs: &[Option<u64>],
+) -> Result<(), String> {
+    let cutoff = shadowed_through_seq(surface_seqs, compaction.shadowed_messages);
+    let payload = json!({
+        "shadowed_messages": compaction.shadowed_messages,
+        "shadowed_through_seq": cutoff,
+        "before_bytes": compaction.before_bytes,
+        "after_bytes": compaction.after_bytes,
+    });
+    store
+        .append_event(
+            session,
+            NewEvent::new(SessionEventKind::CompactionStart)
+                .with_turn(turn)
+                .with_payload(payload.clone()),
+        )
+        .map_err(|error| error.to_string())?;
+    store
+        .append_event(
+            session,
+            NewEvent::new(SessionEventKind::CompactionSummary)
+                .with_turn(turn)
+                .with_payload(json!({
+                    "content": compaction.summary,
+                    "source": "compaction",
+                    "shadowed_messages": compaction.shadowed_messages,
+                    "shadowed_through_seq": cutoff,
+                    "before_bytes": compaction.before_bytes,
+                    "after_bytes": compaction.after_bytes,
+                })),
+        )
+        .map_err(|error| error.to_string())?;
+    store
+        .append_event(
+            session,
+            NewEvent::new(SessionEventKind::CompactionEnd)
+                .with_turn(turn)
+                .with_payload(payload),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn chat_message_from_session(message: &SessionMessage) -> Result<ChatMessage, String> {
@@ -4902,6 +5003,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compaction_cutoff_ignores_prior_checkpoint_sequences() {
+        let entries = vec![None, Some(10), Some(11), Some(12)];
+        assert_eq!(shadowed_through_seq(&entries, 1), 0);
+        assert_eq!(shadowed_through_seq(&entries, 3), 11);
+        assert_eq!(shadowed_through_seq(&entries, 9), 12);
+    }
+
+    #[test]
     fn project_files_lists_live_workspace_entries() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(root.path().join("src")).expect("src");
@@ -4937,7 +5046,10 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0014_reference_access");
+        assert_eq!(
+            payload.doctor.schema_version,
+            "0015_session_message_surface"
+        );
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

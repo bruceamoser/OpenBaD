@@ -1504,6 +1504,27 @@ impl Store {
         projections::load_messages(&connection, session_id)
     }
 
+    /// Load the messages a model request should replay.
+    ///
+    /// The newest checkpoint always replaces a prefix of the surface, so it is
+    /// moved ahead of the retained tail. Everything else stays in log order.
+    pub fn load_surface_messages(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
+        let connection = self.reader()?;
+        let mut messages = projections::load_surface_messages(&connection, session_id)?;
+        if let Some(index) = messages
+            .iter()
+            .rposition(|message| message.source.as_deref() == Some("compaction"))
+        {
+            let checkpoint = messages.remove(index);
+            let insert_at = usize::from(messages.first().is_some_and(|m| m.role == "system"));
+            messages.insert(insert_at, checkpoint);
+        }
+        Ok(messages)
+    }
+
     pub fn load_turns(&self, session_id: SessionId) -> Result<Vec<SessionTurn>, StoreError> {
         let connection = self.reader()?;
         projections::load_turns(&connection, session_id)
@@ -3658,7 +3679,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0014_reference_access"
+            "0015_session_message_surface"
         );
     }
 
@@ -3928,6 +3949,131 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "tool");
         assert_eq!(messages[0].content["tool_call_id"], "call-1");
+    }
+
+    #[test]
+    fn compaction_shadows_old_messages_but_keeps_the_transcript() {
+        let store = Store::open_in_memory().expect("store");
+        let session = store.create_session(None, None).expect("session");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::UserMessage)
+                    .with_turn(1)
+                    .with_payload(json!({"content": "old request"})),
+            )
+            .expect("first");
+        let old_answer = store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::AssistantMessage)
+                    .with_turn(1)
+                    .with_payload(json!({"content": "old answer"})),
+            )
+            .expect("old answer");
+        let retained = store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::UserMessage)
+                    .with_turn(2)
+                    .with_payload(json!({"content": "current request"})),
+            )
+            .expect("retained");
+        let checkpoint = store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::CompactionSummary)
+                    .with_turn(2)
+                    .with_payload(json!({
+                        "content": "<compacted-summary>old context</compacted-summary>",
+                        "source": "compaction",
+                        "shadowed_through_seq": old_answer.seq as i64,
+                    })),
+            )
+            .expect("checkpoint");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::AssistantMessage)
+                    .with_turn(2)
+                    .with_payload(json!({"content": "current answer"})),
+            )
+            .expect("current answer");
+
+        let all = store.load_messages(session).expect("transcript");
+        assert_eq!(all.len(), 5, "the transcript keeps shadowed messages");
+        assert_eq!(all[0].content["content"], "old request");
+        assert_eq!(
+            all.iter()
+                .filter(|message| message.content["content"] == "old answer")
+                .count(),
+            1
+        );
+
+        let surface = store.load_surface_messages(session).expect("surface");
+        let contents = surface
+            .iter()
+            .map(|message| message.content["content"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec![
+                "<compacted-summary>old context</compacted-summary>",
+                "current request",
+                "current answer"
+            ],
+            "the checkpoint leads the retained tail"
+        );
+        assert_eq!(surface[0].source.as_deref(), Some("compaction"));
+        assert_eq!(surface[1].seq, retained.seq);
+        assert!(checkpoint.seq > retained.seq);
+
+        // A later checkpoint absorbs the previous one without disturbing the
+        // retained tail it did not summarize.
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::UserMessage)
+                    .with_turn(3)
+                    .with_payload(json!({"content": "next request"})),
+            )
+            .expect("next request");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::AssistantMessage)
+                    .with_turn(3)
+                    .with_payload(json!({"content": "next answer"})),
+            )
+            .expect("next answer");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::CompactionSummary)
+                    .with_turn(3)
+                    .with_payload(json!({
+                        "content": "<compacted-summary>newer context</compacted-summary>",
+                        "source": "compaction",
+                        "shadowed_through_seq": 0,
+                    })),
+            )
+            .expect("second checkpoint");
+
+        let surface = store.load_surface_messages(session).expect("surface");
+        let contents = surface
+            .iter()
+            .map(|message| message.content["content"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec![
+                "<compacted-summary>newer context</compacted-summary>",
+                "current request",
+                "current answer",
+                "next request",
+                "next answer"
+            ]
+        );
     }
 
     #[test]

@@ -28,6 +28,51 @@ const ESTIMATED_BYTES_PER_TOKEN: usize = 3;
 /// Room for tokenizer drift and provider-side framing.
 const CONTEXT_SAFETY_TOKENS: usize = 8_192;
 
+/// The summarization directive, delivered as the final user message after the
+/// replayed conversation. Reusing the conversation prefix keeps the compaction
+/// call on the provider's warm cache.
+const COMPACTION_INSTRUCTION: &str = "\
+You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.
+
+Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write \"(none)\" for an empty section — never drop a section.
+
+## Primary Request and Intent
+- [the user's original and evolving goals; quote verbatim where the exact wording matters]
+
+## Key Technical Concepts
+- [technologies, frameworks, patterns, and conventions in play]
+
+## Files and Code
+- [exact path: why it matters, key changes or snippets]
+
+## Errors and Fixes
+- [error: how it was resolved, plus any related user feedback]
+
+## Pending Jobs
+- [explicitly requested work not yet completed]
+
+## Current Work
+- [precisely what was in progress at this checkpoint]
+
+## Next Step
+- [the single next action, directly in line with the most recent request, or \"(none)\"]
+
+## Critical Context
+- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]
+
+Rules:
+- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.
+- Capture user feedback and explicit instructions faithfully, especially corrections.
+- Do NOT mention this summarization request or that the context was compacted.
+- Output only the checkpoint text: do not call any tool or take any other action.
+- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.";
+
+/// Framing that makes the replacement message established context.
+const CHECKPOINT_PREAMBLE: &str = "This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.";
+
+const CHECKPOINT_OPEN: &str = "<compacted-summary>";
+const CHECKPOINT_CLOSE: &str = "</compacted-summary>";
+
 /// Messages the human injects into a running turn. They are delivered before
 /// the next provider request, so they can redirect the agent without starting a
 /// second turn.
@@ -80,16 +125,17 @@ pub struct AgentConfig {
     /// Provider context window in tokens. Requests are capped so that the
     /// estimated prompt plus the completion budget fits inside it.
     pub context_window: u32,
-    /// Compact history once estimated prompt tokens exceed this fraction of
-    /// the context window.
-    pub compact_at_ratio: f32,
     pub allow_writes: bool,
     pub allow_commands: bool,
     pub stream: bool,
     pub system_prompt: Option<String>,
-    /// Legacy byte threshold for compacting old tool results.
-    pub compact_after_bytes: usize,
-    pub compact_keep_recent: usize,
+    /// Fraction of the context window that may be occupied by the prompt
+    /// before older history is compacted. `0.0` disables compaction.
+    pub compact_at_ratio: f64,
+    /// Fraction of the context window retained verbatim as recent history.
+    pub retain_recent_ratio: f64,
+    /// Completion budget for the compaction summary call.
+    pub compact_max_tokens: u32,
 }
 
 impl Default for AgentConfig {
@@ -98,13 +144,13 @@ impl Default for AgentConfig {
             max_steps: 0,
             max_output_tokens: 16_384,
             context_window: 1_000_000,
-            compact_at_ratio: 0.85,
             allow_writes: false,
             allow_commands: false,
             stream: true,
             system_prompt: None,
-            compact_after_bytes: 600_000,
-            compact_keep_recent: 8,
+            compact_at_ratio: 0.8,
+            retain_recent_ratio: 0.16,
+            compact_max_tokens: 16_384,
         }
     }
 }
@@ -135,6 +181,22 @@ struct NoopObserver;
 
 impl AgentObserver for NoopObserver {}
 
+/// A checkpoint created by compacting an older span of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionRecord {
+    /// The checkpoint message content: the summarizer output wrapped in the
+    /// preamble and `<compacted-summary>` markers. Persist this verbatim.
+    pub summary: String,
+    /// Number of leading history messages (after the system prompt) replaced
+    /// by the checkpoint. The current turn is never included.
+    pub shadowed_messages: usize,
+    /// Number of messages already produced in this run when the checkpoint
+    /// was created, so the caller can persist it at the right position.
+    pub new_messages_before: usize,
+    pub before_bytes: usize,
+    pub after_bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRun {
     /// Messages produced after the supplied history, including tool messages.
@@ -142,6 +204,9 @@ pub struct AgentRun {
     pub text: String,
     pub usage: UsageTotals,
     pub steps: u32,
+    /// The checkpoint created during this run, when the conversation had to be
+    /// compacted to fit the model window.
+    pub compaction: Option<CompactionRecord>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -437,7 +502,15 @@ impl<T: HttpTransport> Agent<T> {
             },
             None => None,
         };
-        let start_len = messages.len();
+        // The current turn and any steering messages appended to it stay
+        // verbatim. Compaction only ever rewrites history before this point.
+        let turn_start = messages
+            .iter()
+            .rposition(|message| message.role == ChatRole::User)
+            .unwrap_or(messages.len());
+        let mut new_messages: Vec<ChatMessage> = Vec::new();
+        let mut compaction: Option<CompactionRecord> = None;
+        let mut compaction_attempted = false;
 
         let tool_schemas = self.tools.openai_tools();
         let tool_tokens = estimate_tokens(
@@ -500,49 +573,133 @@ impl<T: HttpTransport> Agent<T> {
             observer.on_step(step);
             if let Some(steering) = &self.steering {
                 for message in steering.drain() {
-                    messages.push(ChatMessage::user(message));
+                    let message = ChatMessage::user(message);
+                    messages.push(message.clone());
+                    new_messages.push(message);
                 }
             }
-            let mut request_messages = messages.clone();
+            // Reasoning is only required for the live tool loop. Keeping it on
+            // every completed turn is what made long sessions balloon; strip it
+            // only from assistant text messages that are already finished.
+            strip_completed_text_reasoning(&mut messages);
             let catalog_tokens = mcp_catalog
                 .as_ref()
                 .map_or(0, |catalog| estimate_tokens(message_bytes(catalog)));
-            let before_bytes = request_messages.iter().map(message_bytes).sum::<usize>();
-            if self.config.compact_after_bytes > 0 && before_bytes > self.config.compact_after_bytes
-            {
-                compact_tool_results(&mut request_messages, self.config.compact_keep_recent);
-            }
-            let mut input_tokens = request_tokens(&request_messages, tool_tokens) + catalog_tokens;
-            let initial_input_tokens = input_tokens;
+            let mut input_tokens = request_tokens(&messages, tool_tokens) + catalog_tokens;
             let context_window = self.config.context_window as usize;
             let configured_output = self.config.max_output_tokens as usize;
             let safety = CONTEXT_SAFETY_TOKENS.min(context_window / 8).max(1);
-            let compact_ratio = if self.config.compact_at_ratio.is_finite() {
-                self.config.compact_at_ratio.clamp(0.5, 0.95)
-            } else {
-                0.85
-            };
-            let compact_at =
-                ((context_window as f32 * compact_ratio) as usize).max(context_window / 10);
-            if input_tokens + configured_output + safety > context_window
-                || input_tokens > compact_at
-            {
-                let target = compact_at
-                    .saturating_sub(
-                        configured_output.min(context_window / 2) + safety + tool_tokens,
-                    )
-                    .max(context_window / 10);
-                compact_request(
-                    &mut request_messages,
-                    self.config.compact_keep_recent,
-                    target,
-                );
-                input_tokens = request_tokens(&request_messages, tool_tokens) + catalog_tokens;
+            let before_bytes = messages.iter().map(message_bytes).sum::<usize>();
+
+            if !compaction_attempted {
+                let pressure_budget = context_window
+                    .saturating_sub(configured_output)
+                    .saturating_sub(safety);
+                let threshold =
+                    ratio_tokens(self.config.compact_at_ratio, context_window).min(pressure_budget);
+                let over_budget = input_tokens + configured_output + safety > context_window;
+                let needs_compaction = (threshold > 0 && input_tokens >= threshold) || over_budget;
+                if needs_compaction {
+                    if let Some(target_end) = select_compaction_end(
+                        &messages,
+                        turn_start,
+                        ratio_tokens(self.config.retain_recent_ratio, context_window),
+                    ) {
+                        compaction_attempted = true;
+                        let chunk_budget = context_window.saturating_sub(
+                            estimate_tokens(message_bytes(&messages[0]))
+                                + tool_tokens
+                                + estimate_tokens(COMPACTION_INSTRUCTION.len())
+                                + self.config.compact_max_tokens as usize
+                                + safety,
+                        );
+                        // A session can already be larger than the model
+                        // window before its first compaction (long-lived
+                        // sessions from older builds). Summarize the old spans
+                        // in window-sized chunks, each merging the previous
+                        // checkpoint, until the whole range is covered.
+                        let original_messages = messages.clone();
+                        let mut remaining = target_end;
+                        let mut checkpoint_text = None;
+                        let mut first_chunk = true;
+                        while remaining > 0 {
+                            let end = if first_chunk {
+                                remaining
+                            } else {
+                                remaining + 1
+                            };
+                            let Some(chunk_end) =
+                                select_compaction_chunk(&messages, end, chunk_budget)
+                            else {
+                                break;
+                            };
+                            let summary = self
+                                .summarize_range(
+                                    &messages[..=chunk_end],
+                                    &tool_schemas,
+                                    self.config.compact_max_tokens.max(1),
+                                )
+                                .await;
+                            match summary {
+                                Ok((summary, summary_usage)) => {
+                                    if let Some(pricing) = deepseek_pricing(self.client.model()) {
+                                        usage_totals.record(
+                                            &summary_usage,
+                                            &pricing.cost(&summary_usage, peak_pricing),
+                                        );
+                                    } else {
+                                        usage_totals.record(&summary_usage, &Default::default());
+                                    }
+                                    observer.on_usage(&usage_totals);
+                                    let checkpoint = checkpoint_message(&summary);
+                                    checkpoint_text =
+                                        checkpoint.content.clone().or(checkpoint_text);
+                                    let replaced = if first_chunk {
+                                        chunk_end
+                                    } else {
+                                        chunk_end - 1
+                                    };
+                                    messages.splice(1..=chunk_end, [checkpoint]);
+                                    remaining = remaining.saturating_sub(replaced);
+                                    first_chunk = false;
+                                }
+                                Err(error) => {
+                                    if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                                        eprintln!("[agent] compaction failed: {error}");
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        let shadowed = target_end - remaining;
+                        let after_bytes = messages.iter().map(message_bytes).sum::<usize>();
+                        // A checkpoint that does not shrink the prompt is not
+                        // worth a cache break. Restore the original history so
+                        // the request and what gets persisted stay identical.
+                        if shadowed == 0 || checkpoint_text.is_none() || after_bytes >= before_bytes
+                        {
+                            messages = original_messages;
+                        } else if let Some(checkpoint_text) = checkpoint_text {
+                            observer.on_compaction(before_bytes, after_bytes);
+                            input_tokens = request_tokens(&messages, tool_tokens) + catalog_tokens;
+                            compaction = Some(CompactionRecord {
+                                summary: checkpoint_text,
+                                shadowed_messages: shadowed,
+                                new_messages_before: new_messages.len(),
+                                before_bytes,
+                                after_bytes,
+                            });
+                            if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                                eprintln!(
+                                    "[agent] compacted {shadowed} messages ({before_bytes} -> {after_bytes} bytes)"
+                                );
+                            }
+                        }
+                    }
+                }
             }
-            let after_bytes = request_messages.iter().map(message_bytes).sum::<usize>();
-            if after_bytes < before_bytes {
-                observer.on_compaction(before_bytes, after_bytes);
-            }
+
+            let mut request_messages = messages.clone();
             // The catalog is volatile tail context: keep it outside the
             // compactable history and append it only for this request.
             if let Some(catalog) = &mcp_catalog {
@@ -551,7 +708,7 @@ impl<T: HttpTransport> Agent<T> {
             let available = context_window.saturating_sub(input_tokens + safety);
             if available == 0 {
                 return Err(AgentError::ContextOverflow {
-                    estimated_input: initial_input_tokens.max(input_tokens),
+                    estimated_input: input_tokens,
                     context_window: self.config.context_window,
                 });
             }
@@ -624,6 +781,7 @@ impl<T: HttpTransport> Agent<T> {
             if let Some(calls) = assistant.tool_calls.as_mut() {
                 sanitize_tool_arguments(calls);
             }
+            new_messages.push(assistant.clone());
             messages.push(assistant);
 
             if tool_calls.is_empty() {
@@ -637,15 +795,18 @@ impl<T: HttpTransport> Agent<T> {
                         return Err(AgentError::MaxSteps(step_budget));
                     }
                     for message in pending {
-                        messages.push(ChatMessage::user(message));
+                        let message = ChatMessage::user(message);
+                        messages.push(message.clone());
+                        new_messages.push(message);
                     }
                     continue;
                 }
                 return Ok(AgentRun {
-                    new_messages: messages[start_len..].to_vec(),
+                    new_messages,
                     text: visible_text,
                     usage: usage_totals,
                     steps: step,
+                    compaction,
                 });
             }
 
@@ -677,7 +838,9 @@ impl<T: HttpTransport> Agent<T> {
                     let content = self
                         .execute_tool_call(step, &batch[0], &context, observer)
                         .await;
-                    messages.push(ChatMessage::tool(batch[0].id.clone(), content));
+                    let message = ChatMessage::tool(batch[0].id.clone(), content);
+                    messages.push(message.clone());
+                    new_messages.push(message);
                 } else {
                     let contents = join_all(
                         batch
@@ -686,7 +849,9 @@ impl<T: HttpTransport> Agent<T> {
                     )
                     .await;
                     for (call, content) in batch.iter().zip(contents) {
-                        messages.push(ChatMessage::tool(call.id.clone(), content));
+                        let message = ChatMessage::tool(call.id.clone(), content);
+                        messages.push(message.clone());
+                        new_messages.push(message);
                     }
                 }
                 call_index = batch_end;
@@ -772,6 +937,75 @@ impl<T: HttpTransport> Agent<T> {
             finish_reason,
             usage,
         ))
+    }
+
+    /// Condense a span of history into a reusable checkpoint.
+    ///
+    /// The call replays the conversation's own system prompt and tool schemas
+    /// followed by the shadowed span, then appends the compaction directive as
+    /// the final user message. Reusing that prefix keeps the summarizer on the
+    /// provider's warm cache.
+    async fn summarize_range(
+        &self,
+        messages: &[ChatMessage],
+        tool_schemas: &[Value],
+        max_tokens: u32,
+    ) -> Result<(String, Usage), ProviderError> {
+        let mut request_messages = messages.to_vec();
+        request_messages.push(ChatMessage::user(COMPACTION_INSTRUCTION));
+        let tool_tokens = estimate_tokens(
+            tool_schemas
+                .iter()
+                .map(|schema| schema.to_string().len())
+                .sum(),
+        );
+        let context_window = self.config.context_window as usize;
+        let safety = CONTEXT_SAFETY_TOKENS.min(context_window / 8).max(1);
+        let available =
+            context_window.saturating_sub(request_tokens(&request_messages, tool_tokens) + safety);
+        if available == 0 {
+            return Err(ProviderError::InvalidRequest(
+                "compaction input exceeds the context window".to_owned(),
+            ));
+        }
+        let max_tokens = max_tokens
+            .min(u32::try_from(available).unwrap_or(u32::MAX))
+            .max(1);
+        let request = self.client.build_request(
+            request_messages,
+            Some(tool_schemas.to_vec()),
+            Some(max_tokens),
+            false,
+        );
+        let envelope = RequestEnvelope {
+            series_id: Uuid::now_v7(),
+            provider: "deepseek".to_owned(),
+            model: self.client.model().to_owned(),
+            api_format: ApiFormat::OpenAi,
+            thinking_enabled: self.client.thinking_enabled(),
+            reasoning_effort: self.client.reasoning_effort(),
+            system_hash: hash_bytes(
+                messages
+                    .first()
+                    .and_then(|message| message.content.as_deref())
+                    .unwrap_or_default()
+                    .as_bytes(),
+            ),
+            tools_hash: hash_bytes(canonical_json(&Value::Array(tool_schemas.to_vec())).as_bytes()),
+            workspace_hash: Some(hash_bytes(
+                self.workspace.root().to_string_lossy().as_bytes(),
+            )),
+            max_output_tokens: max_tokens,
+        };
+        let response = self.client.complete(request.freeze(envelope)?).await?;
+        let summary = response.message.content.unwrap_or_default();
+        let summary = summary.trim();
+        if summary.is_empty() {
+            return Err(ProviderError::InvalidResponse(
+                "compaction produced no summary text".to_owned(),
+            ));
+        }
+        Ok((summary.to_owned(), response.usage))
     }
 
     fn memory_context(&self) -> String {
@@ -997,182 +1231,133 @@ fn request_tokens(messages: &[ChatMessage], tool_tokens: usize) -> usize {
         + tool_tokens
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let mut truncated: String = text.chars().take(max_chars).collect();
-    truncated.push('…');
-    truncated
-}
-
-fn truncate_bytes(text: &str, max_bytes: usize) -> (String, usize) {
-    if text.len() <= max_bytes {
-        return (text.to_owned(), 0);
-    }
-    let mut end = max_bytes.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = text[..end].to_owned();
-    truncated.push('…');
-    (truncated, text.len().saturating_sub(end))
-}
-
-/// Choose a user-message boundary so the recent window keeps whole turns and
-/// never strands a tool result without its assistant call.
-fn recent_turn_start(messages: &[ChatMessage], keep_recent: usize) -> usize {
-    if messages.len() <= 2 {
-        return 1;
-    }
-    let target = messages.len().saturating_sub(keep_recent.max(4)).max(2);
-    messages
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(index, message)| *index >= target && message.role == ChatRole::User)
-        .map(|(index, _)| index)
-        .or_else(|| {
-            messages
-                .iter()
-                .rposition(|message| message.role == ChatRole::User)
-                .filter(|index| *index > 1)
-        })
-        .unwrap_or(1)
-}
-
-fn summarize_messages(messages: &[ChatMessage]) -> String {
-    let mut parts = Vec::new();
-    for message in messages {
-        match message.role {
-            ChatRole::User => {
-                if let Some(content) = message.content.as_deref() {
-                    let text = truncate_chars(content.trim(), 1_200);
-                    if !text.is_empty() {
-                        parts.push(format!("User message: {text}"));
-                    }
-                }
-            }
-            ChatRole::Assistant => {
-                if let Some(content) = message.content.as_deref() {
-                    let text = truncate_chars(content.trim(), 800);
-                    if !text.is_empty() {
-                        parts.push(format!("Assistant: {text}"));
-                    }
-                }
-                if let Some(calls) = &message.tool_calls {
-                    let names = calls
-                        .iter()
-                        .map(|call| {
-                            format!(
-                                "{}({})",
-                                call.function.name,
-                                truncate_chars(&call.function.arguments, 160)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    parts.push(format!("Tool calls: {names}"));
-                }
-            }
-            ChatRole::Tool => {
-                if let Some(content) = message.content.as_deref() {
-                    let text = truncate_chars(content.trim(), 400);
-                    if !text.is_empty() {
-                        parts.push(format!("Tool result: {text}"));
-                    }
-                }
-            }
-            ChatRole::System => {}
-        }
-    }
-    let mut summary = parts.join("\n");
-    if summary.chars().count() > 16_000 {
-        let omitted = summary.chars().count() - 16_000;
-        summary = truncate_chars(&summary, 16_000);
-        summary.push_str(&format!("\n[summary truncated; {omitted} chars omitted]"));
-    }
-    summary
-}
-
-fn trim_large_messages(messages: &mut [ChatMessage], target_tokens: usize) {
-    let per_message = target_tokens
-        .saturating_mul(ESTIMATED_BYTES_PER_TOKEN)
-        .checked_div(messages.len().max(1))
-        .unwrap_or(0)
-        .max(512);
-    let last = messages.len().saturating_sub(1);
-    for (index, message) in messages.iter_mut().enumerate().skip(1) {
-        // Preserve the current user request, but a trailing tool result is
-        // fair game when the request would otherwise not fit.
-        if index == last && message.role != ChatRole::Tool {
-            continue;
-        }
-        let cap = match message.role {
-            ChatRole::Tool => per_message.min(4_000),
-            ChatRole::Assistant => per_message.saturating_mul(2).min(8_000),
-            ChatRole::User => per_message.saturating_mul(4).min(16_000),
-            ChatRole::System => 0,
-        };
-        if cap == 0 {
-            continue;
-        }
-        if let Some(content) = message.content.as_mut() {
-            if content.len() > cap {
-                let (mut trimmed, omitted) = truncate_bytes(content, cap);
-                trimmed.push_str(&format!("\n[compacted; {omitted} bytes omitted]"));
-                *content = trimmed;
-            }
-        }
-    }
-}
-
-/// Replace older turns with a bounded extractive summary and trim oversized
-/// retained messages. The original events stay untouched in the store; this
-/// only shapes the next provider request.
-fn compact_request(
-    messages: &mut Vec<ChatMessage>,
-    keep_recent: usize,
-    target_tokens: usize,
-) -> usize {
-    let before = messages.iter().map(message_bytes).sum::<usize>();
-    let recent_start = recent_turn_start(messages, keep_recent);
-    if recent_start > 1 {
-        let summary = summarize_messages(&messages[1..recent_start]);
-        if !summary.is_empty() {
-            let marker = ChatMessage::user(format!(
-                "<compacted-summary range=\"messages:1-{}\">\n[Compacted transcript excerpt; this is not a new user request.]\n{}\n</compacted-summary>",
-                recent_start - 1,
-                summary
-            ));
-            messages.drain(1..recent_start);
-            messages.insert(1, marker);
-        }
-    }
-    trim_large_messages(messages, target_tokens);
-    before.saturating_sub(messages.iter().map(message_bytes).sum::<usize>())
-}
-
-fn compact_tool_results(messages: &mut [ChatMessage], keep_recent: usize) -> usize {
-    if messages.len() <= keep_recent.saturating_add(1) {
+fn ratio_tokens(ratio: f64, context_window: usize) -> usize {
+    if !ratio.is_finite() || ratio <= 0.0 {
         return 0;
     }
-    let cutoff = messages.len() - keep_recent.max(1);
-    let mut omitted = 0;
-    for message in messages.iter_mut().take(cutoff) {
-        if message.role != ChatRole::Tool {
-            continue;
-        }
-        let Some(content) = message.content.as_mut() else {
-            continue;
-        };
-        if content.len() <= 256 || content.starts_with("[compacted tool result") {
-            continue;
-        }
-        omitted += content.len();
-        *content = format!("[compacted tool result; {} bytes omitted]", omitted);
+    (context_window as f64 * ratio.min(1.0)).floor() as usize
+}
+
+/// Pick the last message that compaction may shadow.
+///
+/// The retained tail is chosen from the end of the history: at least
+/// `retain_tokens` of recent messages, and always the previous and current
+/// user turns verbatim. The returned index is inclusive; everything after it
+/// stays in the request untouched, so a tool-call/result pair is never split
+/// and the answer the user is continuing from is never summarized away.
+fn select_compaction_end(
+    messages: &[ChatMessage],
+    turn_start: usize,
+    retain_tokens: usize,
+) -> Option<usize> {
+    if turn_start <= 1 {
+        return None;
     }
-    omitted
+    let mut retained = 0;
+    let mut keep_from = turn_start;
+    while keep_from > 1 {
+        keep_from -= 1;
+        retained += estimate_tokens(message_bytes(&messages[keep_from])) + 4;
+        if retained >= retain_tokens {
+            break;
+        }
+    }
+    if let Some(previous_turn_start) = messages[..turn_start]
+        .iter()
+        .rposition(|message| message.role == ChatRole::User)
+    {
+        keep_from = keep_from.min(previous_turn_start.max(1));
+    }
+    // The token boundary can land inside a turn. Move it back to the user
+    // message that starts that turn so the retained tail never begins with a
+    // tool result whose call was summarized away.
+    while keep_from > 1 && messages[keep_from].role != ChatRole::User {
+        keep_from -= 1;
+    }
+    if keep_from <= 1 {
+        return None;
+    }
+    Some(keep_from - 1)
+}
+
+/// Pick the last message of one summarization chunk.
+///
+/// The chunk starts at the system prompt (plus a previous checkpoint when one
+/// exists) and grows until the summarizer budget would be exceeded. It never
+/// ends immediately after an assistant tool call, which would leave the
+/// matching tool result outside the replayed prefix.
+fn select_compaction_chunk(
+    messages: &[ChatMessage],
+    end: usize,
+    budget_tokens: usize,
+) -> Option<usize> {
+    if end < 1 || budget_tokens == 0 {
+        return None;
+    }
+    let mut used = estimate_tokens(message_bytes(&messages[1])) + 4;
+    if used > budget_tokens {
+        return None;
+    }
+    let mut chunk_end = 1;
+    for (index, message) in messages.iter().enumerate().take(end + 1).skip(2) {
+        let tokens = estimate_tokens(message_bytes(message)) + 4;
+        if used + tokens > budget_tokens {
+            break;
+        }
+        used += tokens;
+        chunk_end = index;
+    }
+    if chunk_end < end {
+        // Prefer ending the chunk on a turn boundary. A single turn larger
+        // than the summarizer budget falls back to the tool-pair boundary.
+        let mut aligned = chunk_end;
+        while aligned > 1 && messages[aligned + 1].role != ChatRole::User {
+            aligned -= 1;
+        }
+        if aligned > 1 && messages[aligned + 1].role == ChatRole::User {
+            chunk_end = aligned;
+        }
+    }
+    while chunk_end > 1 && has_unpaired_tool_call(&messages[chunk_end]) {
+        chunk_end -= 1;
+    }
+    // Leave at least one new message for every chunk after a checkpoint;
+    // otherwise the loop cannot make progress.
+    if end > 1 && chunk_end < 2 {
+        return None;
+    }
+    Some(chunk_end)
+}
+
+fn has_unpaired_tool_call(message: &ChatMessage) -> bool {
+    message.role == ChatRole::Assistant
+        && message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+fn checkpoint_message(summary: &str) -> ChatMessage {
+    ChatMessage::user(format!(
+        "{CHECKPOINT_PREAMBLE}\n\n{CHECKPOINT_OPEN}\n{}\n{CHECKPOINT_CLOSE}",
+        summary.trim()
+    ))
+}
+
+fn strip_completed_text_reasoning(messages: &mut [ChatMessage]) {
+    for message in messages {
+        // Reasoning is required when the assistant message also carries tool
+        // calls. It is not required on a finished text answer, and keeping it
+        // makes long sessions balloon without helping the next request.
+        let completed_text = message.role == ChatRole::Assistant
+            && message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty());
+        if completed_text {
+            message.reasoning_content = None;
+        }
+    }
 }
 
 fn append_tool_audit(
@@ -1361,6 +1546,47 @@ mod tests {
     fn request_json(requests: &Arc<Mutex<Vec<HttpRequest>>>, index: usize) -> Value {
         let requests = requests.lock().expect("requests");
         serde_json::from_slice(&requests[index].body).expect("request json")
+    }
+
+    /// Answers compaction calls with a summary and everything else with a
+    /// normal answer, so tests do not have to predict the chunk count.
+    struct CompactionTransport {
+        requests: Arc<Mutex<Vec<HttpRequest>>>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for CompactionTransport {
+        async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            let body: Value = serde_json::from_slice(&request.body)
+                .map_err(|error| ProviderError::InvalidRequest(error.to_string()))?;
+            let summary_call = body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|content| content.contains("compaction engine"));
+            self.requests.lock().expect("requests").push(request);
+            let content = if summary_call {
+                format!(
+                    "Checkpoint {}.",
+                    self.requests.lock().expect("requests").len()
+                )
+            } else {
+                "Done.".to_owned()
+            };
+            let body = json!({
+                "model": "deepseek-flash",
+                "choices": [{
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2}
+            });
+            Ok(response(&body.to_string()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
     }
 
     #[tokio::test]
@@ -1626,33 +1852,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn old_tool_results_are_compacted_before_the_request() {
+    async fn compaction_summarizes_old_turns_and_keeps_recent_context() {
         let directory = tempdir().expect("tempdir");
-        let transport = MockTransport {
-            responses: Mutex::new(VecDeque::from([response(
-                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
-            )])),
-            requests: Mutex::new(Vec::new()),
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = CompactionTransport {
+            requests: Arc::clone(&requests),
         };
         let client = DeepSeekClient::new(transport, "sk-test");
-        let agent = default_agent(
+        let agent = Agent::new(
             client,
+            ToolRegistry::new(),
             Arc::new(WorkspaceService::new(directory.path())),
             AgentConfig {
                 stream: false,
-                compact_after_bytes: 1_000,
-                compact_keep_recent: 2,
+                context_window: 10_000,
+                max_output_tokens: 1_000,
+                compact_at_ratio: 0.5,
+                retain_recent_ratio: 0.1,
+                compact_max_tokens: 2_000,
                 ..AgentConfig::default()
             },
         );
         let mut history = Vec::new();
-        for index in 0..8 {
+        for turn in 0..6 {
+            history.push(ChatMessage::user(format!("old request {turn}")));
+            let mut call = ChatMessage::assistant("checking");
+            call.tool_calls = Some(vec![ToolCall::function(
+                format!("call-{turn}"),
+                "read_file",
+                json!({"path": format!("file{turn}.txt")}),
+            )]);
+            history.push(call);
             history.push(ChatMessage::tool(
-                format!("call-{index}"),
-                format!("{index}:{}", "x".repeat(400)),
+                format!("call-{turn}"),
+                format!("{turn}:{}", "x".repeat(3_000)),
             ));
+            history.push(ChatMessage::assistant(format!("old answer {turn}")));
         }
-        history.push(ChatMessage::user("finish"));
+        // The answer the user is continuing from must survive verbatim.
+        history.push(ChatMessage::user("previous request"));
+        history.push(ChatMessage::assistant(
+            "previous answer the user continues from",
+        ));
+        history.push(ChatMessage::user("latest request"));
+
         let observer = CompactObserver {
             before: Mutex::new(0),
             after: Mutex::new(0),
@@ -1662,9 +1905,164 @@ mod tests {
             .await
             .expect("run");
         assert_eq!(run.text, "Done.");
-        let before = *observer.before.lock().expect("before");
-        let after = *observer.after.lock().expect("after");
-        assert!(before > after);
+        let compaction = run.compaction.expect("checkpoint");
+        assert!(compaction.shadowed_messages > 0);
+        assert!(compaction.summary.contains("<compacted-summary>"));
+        assert!(compaction.summary.contains("Checkpoint"));
+        assert!(*observer.before.lock().expect("before") > *observer.after.lock().expect("after"));
+
+        let summarizer = request_json(&requests, 0);
+        let summarizer_messages = summarizer["messages"].as_array().expect("messages");
+        assert!(
+            summarizer_messages
+                .last()
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|content| content.contains("compaction engine"))
+        );
+        assert!(
+            summarizer_messages
+                .iter()
+                .any(|message| { message["content"] == json!("old answer 0") })
+        );
+
+        let request = {
+            let requests = requests.lock().expect("requests");
+            let last = requests.last().expect("main request");
+            serde_json::from_slice::<Value>(&last.body).expect("request json")
+        };
+        let messages = request["messages"].as_array().expect("messages");
+        assert_eq!(messages.first().expect("first")["role"], json!("system"));
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("<compacted-summary>"))
+        );
+        assert!(messages.iter().any(|message| {
+            message["content"] == json!("previous answer the user continues from")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["content"] == json!("latest request"))
+        );
+        // The oldest turns are summarized, not replayed.
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["content"] == json!("old answer 0"))
+        );
+        assert!(!messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with("0:"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn oversized_existing_history_is_summarized_in_chunks() {
+        let directory = tempdir().expect("tempdir");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = CompactionTransport {
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::new(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                context_window: 10_000,
+                max_output_tokens: 1_000,
+                compact_at_ratio: 0.5,
+                retain_recent_ratio: 0.05,
+                compact_max_tokens: 2_000,
+                ..AgentConfig::default()
+            },
+        );
+        // Roughly twice the model window before the first request, like a
+        // long-lived session created before compaction existed.
+        let mut history = Vec::new();
+        for turn in 0..20 {
+            history.push(ChatMessage::user(format!("old request {turn}")));
+            let mut call = ChatMessage::assistant("checking");
+            call.tool_calls = Some(vec![ToolCall::function(
+                format!("call-{turn}"),
+                "read_file",
+                json!({"path": format!("file{turn}.txt")}),
+            )]);
+            history.push(call);
+            history.push(ChatMessage::tool(
+                format!("call-{turn}"),
+                format!("{turn}:{}", "x".repeat(3_000)),
+            ));
+            history.push(ChatMessage::assistant(format!("old answer {turn}")));
+        }
+        history.push(ChatMessage::user("previous request"));
+        history.push(ChatMessage::assistant(
+            "previous answer the user continues from",
+        ));
+        history.push(ChatMessage::user("latest request"));
+
+        let run = agent.run(history).await.expect("run");
+        assert_eq!(run.text, "Done.");
+        let compaction = run.compaction.expect("checkpoint");
+        assert!(compaction.shadowed_messages > 0);
+        assert!(compaction.after_bytes < compaction.before_bytes);
+
+        let requests = requests.lock().expect("requests");
+        assert!(
+            requests.len() > 2,
+            "the oversized history must be summarized in more than one chunk"
+        );
+        let last: Value =
+            serde_json::from_slice(&requests.last().expect("last").body).expect("request json");
+        let messages = last["messages"].as_array().expect("messages");
+        assert!(messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("<compacted-summary>"))
+        }));
+        assert!(messages.iter().any(|message| {
+            message["content"] == json!("previous answer the user continues from")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["content"] == json!("latest request"))
+        );
+        let estimated_input = request_tokens(
+            &serde_json::from_value::<Vec<ChatMessage>>(Value::Array(messages.clone()))
+                .expect("history"),
+            0,
+        );
+        let max_tokens = last["max_tokens"].as_u64().expect("max_tokens") as usize;
+        assert!(estimated_input + max_tokens <= 10_000);
+    }
+
+    #[test]
+    fn compaction_boundary_keeps_recent_turns_and_tool_pairs() {
+        let mut old_call = ChatMessage::assistant("checking old");
+        old_call.tool_calls = Some(vec![ToolCall::function(
+            "call-old",
+            "read_file",
+            json!({"path": "old.txt"}),
+        )]);
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("old request"),
+            old_call,
+            ChatMessage::tool("call-old", "old result"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("previous request"),
+            ChatMessage::assistant("previous answer"),
+            ChatMessage::user("latest request"),
+        ];
+        let end = select_compaction_end(&messages, 7, 0).expect("range");
+        assert_eq!(end, 4);
+        assert_eq!(messages[end].role, ChatRole::Assistant);
+        assert_eq!(messages[end + 1].role, ChatRole::User);
+        assert!(select_compaction_end(&messages, 5, 0).is_none());
     }
 
     #[tokio::test]
@@ -1696,7 +2094,11 @@ mod tests {
             .run(vec![ChatMessage::user("read hello.txt")])
             .await
             .expect("run");
-        let request = request_json(&requests, 1);
+        let request = {
+            let requests = requests.lock().expect("requests");
+            let last = requests.last().expect("main request");
+            serde_json::from_slice::<Value>(&last.body).expect("request json")
+        };
         let messages = request["messages"].as_array().expect("messages");
         assert!(
             messages.iter().any(|message| {
@@ -1715,7 +2117,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn huge_reasoning_history_is_compacted_before_the_budget_check() {
+    async fn completed_text_reasoning_is_not_replayed() {
         let directory = tempdir().expect("tempdir");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let transport = RecordingTransport {
@@ -1745,30 +2147,34 @@ mod tests {
         agent.run(history).await.expect("run");
         let request = request_json(&requests, 0);
         let messages = request["messages"].as_array().expect("messages");
-        assert!(messages.iter().any(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("<compacted-summary"))
-        }));
-        assert_eq!(request["max_tokens"], json!(16_384));
-        let reasoning_bytes = messages
-            .iter()
-            .filter_map(|message| message["reasoning_content"].as_str())
-            .map(str::len)
-            .sum::<usize>();
-        assert!(
-            reasoning_bytes < 500_000,
-            "compaction should drop most old reasoning rather than replay 4 MB"
+        assert_eq!(
+            messages.last().expect("last")["content"],
+            json!("latest request")
         );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.get("reasoning_content").is_none()),
+            "finished text turn reasoning should be dropped"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["content"] == json!("ok"))
+                .count(),
+            40,
+            "visible assistant answers must survive verbatim"
+        );
+        assert_eq!(request["max_tokens"], json!(16_384));
     }
 
     #[tokio::test]
-    async fn request_compacts_history_and_fits_completion_budget() {
+    async fn compaction_never_summarizes_the_recent_turns_to_force_a_fit() {
         let directory = tempdir().expect("tempdir");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let transport = RecordingTransport {
             responses: Mutex::new(VecDeque::from([response(
-                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"unused"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
             )])),
             requests: Arc::clone(&requests),
         };
@@ -1779,41 +2185,25 @@ mod tests {
             Arc::new(WorkspaceService::new(directory.path())),
             AgentConfig {
                 stream: false,
-                context_window: 12_000,
-                max_output_tokens: 16_384,
-                compact_at_ratio: 0.5,
-                compact_keep_recent: 4,
-                compact_after_bytes: 0,
+                context_window: 20_000,
+                max_output_tokens: 1_000,
                 ..AgentConfig::default()
             },
         );
         let history = vec![
-            ChatMessage::user(format!("old request {}", "x".repeat(60_000))),
-            ChatMessage::assistant("old answer"),
+            ChatMessage::user("previous request"),
+            ChatMessage::assistant("y".repeat(90_000)),
             ChatMessage::user("latest request"),
         ];
-        let run = agent.run(history).await.expect("run");
-        assert_eq!(run.text, "Done.");
-        let request = request_json(&requests, 0);
-        let messages = request["messages"].as_array().expect("messages");
-        assert_eq!(messages.first().expect("first")["role"], json!("system"));
-        assert!(messages.iter().any(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("<compacted-summary"))
-        }));
-        assert_eq!(
-            messages.last().expect("last")["content"],
-            json!("latest request")
+        let error = agent
+            .run(history)
+            .await
+            .expect_err("oversized previous turn");
+        assert!(matches!(error, AgentError::ContextOverflow { .. }));
+        assert!(
+            requests.lock().expect("requests").is_empty(),
+            "the summarizer must not rewrite the turns the user is continuing from"
         );
-        let max_tokens = request["max_tokens"].as_u64().expect("max_tokens");
-        assert!(max_tokens < 16_384, "completion budget must shrink");
-        let estimated_input = messages
-            .iter()
-            .map(|message| message.to_string().len())
-            .sum::<usize>()
-            / 3;
-        assert!(estimated_input + max_tokens as usize + 1_500 <= 12_000);
     }
 
     #[tokio::test]
@@ -1835,7 +2225,6 @@ mod tests {
                 stream: false,
                 context_window: 32_000,
                 max_output_tokens: 16_384,
-                compact_after_bytes: 0,
                 ..AgentConfig::default()
             },
         );

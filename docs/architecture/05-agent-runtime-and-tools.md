@@ -1066,11 +1066,17 @@ pub struct TurnBudget {
 - Cancellation propagates to the provider stream and all child processes.
 - A cancelled turn preserves partial assistant text and completed tool results.
 - A repeated-failure guard stops loops after N identical failures.
-- Before each provider request, if the history exceeds `compact_after_bytes`
-  (600 KB by default), tool messages older than the recent window (8 messages
-  by default) are replaced with `[compacted tool result; N bytes omitted]`.
-  System, user, and assistant text are never rewritten. This is a deterministic
-  first-stage compactor; it intentionally resets the cache prefix.
+- Before each provider request, the agent estimates prompt tokens against the
+  model window. At 80% pressure (or when the request cannot fit), it compacts
+  history using the model itself: the conversation's system prompt, tools, and
+  an older span are replayed, the model writes a structured checkpoint, and the
+  span is replaced with one `<compacted-summary>` message. The previous and
+  current user turns always stay verbatim. A history larger than the window is
+  summarized in window-sized chunks, each merging the previous checkpoint.
+  Compaction runs at most once per turn and is persisted as
+  `compaction/start`, `compaction/summary`, and `compaction/end`; shadowed
+  messages remain in `session_messages` with `surface = 0` for the transcript
+  and audit.
 
 ## 16. Runtime pseudocode
 

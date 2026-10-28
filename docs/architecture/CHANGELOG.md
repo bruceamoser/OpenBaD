@@ -37,17 +37,24 @@ changes.
   plus a production Vite build; the WebDriver suite in
   `apps/desktop/native-e2e/` remains the end-to-end coverage. This removes a
   permanently drifting duplicate of the native suite.
-- **Context budget and history compaction.** Before each provider request the
-  agent now estimates prompt tokens against the model window and caps the
-  completion budget so prompt plus output cannot exceed it. When history crosses
-  the pressure threshold it replaces older turns with a bounded
-  `<compacted-summary>` block, preserving the system prompt and recent whole
-  turns. Assistant `reasoning_content` is still passed back verbatim while tools
-  are present; older reasoning leaves the request only when its whole turn is
-  compacted. A request that cannot fit after compaction returns a clear
-  `ContextOverflow` error instead of a raw provider 400. The desktop chat shows a
-  live `context compacted` marker; stored history and the UI transcript remain
-  unchanged.
+- **Compaction follows the harness design.** Before each provider request the
+  agent estimates prompt tokens against the model window, compacts when the
+  prompt passes 80% of the window (or cannot fit), and caps the completion
+  budget to the space that remains. Compaction summarizes complete older turns
+  through the model itself, reusing the conversation's system prompt and tool
+  schemas as the request prefix, and replaces them with one
+  `<compacted-summary>` checkpoint. The previous and current user turns are
+  always retained verbatim, so the answer the user is continuing from is never
+  summarized away and tool-call/result pairs are never split. The checkpoint is
+  persisted as `compaction/start`, `compaction/summary`, and `compaction/end`
+  events; the new `session_messages.surface` column keeps the original messages
+  for the transcript and audit while the model replays only the checkpoint plus
+  the retained tail. Compaction runs at most once per turn, so a long agentic
+  turn no longer rewrites tool results on every step. Completed text turns drop
+  their now-unneeded `reasoning_content`; tool-call turns keep it. A request
+  that still cannot fit returns a clear `ContextOverflow` error instead of a raw
+  provider 400. The desktop chat shows at most one `context compacted` marker
+  per turn.
 - **Project export/import.** New `openbad-transfer` crate packs a project into a
   single `.openbad-project` zip: workspace files (including `.git` and
   `.openbad`, excluding rebuildable output and `.gitignore`d paths) plus
