@@ -304,3 +304,13 @@ token-based theming down to light mode. Delegated subagents now run under the
 parent's policy and approval gate instead of bypassing it. See
 `docs/plans/0004-chat-experience-and-turn-engine.md` for the design and the
 follow-up log.
+
+## v0.2.1
+
+Fix release on top of 0.2.0. The read-before-overwrite guard now remembers reads
+for the whole session, with the file's size and modification time, instead of
+only for the current turn — so a file read in one turn can be overwritten in
+the next, an external edit still forces a re-read, and delegated subagents see
+the parent's reads. The transcript no longer repeats every tool result under
+the final message, and tool cards render before the answer so the turn ends
+with the answer.
