@@ -69,6 +69,16 @@ export type ChatAttachment = {
   previewUrl?: string;
 };
 
+export type ToolCallView = {
+  id: string;
+  name: string;
+  arguments: string;
+  status: "queued" | "running" | "settled";
+  durationMs?: number;
+  result?: string;
+  isError?: boolean;
+};
+
 export type ChatEntry = {
   id: string;
   role: "user" | "assistant";
@@ -80,6 +90,8 @@ export type ChatEntry = {
   lastReasoningStep?: number;
   status?: string;
   tools?: string[];
+  toolCalls?: ToolCallView[];
+  checkpointCount?: number;
   steering?: boolean;
   attachments?: ChatAttachment[];
   usage?: Usage;
