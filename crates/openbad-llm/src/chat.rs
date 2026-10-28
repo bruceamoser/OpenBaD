@@ -383,6 +383,18 @@ pub struct ToolCallDelta {
     pub function: Option<FunctionDelta>,
 }
 
+/// Rewrites tool arguments that are not JSON objects to `{}` so a replayed
+/// history still validates.
+pub fn sanitize_tool_arguments(calls: &mut [ToolCall]) {
+    for call in calls {
+        let is_object = serde_json::from_str::<Value>(&call.function.arguments)
+            .is_ok_and(|value| value.is_object());
+        if !is_object {
+            call.function.arguments = "{}".to_owned();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamDelta {
     #[serde(default)]

@@ -4944,6 +4944,12 @@ fn persist_compaction(
                     "source": "compaction",
                     "shadowed_messages": compaction.shadowed_messages,
                     "shadowed_through_seq": cutoff,
+                    "surface_op": {
+                        "replace": {
+                            "start_seq": 0,
+                            "end_seq": cutoff
+                        }
+                    },
                     "before_bytes": compaction.before_bytes,
                     "after_bytes": compaction.after_bytes,
                 })),
@@ -5215,6 +5221,79 @@ mod tests {
         assert_eq!(shadowed_through_seq(&entries, 1), 0);
         assert_eq!(shadowed_through_seq(&entries, 3), 11);
         assert_eq!(shadowed_through_seq(&entries, 9), 12);
+    }
+
+    #[test]
+    fn replay_matches_the_projected_history() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("replay", "/tmp/openbad-replay")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("replay"))
+            .expect("session");
+        store
+            .append_events(
+                session,
+                vec![
+                    NewEvent::new(SessionEventKind::TurnStart).with_turn(1),
+                    NewEvent::new(SessionEventKind::UserMessage)
+                        .with_turn(1)
+                        .with_step(1)
+                        .with_payload(json!({"content": "first question"})),
+                    NewEvent::new(SessionEventKind::AssistantMessage)
+                        .with_turn(1)
+                        .with_step(1)
+                        .with_payload(json!({"content": "first answer"})),
+                    NewEvent::new(SessionEventKind::TurnEnd)
+                        .with_turn(1)
+                        .with_payload(json!({"reason": "complete"})),
+                    NewEvent::new(SessionEventKind::TurnStart).with_turn(2),
+                    NewEvent::new(SessionEventKind::UserMessage)
+                        .with_turn(2)
+                        .with_step(1)
+                        .with_payload(json!({"content": "second question"})),
+                    NewEvent::new(SessionEventKind::CompactionSummary)
+                        .with_turn(2)
+                        .with_payload(json!({
+                            "content": "summary",
+                            "source": "compaction",
+                            "shadowed_messages": 2,
+                            "shadowed_through_seq": 3,
+                            "surface_op": {"replace": {"start_seq": 0, "end_seq": 3}}
+                        })),
+                    NewEvent::new(SessionEventKind::AssistantMessage)
+                        .with_turn(2)
+                        .with_step(1)
+                        .with_payload(json!({"content": "second answer"})),
+                    NewEvent::new(SessionEventKind::TurnEnd)
+                        .with_turn(2)
+                        .with_payload(json!({"reason": "complete"})),
+                ],
+            )
+            .expect("seed");
+
+        let (history, _) = load_history(&store, session).expect("history");
+        let events = store.load_events(session).expect("events");
+        let replayed = openbad_llm::derive_messages(&events)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+
+        let replayed_json = replayed
+            .iter()
+            .map(|message| serde_json::to_string(message).expect("replay json"))
+            .collect::<Vec<_>>();
+        let history_json = history
+            .iter()
+            .map(|message| serde_json::to_string(message).expect("history json"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            replayed_json, history_json,
+            "replay must be byte-identical to the projected history"
+        );
+        assert_eq!(replayed.len(), 3);
     }
 
     #[test]

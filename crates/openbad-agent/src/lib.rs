@@ -1711,15 +1711,7 @@ fn emit_full_message(observer: &dyn AgentObserver, step: u32, message: &ChatMess
 /// error, but replaying the raw arguments in the next request would fail
 /// request validation and abort the whole turn. History therefore keeps a
 /// valid object while execution still reports the original parse error.
-pub fn sanitize_tool_arguments(calls: &mut [ToolCall]) {
-    for call in calls {
-        let is_object = serde_json::from_str::<Value>(&call.function.arguments)
-            .is_ok_and(|value| value.is_object());
-        if !is_object {
-            call.function.arguments = "{}".to_owned();
-        }
-    }
-}
+pub use openbad_llm::chat::sanitize_tool_arguments;
 
 fn merge_tool_delta(calls: &mut BTreeMap<u32, ToolCall>, delta: ToolCallDelta) {
     let entry = calls.entry(delta.index).or_insert_with(|| ToolCall {
