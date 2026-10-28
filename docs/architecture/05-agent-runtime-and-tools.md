@@ -232,12 +232,12 @@ The registry scopes tools by session and workspace:
 - **Workspace tools** — enabled by trust state and capabilities.
 - **MCP tools** — exposed through `mcp_call`.
 - **Skill tools** — exposed through `skill`.
-- **Subagent tools** — a directed worker gets the normal built-in surface minus `subagent` itself, so depth stays at one.
+- **Subagent tools** — a directed worker gets the normal built-in surface minus `subagent` itself, so depth stays at one. The team board is shared, so a parent and its children can claim and finish the same tasks.
 
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-**Domain facades.** The registry contains 125 internal tools grouped into 18
+**Domain facades.** The registry contains 136 internal tools grouped into 18
 domains: artifacts, collaboration, context, exec, files, git, governance,
 knowledge, mcp, memory, orchestration, plan, plugins, repos, search, session,
 snapshots, and web. The model sees two stable tools per domain:
@@ -434,6 +434,7 @@ Implemented:
 | `repo_health` / `git_commit_context` | read | Ahead/behind, dirty state, and commit-message context |
 | `github` | command | Full GitHub surface through `gh`: status, repositories, branches and protection, issues, labels, milestones, pull requests, reviews and merges, Actions, releases, Pages, search, and generic `gh api`; destructive actions require `confirm=true` |
 | `subagent` | execute | Spawn, list, wait for, inspect, or cancel a focused background worker. `spawn` returns immediately; `wait` blocks until a terminal status or timeout, and `status` returns the result and recent activity. Workers inherit the session access mode and cannot spawn further workers |
+| `team_task_create` / `team_task_list` / `team_task_update` / `team_task_get` | write/read/write/read | The shared board in `.openbad/team.json`: units of work with a state (`open`, `claimed`, `blocked`, `done`, `dropped`), an owner, and a result. A parent lays work out and names each task id in a subagent's instructions; the child claims it and records the outcome |
 | `plugin_list` / `plugin_describe` | read | Discover installed and bundled plugins and their actions |
 | `plugin_call` / `plugin_test` | command | Run a plugin action or its declared test command with JSON stdin/stdout and evidence |
 | `write_plugin` / `plugin_install_builtin` | write | Scaffold a plugin or install the bundled AsciiDoc plugin |

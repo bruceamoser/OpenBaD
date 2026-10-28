@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod plan;
 pub mod policy;
 pub mod questions;
+pub mod team;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -40,6 +41,10 @@ pub use policy::{PolicyError, ProjectPolicy, load_project_policy, policy_path};
 pub use questions::{
     Question, QuestionError, answer_question, load_questions, question_summary, questions_path,
     save_questions,
+};
+pub use team::{
+    BoardError, TaskState, TeamTask, board_path, board_summary, create_task, load_board,
+    save_board, task_report, update_task,
 };
 
 fn normalize(path: &Path) -> PathBuf {
