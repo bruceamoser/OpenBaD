@@ -59,6 +59,9 @@ import {
   forgetMemory as forgetStoredMemory,
   loadWorkspaceApprovals as fetchWorkspaceApprovals,
   revokeWorkspaceApproval as revokePersistedApproval,
+  markSessionUnread as persistSessionUnread,
+  notifyTurnFinished as raiseCompletionNotification,
+  onNotificationOpened as subscribeToNotificationOpened,
   forkSession,
   grantOutsideAccess as grantFilesystemAccess,
   loadOutsideAccessGrants as fetchAccessGrants,
@@ -139,10 +142,20 @@ type Preferences = {
   model: string;
   thinking: boolean;
   reasoningEffort: string;
+  /** Raise an OS notification when a turn finishes while the window is hidden. */
+  notifyOnCompletion: boolean;
 };
 
 type PermissionMode = AccessMode;
-type SettingsTab = "model" | "access" | "secrets" | "mcp" | "project" | "services" | "about";
+type SettingsTab =
+  | "general"
+  | "model"
+  | "access"
+  | "secrets"
+  | "mcp"
+  | "project"
+  | "services"
+  | "about";
 
 function countSuffix(primary?: number, total?: number): string {
   if (primary === undefined) {
@@ -155,6 +168,7 @@ const defaultPreferences: Preferences = {
   model: "deepseek-flash",
   thinking: true,
   reasoningEffort: "high",
+  notifyOnCompletion: true,
 };
 
 function loadPreferences(): Preferences {
@@ -170,6 +184,10 @@ function loadPreferences(): Preferences {
           typeof parsed.reasoningEffort === "string"
             ? parsed.reasoningEffort
             : defaultPreferences.reasoningEffort,
+        notifyOnCompletion:
+          typeof parsed.notifyOnCompletion === "boolean"
+            ? parsed.notifyOnCompletion
+            : defaultPreferences.notifyOnCompletion,
       };
     }
   } catch {
@@ -400,6 +418,9 @@ export default function App() {
   const [model, setModel] = useState(preferences.model);
   const [thinking, setThinking] = useState(preferences.thinking);
   const [reasoningEffort, setReasoningEffort] = useState(preferences.reasoningEffort);
+  const [notifyOnCompletion, setNotifyOnCompletion] = useState(
+    preferences.notifyOnCompletion,
+  );
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [indexSummary, setIndexSummary] = useState<WorkspaceIndexSummary | null>(null);
@@ -460,6 +481,11 @@ export default function App() {
   const visibleRunRef = useRef<string | null>(null);
   const workspacePathRef = useRef(workspacePath);
   workspacePathRef.current = workspacePath;
+  /** Read inside async turn completion, where a stale closure would be wrong. */
+  const notifyOnCompletionRef = useRef(notifyOnCompletion);
+  notifyOnCompletionRef.current = notifyOnCompletion;
+  const sessionsRef = useRef<SessionSummary[]>(sessions);
+  sessionsRef.current = sessions;
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -810,12 +836,12 @@ export default function App() {
     try {
       localStorage.setItem(
         "openbad.preferences",
-        JSON.stringify({ model, thinking, reasoningEffort }),
+        JSON.stringify({ model, thinking, reasoningEffort, notifyOnCompletion }),
       );
     } catch {
       // Storage can be unavailable in hardened webviews; preferences are optional.
     }
-  }, [model, reasoningEffort, thinking]);
+  }, [model, notifyOnCompletion, reasoningEffort, thinking]);
 
   useEffect(() => {
     setProjectNameDraft(activeProject?.name ?? "");
@@ -1643,8 +1669,32 @@ export default function App() {
         setTotalDurationMs(run.totalDurationMs);
       }
       setAnnouncement("Turn finished");
+      const finishedSessionId = reply.session_id;
+      const onScreen = visibleRunRef.current === runKey;
       if (!document.hasFocus()) {
         setToast("Turn finished");
+      }
+      if (!onScreen) {
+        // The turn finished off-screen. Keep a dot on the session until its
+        // transcript is opened, and persist it so a restart keeps the marker.
+        await persistSessionUnread(finishedSessionId, true).catch(() => undefined);
+        setSessions((items) =>
+          items.map((item) =>
+            item.id === finishedSessionId ? { ...item, unread: true } : item,
+          ),
+        );
+      }
+      if (!document.hasFocus() && notifyOnCompletionRef.current && !run.stopRequested) {
+        const finishedTitle = sessionsRef.current.find(
+          (item) => item.id === finishedSessionId,
+        )?.title;
+        void raiseCompletionNotification(
+          finishedSessionId,
+          run.projectName,
+          finishedTitle === undefined || finishedTitle === null || finishedTitle.length === 0
+            ? "Turn finished"
+            : `Turn finished · ${finishedTitle}`,
+        ).catch(() => undefined);
       }
       void loadFoundation();
       void loadSessions();
@@ -1831,12 +1881,52 @@ export default function App() {
           showRun ? run.totalDurationMs : view.total_duration_ms,
         );
         setEntries(showRun ? [...run.entries] : loadedEntries);
+        // Opening the transcript clears the unread mark it may have carried.
+        void persistSessionUnread(view.session_id, false).catch(() => undefined);
+        setSessions((items) =>
+          items.map((item) =>
+            item.id === view.session_id ? { ...item, unread: false } : item,
+          ),
+        );
       } catch (cause) {
         setError(describeError(cause));
       }
     },
     [captureCurrentScroll, projects, workspacePath],
   );
+
+  // A notification click focuses the window; the host then names the session it
+  // was about, so the click lands on the finished transcript.
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void subscribeToNotificationOpened((target) => {
+      void (async () => {
+        const known = sessionsRef.current.find((item) => item.id === target);
+        if (known !== undefined) {
+          await openSession(known);
+          return;
+        }
+        const fresh = await fetchSessions().catch(() => []);
+        const match = fresh.find((item) => item.id === target);
+        if (match !== undefined) {
+          await openSession(match);
+        }
+      })();
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+        } else {
+          unsubscribe = dispose;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [openSession]);
 
   const openLineageSource = useCallback(async () => {
     const sourceId = lineageSource?.id;
@@ -2432,6 +2522,7 @@ export default function App() {
                           onArchive={() => void archiveSession(session, true)}
                           onDelete={() => void deleteSession(session)}
                           archived={false}
+                          unread={session.unread && session.id !== sessionId}
                           status={
                             session.id === sessionId
                               ? pendingApproval !== null
@@ -2857,6 +2948,8 @@ export default function App() {
           onThinking={setThinking}
           reasoningEffort={reasoningEffort}
           onReasoningEffort={setReasoningEffort}
+          notifyOnCompletion={notifyOnCompletion}
+          onNotifyOnCompletion={setNotifyOnCompletion}
           permissionMode={permissionMode}
           onPermissionMode={changePermissionMode}
           accessGrants={accessGrants}
@@ -3080,6 +3173,7 @@ function SessionRow({
   onArchive,
   onDelete,
   archived,
+  unread,
   status,
 }: {
   session: SessionSummary;
@@ -3095,6 +3189,8 @@ function SessionRow({
   onArchive: () => void;
   onDelete: () => void;
   archived: boolean;
+  /** A turn finished here while the user was elsewhere; cleared on open. */
+  unread?: boolean;
   status?: "running" | "approval";
 }) {
   if (editing) {
@@ -3130,6 +3226,13 @@ function SessionRow({
     >
       <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
         <MessageSquare size={12} className="shrink-0 text-obd-subtle" />
+        {status === undefined && unread === true && (
+          <span
+            aria-label="Unread"
+            title="Unread"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-obd-info"
+          />
+        )}
         {status !== undefined && (
           <span
             aria-label={status === "approval" ? "Waiting for approval" : "Running"}
@@ -3715,6 +3818,8 @@ function SettingsDialog({
   onThinking,
   reasoningEffort,
   onReasoningEffort,
+  notifyOnCompletion,
+  onNotifyOnCompletion,
   permissionMode,
   onPermissionMode,
   accessGrants,
@@ -3743,6 +3848,8 @@ function SettingsDialog({
   onThinking: (value: boolean) => void;
   reasoningEffort: string;
   onReasoningEffort: (value: string) => void;
+  notifyOnCompletion: boolean;
+  onNotifyOnCompletion: (value: boolean) => void;
   permissionMode: PermissionMode;
   onPermissionMode: (value: PermissionMode) => void;
   accessGrants: OutsideAccessGrant[];
@@ -3763,6 +3870,7 @@ function SettingsDialog({
   foundation: FoundationState;
 }) {
   const tabs: { id: SettingsTab; label: string }[] = [
+    { id: "general", label: "General" },
     { id: "model", label: "Model" },
     { id: "access", label: "Access" },
     { id: "secrets", label: "Secrets" },
@@ -3810,6 +3918,31 @@ function SettingsDialog({
         </div>
 
         <div className="min-w-0 flex-1 overflow-y-auto p-5">
+          {tab === "general" && (
+            <div className="max-w-md space-y-4">
+              <Section
+                title="Notifications"
+                description="System notifications for work that finishes while OpenBaD is in the background."
+              >
+                <label className="flex items-start justify-between gap-3 text-[12px] text-obd-body">
+                  <span className="min-w-0">
+                    Notify when a turn finishes
+                    <span className="mt-0.5 block text-[11px] leading-5 text-obd-subtle">
+                      Only when the window is not in front and the turn was not stopped.
+                      Clicking the notification returns to that session.
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={notifyOnCompletion}
+                    onChange={(event) => onNotifyOnCompletion(event.target.checked)}
+                    className="mt-0.5 accent-obd-accent"
+                  />
+                </label>
+              </Section>
+            </div>
+          )}
+
           {tab === "model" && (
             <div className="max-w-md space-y-4">
               <Section title="Model route" description="Changes start a new cache series.">

@@ -64,6 +64,11 @@ enum WriteCommand {
         tool: String,
         reply: SyncSender<Result<(), StoreError>>,
     },
+    SetSessionUnread {
+        session_id: SessionId,
+        unread: bool,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
     RenameWorkspace {
         workspace_id: WorkspaceId,
         name: String,
@@ -493,6 +498,20 @@ impl Store {
         self.write(|reply| WriteCommand::SetSessionAccessMode {
             session_id,
             access_mode: access_mode.to_owned(),
+            reply,
+        })
+    }
+
+    /// Mark a session unread after a turn finished while the user was not
+    /// looking at it, or clear the mark once its transcript is opened.
+    pub fn set_session_unread(
+        &self,
+        session_id: SessionId,
+        unread: bool,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::SetSessionUnread {
+            session_id,
+            unread,
             reply,
         })
     }
@@ -1208,6 +1227,7 @@ impl Store {
                 updated_at,
                 last_turn: last_turn as u32,
                 access_mode: access_mode_from_metadata(&metadata_json),
+                unread: unread_from_metadata(&metadata_json),
                 forked_from_seq: forked_from_seq.and_then(|seq| u64::try_from(seq).ok()),
                 forked_from_session: forked_from_session
                     .map(|value| {
@@ -1539,6 +1559,7 @@ impl Store {
                 updated_at,
                 last_turn: last_turn as u32,
                 access_mode: access_mode_from_metadata(&metadata_json),
+                unread: unread_from_metadata(&metadata_json),
                 forked_from_seq: forked_from_seq.and_then(|seq| u64::try_from(seq).ok()),
                 forked_from_session: forked_from_session
                     .map(|value| {
@@ -1648,6 +1669,7 @@ impl Store {
                 updated_at,
                 last_turn: last_turn as u32,
                 access_mode: access_mode_from_metadata(&metadata_json),
+                unread: unread_from_metadata(&metadata_json),
                 forked_from_seq: forked_from_seq.and_then(|seq| u64::try_from(seq).ok()),
                 forked_from_session: forked_from_session
                     .map(|value| {
@@ -3169,28 +3191,25 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                 access_mode,
                 reply,
             } => {
-                let result = (|| {
-                    let metadata_json: Option<String> = connection
-                        .query_row(
-                            "SELECT metadata_json FROM sessions WHERE id = ?1",
-                            [session_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .optional()?;
-                    let mut metadata = metadata_json
-                        .as_deref()
-                        .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                        .filter(Value::is_object)
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    if let Some(object) = metadata.as_object_mut() {
-                        object.insert("access_mode".to_owned(), serde_json::json!(access_mode));
-                    }
-                    connection.execute(
-                        "UPDATE sessions SET metadata_json = ?1 WHERE id = ?2",
-                        params![serde_json::to_string(&metadata)?, session_id.to_string()],
-                    )?;
-                    Ok(())
-                })();
+                let result = set_session_metadata_value(
+                    &connection,
+                    session_id,
+                    "access_mode",
+                    Value::String(access_mode),
+                );
+                let _ = reply.send(result);
+            }
+            WriteCommand::SetSessionUnread {
+                session_id,
+                unread,
+                reply,
+            } => {
+                let result = set_session_metadata_value(
+                    &connection,
+                    session_id,
+                    "unread",
+                    Value::Bool(unread),
+                );
                 let _ = reply.send(result);
             }
             WriteCommand::SetSessionArchived {
@@ -3687,6 +3706,42 @@ fn access_mode_from_metadata(metadata_json: &str) -> String {
             )
         })
         .unwrap_or_else(|| "read".to_owned())
+}
+
+fn unread_from_metadata(metadata_json: &str) -> bool {
+    serde_json::from_str::<Value>(metadata_json)
+        .ok()
+        .and_then(|value| value.get("unread").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Merge one key into a session's metadata JSON, keeping the other keys.
+fn set_session_metadata_value(
+    connection: &Connection,
+    session_id: SessionId,
+    key: &str,
+    value: Value,
+) -> Result<(), StoreError> {
+    let metadata_json: Option<String> = connection
+        .query_row(
+            "SELECT metadata_json FROM sessions WHERE id = ?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut metadata = metadata_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(key.to_owned(), value);
+    }
+    connection.execute(
+        "UPDATE sessions SET metadata_json = ?1 WHERE id = ?2",
+        params![serde_json::to_string(&metadata)?, session_id.to_string()],
+    )?;
+    Ok(())
 }
 
 fn create_session(connection: &Connection, session: NewSession) -> Result<SessionId, StoreError> {
@@ -4713,6 +4768,31 @@ mod tests {
             store.set_session_access_mode(session, "admin"),
             Err(StoreError::InvalidData(_))
         ));
+    }
+
+    #[test]
+    fn session_unread_mark_survives_and_clears() {
+        let store = Store::open_in_memory().expect("store");
+        let session = store.create_session(None, None).expect("session");
+        assert!(!store.list_sessions(10).expect("sessions")[0].unread);
+
+        store
+            .set_session_unread(session, true)
+            .expect("mark unread");
+        assert!(store.list_sessions(10).expect("sessions")[0].unread);
+
+        // The mark shares metadata with the access mode and must not clobber it.
+        store
+            .set_session_access_mode(session, "edit")
+            .expect("set mode");
+        let summary = store.list_sessions(10).expect("sessions").remove(0);
+        assert!(summary.unread);
+        assert_eq!(summary.access_mode, "edit");
+
+        store
+            .set_session_unread(session, false)
+            .expect("clear unread");
+        assert!(!store.list_sessions(10).expect("sessions")[0].unread);
     }
 
     #[test]

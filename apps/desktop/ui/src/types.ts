@@ -226,6 +226,8 @@ export type SessionSummary = {
   created_at: number;
   updated_at: number;
   last_turn: number;
+  /** Set when a turn finished while the user was not looking at the session. */
+  unread: boolean;
   access_mode: AccessMode;
   forked_from_seq?: number | null;
   forked_from_session?: string | null;

@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
@@ -863,6 +864,42 @@ export async function forkSession(
       0,
     ),
   };
+}
+
+/** Persist whether a session still has a turn the user has not looked at. */
+export async function markSessionUnread(
+  sessionId: string,
+  unread: boolean,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("mark_session_unread", { sessionId, unread });
+  }
+}
+
+/** Show a completion notification; the window must already be unfocused. */
+export async function notifyTurnFinished(
+  sessionId: string,
+  title: string,
+  body: string,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("notify_turn_finished", { sessionId, title, body });
+  }
+}
+
+/**
+ * Calls `handler` with the session of the last completion notification when the
+ * window regains focus from it. Returns an unsubscribe function.
+ */
+export async function onNotificationOpened(
+  handler: (sessionId: string) => void,
+): Promise<() => void> {
+  if (!isTauri) {
+    return () => undefined;
+  }
+  return listen<string>("openbad:notification-opened", (event) =>
+    handler(event.payload),
+  );
 }
 
 export async function loadWorkspaceApprovals(
@@ -2006,6 +2043,7 @@ async function mockChat(
       created_at: startedAt,
       updated_at: Date.now(),
       last_turn: 1,
+      unread: false,
       access_mode: "read",
     });
   }

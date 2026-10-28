@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use openbad_agent::{
@@ -43,8 +43,9 @@ use openbad_tools::{
 use openbad_workspace::WorkspaceService;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_notification::{NotificationExt, PermissionState};
 use uuid::Uuid;
 
 const API_KEY_REFERENCE: &str = "openbad/deepseek/api_key";
@@ -93,6 +94,33 @@ pub struct AppState {
     subagent_cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<openbad_terminal::TerminalManager>,
     mcp: McpManagers,
+}
+
+/// How long a shown completion notification keeps pointing at its session.
+///
+/// A desktop notification click only focuses the window, so the app carries
+/// its own signal: the next focus after a notification reveals that session.
+/// It expires so a much later manual focus does not move the user.
+const NOTIFICATION_FOCUS_TTL: Duration = Duration::from_secs(120);
+
+struct PendingNotification {
+    session_id: String,
+    shown_at: Instant,
+}
+
+/// The session a window focus should reveal, if a notification is still fresh.
+#[derive(Default)]
+struct NotificationFocus {
+    pending: Mutex<Option<PendingNotification>>,
+}
+
+fn fresh_notification_session(
+    pending: Option<PendingNotification>,
+    now: Instant,
+) -> Option<String> {
+    pending
+        .filter(|item| now.saturating_duration_since(item.shown_at) <= NOTIFICATION_FOCUS_TTL)
+        .map(|item| item.session_id)
 }
 
 #[derive(Default)]
@@ -4885,6 +4913,68 @@ fn revoke_workspace_approval(
     Ok(())
 }
 
+/// Show a completion notification for a session.
+///
+/// The UI only calls this when the window is unfocused, the turn finished
+/// normally, and the preference is on. A refused permission is a soft no: the
+/// turn already finished, so there is nothing to report.
+#[tauri::command]
+fn notify_turn_finished(
+    app: tauri::AppHandle,
+    focus: State<'_, NotificationFocus>,
+    session_id: String,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    let notification = app.notification();
+    let mut permission = notification
+        .permission_state()
+        .map_err(|error| error.to_string())?;
+    if matches!(
+        permission,
+        PermissionState::Prompt | PermissionState::PromptWithRationale
+    ) {
+        permission = notification
+            .request_permission()
+            .map_err(|error| error.to_string())?;
+    }
+    if permission != PermissionState::Granted {
+        return Ok(());
+    }
+    notification
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| error.to_string())?;
+    if let Ok(mut pending) = focus.pending.lock() {
+        *pending = Some(PendingNotification {
+            session_id,
+            shown_at: Instant::now(),
+        });
+    }
+    Ok(())
+}
+
+/// Persist whether a session still has a turn the user has not looked at.
+#[tauri::command]
+fn mark_session_unread(
+    state: State<'_, AppState>,
+    session_id: String,
+    unread: bool,
+) -> Result<(), String> {
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .set_session_unread(session, unread)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn respond_to_approval(
     state: State<'_, AppState>,
@@ -5652,6 +5742,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             store: Arc::new(Mutex::new(store)),
             secrets: secret_store(),
@@ -5661,6 +5752,21 @@ pub fn run() {
             subagent_cancels: Arc::new(Mutex::new(HashMap::new())),
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
             mcp: McpManagers::default(),
+        })
+        .manage(NotificationFocus::default())
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Focused(true)) {
+                return;
+            }
+            let pending = window
+                .state::<NotificationFocus>()
+                .pending
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some(session_id) = fresh_notification_session(pending, Instant::now()) {
+                let _ = window.emit("openbad:notification-opened", session_id);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             health,
@@ -5689,6 +5795,8 @@ pub fn run() {
             clipboard::read_clipboard_image,
             cancel_chat,
             respond_to_approval,
+            notify_turn_finished,
+            mark_session_unread,
             workspace_approvals,
             revoke_workspace_approval,
             steer_chat,
@@ -6196,6 +6304,34 @@ mod tests {
             build().cached("write_file").is_none(),
             "a revoked grant asks again"
         );
+    }
+
+    #[test]
+    fn notification_focus_follows_only_a_fresh_notification() {
+        let shown_at = Instant::now();
+        let fresh = || {
+            Some(PendingNotification {
+                session_id: "session-1".to_owned(),
+                shown_at,
+            })
+        };
+        assert_eq!(
+            fresh_notification_session(fresh(), shown_at),
+            Some("session-1".to_owned())
+        );
+        assert_eq!(
+            fresh_notification_session(fresh(), shown_at + NOTIFICATION_FOCUS_TTL),
+            Some("session-1".to_owned())
+        );
+        assert_eq!(
+            fresh_notification_session(
+                fresh(),
+                shown_at + NOTIFICATION_FOCUS_TTL + Duration::from_secs(1)
+            ),
+            None,
+            "an old notification must not move the user on a later focus"
+        );
+        assert_eq!(fresh_notification_session(None, shown_at), None);
     }
 
     #[test]
