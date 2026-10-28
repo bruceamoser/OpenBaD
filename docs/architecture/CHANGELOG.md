@@ -291,3 +291,16 @@ project-scoped MCP enablement, and any-file chat attachments described below.
   `${{steps.id...}}` references, result templates, a 64-step cap, and
   background status. Nested calls inherit the session access mode. The
   built-in surface is 119 of 128 slots.
+
+## v0.2.0
+
+Bundled desktop release carrying the chat-experience and turn-engine rework on
+top of 0.1.12: a durable turn log that survives a crash or cancel, a fail-closed
+tool pipeline with per-call approvals and persisted workspace grants, a
+transcript that renders tool calls, edits, checkpoints, retries, forks, and
+compaction as first-class rows, non-truncating long-context handling, parallel
+sessions with Ask/Plan/Agent modes, OS notifications with unread tracking, and
+token-based theming down to light mode. Delegated subagents now run under the
+parent's policy and approval gate instead of bypassing it. See
+`docs/plans/0004-chat-experience-and-turn-engine.md` for the design and the
+follow-up log.
