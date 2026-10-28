@@ -57,6 +57,8 @@ import {
   checkpointDiff as fetchCheckpointDiff,
   clearApiKey as clearStoredApiKey,
   forgetMemory as forgetStoredMemory,
+  loadWorkspaceApprovals as fetchWorkspaceApprovals,
+  revokeWorkspaceApproval as revokePersistedApproval,
   forkSession,
   grantOutsideAccess as grantFilesystemAccess,
   loadOutsideAccessGrants as fetchAccessGrants,
@@ -125,6 +127,7 @@ import type {
   ToolCallView,
   UploadSource,
   Usage,
+  WorkspaceApproval,
   WorkspaceIndexSummary,
   WorkspaceSummary,
 } from "./types";
@@ -432,6 +435,7 @@ export default function App() {
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [accessNotice, setAccessNotice] = useState<string | null>(null);
   const [accessGrants, setAccessGrants] = useState<OutsideAccessGrant[]>([]);
+  const [toolApprovals, setToolApprovals] = useState<WorkspaceApproval[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
@@ -533,6 +537,33 @@ export default function App() {
     }
   }, []);
 
+  const loadToolApprovals = useCallback(async () => {
+    if (activeProject === null) {
+      setToolApprovals([]);
+      return;
+    }
+    try {
+      setToolApprovals(await fetchWorkspaceApprovals(activeProject.path));
+    } catch {
+      setToolApprovals([]);
+    }
+  }, [activeProject]);
+
+  const revokeToolApproval = useCallback(
+    async (approval: WorkspaceApproval) => {
+      if (activeProject === null) {
+        return;
+      }
+      try {
+        await revokePersistedApproval(activeProject.path, approval.tool);
+        setToolApprovals((items) => items.filter((item) => item.tool !== approval.tool));
+      } catch (cause) {
+        setError(describeError(cause));
+      }
+    },
+    [activeProject],
+  );
+
   const loadAccessGrants = useCallback(async () => {
     if (activeProject === null) {
       setAccessGrants([]);
@@ -548,6 +579,14 @@ export default function App() {
   useEffect(() => {
     void loadAccessGrants();
   }, [loadAccessGrants]);
+
+  // Standing approvals are shown in Settings, so refresh them whenever the
+  // dialog opens or the workspace changes.
+  useEffect(() => {
+    if (settingsOpen) {
+      void loadToolApprovals();
+    }
+  }, [loadToolApprovals, settingsOpen]);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -2822,6 +2861,8 @@ export default function App() {
           onPermissionMode={changePermissionMode}
           accessGrants={accessGrants}
           onRevokeAccess={(grant) => void revokeAccess(grant)}
+          toolApprovals={toolApprovals}
+          onRevokeToolApproval={(approval) => void revokeToolApproval(approval)}
           apiKeyStatus={apiKeyStatus}
           apiKeyInput={apiKeyInput}
           onApiKeyInput={setApiKeyInput}
@@ -3678,6 +3719,8 @@ function SettingsDialog({
   onPermissionMode,
   accessGrants,
   onRevokeAccess,
+  toolApprovals,
+  onRevokeToolApproval,
   apiKeyStatus,
   apiKeyInput,
   onApiKeyInput,
@@ -3703,6 +3746,8 @@ function SettingsDialog({
   permissionMode: PermissionMode;
   onPermissionMode: (value: PermissionMode) => void;
   accessGrants: OutsideAccessGrant[];
+  toolApprovals: WorkspaceApproval[];
+  onRevokeToolApproval: (approval: WorkspaceApproval) => void;
   onRevokeAccess: (grant: OutsideAccessGrant) => void;
   apiKeyStatus: boolean;
   apiKeyInput: string;
@@ -3870,6 +3915,43 @@ function SettingsDialog({
                           aria-label={`Revoke access to ${grant.path}`}
                           onClick={() => onRevokeAccess(grant)}
                           className="rounded p-1 text-obd-subtle hover:bg-obd-raised hover:text-obd-warning"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="border-t border-obd-line pt-3">
+                <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-obd-subtle">
+                  Standing tool approvals
+                </p>
+                {toolApprovals.length === 0 ? (
+                  <p className="px-1 text-[11px] leading-5 text-obd-subtle">
+                    No standing approvals. Choosing <em>Allow in this workspace</em> at an
+                    approval prompt keeps that tool allowed here, including after a restart.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {toolApprovals.map((approval) => (
+                      <div
+                        key={approval.tool}
+                        className="flex items-center gap-2 rounded-md border border-obd-line bg-obd-raised p-2.5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-mono text-[10px] text-obd-body">
+                            {approval.tool}
+                          </p>
+                          <p className="mt-0.5 text-[9px] uppercase tracking-wide text-obd-subtle">
+                            allowed in this workspace
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`Revoke approval for ${approval.tool}`}
+                          onClick={() => onRevokeToolApproval(approval)}
+                          className="rounded p-1 text-obd-subtle hover:bg-obd-surface hover:text-obd-warning"
                         >
                           <Trash2 size={11} />
                         </button>

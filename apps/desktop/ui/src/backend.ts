@@ -24,6 +24,7 @@ import type {
   MemoryRecord,
   OutsideAccessGrant,
   SessionSummary,
+  WorkspaceApproval,
   SessionView,
   KnowledgeDocument,
   KnowledgeDocumentSummary,
@@ -862,6 +863,23 @@ export async function forkSession(
       0,
     ),
   };
+}
+
+export async function loadWorkspaceApprovals(
+  workspacePath: string,
+): Promise<WorkspaceApproval[]> {
+  return isTauri
+    ? invoke<WorkspaceApproval[]>("workspace_approvals", { workspacePath })
+    : [];
+}
+
+export async function revokeWorkspaceApproval(
+  workspacePath: string,
+  tool: string,
+): Promise<void> {
+  if (isTauri) {
+    await invoke("revoke_workspace_approval", { workspacePath, tool });
+  }
 }
 
 export async function steerChat(runId: string, message: string): Promise<void> {

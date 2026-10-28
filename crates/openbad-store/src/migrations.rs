@@ -68,6 +68,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0016_session_fork",
         include_str!("../migrations/0016_session_fork.sql"),
     ),
+    (
+        "0017_tool_approvals",
+        include_str!("../migrations/0017_tool_approvals.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.
