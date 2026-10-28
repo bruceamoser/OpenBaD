@@ -54,6 +54,43 @@ impl RetryPolicy {
     }
 }
 
+/// Observes provider attempts that failed and are about to be retried.
+///
+/// The listener is also the cancellation seam: a caller that has been
+/// cancelled stops waiting out the backoff instead of letting the retry run.
+pub trait RequestAttempts: Send + Sync {
+    /// One attempt failed. `attempt` is 1-based and `delay` is the wait before
+    /// the next one.
+    fn retrying(&self, attempt: u32, status: Option<u16>, delay: Duration);
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+/// Sleep before the next attempt, waking early when the caller is cancelled.
+pub(crate) async fn backoff(
+    delay: Duration,
+    attempts: Option<&dyn RequestAttempts>,
+) -> Result<(), crate::provider::ProviderError> {
+    let Some(listener) = attempts else {
+        tokio::time::sleep(delay).await;
+        return Ok(());
+    };
+    let mut remaining = delay;
+    while !remaining.is_zero() {
+        if listener.is_cancelled() {
+            return Err(crate::provider::ProviderError::Cancelled);
+        }
+        let slice = remaining.min(Duration::from_millis(50));
+        tokio::time::sleep(slice).await;
+        remaining = remaining.saturating_sub(slice);
+    }
+    if listener.is_cancelled() {
+        return Err(crate::provider::ProviderError::Cancelled);
+    }
+    Ok(())
+}
+
 #[must_use]
 pub fn is_retryable(status: Option<u16>) -> bool {
     match status {

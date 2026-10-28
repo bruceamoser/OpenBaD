@@ -13,7 +13,7 @@ use crate::fim::{FimRequest, FimResponse};
 use crate::provider::{
     CacheMode, FrozenRequest, ModelProvider, ProviderCapabilities, ProviderError,
 };
-use crate::retry::RetryPolicy;
+use crate::retry::{RequestAttempts, RetryPolicy, backoff};
 use crate::transport::{HttpRequest, HttpTransport};
 
 pub const FLASH_MODEL: &str = "deepseek-flash";
@@ -215,7 +215,16 @@ impl<T: HttpTransport> DeepSeekClient<T> {
     }
 
     pub async fn complete(&self, frozen: FrozenRequest) -> Result<ModelResponse, ProviderError> {
-        let response = self.post_with_retry(&frozen).await?;
+        self.complete_with(frozen, None).await
+    }
+
+    /// Complete while reporting each failed attempt to `attempts`.
+    pub async fn complete_with(
+        &self,
+        frozen: FrozenRequest,
+        attempts: Option<&dyn RequestAttempts>,
+    ) -> Result<ModelResponse, ProviderError> {
+        let response = self.post_with_retry(&frozen, attempts).await?;
         let parsed: ChatResponse = serde_json::from_slice(&response.body)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
         let choice =
@@ -239,11 +248,14 @@ impl<T: HttpTransport> DeepSeekClient<T> {
         let body = serde_json::to_vec(&request)
             .map_err(|error| ProviderError::InvalidRequest(error.to_string()))?;
         let response = self
-            .post_with_retry_request(HttpRequest {
-                url: format!("{}/beta/completions", self.base_url.trim_end_matches('/')),
-                headers: self.headers(),
-                body,
-            })
+            .post_with_retry_request(
+                HttpRequest {
+                    url: format!("{}/beta/completions", self.base_url.trim_end_matches('/')),
+                    headers: self.headers(),
+                    body,
+                },
+                None,
+            )
             .await?;
         serde_json::from_slice(&response.body)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))
@@ -253,7 +265,16 @@ impl<T: HttpTransport> DeepSeekClient<T> {
         &self,
         frozen: FrozenRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let bytes = self.stream_with_retry(&frozen).await?;
+        self.stream_with(frozen, None).await
+    }
+
+    /// Stream while reporting each failed attempt to `attempts`.
+    pub async fn stream_with(
+        &self,
+        frozen: FrozenRequest,
+        attempts: Option<&dyn RequestAttempts>,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        let bytes = self.stream_with_retry(&frozen, attempts).await?;
         let decoder = DeepSeekStreamDecoder::new();
         let pending: VecDeque<StreamEvent> = VecDeque::new();
 
@@ -292,14 +313,16 @@ impl<T: HttpTransport> DeepSeekClient<T> {
     async fn post_with_retry(
         &self,
         frozen: &FrozenRequest,
+        attempts: Option<&dyn RequestAttempts>,
     ) -> Result<crate::transport::HttpResponse, ProviderError> {
-        self.post_with_retry_request(self.http_request(frozen))
+        self.post_with_retry_request(self.http_request(frozen), attempts)
             .await
     }
 
     async fn post_with_retry_request(
         &self,
         request: HttpRequest,
+        listener: Option<&dyn RequestAttempts>,
     ) -> Result<crate::transport::HttpResponse, ProviderError> {
         let mut attempts = 0;
         loop {
@@ -317,7 +340,10 @@ impl<T: HttpTransport> DeepSeekClient<T> {
                 Ok(response) => {
                     let status = response.status;
                     if let Some(delay) = self.retry.next_delay(attempts, Some(status), None) {
-                        tokio::time::sleep(delay).await;
+                        if let Some(listener) = listener {
+                            listener.retrying(attempts + 1, Some(status), delay);
+                        }
+                        backoff(delay, listener).await?;
                         attempts += 1;
                         continue;
                     }
@@ -327,11 +353,12 @@ impl<T: HttpTransport> DeepSeekClient<T> {
                     )));
                 }
                 Err(error) => {
-                    if let Some(delay) =
-                        self.retry
-                            .next_delay(attempts, provider_error_status(&error), None)
-                    {
-                        tokio::time::sleep(delay).await;
+                    let status = provider_error_status(&error);
+                    if let Some(delay) = self.retry.next_delay(attempts, status, None) {
+                        if let Some(listener) = listener {
+                            listener.retrying(attempts + 1, status, delay);
+                        }
+                        backoff(delay, listener).await?;
                         attempts += 1;
                         continue;
                     }
@@ -344,17 +371,19 @@ impl<T: HttpTransport> DeepSeekClient<T> {
     async fn stream_with_retry(
         &self,
         frozen: &FrozenRequest,
+        listener: Option<&dyn RequestAttempts>,
     ) -> Result<crate::transport::ByteStream, ProviderError> {
         let mut attempts = 0;
         loop {
             match self.transport.post_stream(self.http_request(frozen)).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => {
-                    if let Some(delay) =
-                        self.retry
-                            .next_delay(attempts, provider_error_status(&error), None)
-                    {
-                        tokio::time::sleep(delay).await;
+                    let status = provider_error_status(&error);
+                    if let Some(delay) = self.retry.next_delay(attempts, status, None) {
+                        if let Some(listener) = listener {
+                            listener.retrying(attempts + 1, status, delay);
+                        }
+                        backoff(delay, listener).await?;
                         attempts += 1;
                         continue;
                     }

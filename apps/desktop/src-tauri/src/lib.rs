@@ -1522,6 +1522,12 @@ pub enum AgentEvent {
         before_bytes: usize,
         after_bytes: usize,
     },
+    AttemptFailed {
+        step: u32,
+        attempt: u32,
+        message: String,
+        retry_in_ms: Option<u64>,
+    },
     ToolStatus {
         step: u32,
         #[serde(default)]
@@ -1762,6 +1768,12 @@ impl AgentObserver for ChannelObserver {
     }
 
     fn on_attempt_failed(&self, failure: &AttemptFailure) {
+        let _ = self.channel.send(AgentEvent::AttemptFailed {
+            step: failure.step,
+            attempt: failure.attempt,
+            message: failure.message.clone(),
+            retry_in_ms: failure.retry_in_ms,
+        });
         let payload =
             serde_json::to_value(failure).unwrap_or_else(|_| json!({ "step": failure.step }));
         self.record(
@@ -4730,6 +4742,10 @@ pub struct ChatInput {
     pub session_id: Option<String>,
     pub workspace_path: String,
     pub message: String,
+    /// Re-run the failed turn against the existing surface instead of
+    /// appending another user message.
+    #[serde(default)]
+    pub resume: bool,
     pub allow_writes: bool,
     pub allow_commands: bool,
     /// Explicit policy preset. Falls back to the boolean flags when absent.
@@ -4800,6 +4816,7 @@ async fn chat(
         allow_commands,
         policy,
         mode,
+        resume,
         max_steps,
         model,
         thinking,
@@ -4807,7 +4824,7 @@ async fn chat(
         attachments,
     } = request;
     let prompt = message.trim().to_owned();
-    if prompt.is_empty() && attachments.is_empty() {
+    if !resume && prompt.is_empty() && attachments.is_empty() {
         return Err("message must not be empty".to_owned());
     }
     let started = std::time::Instant::now();
@@ -4850,8 +4867,11 @@ async fn chat(
     } else {
         prompt.clone()
     };
-    let (message, staged_attachments) =
-        compose_chat_message(&workspace_path, &prompt, &attachments)?;
+    let (message, staged_attachments) = if resume {
+        (String::new(), Vec::new())
+    } else {
+        compose_chat_message(&workspace_path, &prompt, &attachments)?
+    };
 
     let api_key = resolve_api_key(&state)?;
     let redactions = vec![api_key.clone()];
@@ -4910,28 +4930,30 @@ async fn chat(
                 NewEvent::new(SessionEventKind::TurnStart).with_turn(turn),
             )
             .map_err(|error| error.to_string())?;
-        store
-            .append_event(
-                session,
-                NewEvent::new(SessionEventKind::UserMessage)
-                    .with_turn(turn)
-                    .with_step(1)
-                    .with_payload(json!({
-                        "content": message,
-                        "display": prompt,
-                        "attachments": staged_attachments
-                            .iter()
-                            .map(|attachment| {
-                                Path::new(&attachment.path)
-                                    .strip_prefix(&workspace_path)
-                                    .map(|path| path.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|_| attachment.name.clone())
-                            })
-                            .collect::<Vec<_>>(),
-                    })),
-            )
-            .map_err(|error| error.to_string())?;
-        history.push(ChatMessage::user(message.clone()));
+        if !resume {
+            store
+                .append_event(
+                    session,
+                    NewEvent::new(SessionEventKind::UserMessage)
+                        .with_turn(turn)
+                        .with_step(1)
+                        .with_payload(json!({
+                            "content": message,
+                            "display": prompt,
+                            "attachments": staged_attachments
+                                .iter()
+                                .map(|attachment| {
+                                    Path::new(&attachment.path)
+                                        .strip_prefix(&workspace_path)
+                                        .map(|path| path.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|_| attachment.name.clone())
+                                })
+                                .collect::<Vec<_>>(),
+                        })),
+                )
+                .map_err(|error| error.to_string())?;
+            history.push(ChatMessage::user(message.clone()));
+        }
 
         let user_id = ensure_user_id(&store)?;
         let indexed = workspace_id

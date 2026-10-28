@@ -276,6 +276,14 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
         lastContentStep: event.step,
         status: "Writing…",
       };
+    case "attempt_failed":
+      return {
+        ...entry,
+        status:
+          event.retry_in_ms === null || event.retry_in_ms === undefined
+            ? "Attempt failed"
+            : `Retrying in ${formatRetryDelay(event.retry_in_ms)} (attempt ${event.attempt + 1})`,
+      };
     case "tool_call": {
       const toolCalls = [...(entry.toolCalls ?? [])];
       toolCalls.push({
@@ -1300,9 +1308,10 @@ export default function App() {
     [previewWidth, panelOpen, panelWidth],
   );
 
-  const send = useCallback(async (override: string, pending: UploadSource[] = []) => {
+  const send = useCallback(
+    async (override: string, pending: UploadSource[] = [], resume = false) => {
     const text = override.trim();
-    if ((text.length === 0 && pending.length === 0) || workspacePath.length === 0) {
+    if ((!resume && text.length === 0 && pending.length === 0) || workspacePath.length === 0) {
       return;
     }
     // Only the same project is serialized. Another project may keep a turn
@@ -1351,7 +1360,9 @@ export default function App() {
       workspacePath,
       sessionId,
       permissionMode,
-      entries: [...baseEntries, userEntry, assistantEntry],
+      entries: resume
+        ? [...baseEntries, assistantEntry]
+        : [...baseEntries, userEntry, assistantEntry],
       busy: true,
       stopRequested: false,
       scrollTop: scrollRef.current?.scrollTop ?? 0,
@@ -1410,6 +1421,7 @@ export default function App() {
           sessionId,
           workspacePath,
           message: text,
+          resume,
           allowWrites,
           allowCommands,
           policy: effectivePolicy,
@@ -2527,7 +2539,7 @@ export default function App() {
                     nowMs={running ? nowMs : undefined}
                     workspacePath={workspacePath}
                     onOpenPreview={openPreview}
-                    onRetry={lastUser && !busy ? () => void send(entry.text) : undefined}
+                    onRetry={lastUser && !busy ? () => void send("", [], true) : undefined}
                     onEdit={lastUser ? () => composerRef.current?.setDraft(entry.text) : undefined}
                     onReviewChanges={
                       entry.role === "assistant" && (entry.checkpointCount ?? 0) > 0
@@ -3994,6 +4006,12 @@ function rememberProjectPath(path: string): void {
   } catch {
     // Storage is optional in hardened webviews.
   }
+}
+
+function formatRetryDelay(delayMs: number): string {
+  return delayMs >= 1000
+    ? `${(delayMs / 1000).toFixed(delayMs % 1000 === 0 ? 0 : 1)}s`
+    : `${delayMs}ms`;
 }
 
 function formatBytes(bytes: number): string {

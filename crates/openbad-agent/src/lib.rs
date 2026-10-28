@@ -302,6 +302,9 @@ pub struct AttemptFailure {
     pub attempt: u32,
     pub message: String,
     pub cancelled: bool,
+    /// Set when the provider will retry: the wait before the next attempt.
+    #[serde(default)]
+    pub retry_in_ms: Option<u64>,
 }
 
 /// The durable delta produced by one step. Observers must settle it as a unit.
@@ -413,13 +416,68 @@ fn report_step_end(
     });
 }
 
-fn report_attempt_failed(observer: &dyn AgentObserver, step: u32, error: &AgentError) {
+fn report_attempt_failed(
+    observer: &dyn AgentObserver,
+    step: u32,
+    attempt: u32,
+    error: &AgentError,
+) {
     observer.on_attempt_failed(&AttemptFailure {
         step,
-        attempt: 1,
+        attempt,
         message: error.to_string(),
         cancelled: matches!(error, AgentError::Cancelled),
+        retry_in_ms: None,
     });
+}
+
+/// Bridges the provider's retry loop to the run observer so retries are
+/// visible and cancellable.
+struct ObservedAttempts<'a> {
+    observer: &'a dyn AgentObserver,
+    step: u32,
+    attempts: std::sync::atomic::AtomicU32,
+}
+
+impl ObservedAttempts<'_> {
+    fn new(observer: &dyn AgentObserver, step: u32) -> ObservedAttempts<'_> {
+        ObservedAttempts {
+            observer,
+            step,
+            attempts: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// The attempt index of the failure that just ended the step.
+    fn failed_attempts(&self) -> u32 {
+        self.attempts.load(std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// True when a retry was already reported for the attempt in flight.
+    fn retried(&self) -> bool {
+        self.attempts.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
+impl openbad_llm::RequestAttempts for ObservedAttempts<'_> {
+    fn retrying(&self, attempt: u32, status: Option<u16>, delay: std::time::Duration) {
+        self.attempts
+            .store(attempt, std::sync::atomic::Ordering::SeqCst);
+        self.observer.on_attempt_failed(&AttemptFailure {
+            step: self.step,
+            attempt,
+            message: match status {
+                Some(status) => format!("provider returned HTTP {status}"),
+                None => "provider request failed".to_owned(),
+            },
+            cancelled: false,
+            retry_in_ms: Some(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)),
+        });
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.observer.is_cancelled()
+    }
 }
 
 fn spill_oversized(content: String, root: &std::path::Path, threshold: usize) -> String {
@@ -1140,9 +1198,10 @@ impl<T: HttpTransport> Agent<T> {
                 last_header = Some(header);
             }
 
+            let attempts = ObservedAttempts::new(observer, step);
             let step_result: Result<(ChatMessage, Option<String>, Usage, bool), AgentError> =
                 if self.config.stream {
-                    self.stream_step(frozen, observer, step)
+                    self.stream_step(frozen, observer, step, &attempts)
                         .await
                         .map(|streamed| {
                             (
@@ -1153,7 +1212,7 @@ impl<T: HttpTransport> Agent<T> {
                             )
                         })
                 } else {
-                    match self.client.complete(frozen).await {
+                    match self.client.complete_with(frozen, Some(&attempts)).await {
                         Ok(response) => {
                             emit_full_message(observer, step, &response.message);
                             Ok((
@@ -1163,6 +1222,7 @@ impl<T: HttpTransport> Agent<T> {
                                 false,
                             ))
                         }
+                        Err(ProviderError::Cancelled) => Err(AgentError::Cancelled),
                         Err(error) => Err(AgentError::Provider(error)),
                     }
                 };
@@ -1170,7 +1230,12 @@ impl<T: HttpTransport> Agent<T> {
                 Ok(settled) => settled,
                 Err(error) => {
                     settle_step(observer, step, true, &new_messages[step_messages_start..]);
-                    report_attempt_failed(observer, step, &error);
+                    // A cancel during backoff follows a failure that was already
+                    // reported with its retry delay; recording it again would
+                    // count the same attempt twice.
+                    if !(matches!(error, AgentError::Cancelled) && attempts.retried()) {
+                        report_attempt_failed(observer, step, attempts.failed_attempts(), &error);
+                    }
                     report_step_end(
                         observer,
                         step,
@@ -1372,8 +1437,13 @@ impl<T: HttpTransport> Agent<T> {
         frozen: openbad_llm::provider::FrozenRequest,
         observer: &dyn AgentObserver,
         step: u32,
+        attempts: &dyn openbad_llm::RequestAttempts,
     ) -> Result<StreamedStep, AgentError> {
-        let mut stream = self.client.stream(frozen).await?;
+        let mut stream = match self.client.stream_with(frozen, Some(attempts)).await {
+            Ok(stream) => stream,
+            Err(ProviderError::Cancelled) => return Err(AgentError::Cancelled),
+            Err(error) => return Err(AgentError::Provider(error)),
+        };
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls = BTreeMap::new();
@@ -3656,6 +3726,144 @@ mod tests {
             ],
             "an unchanged request header is recorded once"
         );
+    }
+
+    #[derive(Default)]
+    struct RetryObserver {
+        attempts: Mutex<Vec<(u32, Option<u64>)>>,
+        cancelled: AtomicBool,
+        cancel_on_retry: bool,
+    }
+
+    impl AgentObserver for RetryObserver {
+        fn on_attempt_failed(&self, failure: &AttemptFailure) {
+            self.attempts
+                .lock()
+                .expect("attempts")
+                .push((failure.attempt, failure.retry_in_ms));
+            if self.cancel_on_retry && failure.retry_in_ms.is_some() {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    fn retry_agent(
+        directory: &std::path::Path,
+        max_attempts: u32,
+        responses: Vec<HttpResponse>,
+    ) -> Agent<MockTransport> {
+        let transport = MockTransport {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test")
+            .with_retry_policy(openbad_llm::RetryPolicy::new(max_attempts, 1, 2));
+        default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory)),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn transient_provider_failures_retry_inside_the_step() {
+        let directory = tempdir().expect("tempdir");
+        let agent = retry_agent(
+            directory.path(),
+            3,
+            vec![
+                HttpResponse {
+                    status: 503,
+                    body: b"upstream unavailable".to_vec(),
+                },
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Recovered."},"finish_reason":"stop"}]}"#,
+                ),
+            ],
+        );
+        let observer = RetryObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await
+            .expect("second attempt succeeds");
+
+        assert_eq!(run.text, "Recovered.");
+        assert_eq!(run.steps, 1, "a retry does not cost an extra step");
+        let attempts = observer.attempts.lock().expect("attempts").clone();
+        assert_eq!(attempts.len(), 1, "one retry was reported");
+        assert_eq!(attempts[0].0, 1);
+        assert!(attempts[0].1.is_some(), "the retry reports its wait");
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_backoff_stops_before_the_next_attempt() {
+        let directory = tempdir().expect("tempdir");
+        let agent = retry_agent(
+            directory.path(),
+            3,
+            vec![
+                HttpResponse {
+                    status: 503,
+                    body: b"upstream unavailable".to_vec(),
+                },
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Never reached."},"finish_reason":"stop"}]}"#,
+                ),
+            ],
+        );
+        let observer = RetryObserver {
+            cancel_on_retry: true,
+            ..RetryObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        assert_eq!(
+            observer.attempts.lock().expect("attempts").len(),
+            1,
+            "only the failed attempt is recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_report_the_final_attempt_number() {
+        let directory = tempdir().expect("tempdir");
+        let agent = retry_agent(
+            directory.path(),
+            2,
+            vec![
+                HttpResponse {
+                    status: 503,
+                    body: b"upstream unavailable".to_vec(),
+                },
+                HttpResponse {
+                    status: 503,
+                    body: b"still unavailable".to_vec(),
+                },
+            ],
+        );
+        let observer = RetryObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await;
+
+        assert!(run.is_err());
+        let attempts = observer.attempts.lock().expect("attempts").clone();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[1].1, None, "the final failure will not retry");
+        assert_eq!(attempts[1].0, 2, "the attempt index is honest");
     }
 
     #[tokio::test]
