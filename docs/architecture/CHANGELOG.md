@@ -30,6 +30,14 @@ Bundled desktop release containing the context-budget and history-compaction
 work described below, on top of the project export/import and other 2026-10-27
 changes.
 
+## v0.1.12
+
+Bundled desktop release replacing the 0.1.11 per-step pruning with the harness
+compaction design: model-written checkpoints, persisted compaction events, and
+a `session_messages.surface` projection. This fixes long sessions that lost the
+previous answer, re-ran completed tool work, and failed with a provider context
+overflow. See the 2026-10-27 compaction entry for details.
+
 ## 2026-10-27
 
 - **Playwright browser suite removed.** The `apps/desktop/ui/e2e` harness and
