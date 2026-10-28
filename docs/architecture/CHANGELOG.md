@@ -315,6 +315,23 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.1
+
+Fix release on top of 0.3.0. A long command payload sometimes comes back from
+the provider with its own markup folded into the `tool` value of a domain proxy
+(`<||DSML|| parameter name="arguments" ...>`), carrying the real arguments with
+it. The proxy rejected the whole call and pasted the payload back into the
+transcript, although the intended tool name and arguments were both intact.
+
+The proxy now recovers the name from the prefix and the arguments from the first
+balanced JSON object (or a JSON-encoded `arguments`, or the embedded payload when
+`arguments` is empty), and resolves the approval risk against the recovered name
+so a repaired call is still gated on the tool it really is. Failures name the
+expected shape and preview the value instead of dumping it. `run_command` and
+the exec domain now also steer toward writing a script with `write_file` and
+running the file, because a heredoc nested inside a JSON string is what breaks
+the serializer.
+
 ## v0.3.0
 
 Minor release on top of 0.2.2. The chat fixes from 0.2.3's scope ship here
