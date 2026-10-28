@@ -5,6 +5,7 @@ pub mod deepseek;
 pub mod fim;
 pub mod pricing;
 pub mod provider;
+pub mod replay;
 pub mod retry;
 pub mod transport;
 
@@ -17,5 +18,6 @@ pub use pricing::{DEEPSEEK_FLASH, DEEPSEEK_V4_PRO, ModelPricing, PeakCalendar, U
 pub use provider::{
     CacheMode, FrozenRequest, ModelProvider, ProviderCapabilities, ProviderError, Usage,
 };
+pub use replay::{DerivedMessage, derive_messages};
 pub use retry::{RetryPolicy, is_retryable};
 pub use transport::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};

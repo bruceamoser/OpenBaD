@@ -173,6 +173,7 @@ export type SessionView = {
     attachments?: string[];
     reasoning: string | null;
     duration_ms?: number | null;
+    interrupted?: boolean;
   }[];
   total_duration_ms: number;
 };

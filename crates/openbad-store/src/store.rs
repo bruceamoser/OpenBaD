@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use openbad_core::event::{NewEvent, SessionEvent, SessionEventKind};
 use openbad_core::{ModelRouteId, ProviderId, SessionId, WorkspaceId};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -30,6 +30,11 @@ enum WriteCommand {
         session_id: SessionId,
         draft: NewEvent,
         reply: SyncSender<Result<SessionEvent, StoreError>>,
+    },
+    AppendEvents {
+        session_id: SessionId,
+        drafts: Vec<NewEvent>,
+        reply: SyncSender<Result<Vec<SessionEvent>, StoreError>>,
     },
     CreateWorkspace {
         workspace: NewWorkspace,
@@ -965,6 +970,23 @@ impl Store {
         self.write(|reply| WriteCommand::AppendEvent {
             session_id,
             draft,
+            reply,
+        })
+    }
+
+    /// Appends several events in one transaction. Either every event lands or
+    /// none does, which is what step settlement requires.
+    pub fn append_events(
+        &self,
+        session_id: SessionId,
+        drafts: Vec<NewEvent>,
+    ) -> Result<Vec<SessionEvent>, StoreError> {
+        if drafts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.write(|reply| WriteCommand::AppendEvents {
+            session_id,
+            drafts,
             reply,
         })
     }
@@ -2920,6 +2942,13 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             } => {
                 let _ = reply.send(append_event(&mut connection, session_id, draft));
             }
+            WriteCommand::AppendEvents {
+                session_id,
+                drafts,
+                reply,
+            } => {
+                let _ = reply.send(append_events(&mut connection, session_id, drafts));
+            }
             WriteCommand::ImportWorkspaceState {
                 workspace_id,
                 state,
@@ -3518,6 +3547,35 @@ fn append_event(
     session_id: SessionId,
     draft: NewEvent,
 ) -> Result<SessionEvent, StoreError> {
+    let transaction = connection.transaction()?;
+    let event = append_event_in_transaction(&transaction, session_id, draft)?;
+    transaction.commit()?;
+    Ok(event)
+}
+
+fn append_events(
+    connection: &mut Connection,
+    session_id: SessionId,
+    drafts: Vec<NewEvent>,
+) -> Result<Vec<SessionEvent>, StoreError> {
+    let transaction = connection.transaction()?;
+    let mut events = Vec::with_capacity(drafts.len());
+    for draft in drafts {
+        events.push(append_event_in_transaction(
+            &transaction,
+            session_id,
+            draft,
+        )?);
+    }
+    transaction.commit()?;
+    Ok(events)
+}
+
+fn append_event_in_transaction(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    draft: NewEvent,
+) -> Result<SessionEvent, StoreError> {
     let NewEvent {
         kind,
         turn,
@@ -3528,7 +3586,6 @@ fn append_event(
     let created_at = now_millis();
     let surface = kind.is_surface();
 
-    let transaction = connection.transaction()?;
     let next_seq: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?1",
         [session_id.to_string()],
@@ -3576,8 +3633,7 @@ fn append_event(
         params![session_id.to_string(), created_at, turn.map(i64::from)],
     )?;
 
-    projections::apply(&transaction, &event)?;
-    transaction.commit()?;
+    projections::apply(transaction, &event)?;
 
     Ok(event)
 }
@@ -3681,6 +3737,76 @@ mod tests {
             store.schema_version().expect("version"),
             "0015_session_message_surface"
         );
+    }
+
+    #[test]
+    fn step_end_counts_toward_the_turn() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("steps", "/tmp/openbad-step-count")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("steps"))
+            .expect("session");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::TurnStart).with_turn(1),
+            )
+            .expect("turn start");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::StepStart)
+                    .with_turn(1)
+                    .with_step(1)
+                    .with_payload(json!({"step": 1})),
+            )
+            .expect("step start");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::StepEnd)
+                    .with_turn(1)
+                    .with_step(1)
+                    .with_payload(json!({"step": 1, "cancelled": false})),
+            )
+            .expect("step end");
+
+        let turns = store.load_turns(session).expect("turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].steps, 1);
+    }
+
+    #[test]
+    fn batch_append_is_atomic_and_ordered() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("batch", "/tmp/openbad-batch")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("batch"))
+            .expect("session");
+
+        let events = store
+            .append_events(
+                session,
+                vec![
+                    NewEvent::new(SessionEventKind::TurnStart).with_turn(1),
+                    NewEvent::new(SessionEventKind::StepStart)
+                        .with_turn(1)
+                        .with_step(1),
+                    NewEvent::new(SessionEventKind::StepEnd)
+                        .with_turn(1)
+                        .with_step(1),
+                ],
+            )
+            .expect("batch append");
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].seq, events[0].seq + 1);
+        assert_eq!(events[2].seq, events[1].seq + 1);
+        assert_eq!(store.load_turns(session).expect("turns")[0].steps, 1);
     }
 
     #[test]

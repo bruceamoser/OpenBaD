@@ -10,7 +10,7 @@ use openbad_llm::DeepSeekClient;
 use openbad_llm::chat::{
     ChatMessage, ChatRole, FunctionCall, StreamEvent, ToolCall, ToolCallDelta,
 };
-use openbad_llm::pricing::{PeakCalendar, UsageTotals, deepseek_pricing};
+use openbad_llm::pricing::{CostBreakdown, PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
 use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
@@ -19,6 +19,7 @@ use openbad_tools::{
     ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -73,16 +74,38 @@ const CHECKPOINT_PREAMBLE: &str = "This is an automatically generated checkpoint
 const CHECKPOINT_OPEN: &str = "<compacted-summary>";
 const CHECKPOINT_CLOSE: &str = "</compacted-summary>";
 
-/// Messages the human injects into a running turn. They are delivered before
-/// the next provider request, so they can redirect the agent without starting a
-/// second turn.
-#[derive(Default)]
-pub struct SteeringInbox {
-    active: AtomicBool,
-    pending: Mutex<VecDeque<String>>,
+/// A queued unit of work for a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxKind {
+    /// A user prompt that starts a new turn after the current one settles.
+    Prompt,
+    /// A user message that redirects the current turn at the next request.
+    Steering,
+    /// A runtime notice (for example, a settled subagent) consumed like steering.
+    Notice,
 }
 
-impl SteeringInbox {
+/// One inbox entry. The id is stable so a UI can reconcile its optimistic echo
+/// with the entry the agent actually consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxEntry {
+    pub id: Uuid,
+    pub kind: InboxKind,
+    pub text: String,
+}
+
+/// A run's single queue for prompts, steering, and notices.
+///
+/// Prompts are claimed one per turn; steering and notices are claimed before
+/// the next provider request so they redirect the running turn without starting
+/// a second one.
+#[derive(Default)]
+pub struct Inbox {
+    active: AtomicBool,
+    pending: Mutex<VecDeque<InboxEntry>>,
+}
+
+impl Inbox {
     pub fn begin(&self) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
@@ -99,22 +122,86 @@ impl SteeringInbox {
         self.active.load(Ordering::SeqCst)
     }
 
-    pub fn push(&self, message: String) -> bool {
+    pub fn push_prompt(&self, text: impl Into<String>) -> bool {
+        self.push(InboxKind::Prompt, text)
+    }
+
+    pub fn push_steering(&self, text: impl Into<String>) -> bool {
+        self.push(InboxKind::Steering, text)
+    }
+
+    pub fn push_notice(&self, text: impl Into<String>) -> bool {
+        self.push(InboxKind::Notice, text)
+    }
+
+    fn push(&self, kind: InboxKind, text: impl Into<String>) -> bool {
         if !self.is_active() {
             return false;
         }
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
-        pending.push_back(message);
+        pending.push_back(InboxEntry {
+            id: Uuid::now_v7(),
+            kind,
+            text: text.into(),
+        });
         true
     }
 
-    fn drain(&self) -> Vec<String> {
+    /// Claims every steering message and notice in insertion order. Prompts
+    /// stay queued for the next turn.
+    pub fn claim_steering(&self) -> Vec<InboxEntry> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return Vec::new();
+        };
+        let mut claimed = Vec::new();
+        pending.retain(|entry| {
+            if entry.kind == InboxKind::Prompt {
+                true
+            } else {
+                claimed.push(entry.clone());
+                false
+            }
+        });
+        claimed
+    }
+
+    /// Claims the next prompt, leaving steering and notices in place.
+    pub fn claim_prompt(&self) -> Option<InboxEntry> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return None;
+        };
+        let index = pending
+            .iter()
+            .position(|entry| entry.kind == InboxKind::Prompt)?;
+        pending.remove(index)
+    }
+
+    /// Claims the next entry of any kind, in insertion order.
+    pub fn claim_next(&self) -> Option<InboxEntry> {
+        self.pending.lock().ok()?.pop_front()
+    }
+
+    /// Drops every pending entry. Cancellation closes the queue with this.
+    pub fn discard_pending(&self) -> Vec<InboxEntry> {
         self.pending
             .lock()
             .map(|mut pending| pending.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pending
+            .lock()
+            .map(|pending| pending.len())
+            .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -155,9 +242,85 @@ impl Default for AgentConfig {
     }
 }
 
+/// Token and cost accounting for one step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct StepUsage {
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl StepUsage {
+    fn from_usage(usage: &Usage, cost: &CostBreakdown) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
+            cost_usd: cost.total_usd(),
+        }
+    }
+}
+
+/// The durable outcome of one step. Emitted exactly once per started step,
+/// including steps that were cancelled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StepOutcome {
+    pub step: u32,
+    pub finish_reason: Option<String>,
+    pub tool_calls: usize,
+    pub usage: StepUsage,
+    pub duration_ms: u64,
+    pub cancelled: bool,
+}
+
+/// A provider attempt that never settled as an assistant message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttemptFailure {
+    pub step: u32,
+    pub attempt: u32,
+    pub message: String,
+    pub cancelled: bool,
+}
+
+/// The durable delta produced by one step. Observers must settle it as a unit.
+pub struct StepSettlement<'a> {
+    pub step: u32,
+    /// The assistant message was cut short by cancellation.
+    pub interrupted: bool,
+    pub messages: &'a [ChatMessage],
+}
+
 /// Receives live progress from the agent. Implementations must not block.
 pub trait AgentObserver: Send + Sync {
+    /// Called when a step begins. Defaults to [`Self::on_step`] so existing
+    /// observers keep working.
+    fn on_step_start(&self, step: u32) {
+        self.on_step(step);
+    }
     fn on_step(&self, _step: u32) {}
+    fn on_step_end(&self, _outcome: &StepOutcome) {}
+    /// Settle the messages produced by a step. Called once per step, after the
+    /// step's tool results exist. A settlement is atomic: either the whole
+    /// delta lands or none of it does.
+    fn on_step_settled(&self, _settlement: &StepSettlement<'_>) {}
+    fn on_attempt_failed(&self, _failure: &AttemptFailure) {}
+    /// Called when history was compacted, before the step's request is sent.
+    fn on_compaction_settled(&self, _record: &CompactionRecord) {}
+    /// Called before a request is sent, whenever the header differs from the
+    /// previous step's header.
+    fn on_request(
+        &self,
+        _step: u32,
+        _envelope: &RequestEnvelope,
+        _message_count: usize,
+        _estimated_input_tokens: usize,
+    ) {
+    }
     fn on_reasoning(&self, _step: u32, _text: &str) {}
     fn on_content(&self, _step: u32, _text: &str) {}
     fn on_tool_call(&self, _step: u32, _call: &ToolCall) {}
@@ -180,6 +343,68 @@ pub trait AgentObserver: Send + Sync {
 struct NoopObserver;
 
 impl AgentObserver for NoopObserver {}
+
+fn report_step_end(
+    observer: &dyn AgentObserver,
+    step: u32,
+    finish_reason: Option<String>,
+    tool_calls: usize,
+    usage: StepUsage,
+    started: std::time::Instant,
+    cancelled: bool,
+) {
+    observer.on_step_end(&StepOutcome {
+        step,
+        finish_reason,
+        tool_calls,
+        usage,
+        duration_ms: started.elapsed().as_millis() as u64,
+        cancelled,
+    });
+}
+
+fn report_attempt_failed(observer: &dyn AgentObserver, step: u32, error: &AgentError) {
+    observer.on_attempt_failed(&AttemptFailure {
+        step,
+        attempt: 1,
+        message: error.to_string(),
+        cancelled: matches!(error, AgentError::Cancelled),
+    });
+}
+
+fn settle_step(
+    observer: &dyn AgentObserver,
+    step: u32,
+    interrupted: bool,
+    messages: &[ChatMessage],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    observer.on_step_settled(&StepSettlement {
+        step,
+        interrupted,
+        messages,
+    });
+}
+
+/// Every assistant tool call must be paired with a result before the next
+/// request. Calls that never ran get an explicit unknown-outcome result.
+fn append_interrupted_results(
+    messages: &mut Vec<ChatMessage>,
+    new_messages: &mut Vec<ChatMessage>,
+    calls: &[ToolCall],
+) {
+    for call in calls {
+        let content = format!(
+            "error: the turn was interrupted before `{}` returned. Its outcome is unknown; retry only if it is safe to repeat.",
+            call.function.name
+        );
+        let message = ChatMessage::tool(call.id.clone(), content);
+        messages.push(message.clone());
+        new_messages.push(message);
+    }
+}
 
 /// A checkpoint created by compacting an older span of the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +432,15 @@ pub struct AgentRun {
     /// The checkpoint created during this run, when the conversation had to be
     /// compacted to fit the model window.
     pub compaction: Option<CompactionRecord>,
+}
+
+/// A streamed step. `cancelled` means the stream was cut short after some
+/// content was already delivered to the user.
+struct StreamedStep {
+    message: ChatMessage,
+    finish_reason: Option<String>,
+    usage: Usage,
+    cancelled: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -244,7 +478,7 @@ pub struct Agent<T: HttpTransport> {
     mcp: Option<Arc<dyn McpService>>,
     terminal: Option<Arc<dyn TerminalService>>,
     outside_grants: Vec<OutsideGrant>,
-    steering: Option<Arc<SteeringInbox>>,
+    inbox: Option<Arc<Inbox>>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -271,7 +505,7 @@ impl<T: HttpTransport> Agent<T> {
             mcp: None,
             terminal: None,
             outside_grants: Vec::new(),
-            steering: None,
+            inbox: None,
             redactions: Vec::new(),
             config,
         }
@@ -339,8 +573,8 @@ impl<T: HttpTransport> Agent<T> {
     }
 
     #[must_use]
-    pub fn with_steering(mut self, steering: Arc<SteeringInbox>) -> Self {
-        self.steering = Some(steering);
+    pub fn with_inbox(mut self, inbox: Arc<Inbox>) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 
@@ -564,16 +798,19 @@ impl<T: HttpTransport> Agent<T> {
             self.config.max_steps
         };
         let mut visible_text = String::new();
+        let mut last_header: Option<RequestEnvelope> = None;
         for step in 1..=step_budget {
             context.set_turn(step);
             if observer.is_cancelled() {
                 self.close_terminals().await;
                 return Err(AgentError::Cancelled);
             }
-            observer.on_step(step);
-            if let Some(steering) = &self.steering {
-                for message in steering.drain() {
-                    let message = ChatMessage::user(message);
+            let step_started = std::time::Instant::now();
+            observer.on_step_start(step);
+            let step_messages_start = new_messages.len();
+            if let Some(inbox) = &self.inbox {
+                for entry in inbox.claim_steering() {
+                    let message = ChatMessage::user(entry.text);
                     messages.push(message.clone());
                     new_messages.push(message);
                 }
@@ -682,13 +919,15 @@ impl<T: HttpTransport> Agent<T> {
                         } else if let Some(checkpoint_text) = checkpoint_text {
                             observer.on_compaction(before_bytes, after_bytes);
                             input_tokens = request_tokens(&messages, tool_tokens) + catalog_tokens;
-                            compaction = Some(CompactionRecord {
+                            let record = CompactionRecord {
                                 summary: checkpoint_text,
                                 shadowed_messages: shadowed,
                                 new_messages_before: new_messages.len(),
                                 before_bytes,
                                 after_bytes,
-                            });
+                            };
+                            observer.on_compaction_settled(&record);
+                            compaction = Some(record);
                             if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
                                 eprintln!(
                                     "[agent] compacted {shadowed} messages ({before_bytes} -> {after_bytes} bytes)"
@@ -707,6 +946,16 @@ impl<T: HttpTransport> Agent<T> {
             }
             let available = context_window.saturating_sub(input_tokens + safety);
             if available == 0 {
+                settle_step(observer, step, true, &new_messages[step_messages_start..]);
+                report_step_end(
+                    observer,
+                    step,
+                    None,
+                    0,
+                    StepUsage::default(),
+                    step_started,
+                    false,
+                );
                 return Err(AgentError::ContextOverflow {
                     estimated_input: input_tokens,
                     context_window: self.config.context_window,
@@ -717,6 +966,7 @@ impl<T: HttpTransport> Agent<T> {
                 .max_output_tokens
                 .min(u32::try_from(available).unwrap_or(u32::MAX))
                 .max(1);
+            let message_count = request_messages.len();
             let request = self.client.build_request(
                 request_messages,
                 Some(tool_schemas.clone()),
@@ -737,25 +987,100 @@ impl<T: HttpTransport> Agent<T> {
                 )),
                 max_output_tokens,
             };
-            let frozen = request.freeze(envelope)?;
+            let header_changed = last_header.as_ref() != Some(&envelope);
+            let header = envelope.clone();
+            let frozen = match request.freeze(envelope) {
+                Ok(frozen) => frozen,
+                Err(error) => {
+                    settle_step(observer, step, true, &new_messages[step_messages_start..]);
+                    report_step_end(
+                        observer,
+                        step,
+                        None,
+                        0,
+                        StepUsage::default(),
+                        step_started,
+                        false,
+                    );
+                    return Err(error.into());
+                }
+            };
+            if header_changed {
+                observer.on_request(step, &header, message_count, input_tokens);
+                last_header = Some(header);
+            }
 
-            let (mut assistant, finish_reason, response_usage) = if self.config.stream {
-                self.stream_step(frozen, observer, step).await?
-            } else {
-                let response = self.client.complete(frozen).await?;
-                emit_full_message(observer, step, &response.message);
-                (response.message, response.finish_reason, response.usage)
+            let step_result: Result<(ChatMessage, Option<String>, Usage, bool), AgentError> =
+                if self.config.stream {
+                    self.stream_step(frozen, observer, step)
+                        .await
+                        .map(|streamed| {
+                            (
+                                streamed.message,
+                                streamed.finish_reason,
+                                streamed.usage,
+                                streamed.cancelled,
+                            )
+                        })
+                } else {
+                    match self.client.complete(frozen).await {
+                        Ok(response) => {
+                            emit_full_message(observer, step, &response.message);
+                            Ok((
+                                response.message,
+                                response.finish_reason,
+                                response.usage,
+                                false,
+                            ))
+                        }
+                        Err(error) => Err(AgentError::Provider(error)),
+                    }
+                };
+            let (mut assistant, finish_reason, response_usage, interrupted) = match step_result {
+                Ok(settled) => settled,
+                Err(error) => {
+                    settle_step(observer, step, true, &new_messages[step_messages_start..]);
+                    report_attempt_failed(observer, step, &error);
+                    report_step_end(
+                        observer,
+                        step,
+                        None,
+                        0,
+                        StepUsage::default(),
+                        step_started,
+                        matches!(error, AgentError::Cancelled),
+                    );
+                    return Err(error);
+                }
             };
 
-            if let Some(pricing) = deepseek_pricing(self.client.model()) {
-                usage_totals.record(
-                    &response_usage,
-                    &pricing.cost(&response_usage, peak_pricing),
-                );
-            } else {
-                usage_totals.record(&response_usage, &Default::default());
-            }
+            let step_cost = deepseek_pricing(self.client.model())
+                .map(|pricing| pricing.cost(&response_usage, peak_pricing))
+                .unwrap_or_default();
+            usage_totals.record(&response_usage, &step_cost);
             observer.on_usage(&usage_totals);
+            let step_usage = StepUsage::from_usage(&response_usage, &step_cost);
+
+            if interrupted {
+                if let Some(calls) = assistant.tool_calls.as_mut() {
+                    sanitize_tool_arguments(calls);
+                }
+                let calls = assistant.tool_calls.clone().unwrap_or_default();
+                new_messages.push(assistant.clone());
+                messages.push(assistant);
+                append_interrupted_results(&mut messages, &mut new_messages, &calls);
+                settle_step(observer, step, true, &new_messages[step_messages_start..]);
+                report_step_end(
+                    observer,
+                    step,
+                    finish_reason,
+                    calls.len(),
+                    step_usage,
+                    step_started,
+                    true,
+                );
+                return Err(AgentError::Cancelled);
+            }
 
             let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
             let text = assistant.content.clone().unwrap_or_default();
@@ -785,22 +1110,41 @@ impl<T: HttpTransport> Agent<T> {
             messages.push(assistant);
 
             if tool_calls.is_empty() {
+                settle_step(observer, step, false, &new_messages[step_messages_start..]);
                 let pending = self
-                    .steering
+                    .inbox
                     .as_ref()
-                    .map(|steering| steering.drain())
+                    .map(|inbox| inbox.claim_steering())
                     .unwrap_or_default();
                 if !pending.is_empty() {
+                    report_step_end(
+                        observer,
+                        step,
+                        finish_reason,
+                        tool_calls.len(),
+                        step_usage,
+                        step_started,
+                        false,
+                    );
                     if step == step_budget {
                         return Err(AgentError::MaxSteps(step_budget));
                     }
-                    for message in pending {
-                        let message = ChatMessage::user(message);
+                    for entry in pending {
+                        let message = ChatMessage::user(entry.text);
                         messages.push(message.clone());
                         new_messages.push(message);
                     }
                     continue;
                 }
+                report_step_end(
+                    observer,
+                    step,
+                    finish_reason,
+                    tool_calls.len(),
+                    step_usage,
+                    step_started,
+                    false,
+                );
                 return Ok(AgentRun {
                     new_messages,
                     text: visible_text,
@@ -814,6 +1158,21 @@ impl<T: HttpTransport> Agent<T> {
             while call_index < tool_calls.len() {
                 if observer.is_cancelled() {
                     self.close_terminals().await;
+                    append_interrupted_results(
+                        &mut messages,
+                        &mut new_messages,
+                        &tool_calls[call_index..],
+                    );
+                    settle_step(observer, step, true, &new_messages[step_messages_start..]);
+                    report_step_end(
+                        observer,
+                        step,
+                        finish_reason,
+                        tool_calls.len(),
+                        step_usage,
+                        step_started,
+                        true,
+                    );
                     return Err(AgentError::Cancelled);
                 }
                 let mut batch_end = call_index + 1;
@@ -857,6 +1216,16 @@ impl<T: HttpTransport> Agent<T> {
                 call_index = batch_end;
             }
 
+            settle_step(observer, step, false, &new_messages[step_messages_start..]);
+            report_step_end(
+                observer,
+                step,
+                finish_reason,
+                tool_calls.len(),
+                step_usage,
+                step_started,
+                false,
+            );
             if step == step_budget {
                 return Err(AgentError::MaxSteps(step_budget));
             }
@@ -870,18 +1239,20 @@ impl<T: HttpTransport> Agent<T> {
         frozen: openbad_llm::provider::FrozenRequest,
         observer: &dyn AgentObserver,
         step: u32,
-    ) -> Result<(ChatMessage, Option<String>, Usage), AgentError> {
+    ) -> Result<StreamedStep, AgentError> {
         let mut stream = self.client.stream(frozen).await?;
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls = BTreeMap::new();
         let mut usage = Usage::default();
         let mut finish_reason = None;
+        let mut cancelled = false;
 
         while let Some(event) = stream.next().await {
             if observer.is_cancelled() {
                 self.close_terminals().await;
-                return Err(AgentError::Cancelled);
+                cancelled = true;
+                break;
             }
             match event? {
                 StreamEvent::Delta {
@@ -917,8 +1288,8 @@ impl<T: HttpTransport> Agent<T> {
         } else {
             Some(calls.into_values().collect())
         };
-        Ok((
-            ChatMessage {
+        Ok(StreamedStep {
+            message: ChatMessage {
                 role: ChatRole::Assistant,
                 content: if content.is_empty() {
                     None
@@ -936,7 +1307,8 @@ impl<T: HttpTransport> Agent<T> {
             },
             finish_reason,
             usage,
-        ))
+            cancelled,
+        })
     }
 
     /// Condense a span of history into a reusable checkpoint.
@@ -1425,15 +1797,7 @@ fn emit_full_message(observer: &dyn AgentObserver, step: u32, message: &ChatMess
 /// error, but replaying the raw arguments in the next request would fail
 /// request validation and abort the whole turn. History therefore keeps a
 /// valid object while execution still reports the original parse error.
-pub fn sanitize_tool_arguments(calls: &mut [ToolCall]) {
-    for call in calls {
-        let is_object = serde_json::from_str::<Value>(&call.function.arguments)
-            .is_ok_and(|value| value.is_object());
-        if !is_object {
-            call.function.arguments = "{}".to_owned();
-        }
-    }
-}
+pub use openbad_llm::chat::sanitize_tool_arguments;
 
 fn merge_tool_delta(calls: &mut BTreeMap<u32, ToolCall>, delta: ToolCallDelta) {
     let entry = calls.entry(delta.index).or_insert_with(|| ToolCall {
@@ -1487,6 +1851,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use bytes::Bytes;
     use openbad_llm::transport::{ByteStream, HttpRequest, HttpResponse};
     use openbad_tools::McpToolSummary;
     use serde_json::json;
@@ -2290,12 +2655,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inbox_orders_prompts_and_steering_separately() {
+        let inbox = Inbox::default();
+        inbox.begin();
+        assert!(inbox.push_prompt("first"));
+        assert!(inbox.push_steering("steer one"));
+        assert!(inbox.push_prompt("second"));
+        assert!(inbox.push_steering("steer two"));
+        assert!(inbox.push_notice("notice"));
+
+        let steering = inbox.claim_steering();
+        assert_eq!(
+            steering
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["steer one", "steer two", "notice"],
+            "steering and notices are claimed in insertion order"
+        );
+        assert_eq!(
+            inbox.claim_prompt().map(|entry| entry.text),
+            Some("first".to_owned())
+        );
+        assert_eq!(
+            inbox.claim_prompt().map(|entry| entry.text),
+            Some("second".to_owned()),
+            "prompts keep their own FIFO order"
+        );
+        assert!(inbox.claim_prompt().is_none());
+        assert!(inbox.is_empty());
+    }
+
+    #[test]
+    fn inbox_rejects_entries_when_inactive_and_discards_on_demand() {
+        let inbox = Inbox::default();
+        assert!(!inbox.push_prompt("ignored"), "inactive inbox rejects work");
+        inbox.begin();
+        assert!(inbox.push_steering("one"));
+        assert!(inbox.push_prompt("two"));
+        assert_eq!(inbox.len(), 2);
+
+        let discarded = inbox.discard_pending();
+        assert_eq!(discarded.len(), 2);
+        assert_eq!(discarded[0].kind, InboxKind::Steering);
+        assert_eq!(discarded[1].kind, InboxKind::Prompt);
+        assert!(inbox.is_empty());
+
+        inbox.end();
+        assert!(!inbox.push_steering("closed"));
+    }
+
     struct SteeringTransport {
         responses: Mutex<VecDeque<HttpResponse>>,
         requests: Mutex<Vec<HttpRequest>>,
-        steering: Arc<SteeringInbox>,
+        inbox: Arc<Inbox>,
     }
-
     #[async_trait]
     impl HttpTransport for SteeringTransport {
         async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
@@ -2306,8 +2721,8 @@ mod tests {
             };
             if is_first {
                 assert!(
-                    self.steering
-                        .push("Please mention the second answer.".to_owned())
+                    self.inbox
+                        .push_steering("Please mention the second answer.".to_owned())
                 );
             }
             self.responses
@@ -2325,8 +2740,8 @@ mod tests {
     #[tokio::test]
     async fn steering_redirects_a_running_turn() {
         let directory = tempdir().expect("tempdir");
-        let steering = Arc::new(SteeringInbox::default());
-        steering.begin();
+        let inbox = Arc::new(Inbox::default());
+        inbox.begin();
         let transport = SteeringTransport {
             responses: Mutex::new(VecDeque::from([
                 response(
@@ -2337,7 +2752,7 @@ mod tests {
                 ),
             ])),
             requests: Mutex::new(Vec::new()),
-            steering: Arc::clone(&steering),
+            inbox: Arc::clone(&inbox),
         };
         let client = DeepSeekClient::new(transport, "sk-test");
         let agent = default_agent(
@@ -2348,12 +2763,12 @@ mod tests {
                 ..AgentConfig::default()
             },
         )
-        .with_steering(Arc::clone(&steering));
+        .with_inbox(Arc::clone(&inbox));
         let run = agent
             .run(vec![ChatMessage::user("start")])
             .await
             .expect("run");
-        steering.end();
+        inbox.end();
         assert_eq!(run.steps, 2);
         assert_eq!(run.text, "First answer.\n\nSecond answer.");
         assert!(run.new_messages.iter().any(|message| {
@@ -2748,5 +3163,388 @@ mod tests {
             "key=[redacted] and also [redacted]"
         );
         assert_eq!(redact_secrets(content, &["short".to_owned()]), content);
+    }
+
+    #[derive(Default)]
+    struct LifecycleObserver {
+        events: Mutex<Vec<String>>,
+        cancelled: AtomicBool,
+        cancel_on_step: Option<u32>,
+    }
+
+    impl AgentObserver for LifecycleObserver {
+        fn on_step_start(&self, step: u32) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("start:{step}"));
+            if self.cancel_on_step == Some(step) {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_step_end(&self, outcome: &StepOutcome) {
+            self.events.lock().expect("events").push(format!(
+                "end:{}:{}:{}",
+                outcome.step, outcome.tool_calls, outcome.cancelled
+            ));
+        }
+
+        fn on_attempt_failed(&self, failure: &AttemptFailure) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("attempt:{}:{}", failure.step, failure.cancelled));
+        }
+
+        fn on_request(
+            &self,
+            step: u32,
+            envelope: &RequestEnvelope,
+            message_count: usize,
+            _estimated_input_tokens: usize,
+        ) {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("request:{step}:{message_count}:{}", envelope.model));
+        }
+
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    fn lifecycle_agent(
+        directory: &std::path::Path,
+        responses: Vec<HttpResponse>,
+    ) -> Agent<MockTransport> {
+        let transport = MockTransport {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory)),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_describe_each_step() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello from disk").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"The file says hello."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"#,
+                ),
+            ],
+        );
+        let observer = LifecycleObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await
+            .expect("run");
+
+        assert_eq!(run.steps, 2);
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec![
+                "start:1".to_owned(),
+                "request:1:2:deepseek-flash".to_owned(),
+                "end:1:1:false".to_owned(),
+                "start:2".to_owned(),
+                "end:2:0:false".to_owned(),
+            ],
+            "an unchanged request header is recorded once"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_attempt_is_recorded_without_an_assistant_message() {
+        let directory = tempdir().expect("tempdir");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![HttpResponse {
+                status: 400,
+                body: br#"{"error":"bad request"}"#.to_vec(),
+            }],
+        );
+        let observer = LifecycleObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await;
+
+        assert!(run.is_err());
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec![
+                "start:1".to_owned(),
+                "request:1:2:deepseek-flash".to_owned(),
+                "attempt:1:false".to_owned(),
+                "end:1:0:false".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_before_tools_closes_the_step() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )],
+        );
+        let observer = LifecycleObserver {
+            cancel_on_step: Some(1),
+            ..LifecycleObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec![
+                "start:1".to_owned(),
+                "request:1:2:deepseek-flash".to_owned(),
+                "end:1:1:true".to_owned(),
+            ]
+        );
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Settlement {
+        step: u32,
+        interrupted: bool,
+        roles: Vec<String>,
+        tool_text: String,
+        assistant_text: String,
+    }
+
+    #[derive(Default)]
+    struct SettlementObserver {
+        settled: Mutex<Vec<Settlement>>,
+        cancelled: AtomicBool,
+        cancel_on_step: Option<u32>,
+        cancel_on_content: bool,
+    }
+
+    impl AgentObserver for SettlementObserver {
+        fn on_step_start(&self, step: u32) {
+            if self.cancel_on_step == Some(step) {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_content(&self, _step: u32, _text: &str) {
+            if self.cancel_on_content {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_step_settled(&self, settlement: &StepSettlement<'_>) {
+            let roles = settlement
+                .messages
+                .iter()
+                .map(|message| match message.role {
+                    ChatRole::User => "user".to_owned(),
+                    ChatRole::Assistant => "assistant".to_owned(),
+                    ChatRole::Tool => "tool".to_owned(),
+                    _ => "other".to_owned(),
+                })
+                .collect();
+            let tool_text = settlement
+                .messages
+                .iter()
+                .find(|message| message.role == ChatRole::Tool)
+                .and_then(|message| message.content.clone())
+                .unwrap_or_default();
+            let assistant_text = settlement
+                .messages
+                .iter()
+                .find(|message| message.role == ChatRole::Assistant)
+                .and_then(|message| message.content.clone())
+                .unwrap_or_default();
+            self.settled.lock().expect("settled").push(Settlement {
+                step: settlement.step,
+                interrupted: settlement.interrupted,
+                roles,
+                tool_text,
+                assistant_text,
+            });
+        }
+
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test]
+    async fn each_step_settles_its_messages() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello from disk").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"The file says hello."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"#,
+                ),
+            ],
+        );
+        let observer = SettlementObserver::default();
+
+        agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await
+            .expect("run");
+
+        assert_eq!(
+            *observer.settled.lock().expect("settled"),
+            vec![
+                Settlement {
+                    step: 1,
+                    interrupted: false,
+                    roles: vec!["assistant".to_owned(), "tool".to_owned()],
+                    tool_text: "hello from disk".to_owned(),
+                    assistant_text: String::new(),
+                },
+                Settlement {
+                    step: 2,
+                    interrupted: false,
+                    roles: vec!["assistant".to_owned()],
+                    tool_text: String::new(),
+                    assistant_text: "The file says hello.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_settles_paired_results_for_unstarted_tools() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )],
+        );
+        let observer = SettlementObserver {
+            cancel_on_step: Some(1),
+            ..SettlementObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        let settled = observer.settled.lock().expect("settled");
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].step, 1);
+        assert!(settled[0].interrupted);
+        assert_eq!(
+            settled[0].roles,
+            vec!["assistant".to_owned(), "tool".to_owned()]
+        );
+        assert!(settled[0].tool_text.contains("outcome is unknown"));
+    }
+
+    struct StreamingTransport {
+        body: &'static [u8],
+    }
+
+    #[async_trait]
+    impl HttpTransport for StreamingTransport {
+        async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            Err(ProviderError::Unsupported("completion".to_owned()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+                Bytes::from_static(self.body),
+            )])))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_stream_settles_the_delivered_prefix() {
+        let directory = tempdir().expect("tempdir");
+        let transport = StreamingTransport {
+            body: b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: true,
+                ..AgentConfig::default()
+            },
+        );
+        let observer = SettlementObserver {
+            cancel_on_content: true,
+            ..SettlementObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hi")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        let settled = observer.settled.lock().expect("settled");
+        assert_eq!(settled.len(), 1);
+        assert!(settled[0].interrupted);
+        assert_eq!(settled[0].roles, vec!["assistant".to_owned()]);
+        assert_eq!(settled[0].assistant_text, "Hello ");
+    }
+
+    #[tokio::test]
+    async fn context_overflow_closes_the_step() {
+        let directory = tempdir().expect("tempdir");
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                context_window: 1,
+                ..AgentConfig::default()
+            },
+        );
+        let observer = LifecycleObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hello")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::ContextOverflow { .. })));
+        assert_eq!(
+            *observer.events.lock().expect("events"),
+            vec!["start:1".to_owned(), "end:1:0:false".to_owned()]
+        );
     }
 }
