@@ -80,9 +80,6 @@ pub struct AgentConfig {
     /// Provider context window in tokens. Requests are capped so that the
     /// estimated prompt plus the completion budget fits inside it.
     pub context_window: u32,
-    /// Compact history once estimated prompt tokens exceed this fraction of
-    /// the context window.
-    pub compact_at_ratio: f32,
     pub allow_writes: bool,
     pub allow_commands: bool,
     pub stream: bool,
@@ -98,7 +95,6 @@ impl Default for AgentConfig {
             max_steps: 0,
             max_output_tokens: 16_384,
             context_window: 1_000_000,
-            compact_at_ratio: 0.85,
             allow_writes: false,
             allow_commands: false,
             stream: true,
@@ -504,6 +500,10 @@ impl<T: HttpTransport> Agent<T> {
                 }
             }
             let mut request_messages = messages.clone();
+            // Reasoning is only required for the live tool loop. Keeping it on
+            // every completed turn is what made long sessions balloon; strip it
+            // only from assistant text messages that are already finished.
+            strip_completed_text_reasoning(&mut request_messages);
             let catalog_tokens = mcp_catalog
                 .as_ref()
                 .map_or(0, |catalog| estimate_tokens(message_bytes(catalog)));
@@ -517,26 +517,11 @@ impl<T: HttpTransport> Agent<T> {
             let context_window = self.config.context_window as usize;
             let configured_output = self.config.max_output_tokens as usize;
             let safety = CONTEXT_SAFETY_TOKENS.min(context_window / 8).max(1);
-            let compact_ratio = if self.config.compact_at_ratio.is_finite() {
-                self.config.compact_at_ratio.clamp(0.5, 0.95)
-            } else {
-                0.85
-            };
-            let compact_at =
-                ((context_window as f32 * compact_ratio) as usize).max(context_window / 10);
-            if input_tokens + configured_output + safety > context_window
-                || input_tokens > compact_at
-            {
-                let target = compact_at
-                    .saturating_sub(
-                        configured_output.min(context_window / 2) + safety + tool_tokens,
-                    )
-                    .max(context_window / 10);
-                compact_request(
-                    &mut request_messages,
-                    self.config.compact_keep_recent,
-                    target,
-                );
+            // Only rewrite history when the request genuinely will not fit.
+            // Earlier pressure-based compaction was dropping the assistant
+            // answer the user had just asked for.
+            if input_tokens + configured_output + safety > context_window {
+                prune_historical_tool_context(&mut request_messages);
                 input_tokens = request_tokens(&request_messages, tool_tokens) + catalog_tokens;
             }
             let after_bytes = request_messages.iter().map(message_bytes).sum::<usize>();
@@ -997,159 +982,88 @@ fn request_tokens(messages: &[ChatMessage], tool_tokens: usize) -> usize {
         + tool_tokens
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let mut truncated: String = text.chars().take(max_chars).collect();
-    truncated.push('…');
-    truncated
-}
-
-fn truncate_bytes(text: &str, max_bytes: usize) -> (String, usize) {
-    if text.len() <= max_bytes {
-        return (text.to_owned(), 0);
-    }
-    let mut end = max_bytes.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = text[..end].to_owned();
-    truncated.push('…');
-    (truncated, text.len().saturating_sub(end))
-}
-
-/// Choose a user-message boundary so the recent window keeps whole turns and
-/// never strands a tool result without its assistant call.
 fn recent_turn_start(messages: &[ChatMessage], keep_recent: usize) -> usize {
     if messages.len() <= 2 {
         return 1;
     }
-    let target = messages.len().saturating_sub(keep_recent.max(4)).max(2);
-    messages
+    let user_indexes = messages
         .iter()
         .enumerate()
         .skip(1)
-        .find(|(index, message)| *index >= target && message.role == ChatRole::User)
+        .filter(|(_, message)| message.role == ChatRole::User)
         .map(|(index, _)| index)
-        .or_else(|| {
-            messages
-                .iter()
-                .rposition(|message| message.role == ChatRole::User)
-                .filter(|index| *index > 1)
-        })
-        .unwrap_or(1)
+        .collect::<Vec<_>>();
+    let Some(last_user) = user_indexes.last().copied() else {
+        return 1;
+    };
+    let by_messages = messages.len().saturating_sub(keep_recent.max(4)).max(2);
+    let message_boundary = user_indexes
+        .iter()
+        .copied()
+        .find(|index| *index >= by_messages)
+        .unwrap_or(last_user);
+    // Keep the previous user turn verbatim too. Otherwise a new question at the
+    // tail makes the boundary the new question itself, and the answer the user
+    // is asking to continue from is folded into the summary.
+    let turn_boundary = user_indexes
+        .get(user_indexes.len().saturating_sub(2))
+        .copied()
+        .unwrap_or(last_user);
+    message_boundary.min(turn_boundary).max(1)
 }
 
-fn summarize_messages(messages: &[ChatMessage]) -> String {
-    let mut parts = Vec::new();
+fn strip_completed_text_reasoning(messages: &mut [ChatMessage]) {
     for message in messages {
-        match message.role {
-            ChatRole::User => {
-                if let Some(content) = message.content.as_deref() {
-                    let text = truncate_chars(content.trim(), 1_200);
-                    if !text.is_empty() {
-                        parts.push(format!("User message: {text}"));
-                    }
-                }
-            }
-            ChatRole::Assistant => {
-                if let Some(content) = message.content.as_deref() {
-                    let text = truncate_chars(content.trim(), 800);
-                    if !text.is_empty() {
-                        parts.push(format!("Assistant: {text}"));
-                    }
-                }
-                if let Some(calls) = &message.tool_calls {
-                    let names = calls
-                        .iter()
-                        .map(|call| {
-                            format!(
-                                "{}({})",
-                                call.function.name,
-                                truncate_chars(&call.function.arguments, 160)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    parts.push(format!("Tool calls: {names}"));
-                }
-            }
-            ChatRole::Tool => {
-                if let Some(content) = message.content.as_deref() {
-                    let text = truncate_chars(content.trim(), 400);
-                    if !text.is_empty() {
-                        parts.push(format!("Tool result: {text}"));
-                    }
-                }
-            }
-            ChatRole::System => {}
-        }
-    }
-    let mut summary = parts.join("\n");
-    if summary.chars().count() > 16_000 {
-        let omitted = summary.chars().count() - 16_000;
-        summary = truncate_chars(&summary, 16_000);
-        summary.push_str(&format!("\n[summary truncated; {omitted} chars omitted]"));
-    }
-    summary
-}
-
-fn trim_large_messages(messages: &mut [ChatMessage], target_tokens: usize) {
-    let per_message = target_tokens
-        .saturating_mul(ESTIMATED_BYTES_PER_TOKEN)
-        .checked_div(messages.len().max(1))
-        .unwrap_or(0)
-        .max(512);
-    let last = messages.len().saturating_sub(1);
-    for (index, message) in messages.iter_mut().enumerate().skip(1) {
-        // Preserve the current user request, but a trailing tool result is
-        // fair game when the request would otherwise not fit.
-        if index == last && message.role != ChatRole::Tool {
-            continue;
-        }
-        let cap = match message.role {
-            ChatRole::Tool => per_message.min(4_000),
-            ChatRole::Assistant => per_message.saturating_mul(2).min(8_000),
-            ChatRole::User => per_message.saturating_mul(4).min(16_000),
-            ChatRole::System => 0,
-        };
-        if cap == 0 {
-            continue;
-        }
-        if let Some(content) = message.content.as_mut() {
-            if content.len() > cap {
-                let (mut trimmed, omitted) = truncate_bytes(content, cap);
-                trimmed.push_str(&format!("\n[compacted; {omitted} bytes omitted]"));
-                *content = trimmed;
-            }
+        // Reasoning is required when the assistant message also carries tool
+        // calls. It is not required on a finished text answer, and keeping it
+        // makes long sessions balloon without helping the next request.
+        let completed_text = message.role == ChatRole::Assistant
+            && message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty());
+        if completed_text {
+            message.reasoning_content = None;
         }
     }
 }
 
-/// Replace older turns with a bounded extractive summary and trim oversized
-/// retained messages. The original events stay untouched in the store; this
-/// only shapes the next provider request.
-fn compact_request(
-    messages: &mut Vec<ChatMessage>,
-    keep_recent: usize,
-    target_tokens: usize,
-) -> usize {
+/// Drop old tool-call/result pairs while preserving every user message and
+/// every assistant text answer verbatim. This is the last-resort fit step for
+/// sessions whose visible conversation is larger than the model window.
+fn prune_historical_tool_context(messages: &mut Vec<ChatMessage>) -> usize {
     let before = messages.iter().map(message_bytes).sum::<usize>();
-    let recent_start = recent_turn_start(messages, keep_recent);
-    if recent_start > 1 {
-        let summary = summarize_messages(&messages[1..recent_start]);
-        if !summary.is_empty() {
-            let marker = ChatMessage::user(format!(
-                "<compacted-summary range=\"messages:1-{}\">\n[Compacted transcript excerpt; this is not a new user request.]\n{}\n</compacted-summary>",
-                recent_start - 1,
-                summary
-            ));
-            messages.drain(1..recent_start);
-            messages.insert(1, marker);
+    let recent_start = recent_turn_start(messages, 8);
+    if recent_start <= 1 {
+        return 0;
+    }
+    let mut kept = Vec::with_capacity(messages.len());
+    kept.push(messages[0].clone());
+    for message in messages.iter().skip(1).take(recent_start - 1) {
+        match message.role {
+            ChatRole::Tool => {}
+            ChatRole::Assistant
+                if message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty()) =>
+            {
+                // A tool call cannot survive without its result. Keep the
+                // assistant's visible text, drop the call and its reasoning.
+                if let Some(content) = message
+                    .content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|content| !content.is_empty())
+                {
+                    kept.push(ChatMessage::assistant(content.to_owned()));
+                }
+            }
+            _ => kept.push(message.clone()),
         }
     }
-    trim_large_messages(messages, target_tokens);
+    kept.extend(messages.drain(recent_start..));
+    *messages = kept;
     before.saturating_sub(messages.iter().map(message_bytes).sum::<usize>())
 }
 
@@ -1715,7 +1629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn huge_reasoning_history_is_compacted_before_the_budget_check() {
+    async fn completed_text_reasoning_is_not_replayed() {
         let directory = tempdir().expect("tempdir");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let transport = RecordingTransport {
@@ -1745,25 +1659,29 @@ mod tests {
         agent.run(history).await.expect("run");
         let request = request_json(&requests, 0);
         let messages = request["messages"].as_array().expect("messages");
-        assert!(messages.iter().any(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("<compacted-summary"))
-        }));
-        assert_eq!(request["max_tokens"], json!(16_384));
-        let reasoning_bytes = messages
-            .iter()
-            .filter_map(|message| message["reasoning_content"].as_str())
-            .map(str::len)
-            .sum::<usize>();
-        assert!(
-            reasoning_bytes < 500_000,
-            "compaction should drop most old reasoning rather than replay 4 MB"
+        assert_eq!(
+            messages.last().expect("last")["content"],
+            json!("latest request")
         );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.get("reasoning_content").is_none()),
+            "finished text turn reasoning should be dropped"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["content"] == json!("ok"))
+                .count(),
+            40,
+            "visible assistant answers must survive verbatim"
+        );
+        assert_eq!(request["max_tokens"], json!(16_384));
     }
 
     #[tokio::test]
-    async fn request_compacts_history_and_fits_completion_budget() {
+    async fn historical_tool_context_is_pruned_without_losing_recent_answers() {
         let directory = tempdir().expect("tempdir");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let transport = RecordingTransport {
@@ -1781,15 +1699,32 @@ mod tests {
                 stream: false,
                 context_window: 12_000,
                 max_output_tokens: 16_384,
-                compact_at_ratio: 0.5,
-                compact_keep_recent: 4,
                 compact_after_bytes: 0,
                 ..AgentConfig::default()
             },
         );
+        let mut old_call = ChatMessage::assistant("checking old context");
+        old_call.tool_calls = Some(vec![ToolCall::function(
+            "call-old",
+            "read_file",
+            json!({"path": "old.txt"}),
+        )]);
+        old_call.reasoning_content = Some("old tool reasoning".to_owned());
+        let mut recent_call = ChatMessage::assistant("checking recent context");
+        recent_call.tool_calls = Some(vec![ToolCall::function(
+            "call-recent",
+            "read_file",
+            json!({"path": "recent.txt"}),
+        )]);
         let history = vec![
-            ChatMessage::user(format!("old request {}", "x".repeat(60_000))),
-            ChatMessage::assistant("old answer"),
+            ChatMessage::user("old request"),
+            old_call,
+            ChatMessage::tool("call-old", "x".repeat(60_000)),
+            ChatMessage::assistant("old conclusion"),
+            ChatMessage::user("recent request"),
+            recent_call,
+            ChatMessage::tool("call-recent", "recent tool result"),
+            ChatMessage::assistant("recent answer the user wants to continue from"),
             ChatMessage::user("latest request"),
         ];
         let run = agent.run(history).await.expect("run");
@@ -1797,15 +1732,39 @@ mod tests {
         let request = request_json(&requests, 0);
         let messages = request["messages"].as_array().expect("messages");
         assert_eq!(messages.first().expect("first")["role"], json!("system"));
-        assert!(messages.iter().any(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("<compacted-summary"))
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["content"] == json!("x".repeat(60_000)))
+        );
+        assert!(!messages.iter().any(|message| {
+            message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| calls.iter().any(|call| call["id"] == json!("call-old")))
         }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["content"] == json!("old conclusion"))
+        );
+        assert!(messages.iter().any(|message| {
+            message["content"] == json!("recent answer the user wants to continue from")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["content"] == json!("recent tool result"))
+        );
         assert_eq!(
             messages.last().expect("last")["content"],
             json!("latest request")
         );
+        assert!(!messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("<compacted-summary"))
+        }));
         let max_tokens = request["max_tokens"].as_u64().expect("max_tokens");
         assert!(max_tokens < 16_384, "completion budget must shrink");
         let estimated_input = messages
@@ -1813,7 +1772,7 @@ mod tests {
             .map(|message| message.to_string().len())
             .sum::<usize>()
             / 3;
-        assert!(estimated_input + max_tokens as usize + 1_500 <= 12_000);
+        assert!(estimated_input + max_tokens as usize <= 12_000);
     }
 
     #[tokio::test]

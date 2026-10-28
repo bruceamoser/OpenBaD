@@ -1510,6 +1510,7 @@ pub enum AgentEvent {
 struct ChannelObserver {
     channel: Channel<AgentEvent>,
     cancel: Arc<AtomicBool>,
+    compaction_reported: AtomicBool,
 }
 
 impl AgentObserver for ChannelObserver {
@@ -1561,7 +1562,9 @@ impl AgentObserver for ChannelObserver {
     }
 
     fn on_compaction(&self, before_bytes: usize, after_bytes: usize) {
-        if after_bytes < before_bytes {
+        if after_bytes < before_bytes
+            && !self.compaction_reported.swap(true, Ordering::Relaxed)
+        {
             let _ = self.channel.send(AgentEvent::Compaction {
                 before_bytes,
                 after_bytes,
@@ -4468,6 +4471,7 @@ async fn chat(
     let observer = ChannelObserver {
         channel: on_event,
         cancel,
+        compaction_reported: AtomicBool::new(false),
     };
     let outcome = agent.run_with_observer(history, &observer).await;
     run_guard.finish_steering();
