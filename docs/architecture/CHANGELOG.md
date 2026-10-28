@@ -314,3 +314,11 @@ the next, an external edit still forces a re-read, and delegated subagents see
 the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
+
+## v0.2.2
+
+Fix release on top of 0.2.1. The domain proxies (`exec_run`, `files_run`, …)
+now carry an enum of their domain's tools in the schema, name those tools in
+the description, and repeat both in argument errors — so a model that skips
+`<domain>_list` gets a correctable message instead of `missing string argument:
+tool` or `tool … is not in the exec domain`.
