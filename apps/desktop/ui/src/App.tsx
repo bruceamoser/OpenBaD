@@ -691,10 +691,6 @@ export default function App() {
       void fetchApiKeyStatus()
         .then(setApiKeyStatus)
         .catch(() => setApiKeyStatus(false));
-      setAnnouncement("Turn finished");
-      if (!document.hasFocus()) {
-        setToast("Turn finished");
-      }
       void loadFoundation();
       void loadSessions();
       void loadArchivedSessions();
@@ -1720,6 +1716,18 @@ export default function App() {
       if (visibleRunRef.current === runKey) {
         setError(message);
         setEntries([...run.entries]);
+      } else {
+        // A turn that fails off-screen is exactly the case the user needs to
+        // come back to, so it earns the same dot a completion does.
+        const failedSessionId = run.sessionId ?? baseSessionId;
+        if (failedSessionId !== null) {
+          await persistSessionUnread(failedSessionId, true).catch(() => undefined);
+          setSessions((items) =>
+            items.map((item) =>
+              item.id === failedSessionId ? { ...item, unread: true } : item,
+            ),
+          );
+        }
       }
     } finally {
       run.busy = false;
