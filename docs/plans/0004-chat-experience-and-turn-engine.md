@@ -1,6 +1,6 @@
 # 0004 — Chat Experience and Turn Engine Rework
 
-> **Status (2026-10-27):** Phase A implemented on `feature/832-durable-turn-substrate`. Phases B–F proposed. This plan implements, rather than invents, capabilities already listed in the feature table: F-09, F-17, F-18, F-19, F-36, F-45, plus new F-54.
+> **Status (2026-10-27):** Phases A–F implemented and merged (#838–#843). Open follow-ups are tracked in the change log rows and §10. This plan implements, rather than invents, capabilities already listed in the feature table: F-09, F-17, F-18, F-19, F-36, F-45, plus new F-54.
 
 **Review basis.** Three-way review of this repository, [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) at `0.2.1-rc.2` (`master`, `687f282e`), and VS Code at `main` (`7c4967fad97`). The question was narrow: *which turn and chat technology should OpenBaD adopt, and which user experience should it imitate?*
 
