@@ -54,6 +54,16 @@ enum WriteCommand {
         title: Option<String>,
         reply: SyncSender<Result<SessionId, StoreError>>,
     },
+    RecordToolApproval {
+        workspace: String,
+        tool: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    RevokeToolApproval {
+        workspace: String,
+        tool: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
     RenameWorkspace {
         workspace_id: WorkspaceId,
         name: String,
@@ -998,6 +1008,50 @@ impl Store {
             drafts,
             reply,
         })
+    }
+
+    /// Record a standing workspace approval for a tool.
+    pub fn record_tool_approval(&self, workspace: &str, tool: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::RecordToolApproval {
+            workspace: workspace.to_owned(),
+            tool: tool.to_owned(),
+            reply,
+        })
+    }
+
+    /// Drop a standing workspace approval so the next call asks again.
+    pub fn revoke_tool_approval(&self, workspace: &str, tool: &str) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::RevokeToolApproval {
+            workspace: workspace.to_owned(),
+            tool: tool.to_owned(),
+            reply,
+        })
+    }
+
+    /// Standing approvals recorded for a workspace, newest first.
+    pub fn tool_approvals(&self, workspace: &str) -> Result<Vec<(String, i64)>, StoreError> {
+        let connection = self.reader()?;
+        let mut statement = connection.prepare(
+            "SELECT tool, granted_at FROM tool_approvals
+             WHERE workspace = ?1 ORDER BY granted_at DESC",
+        )?;
+        let rows = statement.query_map([workspace], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut approvals = Vec::new();
+        for row in rows {
+            approvals.push(row?);
+        }
+        Ok(approvals)
+    }
+
+    /// True when the workspace already granted standing approval for a tool.
+    pub fn has_tool_approval(&self, workspace: &str, tool: &str) -> Result<bool, StoreError> {
+        let connection = self.reader()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM tool_approvals WHERE workspace = ?1 AND tool = ?2",
+            params![workspace, tool],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// Copy the session's history before `at_user_seq` into a new session.
@@ -3060,6 +3114,20 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             WriteCommand::CreateSession { session, reply } => {
                 let _ = reply.send(create_session(&connection, session));
             }
+            WriteCommand::RecordToolApproval {
+                workspace,
+                tool,
+                reply,
+            } => {
+                let _ = reply.send(record_tool_approval(&connection, &workspace, &tool));
+            }
+            WriteCommand::RevokeToolApproval {
+                workspace,
+                tool,
+                reply,
+            } => {
+                let _ = reply.send(revoke_tool_approval(&connection, &workspace, &tool));
+            }
             WriteCommand::ForkSession {
                 source,
                 at_user_seq,
@@ -3633,6 +3701,31 @@ fn create_session(connection: &Connection, session: NewSession) -> Result<Sessio
     Ok(id)
 }
 
+fn record_tool_approval(
+    connection: &Connection,
+    workspace: &str,
+    tool: &str,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO tool_approvals (workspace, tool, granted_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace, tool) DO UPDATE SET granted_at = excluded.granted_at",
+        params![workspace, tool, now_millis()],
+    )?;
+    Ok(())
+}
+
+fn revoke_tool_approval(
+    connection: &Connection,
+    workspace: &str,
+    tool: &str,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "DELETE FROM tool_approvals WHERE workspace = ?1 AND tool = ?2",
+        params![workspace, tool],
+    )?;
+    Ok(())
+}
+
 fn fork_session(
     connection: &mut Connection,
     source: SessionId,
@@ -3932,8 +4025,35 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0016_session_fork"
+            "0017_tool_approvals"
         );
+    }
+
+    #[test]
+    fn workspace_approvals_persist_and_revoke() {
+        let store = Store::open_in_memory().expect("store");
+        assert!(!store.has_tool_approval("/tmp/ws", "shell").expect("lookup"));
+
+        store
+            .record_tool_approval("/tmp/ws", "shell")
+            .expect("record");
+        assert!(store.has_tool_approval("/tmp/ws", "shell").expect("lookup"));
+        assert!(
+            !store
+                .has_tool_approval("/tmp/other", "shell")
+                .expect("lookup"),
+            "a grant applies only to the workspace it was made in"
+        );
+
+        let grants = store.tool_approvals("/tmp/ws").expect("list");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].0, "shell");
+
+        store
+            .revoke_tool_approval("/tmp/ws", "shell")
+            .expect("revoke");
+        assert!(!store.has_tool_approval("/tmp/ws", "shell").expect("lookup"));
+        assert!(store.tool_approvals("/tmp/ws").expect("list").is_empty());
     }
 
     #[test]

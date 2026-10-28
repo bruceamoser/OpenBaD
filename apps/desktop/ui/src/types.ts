@@ -257,6 +257,11 @@ export type SessionView = {
   total_duration_ms: number;
 };
 
+export type WorkspaceApproval = {
+  tool: string;
+  granted_at: number;
+};
+
 export type OutsideAccessGrant = {
   id: string;
   workspace_id: string;

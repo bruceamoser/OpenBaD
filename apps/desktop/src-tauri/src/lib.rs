@@ -1869,22 +1869,46 @@ struct DesktopApprovals {
     pending: Arc<Mutex<HashMap<Uuid, std::sync::mpsc::Sender<ApprovalDecision>>>>,
     cancel: Arc<AtomicBool>,
     cache: Arc<Mutex<ApprovalCache>>,
+    store: Arc<Mutex<Store>>,
     session: SessionId,
     workspace: String,
 }
 
 impl DesktopApprovals {
     fn cached(&self, tool: &str) -> Option<ApprovalDecision> {
-        let cache = self.cache.lock().ok()?;
-        cache
-            .sessions
-            .get(&(self.session, tool.to_owned()))
-            .or_else(|| {
-                cache
-                    .workspaces
-                    .get(&(self.workspace.clone(), tool.to_owned()))
-            })
-            .copied()
+        {
+            let cache = self.cache.lock().ok()?;
+            if let Some(decision) = cache
+                .sessions
+                .get(&(self.session, tool.to_owned()))
+                .or_else(|| {
+                    cache
+                        .workspaces
+                        .get(&(self.workspace.clone(), tool.to_owned()))
+                })
+                .copied()
+            {
+                return Some(decision);
+            }
+        }
+        // Workspace grants are durable, so a restart does not re-ask for a tool
+        // the user already allowed here.
+        let persisted = self
+            .store
+            .lock()
+            .ok()?
+            .has_tool_approval(&self.workspace, tool)
+            .unwrap_or(false);
+        if !persisted {
+            return None;
+        }
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.workspaces.insert(
+                (self.workspace.clone(), tool.to_owned()),
+                ApprovalDecision::AllowWorkspace,
+            );
+        }
+        Some(ApprovalDecision::AllowWorkspace)
     }
 
     fn register(&self, id: Uuid, sender: std::sync::mpsc::Sender<ApprovalDecision>) -> bool {
@@ -1915,6 +1939,9 @@ impl DesktopApprovals {
                 cache
                     .workspaces
                     .insert((self.workspace.clone(), tool.to_owned()), decision);
+                if let Ok(store) = self.store.lock() {
+                    let _ = store.record_tool_approval(&self.workspace, tool);
+                }
             }
             _ => {}
         }
@@ -4811,6 +4838,53 @@ fn steer_chat(state: State<'_, AppState>, run_id: String, message: String) -> Re
     }
 }
 
+#[derive(Serialize)]
+pub struct WorkspaceApproval {
+    pub tool: String,
+    pub granted_at: i64,
+}
+
+/// Standing approvals recorded for a workspace.
+#[tauri::command]
+fn workspace_approvals(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<WorkspaceApproval>, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let approvals = store
+        .tool_approvals(&workspace_path)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(tool, granted_at)| WorkspaceApproval { tool, granted_at })
+        .collect();
+    Ok(approvals)
+}
+
+/// Forget a standing approval so the next call asks again.
+#[tauri::command]
+fn revoke_workspace_approval(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    tool: String,
+) -> Result<(), String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .revoke_tool_approval(&workspace_path, &tool)
+        .map_err(|error| error.to_string())?;
+    drop(store);
+    // Drop the in-memory copy as well so the same process stops honouring it.
+    if let Ok(mut cache) = state.approvals.lock() {
+        cache.workspaces.remove(&(workspace_path, tool));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn respond_to_approval(
     state: State<'_, AppState>,
@@ -5102,6 +5176,7 @@ async fn chat(
             pending: Arc::clone(&state.pending_approvals),
             cancel: Arc::clone(&cancel),
             cache: Arc::clone(&state.approvals),
+            store: Arc::clone(&state.store),
             session,
             workspace: workspace_path.to_string_lossy().into_owned(),
         }))
@@ -5614,6 +5689,8 @@ pub fn run() {
             clipboard::read_clipboard_image,
             cancel_chat,
             respond_to_approval,
+            workspace_approvals,
+            revoke_workspace_approval,
             steer_chat,
             api_key_status,
             mcp_servers,
@@ -5873,7 +5950,7 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0016_session_fork");
+        assert_eq!(payload.doctor.schema_version, "0017_tool_approvals");
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);
@@ -6050,6 +6127,7 @@ mod tests {
             pending: Arc::new(Mutex::new(HashMap::new())),
             cancel: Arc::new(AtomicBool::new(false)),
             cache: Arc::new(Mutex::new(ApprovalCache::default())),
+            store: Arc::new(Mutex::new(Store::open_in_memory().expect("store"))),
             session: SessionId::from(Uuid::nil()),
             workspace: "/tmp/approval-workspace".to_owned(),
         };
@@ -6069,6 +6147,54 @@ mod tests {
         assert_eq!(
             approvals.cached("write_file"),
             Some(ApprovalDecision::AllowWorkspace)
+        );
+    }
+
+    #[test]
+    fn workspace_approvals_survive_a_restart() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+        let workspace = "/tmp/approval-workspace".to_owned();
+        let build = || DesktopApprovals {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            cache: Arc::new(Mutex::new(ApprovalCache::default())),
+            store: Arc::clone(&store),
+            session: SessionId::from(Uuid::nil()),
+            workspace: workspace.clone(),
+        };
+
+        let first = build();
+        first.remember("write_file", ApprovalDecision::AllowWorkspace);
+        assert_eq!(
+            first.cached("write_file"),
+            Some(ApprovalDecision::AllowWorkspace)
+        );
+
+        // A fresh observer with an empty cache mirrors a new process: the grant
+        // is served from the store, not from memory.
+        let restarted = build();
+        assert!(restarted.cache.lock().expect("cache").workspaces.is_empty());
+        assert_eq!(
+            restarted.cached("write_file"),
+            Some(ApprovalDecision::AllowWorkspace),
+            "a workspace grant outlives the process that made it"
+        );
+
+        // A different workspace must still ask.
+        let elsewhere = DesktopApprovals {
+            workspace: "/tmp/other-workspace".to_owned(),
+            ..build()
+        };
+        assert!(elsewhere.cached("write_file").is_none());
+
+        store
+            .lock()
+            .expect("store")
+            .revoke_tool_approval(&workspace, "write_file")
+            .expect("revoke");
+        assert!(
+            build().cached("write_file").is_none(),
+            "a revoked grant asks again"
         );
     }
 
