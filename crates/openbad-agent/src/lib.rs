@@ -201,6 +201,14 @@ pub struct AttemptFailure {
     pub cancelled: bool,
 }
 
+/// The durable delta produced by one step. Observers must settle it as a unit.
+pub struct StepSettlement<'a> {
+    pub step: u32,
+    /// The assistant message was cut short by cancellation.
+    pub interrupted: bool,
+    pub messages: &'a [ChatMessage],
+}
+
 /// Receives live progress from the agent. Implementations must not block.
 pub trait AgentObserver: Send + Sync {
     /// Called when a step begins. Defaults to [`Self::on_step`] so existing
@@ -210,7 +218,13 @@ pub trait AgentObserver: Send + Sync {
     }
     fn on_step(&self, _step: u32) {}
     fn on_step_end(&self, _outcome: &StepOutcome) {}
+    /// Settle the messages produced by a step. Called once per step, after the
+    /// step's tool results exist. A settlement is atomic: either the whole
+    /// delta lands or none of it does.
+    fn on_step_settled(&self, _settlement: &StepSettlement<'_>) {}
     fn on_attempt_failed(&self, _failure: &AttemptFailure) {}
+    /// Called when history was compacted, before the step's request is sent.
+    fn on_compaction_settled(&self, _record: &CompactionRecord) {}
     /// Called before a request is sent, whenever the header differs from the
     /// previous step's header.
     fn on_request(
@@ -272,6 +286,40 @@ fn report_attempt_failed(observer: &dyn AgentObserver, step: u32, error: &AgentE
     });
 }
 
+fn settle_step(
+    observer: &dyn AgentObserver,
+    step: u32,
+    interrupted: bool,
+    messages: &[ChatMessage],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    observer.on_step_settled(&StepSettlement {
+        step,
+        interrupted,
+        messages,
+    });
+}
+
+/// Every assistant tool call must be paired with a result before the next
+/// request. Calls that never ran get an explicit unknown-outcome result.
+fn append_interrupted_results(
+    messages: &mut Vec<ChatMessage>,
+    new_messages: &mut Vec<ChatMessage>,
+    calls: &[ToolCall],
+) {
+    for call in calls {
+        let content = format!(
+            "error: the turn was interrupted before `{}` returned. Its outcome is unknown; retry only if it is safe to repeat.",
+            call.function.name
+        );
+        let message = ChatMessage::tool(call.id.clone(), content);
+        messages.push(message.clone());
+        new_messages.push(message);
+    }
+}
+
 /// A checkpoint created by compacting an older span of the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionRecord {
@@ -298,6 +346,15 @@ pub struct AgentRun {
     /// The checkpoint created during this run, when the conversation had to be
     /// compacted to fit the model window.
     pub compaction: Option<CompactionRecord>,
+}
+
+/// A streamed step. `cancelled` means the stream was cut short after some
+/// content was already delivered to the user.
+struct StreamedStep {
+    message: ChatMessage,
+    finish_reason: Option<String>,
+    usage: Usage,
+    cancelled: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -664,6 +721,7 @@ impl<T: HttpTransport> Agent<T> {
             }
             let step_started = std::time::Instant::now();
             observer.on_step_start(step);
+            let step_messages_start = new_messages.len();
             if let Some(steering) = &self.steering {
                 for message in steering.drain() {
                     let message = ChatMessage::user(message);
@@ -775,13 +833,15 @@ impl<T: HttpTransport> Agent<T> {
                         } else if let Some(checkpoint_text) = checkpoint_text {
                             observer.on_compaction(before_bytes, after_bytes);
                             input_tokens = request_tokens(&messages, tool_tokens) + catalog_tokens;
-                            compaction = Some(CompactionRecord {
+                            let record = CompactionRecord {
                                 summary: checkpoint_text,
                                 shadowed_messages: shadowed,
                                 new_messages_before: new_messages.len(),
                                 before_bytes,
                                 after_bytes,
-                            });
+                            };
+                            observer.on_compaction_settled(&record);
+                            compaction = Some(record);
                             if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
                                 eprintln!(
                                     "[agent] compacted {shadowed} messages ({before_bytes} -> {after_bytes} bytes)"
@@ -800,6 +860,7 @@ impl<T: HttpTransport> Agent<T> {
             }
             let available = context_window.saturating_sub(input_tokens + safety);
             if available == 0 {
+                settle_step(observer, step, true, &new_messages[step_messages_start..]);
                 report_step_end(
                     observer,
                     step,
@@ -845,6 +906,7 @@ impl<T: HttpTransport> Agent<T> {
             let frozen = match request.freeze(envelope) {
                 Ok(frozen) => frozen,
                 Err(error) => {
+                    settle_step(observer, step, true, &new_messages[step_messages_start..]);
                     report_step_end(
                         observer,
                         step,
@@ -862,21 +924,36 @@ impl<T: HttpTransport> Agent<T> {
                 last_header = Some(header);
             }
 
-            let step_result: Result<(ChatMessage, Option<String>, Usage), AgentError> =
+            let step_result: Result<(ChatMessage, Option<String>, Usage, bool), AgentError> =
                 if self.config.stream {
-                    self.stream_step(frozen, observer, step).await
+                    self.stream_step(frozen, observer, step)
+                        .await
+                        .map(|streamed| {
+                            (
+                                streamed.message,
+                                streamed.finish_reason,
+                                streamed.usage,
+                                streamed.cancelled,
+                            )
+                        })
                 } else {
                     match self.client.complete(frozen).await {
                         Ok(response) => {
                             emit_full_message(observer, step, &response.message);
-                            Ok((response.message, response.finish_reason, response.usage))
+                            Ok((
+                                response.message,
+                                response.finish_reason,
+                                response.usage,
+                                false,
+                            ))
                         }
                         Err(error) => Err(AgentError::Provider(error)),
                     }
                 };
-            let (mut assistant, finish_reason, response_usage) = match step_result {
+            let (mut assistant, finish_reason, response_usage, interrupted) = match step_result {
                 Ok(settled) => settled,
                 Err(error) => {
+                    settle_step(observer, step, true, &new_messages[step_messages_start..]);
                     report_attempt_failed(observer, step, &error);
                     report_step_end(
                         observer,
@@ -897,6 +974,27 @@ impl<T: HttpTransport> Agent<T> {
             usage_totals.record(&response_usage, &step_cost);
             observer.on_usage(&usage_totals);
             let step_usage = StepUsage::from_usage(&response_usage, &step_cost);
+
+            if interrupted {
+                if let Some(calls) = assistant.tool_calls.as_mut() {
+                    sanitize_tool_arguments(calls);
+                }
+                let calls = assistant.tool_calls.clone().unwrap_or_default();
+                new_messages.push(assistant.clone());
+                messages.push(assistant);
+                append_interrupted_results(&mut messages, &mut new_messages, &calls);
+                settle_step(observer, step, true, &new_messages[step_messages_start..]);
+                report_step_end(
+                    observer,
+                    step,
+                    finish_reason,
+                    calls.len(),
+                    step_usage,
+                    step_started,
+                    true,
+                );
+                return Err(AgentError::Cancelled);
+            }
 
             let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
             let text = assistant.content.clone().unwrap_or_default();
@@ -926,6 +1024,7 @@ impl<T: HttpTransport> Agent<T> {
             messages.push(assistant);
 
             if tool_calls.is_empty() {
+                settle_step(observer, step, false, &new_messages[step_messages_start..]);
                 let pending = self
                     .steering
                     .as_ref()
@@ -973,6 +1072,12 @@ impl<T: HttpTransport> Agent<T> {
             while call_index < tool_calls.len() {
                 if observer.is_cancelled() {
                     self.close_terminals().await;
+                    append_interrupted_results(
+                        &mut messages,
+                        &mut new_messages,
+                        &tool_calls[call_index..],
+                    );
+                    settle_step(observer, step, true, &new_messages[step_messages_start..]);
                     report_step_end(
                         observer,
                         step,
@@ -1025,6 +1130,7 @@ impl<T: HttpTransport> Agent<T> {
                 call_index = batch_end;
             }
 
+            settle_step(observer, step, false, &new_messages[step_messages_start..]);
             report_step_end(
                 observer,
                 step,
@@ -1047,18 +1153,20 @@ impl<T: HttpTransport> Agent<T> {
         frozen: openbad_llm::provider::FrozenRequest,
         observer: &dyn AgentObserver,
         step: u32,
-    ) -> Result<(ChatMessage, Option<String>, Usage), AgentError> {
+    ) -> Result<StreamedStep, AgentError> {
         let mut stream = self.client.stream(frozen).await?;
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls = BTreeMap::new();
         let mut usage = Usage::default();
         let mut finish_reason = None;
+        let mut cancelled = false;
 
         while let Some(event) = stream.next().await {
             if observer.is_cancelled() {
                 self.close_terminals().await;
-                return Err(AgentError::Cancelled);
+                cancelled = true;
+                break;
             }
             match event? {
                 StreamEvent::Delta {
@@ -1094,8 +1202,8 @@ impl<T: HttpTransport> Agent<T> {
         } else {
             Some(calls.into_values().collect())
         };
-        Ok((
-            ChatMessage {
+        Ok(StreamedStep {
+            message: ChatMessage {
                 role: ChatRole::Assistant,
                 content: if content.is_empty() {
                     None
@@ -1113,7 +1221,8 @@ impl<T: HttpTransport> Agent<T> {
             },
             finish_reason,
             usage,
-        ))
+            cancelled,
+        })
     }
 
     /// Condense a span of history into a reusable checkpoint.
@@ -1664,6 +1773,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use bytes::Bytes;
     use openbad_llm::transport::{ByteStream, HttpRequest, HttpResponse};
     use openbad_tools::McpToolSummary;
     use serde_json::json;
@@ -3088,6 +3198,196 @@ mod tests {
                 "end:1:1:true".to_owned(),
             ]
         );
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Settlement {
+        step: u32,
+        interrupted: bool,
+        roles: Vec<String>,
+        tool_text: String,
+        assistant_text: String,
+    }
+
+    #[derive(Default)]
+    struct SettlementObserver {
+        settled: Mutex<Vec<Settlement>>,
+        cancelled: AtomicBool,
+        cancel_on_step: Option<u32>,
+        cancel_on_content: bool,
+    }
+
+    impl AgentObserver for SettlementObserver {
+        fn on_step_start(&self, step: u32) {
+            if self.cancel_on_step == Some(step) {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_content(&self, _step: u32, _text: &str) {
+            if self.cancel_on_content {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_step_settled(&self, settlement: &StepSettlement<'_>) {
+            let roles = settlement
+                .messages
+                .iter()
+                .map(|message| match message.role {
+                    ChatRole::User => "user".to_owned(),
+                    ChatRole::Assistant => "assistant".to_owned(),
+                    ChatRole::Tool => "tool".to_owned(),
+                    _ => "other".to_owned(),
+                })
+                .collect();
+            let tool_text = settlement
+                .messages
+                .iter()
+                .find(|message| message.role == ChatRole::Tool)
+                .and_then(|message| message.content.clone())
+                .unwrap_or_default();
+            let assistant_text = settlement
+                .messages
+                .iter()
+                .find(|message| message.role == ChatRole::Assistant)
+                .and_then(|message| message.content.clone())
+                .unwrap_or_default();
+            self.settled.lock().expect("settled").push(Settlement {
+                step: settlement.step,
+                interrupted: settlement.interrupted,
+                roles,
+                tool_text,
+                assistant_text,
+            });
+        }
+
+        fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test]
+    async fn each_step_settles_its_messages() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello from disk").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"The file says hello."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8}}"#,
+                ),
+            ],
+        );
+        let observer = SettlementObserver::default();
+
+        agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await
+            .expect("run");
+
+        assert_eq!(
+            *observer.settled.lock().expect("settled"),
+            vec![
+                Settlement {
+                    step: 1,
+                    interrupted: false,
+                    roles: vec!["assistant".to_owned(), "tool".to_owned()],
+                    tool_text: "hello from disk".to_owned(),
+                    assistant_text: String::new(),
+                },
+                Settlement {
+                    step: 2,
+                    interrupted: false,
+                    roles: vec!["assistant".to_owned()],
+                    tool_text: String::new(),
+                    assistant_text: "The file says hello.".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_settles_paired_results_for_unstarted_tools() {
+        let directory = tempdir().expect("tempdir");
+        fs::write(directory.path().join("hello.txt"), "hello").expect("file");
+        let agent = lifecycle_agent(
+            directory.path(),
+            vec![response(
+                r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"hello.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )],
+        );
+        let observer = SettlementObserver {
+            cancel_on_step: Some(1),
+            ..SettlementObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("read hello.txt")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        let settled = observer.settled.lock().expect("settled");
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].step, 1);
+        assert!(settled[0].interrupted);
+        assert_eq!(
+            settled[0].roles,
+            vec!["assistant".to_owned(), "tool".to_owned()]
+        );
+        assert!(settled[0].tool_text.contains("outcome is unknown"));
+    }
+
+    struct StreamingTransport {
+        body: &'static [u8],
+    }
+
+    #[async_trait]
+    impl HttpTransport for StreamingTransport {
+        async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            Err(ProviderError::Unsupported("completion".to_owned()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+                Bytes::from_static(self.body),
+            )])))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_stream_settles_the_delivered_prefix() {
+        let directory = tempdir().expect("tempdir");
+        let transport = StreamingTransport {
+            body: b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = default_agent(
+            client,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: true,
+                ..AgentConfig::default()
+            },
+        );
+        let observer = SettlementObserver {
+            cancel_on_content: true,
+            ..SettlementObserver::default()
+        };
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("hi")], &observer)
+            .await;
+
+        assert!(matches!(run, Err(AgentError::Cancelled)));
+        let settled = observer.settled.lock().expect("settled");
+        assert_eq!(settled.len(), 1);
+        assert!(settled[0].interrupted);
+        assert_eq!(settled[0].roles, vec!["assistant".to_owned()]);
+        assert_eq!(settled[0].assistant_text, "Hello ");
     }
 
     #[tokio::test]

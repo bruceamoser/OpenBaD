@@ -212,6 +212,7 @@ function sessionEntries(messages: SessionView["messages"]): ChatEntry[] {
     ),
     reasoning: item.reasoning ?? "",
     durationMs: item.duration_ms ?? undefined,
+    status: item.interrupted ? "Stopped" : undefined,
   }));
 }
 

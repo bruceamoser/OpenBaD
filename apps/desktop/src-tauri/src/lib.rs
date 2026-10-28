@@ -4,7 +4,7 @@ mod preview;
 mod process;
 mod services;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use openbad_agent::{
-    AgentConfig, AgentError, AgentObserver, AttemptFailure, SteeringInbox, StepOutcome,
-    default_agent,
+    AgentConfig, AgentError, AgentObserver, AttemptFailure, CompactionRecord, SteeringInbox,
+    StepOutcome, StepSettlement, default_agent,
 };
 use openbad_core::event::{NewEvent, SessionEventKind};
 use openbad_core::{SessionId, WorkspaceId};
@@ -1523,6 +1523,9 @@ struct RunJournal {
     store: Arc<Mutex<Store>>,
     session: SessionId,
     turn: u32,
+    /// Surface message sequences loaded before the turn started. Compaction
+    /// resolves its shadowed boundary against these.
+    surface_seqs: Vec<Option<u64>>,
 }
 
 impl ChannelObserver {
@@ -1557,6 +1560,85 @@ impl AgentObserver for ChannelObserver {
         let payload =
             serde_json::to_value(outcome).unwrap_or_else(|_| json!({ "step": outcome.step }));
         self.record(SessionEventKind::StepEnd, Some(outcome.step), payload);
+        let usage = outcome.usage;
+        let billed = usage.input_tokens
+            + usage.cache_read_tokens
+            + usage.cache_write_tokens
+            + usage.output_tokens;
+        if billed > 0 {
+            self.record(
+                SessionEventKind::UsageRecorded,
+                Some(outcome.step),
+                json!({
+                    "input_tokens": usage.input_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cost_usd": usage.cost_usd,
+                }),
+            );
+        }
+    }
+
+    fn on_step_settled(&self, settlement: &StepSettlement<'_>) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let Ok(store) = journal.store.lock() else {
+            return;
+        };
+        let drafts = settlement
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let mut payload = match message.role {
+                    ChatRole::User => json!({
+                        "content": message.content.clone().unwrap_or_default(),
+                    }),
+                    ChatRole::Assistant => json!({
+                        "content": message.content,
+                        "reasoning_content": message.reasoning_content,
+                        "tool_calls": message.tool_calls,
+                    }),
+                    ChatRole::Tool => json!({
+                        "content": message.content.clone().unwrap_or_default(),
+                        "tool_call_id": message.tool_call_id,
+                    }),
+                    _ => return None,
+                };
+                let kind = match message.role {
+                    ChatRole::User => SessionEventKind::UserMessage,
+                    ChatRole::Assistant => SessionEventKind::AssistantMessage,
+                    ChatRole::Tool => SessionEventKind::ToolResult,
+                    _ => return None,
+                };
+                if settlement.interrupted && message.role == ChatRole::Assistant {
+                    payload["interrupted"] = json!(true);
+                }
+                Some(
+                    NewEvent::new(kind)
+                        .with_turn(journal.turn)
+                        .with_step(settlement.step)
+                        .with_payload(payload),
+                )
+            })
+            .collect::<Vec<_>>();
+        let _ = store.append_events(journal.session, drafts);
+    }
+
+    fn on_compaction_settled(&self, record: &CompactionRecord) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let Ok(store) = journal.store.lock() else {
+            return;
+        };
+        let _ = persist_compaction(
+            &store,
+            journal.session,
+            journal.turn,
+            record,
+            &journal.surface_seqs,
+        );
     }
 
     fn on_attempt_failed(&self, failure: &AttemptFailure) {
@@ -1667,6 +1749,9 @@ pub struct UiMessage {
     pub reasoning: Option<String>,
     /// Set on the last assistant message of a completed turn.
     pub duration_ms: Option<u64>,
+    /// The turn was cut short; this text is all that was delivered.
+    #[serde(default)]
+    pub interrupted: bool,
 }
 
 #[derive(Serialize)]
@@ -3486,6 +3571,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let _ = repair_interrupted_turn(&store, session);
     let messages = store
         .load_messages(session)
         .map_err(|error| error.to_string())?;
@@ -3523,6 +3609,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                         .unwrap_or_default(),
                     reasoning: None,
                     duration_ms: None,
+                    interrupted: false,
                 })
             }
             "assistant" => {
@@ -3539,6 +3626,7 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
                     attachments: Vec::new(),
                     reasoning: chat.reasoning_content,
                     duration_ms: turn.and_then(|turn| turn_durations.get(&turn).copied()),
+                    interrupted: false,
                 })
             }
             _ => None,
@@ -3546,6 +3634,37 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
         if let Some(ui) = ui {
             ui_messages.push(ui);
             ui_turns.push(message.turn);
+        }
+    }
+    let interrupted_turns: HashSet<u32> = turns
+        .iter()
+        .filter(|turn| turn.reason.as_deref() == Some("interrupted"))
+        .map(|turn| turn.turn)
+        .collect();
+    let mut marked = HashSet::new();
+    for (message, turn) in ui_messages.iter_mut().zip(ui_turns.iter()).rev() {
+        let Some(turn) = turn else {
+            continue;
+        };
+        if message.role == "assistant" && interrupted_turns.contains(turn) && marked.insert(*turn) {
+            message.interrupted = true;
+        }
+    }
+    if let Some(last) = turns.last() {
+        let has_assistant = ui_messages
+            .iter()
+            .zip(ui_turns.iter())
+            .any(|(message, turn)| *turn == Some(last.turn) && message.role == "assistant");
+        if interrupted_turns.contains(&last.turn) && !has_assistant {
+            ui_messages.push(UiMessage {
+                role: "assistant".to_owned(),
+                text: "Stopped before any output.".to_owned(),
+                attachments: Vec::new(),
+                reasoning: None,
+                duration_ms: None,
+                interrupted: true,
+            });
+            ui_turns.push(Some(last.turn));
         }
     }
     keep_last_assistant_duration_per_turn(&mut ui_messages, &ui_turns);
@@ -4385,6 +4504,7 @@ async fn chat(
         } else {
             "read"
         };
+        repair_interrupted_turn(&store, session)?;
         store
             .set_session_access_mode(session, access_mode)
             .map_err(|error| error.to_string())?;
@@ -4554,6 +4674,7 @@ async fn chat(
             store: Arc::clone(&state.store),
             session,
             turn,
+            surface_seqs,
         }),
     };
     let outcome = agent.run_with_observer(history, &observer).await;
@@ -4562,17 +4683,24 @@ async fn chat(
         Ok(run) => run,
         Err(error) => {
             if let Ok(store) = state.store.lock() {
-                let _ = store.append_event(
-                    session,
-                    NewEvent::new(SessionEventKind::Error)
-                        .with_turn(turn)
-                        .with_payload(json!({"message": error.to_string()})),
-                );
+                if !matches!(error, AgentError::Cancelled) {
+                    let _ = store.append_event(
+                        session,
+                        NewEvent::new(SessionEventKind::Error)
+                            .with_turn(turn)
+                            .with_payload(json!({"message": error.to_string()})),
+                    );
+                }
+                let reason = if matches!(error, AgentError::Cancelled) {
+                    "cancelled"
+                } else {
+                    "error"
+                };
                 let _ = store.append_event(
                     session,
                     NewEvent::new(SessionEventKind::TurnEnd)
                         .with_turn(turn)
-                        .with_payload(json!({"reason": "error"})),
+                        .with_payload(json!({"reason": reason})),
                 );
             }
             return Err(error.to_string());
@@ -4580,92 +4708,22 @@ async fn chat(
     };
 
     let mut tool_trace = Vec::new();
+    for message in &run.new_messages {
+        if message.role == ChatRole::Tool {
+            if let Some(content) = &message.content {
+                if !content.is_empty() {
+                    tool_trace.push(truncate_for_ui(content));
+                }
+            }
+        }
+    }
     {
+        // Messages, usage, and compaction were settled step by step during the
+        // run. Only the turn terminator remains.
         let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-
-        let mut compaction_written = false;
-        for (index, message) in run.new_messages.iter().enumerate() {
-            if !compaction_written {
-                if let Some(compaction) = &run.compaction {
-                    if compaction.new_messages_before == index {
-                        persist_compaction(&store, session, turn, compaction, &surface_seqs)?;
-                        compaction_written = true;
-                    }
-                }
-            }
-            match message.role {
-                ChatRole::User => {
-                    store
-                        .append_event(
-                            session,
-                            NewEvent::new(SessionEventKind::UserMessage)
-                                .with_turn(turn)
-                                .with_step(run.steps)
-                                .with_payload(json!({
-                                    "content": message.content.clone().unwrap_or_default()
-                                })),
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
-                ChatRole::Assistant => {
-                    let payload = json!({
-                        "content": message.content,
-                        "reasoning_content": message.reasoning_content,
-                        "tool_calls": message.tool_calls,
-                    });
-                    store
-                        .append_event(
-                            session,
-                            NewEvent::new(SessionEventKind::AssistantMessage)
-                                .with_turn(turn)
-                                .with_step(run.steps)
-                                .with_payload(payload),
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
-                ChatRole::Tool => {
-                    let content = message.content.clone().unwrap_or_default();
-                    if !content.is_empty() {
-                        tool_trace.push(truncate_for_ui(&content));
-                    }
-                    store
-                        .append_event(
-                            session,
-                            NewEvent::new(SessionEventKind::ToolResult)
-                                .with_turn(turn)
-                                .with_step(run.steps)
-                                .with_payload(json!({
-                                    "content": content,
-                                    "tool_call_id": message.tool_call_id,
-                                })),
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
-                _ => {}
-            }
-        }
-        if !compaction_written {
-            if let Some(compaction) = &run.compaction {
-                persist_compaction(&store, session, turn, compaction, &surface_seqs)?;
-            }
-        }
-
-        store
-            .append_event(
-                session,
-                NewEvent::new(SessionEventKind::UsageRecorded)
-                    .with_turn(turn)
-                    .with_payload(json!({
-                        "input_tokens": run.usage.input_tokens,
-                        "cache_read_tokens": run.usage.cache_read_tokens,
-                        "output_tokens": run.usage.output_tokens,
-                        "cost_usd": run.usage.cost_usd,
-                    })),
-            )
-            .map_err(|error| error.to_string())?;
         store
             .append_event(
                 session,
@@ -4746,6 +4804,81 @@ fn ensure_user_id(store: &Store) -> Result<String, String> {
 /// Load the model-visible history and, in the same order, the store sequence
 /// of each message. Checkpoints map to `None` because they are always shadowed
 /// as a set when a newer checkpoint replaces them.
+/// Closes a turn that the process never finished. Every assistant tool call is
+/// paired with a result, and the turn is terminated as interrupted, so the next
+/// request is built from a consistent history.
+fn repair_interrupted_turn(store: &Store, session: SessionId) -> Result<bool, String> {
+    let turns = store
+        .load_turns(session)
+        .map_err(|error| error.to_string())?;
+    let Some(last) = turns.last() else {
+        return Ok(false);
+    };
+    if last.ended_at.is_some() {
+        return Ok(false);
+    }
+    let messages = store
+        .load_messages(session)
+        .map_err(|error| error.to_string())?;
+    let mut answered = HashSet::new();
+    let mut pending = Vec::new();
+    for message in messages
+        .iter()
+        .filter(|message| message.turn == Some(last.turn))
+    {
+        match message.role.as_str() {
+            "assistant" => {
+                let Some(calls) = message.content.get("tool_calls").and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                for call in calls {
+                    let Some(id) = call.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let name = call
+                        .pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    pending.push((id.to_owned(), name.to_owned()));
+                }
+            }
+            "tool" => {
+                if let Some(id) = message.content.get("tool_call_id").and_then(Value::as_str) {
+                    answered.insert(id.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut drafts = Vec::new();
+    for (id, name) in pending {
+        if answered.contains(&id) {
+            continue;
+        }
+        drafts.push(
+            NewEvent::new(SessionEventKind::ToolResult)
+                .with_turn(last.turn)
+                .with_payload(json!({
+                    "content": format!(
+                        "error: the app stopped before `{name}` returned. Its outcome is unknown; retry only if it is safe to repeat."
+                    ),
+                    "tool_call_id": id,
+                    "interrupted": true,
+                })),
+        );
+    }
+    drafts.push(
+        NewEvent::new(SessionEventKind::TurnEnd)
+            .with_turn(last.turn)
+            .with_payload(json!({"reason": "interrupted"})),
+    );
+    store
+        .append_events(session, drafts)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn load_history(
     store: &Store,
     session: SessionId,
@@ -5082,6 +5215,75 @@ mod tests {
         assert_eq!(shadowed_through_seq(&entries, 1), 0);
         assert_eq!(shadowed_through_seq(&entries, 3), 11);
         assert_eq!(shadowed_through_seq(&entries, 9), 12);
+    }
+
+    #[test]
+    fn repairs_a_turn_interrupted_mid_tool_call() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("repair", "/tmp/openbad-repair")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("repair"))
+            .expect("session");
+        store
+            .append_events(
+                session,
+                vec![
+                    NewEvent::new(SessionEventKind::TurnStart).with_turn(1),
+                    NewEvent::new(SessionEventKind::UserMessage)
+                        .with_turn(1)
+                        .with_step(1)
+                        .with_payload(json!({"content": "read it"})),
+                    NewEvent::new(SessionEventKind::AssistantMessage)
+                        .with_turn(1)
+                        .with_step(1)
+                        .with_payload(json!({
+                            "content": "Partial answer",
+                            "tool_calls": [{
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"a.txt\"}"
+                                }
+                            }]
+                        })),
+                ],
+            )
+            .expect("seed");
+
+        assert!(repair_interrupted_turn(&store, session).expect("repair"));
+
+        let turns = store.load_turns(session).expect("turns");
+        assert_eq!(
+            turns.last().expect("turn").reason.as_deref(),
+            Some("interrupted")
+        );
+        let messages = store.load_messages(session).expect("messages");
+        let tool = messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .expect("tool result");
+        assert_eq!(
+            tool.content.get("tool_call_id").and_then(Value::as_str),
+            Some("call-1")
+        );
+        assert!(
+            tool.content
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("outcome is unknown"))
+        );
+        let (history, _) = load_history(&store, session).expect("history");
+        assert!(history.iter().any(|message| {
+            message.role == ChatRole::Assistant
+                && message.content.as_deref() == Some("Partial answer")
+        }));
+        assert!(history.iter().any(|message| {
+            message.role == ChatRole::Tool && message.tool_call_id.as_deref() == Some("call-1")
+        }));
+        assert!(!repair_interrupted_turn(&store, session).expect("idempotent"));
     }
 
     #[test]
@@ -5676,6 +5878,7 @@ mod tests {
             attachments: Vec::new(),
             reasoning: None,
             duration_ms: duration,
+            interrupted: false,
         };
         let mut messages = vec![
             message("user", None),
