@@ -215,6 +215,9 @@ pub struct AgentConfig {
     pub context_window: u32,
     pub policy: ToolPolicy,
     pub max_parallel_tool_calls: usize,
+    /// Tool output larger than this is written to a spill file and replaced
+    /// with a preview plus a retrieval hint. `0` disables spilling.
+    pub spill_threshold_bytes: usize,
     pub stream: bool,
     pub system_prompt: Option<String>,
     /// Fraction of the context window that may be occupied by the prompt
@@ -234,6 +237,7 @@ impl Default for AgentConfig {
             context_window: 1_000_000,
             policy: ToolPolicy::ReadOnly,
             max_parallel_tool_calls: 10,
+            spill_threshold_bytes: 64 * 1024,
             stream: true,
             system_prompt: None,
             compact_at_ratio: 0.8,
@@ -413,6 +417,27 @@ fn report_attempt_failed(observer: &dyn AgentObserver, step: u32, error: &AgentE
         message: error.to_string(),
         cancelled: matches!(error, AgentError::Cancelled),
     });
+}
+
+fn spill_oversized(content: String, root: &std::path::Path, threshold: usize) -> String {
+    if threshold == 0 || content.len() <= threshold {
+        return content;
+    }
+    let directory = root.join(".openbad/spill");
+    if std::fs::create_dir_all(&directory).is_err() {
+        return content;
+    }
+    let path = directory.join(format!("{}.txt", Uuid::now_v7()));
+    if std::fs::write(&path, &content).is_err() {
+        return content;
+    }
+    let preview: String = content.chars().take(2_000).collect();
+    format!(
+        "[output spilled: {} bytes -> {}]\n\n{}\n\n[truncated; read the spill file to inspect the rest]",
+        content.len(),
+        path.display(),
+        preview
+    )
 }
 
 fn truncate_detail(arguments: &str) -> String {
@@ -746,7 +771,11 @@ impl<T: HttpTransport> Agent<T> {
                             content
                         }
                         Ok(result) => {
-                            let content = redact_secrets(&result.content, &self.redactions);
+                            let content = spill_oversized(
+                                redact_secrets(&result.content, &self.redactions),
+                                self.workspace.root(),
+                                self.config.spill_threshold_bytes,
+                            );
                             observer.on_tool_result(step, name, &content, false, &result.metadata);
                             content
                         }
@@ -2490,6 +2519,83 @@ mod tests {
                     .as_deref()
                     .is_some_and(|content| content.contains("Cancelled"))
         }));
+    }
+
+    struct LargeProbe;
+
+    #[async_trait]
+    impl openbad_tools::Tool for LargeProbe {
+        fn definition(&self) -> openbad_tools::ToolDefinition {
+            openbad_tools::ToolDefinition::new(
+                "large_probe",
+                "Returns a large payload.",
+                RiskLevel::Read,
+            )
+            .with_schema(json!({"type": "object", "properties": {}}))
+        }
+
+        async fn execute(
+            &self,
+            _arguments: Value,
+            _context: &ToolContext,
+        ) -> Result<openbad_tools::ToolResult, openbad_tools::ToolError> {
+            Ok(openbad_tools::ToolResult::ok("x".repeat(5_000)))
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_tool_output_spills_to_a_file() {
+        let directory = tempdir().expect("tempdir");
+        let mut registry = ToolRegistry::new();
+        registry.register(LargeProbe);
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"large_probe","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            registry,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                spill_threshold_bytes: 1_000,
+                ..AgentConfig::default()
+            },
+        );
+
+        let run = agent
+            .run_with_observer(
+                vec![ChatMessage::user("large payload")],
+                &StatusObserver::default(),
+            )
+            .await
+            .expect("run");
+
+        let spilled = run
+            .new_messages
+            .iter()
+            .find(|message| message.role == ChatRole::Tool)
+            .and_then(|message| message.content.clone())
+            .expect("tool message");
+        assert!(spilled.contains("output spilled"));
+        assert!(spilled.len() < 3_000, "the inline preview stays bounded");
+
+        let spill_dir = directory.path().join(".openbad/spill");
+        let files = std::fs::read_dir(&spill_dir)
+            .expect("spill dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        let full = std::fs::read_to_string(&files[0]).expect("spill file");
+        assert_eq!(full.len(), 5_000);
     }
 
     #[tokio::test]

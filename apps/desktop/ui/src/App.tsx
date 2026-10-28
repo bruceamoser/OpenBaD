@@ -250,7 +250,28 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
         arguments: event.arguments,
         status: "queued",
       });
-      return { ...entry, status: `Calling ${event.name}…`, toolCalls };
+      const next: ChatEntry = {
+        ...entry,
+        status: `Calling ${event.name}…`,
+        toolCalls,
+      };
+      if (event.name === "todo_write") {
+        try {
+          const parsed = JSON.parse(event.arguments) as {
+            items?: Array<{ id?: string; text?: string; state?: string }>;
+          };
+          if (Array.isArray(parsed.items)) {
+            next.todos = parsed.items.map((item, itemIndex) => ({
+              id: item.id ?? `${itemIndex}`,
+              text: item.text ?? "",
+              state: item.state ?? "todo",
+            }));
+          }
+        } catch {
+          // Malformed todo payloads surface as a tool error instead.
+        }
+      }
+      return next;
     }
     case "tool_status": {
       const toolCalls = [...(entry.toolCalls ?? [])];
@@ -3239,6 +3260,48 @@ const MessageCard = memo(function MessageCard({
             <MarkdownMessage text={entry.text} />
           </div>
         )}
+        {entry.todos !== undefined && entry.todos.length > 0 && (
+          <div className="mt-3 rounded-md border border-white/[0.06] bg-black/20 px-3 py-2">
+            <p className="text-[10px] text-slate-500">
+              Todos ({entry.todos.filter((todo) => todo.state === "done").length}/
+              {entry.todos.length})
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {entry.todos.map((todo) => (
+                <li key={todo.id} className="flex items-start gap-2 text-[11px]">
+                  <span
+                    className={
+                      todo.state === "done"
+                        ? "text-emerald-400"
+                        : todo.state === "doing"
+                          ? "text-sky-300"
+                          : todo.state === "blocked"
+                            ? "text-amber-300"
+                            : "text-slate-600"
+                    }
+                  >
+                    {todo.state === "done"
+                      ? "✓"
+                      : todo.state === "doing"
+                        ? "▸"
+                        : todo.state === "blocked"
+                          ? "!"
+                          : "○"}
+                  </span>
+                  <span
+                    className={
+                      todo.state === "done"
+                        ? "text-slate-500 line-through"
+                        : "text-slate-300"
+                    }
+                  >
+                    {todo.text}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {entry.toolCalls !== undefined && entry.toolCalls.length > 0 && (
           <div className="mt-3 space-y-1.5">
             {entry.toolCalls.map((tool) => (
@@ -3283,7 +3346,15 @@ const MessageCard = memo(function MessageCard({
             {entry.usage.input_tokens.toLocaleString()} in ·{" "}
             {entry.usage.cache_read_tokens.toLocaleString()} cached (
             {cacheHitShare(entry.usage).toFixed(0)}%) · {entry.usage.output_tokens.toLocaleString()}{" "}
-            out · ${entry.usage.cost_usd.toFixed(4)}
+            out · ctx{" "}
+            {(
+              ((entry.usage.input_tokens +
+                entry.usage.cache_read_tokens +
+                entry.usage.cache_write_tokens) /
+                1_000_000) *
+              100
+            ).toFixed(1)}
+            % · ${entry.usage.cost_usd.toFixed(4)}
           </p>
         )}
         {entry.text.length > 0 && (

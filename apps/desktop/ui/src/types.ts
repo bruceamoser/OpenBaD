@@ -79,6 +79,12 @@ export type ToolCallView = {
   isError?: boolean;
 };
 
+export type TodoItemView = {
+  id: string;
+  text: string;
+  state: string;
+};
+
 export type ChatEntry = {
   id: string;
   role: "user" | "assistant";
@@ -91,6 +97,7 @@ export type ChatEntry = {
   status?: string;
   tools?: string[];
   toolCalls?: ToolCallView[];
+  todos?: TodoItemView[];
   checkpointCount?: number;
   steering?: boolean;
   attachments?: ChatAttachment[];
