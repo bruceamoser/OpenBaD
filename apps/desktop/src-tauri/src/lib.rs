@@ -1137,11 +1137,30 @@ struct SubagentSettings {
     grants: Vec<OutsideGrant>,
     terminal: Arc<openbad_terminal::TerminalManager>,
     mcp: Arc<openbad_mcp::McpManager>,
+    /// The parent turn's policy. A child inherits it, so delegating cannot
+    /// turn "ask before writes" into "write freely".
+    policy: ToolPolicy,
+    /// The parent turn's approval gate, so a child's risky call asks the same
+    /// question the parent would.
+    approvals: Arc<dyn ApprovalGate>,
+    /// The parent turn's event stream, used to surface child approvals.
+    events: Channel<AgentEvent>,
 }
 
 struct SubagentRunner {
     settings: Arc<SubagentSettings>,
     active: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+/// The policy a child runs under. A child may ask for fewer permissions than
+/// its parent, never for different ones: the flags carried by the spawn request
+/// collapse "ask" into "allow", so they are only used to narrow the parent.
+fn subagent_policy(parent: ToolPolicy, spec_allows_writes: bool) -> ToolPolicy {
+    if spec_allows_writes {
+        parent
+    } else {
+        ToolPolicy::ReadOnly
+    }
 }
 
 fn subagent_info(record: SubagentRecord) -> SubagentInfo {
@@ -1276,7 +1295,10 @@ fn update_subagent_record(store: &Arc<Mutex<Store>>, id: &str, update: SubagentU
 struct SubagentObserver {
     store: Arc<Mutex<Store>>,
     id: String,
+    title: String,
     cancel: Arc<AtomicBool>,
+    /// Forwarded so a child's approval prompt reaches the parent's transcript.
+    events: Channel<AgentEvent>,
 }
 
 impl AgentObserver for SubagentObserver {
@@ -1333,6 +1355,52 @@ impl AgentObserver for SubagentObserver {
     fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
+
+    fn on_approval_request(&self, step: u32, request: &ApprovalRequest) {
+        let risk = format!("{:?}", request.risk).to_lowercase();
+        let _ = self.events.send(AgentEvent::ApprovalRequest {
+            request_id: request.id.to_string(),
+            tool: request.title.clone(),
+            risk: risk.clone(),
+            detail: format!("Subagent “{}”: {}", self.title, request.detail),
+        });
+        update_subagent_record(
+            &self.store,
+            &self.id,
+            SubagentUpdate {
+                append_log: Some(format!(
+                    "\n[step {step}] approval requested for {} ({risk})\n",
+                    request.title
+                )),
+                ..SubagentUpdate::default()
+            },
+        );
+    }
+
+    fn on_approval_decision(
+        &self,
+        step: u32,
+        request: &ApprovalRequest,
+        decision: ApprovalDecision,
+    ) {
+        let name = format!("{decision:?}").to_lowercase();
+        let _ = self.events.send(AgentEvent::ApprovalDecision {
+            request_id: request.id.to_string(),
+            allowed: decision.is_allowed(),
+            decision: name.clone(),
+        });
+        update_subagent_record(
+            &self.store,
+            &self.id,
+            SubagentUpdate {
+                append_log: Some(format!(
+                    "[step {step}] approval {name} for {}\n",
+                    request.title
+                )),
+                ..SubagentUpdate::default()
+            },
+        );
+    }
 }
 
 async fn run_subagent(
@@ -1354,12 +1422,13 @@ async fn run_subagent(
         client,
         workspace,
         AgentConfig {
-            policy: ToolPolicy::from_flags(spec.allow_writes, spec.allow_commands),
+            policy: subagent_policy(settings.policy, spec.allow_writes),
             max_steps: 0,
             stream: false,
             ..AgentConfig::default()
         },
     )
+    .with_approvals(Arc::clone(&settings.approvals))
     .with_memory(Arc::new(WorkspaceMemory {
         store: Arc::clone(&settings.store),
         workspace_id: settings.workspace_id,
@@ -1387,7 +1456,9 @@ async fn run_subagent(
     let observer = SubagentObserver {
         store: Arc::clone(&settings.store),
         id: id.clone(),
+        title: spec.title.clone(),
         cancel: Arc::clone(&cancel),
+        events: settings.events.clone(),
     };
     let prompt = format!(
         "You are a directed subagent spawned by the main OpenBaD agent. Work only on the task below. You share the parent workspace and access mode, cannot spawn further subagents, and must not ask the user questions. Use tools as needed, verify your work, and finish with a concise report covering what changed, what you checked, and any remaining risk.\n\nTask:\n{}",
@@ -5202,6 +5273,16 @@ async fn chat(
             ..AgentConfig::default()
         },
     );
+    // Built before the subagent wiring so a child asks the same questions the
+    // parent would, through the same gate and the same pending map.
+    let approvals: Arc<dyn ApprovalGate> = Arc::new(DesktopApprovals {
+        pending: Arc::clone(&state.pending_approvals),
+        cancel: Arc::clone(&cancel),
+        cache: Arc::clone(&state.approvals),
+        store: Arc::clone(&state.store),
+        session,
+        workspace: workspace_path.to_string_lossy().into_owned(),
+    });
     if let Ok(workspace_id) = workspace_id.parse::<WorkspaceId>() {
         agent = agent
             .with_memory(Arc::new(WorkspaceMemory {
@@ -5256,20 +5337,16 @@ async fn chat(
                     grants: subagent_grants,
                     terminal: Arc::clone(&state.terminal),
                     mcp: Arc::clone(&mcp_manager),
+                    policy,
+                    approvals: Arc::clone(&approvals),
+                    events: on_event.clone(),
                 }),
                 active: Arc::clone(&state.subagent_cancels),
             }));
     }
     agent = agent
         .with_inbox(run_guard.inbox())
-        .with_approvals(Arc::new(DesktopApprovals {
-            pending: Arc::clone(&state.pending_approvals),
-            cancel: Arc::clone(&cancel),
-            cache: Arc::clone(&state.approvals),
-            store: Arc::clone(&state.store),
-            session,
-            workspace: workspace_path.to_string_lossy().into_owned(),
-        }))
+        .with_approvals(Arc::clone(&approvals))
         .with_redactions(redactions)
         .with_checkpoints(Arc::new(SessionCheckpoints {
             store: Arc::clone(&state.store),
@@ -6303,6 +6380,28 @@ mod tests {
         assert!(
             build().cached("write_file").is_none(),
             "a revoked grant asks again"
+        );
+    }
+
+    #[test]
+    fn a_subagent_inherits_the_parent_policy_and_can_only_narrow_it() {
+        assert_eq!(
+            subagent_policy(ToolPolicy::AskWrites, true),
+            ToolPolicy::AskWrites,
+            "asking for writes must keep asking when delegated"
+        );
+        assert_eq!(
+            subagent_policy(ToolPolicy::AskCommands, true),
+            ToolPolicy::AskCommands
+        );
+        assert_eq!(
+            subagent_policy(ToolPolicy::FullAccess, true),
+            ToolPolicy::FullAccess
+        );
+        assert_eq!(
+            subagent_policy(ToolPolicy::FullAccess, false),
+            ToolPolicy::ReadOnly,
+            "a child may ask for less than its parent, never for more"
         );
     }
 
