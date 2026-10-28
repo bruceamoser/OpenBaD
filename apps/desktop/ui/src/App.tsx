@@ -227,6 +227,12 @@ type BackgroundRun = {
   pendingAccessRequest: OutsideAccessRequest | null;
   pendingPreview: PreviewTarget | null;
   error: string | null;
+  /**
+   * Close the streaming assistant entry and open a new one after a steering
+   * message, so the message renders where it arrived instead of after the
+   * whole turn.
+   */
+  startSteeringSegment?: (text: string) => void;
 };
 
 function sessionEntries(messages: SessionView["messages"]): ChatEntry[] {
@@ -1437,6 +1443,9 @@ export default function App() {
       }
     }
     const assistantId = nextId();
+    // The turn's assistant output is one entry until a steering message splits
+    // it; later deltas belong to the newest segment.
+    let activeAssistantId = assistantId;
     const userId = nextId();
     const userEntry: ChatEntry = {
       id: userId,
@@ -1485,6 +1494,65 @@ export default function App() {
       pendingPreview: null,
       error: null,
     };
+    run.startSteeringSegment = (text: string) => {
+      const steeringEntry: ChatEntry = {
+        id: nextId(),
+        role: "user",
+        text,
+        steering: true,
+      };
+      const active = run.entries.findIndex(
+        (entry) => entry.id === activeAssistantId,
+      );
+      const activeEntry = active === -1 ? undefined : run.entries[active];
+      const saidSomething =
+        activeEntry !== undefined &&
+        (activeEntry.text.trim() !== "" ||
+          (activeEntry.reasoning ?? "").trim() !== "" ||
+          (activeEntry.toolCalls?.length ?? 0) > 0);
+      if (active === -1 || !saidSomething) {
+        // Nothing was said yet, so the message belongs before the segment it
+        // interrupts; the same entry keeps streaming after the card.
+        run.entries =
+          active === -1
+            ? [...run.entries, steeringEntry]
+            : [
+                ...run.entries.slice(0, active),
+                steeringEntry,
+                ...run.entries.slice(active),
+              ];
+      } else {
+        const segmentId = nextId();
+        // The closed segment is finished, so its live status ("Calling
+        // run_command…") must stop rather than sit on a completed block.
+        const closed = run.entries.map((entry) =>
+          entry.id === activeAssistantId
+            ? {
+                ...entry,
+                status: undefined,
+                durationMs: Date.now() - (entry.startedAt ?? Date.now()),
+              }
+            : entry,
+        );
+        activeAssistantId = segmentId;
+        run.entries = [
+          ...closed,
+          steeringEntry,
+          {
+            id: segmentId,
+            role: "assistant",
+            text: "",
+            reasoning: "",
+            status: "Continuing…",
+            tools: [],
+            startedAt: Date.now(),
+          },
+        ];
+      }
+      if (visibleRunRef.current === runKey) {
+        setEntries([...run.entries]);
+      }
+    };
     runsRef.current.set(runKey, run);
     visibleRunRef.current = runKey;
     setEntries([...run.entries]);
@@ -1508,7 +1576,7 @@ export default function App() {
         return;
       }
       active.entries = active.entries.map((entry) =>
-        entry.id === assistantId
+        entry.id === activeAssistantId
           ? pendingEvents.reduce((acc, item) => applyAgentEvent(acc, item), entry)
           : entry,
       );
@@ -1618,8 +1686,10 @@ export default function App() {
           const entryPreview = eventPreview;
           current.entries = current.entries.map((entry) => {
             const updated =
-              entry.id === assistantId ? applyAgentEvent(entry, event) : entry;
-            return entry.id === assistantId && entryPreview !== null
+              entry.id === activeAssistantId
+                ? applyAgentEvent(entry, event)
+                : entry;
+            return entry.id === activeAssistantId && entryPreview !== null
               ? { ...updated, preview: entryPreview }
               : updated;
           });
@@ -1651,8 +1721,20 @@ export default function App() {
             }
           : entry,
       );
+      // A steering message that arrived just as the turn ended leaves an empty
+      // trailing segment; it never produced anything, so it should not read as
+      // "(no text returned)".
+      const endedSegmentId = activeAssistantId;
+      run.entries = run.entries.filter(
+        (entry) =>
+          !(
+            entry.id === endedSegmentId &&
+            endedSegmentId !== assistantId &&
+            entry.text.trim() === ""
+          ),
+      );
       run.entries = run.entries.map((entry) =>
-        entry.id === assistantId
+        entry.id === endedSegmentId
           ? {
               ...entry,
               text: reply.text || entry.text || "(no text returned)",
@@ -1670,7 +1752,9 @@ export default function App() {
         ).length;
         if (count > 0) {
           run.entries = run.entries.map((entry) =>
-            entry.id === assistantId ? { ...entry, checkpointCount: count } : entry,
+            entry.id === activeAssistantId
+              ? { ...entry, checkpointCount: count }
+              : entry,
           );
         }
       } catch {
@@ -1731,7 +1815,7 @@ export default function App() {
       const message = describeError(cause);
       run.error = message;
       run.entries = run.entries.map((entry) =>
-        entry.id === assistantId
+        entry.id === activeAssistantId
           ? {
               ...entry,
               status: "Failed",
@@ -1802,6 +1886,10 @@ export default function App() {
     }
     try {
       await steerRunningTurn(run.id, text);
+      if (run.startSteeringSegment !== undefined) {
+        run.startSteeringSegment(text);
+        return;
+      }
       const steeringEntry: ChatEntry = {
         id: nextId(),
         role: "user",
