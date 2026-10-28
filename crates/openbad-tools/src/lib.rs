@@ -1450,6 +1450,10 @@ impl ToolRegistry {
         registry.register(GitCommitContextTool);
         registry.register(GithubTool);
         registry.register(SubagentTool);
+        registry.register(TeamTaskCreateTool);
+        registry.register(TeamTaskListTool);
+        registry.register(TeamTaskUpdateTool);
+        registry.register(TeamTaskGetTool);
         registry.register(AdrWriteTool);
         registry.register(AdrListTool);
         registry.register(AdrReadTool);
@@ -1755,7 +1759,9 @@ fn domain_description(domain: &str) -> String {
         "governance" => "canon, ADRs, invariants, ledgers, and structured YAML",
         "knowledge" => "long-form knowledge documents and review status",
         "memory" => "short durable memories, recall, update, and forget",
-        "orchestration" => "subagents and deterministic multi-step workflows",
+        "orchestration" => {
+            "subagents, the shared team task board, and deterministic multi-step workflows"
+        }
         "plan" => "plans, todos, recipes, tasks, and gates",
         "plugins" => "skills and plugin discovery, testing, and invocation",
         "repos" => "reference repositories linked to the project",
@@ -1844,6 +1850,9 @@ fn tool_domain(name: &str) -> &'static str {
         | "mcp_server_set_enabled" => "mcp",
         "registry_lookup" | "web_fetch" | "web_search" => "web",
         "subagent" | "workflow" => "orchestration",
+        "team_task_create" | "team_task_list" | "team_task_update" | "team_task_get" => {
+            "orchestration"
+        }
         _ => "general",
     }
 }
@@ -13142,6 +13151,163 @@ impl Tool for UpdateGoalTool {
     }
 }
 
+struct TeamTaskCreateTool;
+
+#[async_trait]
+impl Tool for TeamTaskCreateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "team_task_create",
+            "Add a unit of work to the shared board in .openbad/team.json. The board is how a parent and its subagents divide work: lay out the tasks, add each task id to the subagent's instructions, and let the child claim and finish it. Use todo_write for your own steps instead; use this when more than one worker is involved.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "One line describing the unit of work."},
+                "detail": {"type": "string", "description": "Optional: scope, files, or the definition of done."}
+            },
+            "required": ["title"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::Failed(
+                "writes are disabled in this context".to_owned(),
+            ));
+        }
+        let title = required_string(&arguments, "title")?;
+        let detail = optional_string(&arguments, "detail");
+        let task =
+            openbad_workspace::create_task(context.workspace.root(), &title, detail.as_deref())
+                .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(openbad_workspace::task_report(&task))
+            .with_metadata(json!({"id": task.id, "state": task.state.as_str()})))
+    }
+}
+
+struct TeamTaskListTool;
+
+#[async_trait]
+impl Tool for TeamTaskListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "team_task_list",
+            "List the shared board with each task's state, owner, and result.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({"type": "object", "properties": {}}))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let tasks = openbad_workspace::load_board(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(truncate(
+            &openbad_workspace::board_summary(&tasks),
+            context.max_output_bytes,
+        ))
+        .with_metadata(json!({"tasks": tasks.len()})))
+    }
+}
+
+struct TeamTaskUpdateTool;
+
+#[async_trait]
+impl Tool for TeamTaskUpdateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "team_task_update",
+            "Change one board task: claim it (state claimed plus an owner), mark it blocked or dropped, or finish it with a result. A subagent working a task should claim it before starting and record its result when done.",
+            RiskLevel::Write,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "state": {"type": "string", "enum": ["open", "claimed", "blocked", "done", "dropped"]},
+                "owner": {"type": "string", "description": "Who is doing it; pass your subagent title or leave empty to clear."},
+                "result": {"type": "string", "description": "What came of it, or why it is blocked."}
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if !context.allow_writes {
+            return Err(ToolError::Failed(
+                "writes are disabled in this context".to_owned(),
+            ));
+        }
+        let id = required_string(&arguments, "id")?;
+        let state = optional_string(&arguments, "state");
+        let owner = optional_string(&arguments, "owner");
+        let result = optional_string(&arguments, "result");
+        let task = openbad_workspace::update_task(
+            context.workspace.root(),
+            &id,
+            state.as_deref(),
+            owner.as_deref(),
+            result.as_deref(),
+        )
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok(ToolResult::ok(openbad_workspace::task_report(&task))
+            .with_metadata(json!({"id": task.id, "state": task.state.as_str()})))
+    }
+}
+
+struct TeamTaskGetTool;
+
+#[async_trait]
+impl Tool for TeamTaskGetTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "team_task_get",
+            "Read one board task with its detail and result.",
+            RiskLevel::Read,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let id = required_string(&arguments, "id")?;
+        let tasks = openbad_workspace::load_board(context.workspace.root())
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        let task = tasks
+            .iter()
+            .find(|task| task.id == id)
+            .ok_or_else(|| ToolError::Failed(format!("unknown team task: {id}")))?;
+        Ok(ToolResult::ok(truncate(
+            &openbad_workspace::task_report(task),
+            context.max_output_bytes,
+        ))
+        .with_metadata(json!({"id": task.id, "state": task.state.as_str()})))
+    }
+}
+
 struct WriteHandoffTool;
 
 #[async_trait]
@@ -16888,6 +17054,72 @@ invariants:
             .expect("skip");
         assert!(skipped.content.contains("skipped"), "{}", skipped.content);
         assert_eq!(skipped.metadata["skipped"], true);
+    }
+
+    #[tokio::test]
+    async fn team_board_tools_claim_and_finish_work() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+
+        assert!(
+            TeamTaskListTool
+                .execute(json!({}), &context)
+                .await
+                .expect("empty")
+                .content
+                .contains("empty")
+        );
+
+        let created = TeamTaskCreateTool
+            .execute(
+                json!({"title": "Index the workspace", "detail": "Start with src"}),
+                &context,
+            )
+            .await
+            .expect("create");
+        assert_eq!(created.metadata["id"], "task-1");
+        assert_eq!(created.metadata["state"], "open");
+
+        TeamTaskUpdateTool
+            .execute(
+                json!({"id": "task-1", "state": "claimed", "owner": "child-a"}),
+                &context,
+            )
+            .await
+            .expect("claim");
+        TeamTaskUpdateTool
+            .execute(
+                json!({"id": "task-1", "state": "done", "result": "412 files"}),
+                &context,
+            )
+            .await
+            .expect("finish");
+
+        let listed = TeamTaskListTool
+            .execute(json!({}), &context)
+            .await
+            .expect("list");
+        assert!(listed.content.contains("child-a"), "{}", listed.content);
+        assert!(listed.content.contains("412 files"), "{}", listed.content);
+
+        let read = TeamTaskGetTool
+            .execute(json!({"id": "task-1"}), &context)
+            .await
+            .expect("get");
+        assert_eq!(read.metadata["state"], "done");
+        assert!(
+            TeamTaskGetTool
+                .execute(json!({"id": "task-9"}), &context)
+                .await
+                .is_err()
+        );
+        assert!(
+            TeamTaskUpdateTool
+                .execute(json!({"id": "task-1", "state": "finished"}), &context)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
