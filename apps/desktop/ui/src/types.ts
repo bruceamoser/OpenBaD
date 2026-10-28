@@ -87,6 +87,8 @@ export type TodoItemView = {
 
 export type ChatEntry = {
   id: string;
+  /** Store sequence of the source message; 0 when the entry is synthetic. */
+  seq?: number;
   role: "user" | "assistant";
   text: string;
   startedAt?: number;
@@ -225,11 +227,17 @@ export type SessionSummary = {
   updated_at: number;
   last_turn: number;
   access_mode: AccessMode;
+  forked_from_seq?: number | null;
+  forked_from_session?: string | null;
 };
 
 export type SessionView = {
   session_id: string;
+  forked_from_session?: string | null;
+  forked_from_seq?: number | null;
   messages: {
+    /** Store sequence of the message; 0 for synthetic bubbles. */
+    seq?: number;
     role: string;
     text: string;
     attachments?: string[];

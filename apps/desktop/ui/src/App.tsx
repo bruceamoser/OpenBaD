@@ -29,6 +29,7 @@ import {
   FolderGit2,
   FolderOpen,
   Gauge,
+  GitBranch,
   KeyRound,
   Loader2,
   MessageSquare,
@@ -36,6 +37,7 @@ import {
   PanelLeftOpen,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   Shield,
   Trash2,
@@ -55,6 +57,7 @@ import {
   checkpointDiff as fetchCheckpointDiff,
   clearApiKey as clearStoredApiKey,
   forgetMemory as forgetStoredMemory,
+  forkSession,
   grantOutsideAccess as grantFilesystemAccess,
   loadOutsideAccessGrants as fetchAccessGrants,
   revokeOutsideAccess as revokeFilesystemAccess,
@@ -205,6 +208,7 @@ type BackgroundRun = {
 function sessionEntries(messages: SessionView["messages"]): ChatEntry[] {
   return messages.map((item) => ({
     id: nextId(),
+    seq: item.seq,
     role: item.role === "user" ? "user" : "assistant",
     text: item.text,
     attachments: (item.attachments ?? []).map((attachment) =>
@@ -378,6 +382,9 @@ export default function App() {
   const [workspacePath, setWorkspacePath] = useState("");
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  /** Set while editing an earlier message; sending branches here. */
+  const [pendingFork, setPendingFork] = useState<{ seq: number } | null>(null);
+  const [forkOrigin, setForkOrigin] = useState<{ id: string; seq: number } | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [archivedSessions, setArchivedSessions] = useState<SessionSummary[]>([]);
   const [showArchived, setShowArchived] = useState(false);
@@ -459,6 +466,15 @@ export default function App() {
     [sessionId, sessions],
   );
   const currentTitle = activeSession?.title ?? (sessionId === null ? "New session" : "Session");
+  const lineageSource = useMemo(() => {
+    const sourceId =
+      forkOrigin?.id ?? activeSession?.forked_from_session ?? null;
+    if (sourceId === null) {
+      return null;
+    }
+    const known = sessions.find((session) => session.id === sourceId);
+    return { id: sourceId, title: known?.title ?? null };
+  }, [activeSession?.forked_from_session, forkOrigin?.id, sessions]);
   const sessionUsage = useMemo<Usage>(
     () =>
       entries.reduce<Usage>(
@@ -1326,6 +1342,32 @@ export default function App() {
     setBusy(true);
     setStopRequested(false);
     setError(null);
+    // Editing an earlier message branches the conversation: the original stays
+    // intact and the edited text streams into the fork.
+    let baseEntries = entries;
+    let baseSessionId = sessionId;
+    if (pendingFork !== null) {
+      if (sessionId === null) {
+        setBusy(false);
+        setError("Cannot branch: this session has not been saved yet.");
+        return;
+      }
+      const forkSeq = pendingFork.seq;
+      setPendingFork(null);
+      try {
+        const view = await forkSession(sessionId, forkSeq);
+        baseEntries = sessionEntries(view.messages);
+        baseSessionId = view.session_id;
+        setSessionId(view.session_id);
+        setForkOrigin({ id: view.forked_from_session ?? sessionId, seq: forkSeq });
+        setEntries(baseEntries);
+        void loadSessions();
+      } catch (cause) {
+        setBusy(false);
+        setError(describeError(cause));
+        return;
+      }
+    }
     const assistantId = nextId();
     const userId = nextId();
     const userEntry: ChatEntry = {
@@ -1349,10 +1391,10 @@ export default function App() {
     // Preserve the turns already visible in this session. The previous run
     // cache only holds the latest turn; the live `entries` state is the full
     // transcript the user can currently see.
-    const baseEntries =
+    const baseEntriesForRun =
       existingRun !== undefined && existingRun.busy
         ? existingRun.entries
-        : entries;
+        : baseEntries;
     const run: BackgroundRun = {
       id: runId,
       projectId: activeProjectId,
@@ -1361,8 +1403,8 @@ export default function App() {
       sessionId,
       permissionMode,
       entries: resume
-        ? [...baseEntries, assistantEntry]
-        : [...baseEntries, userEntry, assistantEntry],
+        ? [...baseEntriesForRun, assistantEntry]
+        : [...baseEntriesForRun, userEntry, assistantEntry],
       busy: true,
       stopRequested: false,
       scrollTop: scrollRef.current?.scrollTop ?? 0,
@@ -1418,7 +1460,7 @@ export default function App() {
       const reply = await sendChat(
         {
           runId,
-          sessionId,
+          sessionId: baseSessionId,
           workspacePath,
           message: text,
           resume,
@@ -1610,6 +1652,7 @@ export default function App() {
     loadSessions,
     model,
     openPreview,
+    pendingFork,
     permissionMode,
     reasoningEffort,
     sessionId,
@@ -1731,6 +1774,12 @@ export default function App() {
         }
         visibleRunRef.current = showRun ? targetPath : null;
         setSessionId(view.session_id);
+        setPendingFork(null);
+        setForkOrigin(
+          view.forked_from_session === null || view.forked_from_session === undefined
+            ? null
+            : { id: view.forked_from_session, seq: view.forked_from_seq ?? 0 },
+        );
         setPermissionMode(showRun ? run.permissionMode : session.access_mode);
         setAccessRequest(showRun ? run.pendingAccessRequest : null);
         setToolApproval(showRun ? run.pendingToolApproval : null);
@@ -1749,6 +1798,28 @@ export default function App() {
     },
     [captureCurrentScroll, projects, workspacePath],
   );
+
+  const openLineageSource = useCallback(async () => {
+    const sourceId = lineageSource?.id;
+    if (sourceId === undefined) {
+      return;
+    }
+    const known = sessions.find((session) => session.id === sourceId);
+    if (known !== undefined) {
+      await openSession(known);
+      return;
+    }
+    try {
+      const view = await fetchSession(sourceId);
+      setPendingFork(null);
+      setForkOrigin(null);
+      setSessionId(view.session_id);
+      setEntries(sessionEntries(view.messages));
+      setTotalDurationMs(view.total_duration_ms);
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  }, [lineageSource?.id, openSession, sessions]);
 
   const beginRenameSession = useCallback((session: SessionSummary) => {
     setEditingSessionId(session.id);
@@ -2416,6 +2487,17 @@ export default function App() {
               )}
             </div>
             <h1 className="truncate text-[13px] font-medium text-slate-200">{currentTitle}</h1>
+            {lineageSource !== null && (
+              <button
+                type="button"
+                onClick={() => void openLineageSource()}
+                title="Open the conversation this one branched from"
+                className="mt-0.5 inline-flex items-center gap-1 rounded border border-white/[0.07] bg-white/[0.02] px-1.5 py-0.5 text-[9px] text-slate-400 transition-colors hover:border-emerald-400/25 hover:text-emerald-200"
+              >
+                <GitBranch size={9} />
+                Forked from {lineageSource.title ?? "another session"}
+              </button>
+            )}
             {activeSession !== null && (
               <p
                 className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px] text-slate-500"
@@ -2532,6 +2614,11 @@ export default function App() {
                         item.role === "user" ? itemIndex : last,
                       -1,
                     );
+                const branchable =
+                  entry.role === "user" &&
+                  sessionId !== null &&
+                  entry.seq !== undefined &&
+                  entry.seq > 0;
                 return (
                   <MessageCard
                     key={entry.id}
@@ -2540,7 +2627,14 @@ export default function App() {
                     workspacePath={workspacePath}
                     onOpenPreview={openPreview}
                     onRetry={lastUser && !busy ? () => void send("", [], true) : undefined}
-                    onEdit={lastUser ? () => composerRef.current?.setDraft(entry.text) : undefined}
+                    onEdit={
+                      branchable
+                        ? () => {
+                            composerRef.current?.setDraft(entry.text);
+                            setPendingFork({ seq: entry.seq ?? 0 });
+                          }
+                        : undefined
+                    }
                     onReviewChanges={
                       entry.role === "assistant" && (entry.checkpointCount ?? 0) > 0
                         ? () => openPanel("checkpoints")
@@ -2585,6 +2679,12 @@ export default function App() {
             accessNotice={accessNotice}
             error={error}
             queuedMessages={queuedMessages}
+            branchNotice={
+              pendingFork === null
+                ? null
+                : "Sending will branch from the edited message; the original conversation is kept."
+            }
+            onCancelBranch={() => setPendingFork(null)}
             onPermissionMode={changePermissionMode}
             onOpenSettings={composerOpenModel}
             onDismissAccessNotice={dismissAccessNotice}
@@ -3332,7 +3432,18 @@ const MessageCard = memo(function MessageCard({
           )}
           {entry.text.length > 0 && <span className="whitespace-pre-wrap">{entry.text}</span>}
           {entry.text.length > 0 && (
-            <div className="mt-2 flex justify-end">
+            <div className="mt-2 flex items-center justify-end gap-1">
+              {onEdit !== undefined && (
+                <button
+                  type="button"
+                  onClick={onEdit}
+                  title="Edit and resend as a new branch"
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-emerald-200/70 transition-colors hover:bg-emerald-400/10 hover:text-emerald-100"
+                >
+                  <Pencil size={10} />
+                  Edit
+                </button>
+              )}
               <CopyMessageButton text={entry.text} label="Copy message" showLabel />
             </div>
           )}
@@ -3361,6 +3472,17 @@ const MessageCard = memo(function MessageCard({
           )}
           {entry.text.length > 0 && (
             <CopyMessageButton text={entry.text} label="Copy response" />
+          )}
+          {onRetry !== undefined && (
+            <button
+              type="button"
+              onClick={onRetry}
+              title="Retry this turn"
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-slate-400 transition-colors hover:bg-white/[0.05] hover:text-slate-200"
+            >
+              <RotateCcw size={10} />
+              Retry
+            </button>
           )}
         </div>
         {entry.reasoning !== undefined && entry.reasoning.length > 0 && (

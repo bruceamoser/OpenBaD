@@ -183,6 +183,9 @@ pub struct SessionSummary {
     pub updated_at: i64,
     pub last_turn: u32,
     pub access_mode: String,
+    /// Set when this session was forked; the sequence it branched before.
+    pub forked_from_seq: Option<u64>,
+    pub forked_from_session: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

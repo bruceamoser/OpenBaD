@@ -835,6 +835,35 @@ export async function loadSession(sessionId: string): Promise<SessionView> {
   };
 }
 
+/**
+ * Branch a conversation before `seq`, which must be the sequence of a user
+ * message. Returns the new session's view.
+ */
+export async function forkSession(
+  sessionId: string,
+  seq: number,
+  title?: string,
+): Promise<SessionView> {
+  if (isTauri) {
+    return invoke<SessionView>("fork_session", { sessionId, seq, title });
+  }
+  const messages = (mockMessages.get(sessionId) ?? []).filter(
+    (_message, index) => index + 1 < seq,
+  );
+  const forkId = `fork-${sessionId}-${seq}`;
+  mockMessages.set(forkId, messages);
+  return {
+    session_id: forkId,
+    forked_from_session: sessionId,
+    forked_from_seq: seq,
+    messages: messages.map((message) => ({ ...message })),
+    total_duration_ms: messages.reduce(
+      (total, message) => total + (message.duration_ms ?? 0),
+      0,
+    ),
+  };
+}
+
 export async function steerChat(runId: string, message: string): Promise<void> {
   if (isTauri) {
     await invoke("steer_chat", { runId, message });
