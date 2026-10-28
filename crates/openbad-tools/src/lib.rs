@@ -1,6 +1,7 @@
 //! Tool registry, schemas, and built-in coding tools.
 #![recursion_limit = "256"]
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1539,10 +1540,16 @@ impl ToolRegistry {
             }
             if let Some(domain) = name.strip_suffix("_run") {
                 let tool = arguments.get("tool").and_then(Value::as_str)?;
-                if tool_domain(tool) != domain {
+                if tool_domain(tool) == domain {
+                    return self.tools.get(tool).map(|tool| tool.definition().risk);
+                }
+                // A repaired call is still the tool it names, so approvals and
+                // risk must not be measured against the mangled value.
+                let (tool, _) = repair_domain_call(tool, arguments.get("arguments"))?;
+                if tool_domain(&tool) != domain {
                     return None;
                 }
-                return self.tools.get(tool).map(|tool| tool.definition().risk);
+                return self.tools.get(&tool).map(|tool| tool.definition().risk);
             }
         }
         self.tools.get(name).map(|tool| tool.definition().risk)
@@ -1564,10 +1571,18 @@ impl ToolRegistry {
                 let Some(tool) = arguments.get("tool").and_then(Value::as_str) else {
                     return false;
                 };
-                return tool_domain(tool) == domain
+                let resolved = if tool_domain(tool) == domain {
+                    Cow::Borrowed(tool)
+                } else {
+                    match repair_domain_call(tool, arguments.get("arguments")) {
+                        Some((repaired, _)) => Cow::Owned(repaired),
+                        None => return false,
+                    }
+                };
+                return tool_domain(&resolved) == domain
                     && self
                         .tools
-                        .get(tool)
+                        .get(resolved.as_ref())
                         .is_some_and(|tool| tool.definition().risk == RiskLevel::Read);
             }
         }
@@ -1597,23 +1612,52 @@ impl ToolRegistry {
             if let Some(domain) = name.strip_suffix("_run") {
                 let available = self.domain_names(domain).join(", ");
                 let shape = format!(
-                    "expected {{\"tool\": <name>, \"arguments\": {{...}}}}; {domain} tools: {available}"
+                    "expected {{\"tool\": <name>, \"arguments\": {{...}}}} with arguments as a JSON object; {domain} tools: {available}"
                 );
-                let tool_name = arguments
+                let raw_tool = arguments
                     .get("tool")
                     .and_then(Value::as_str)
                     .ok_or_else(|| ToolError::InvalidArgument(shape.clone()))?;
-                if tool_domain(tool_name) != domain {
-                    return Err(ToolError::InvalidArgument(format!(
-                        "tool {tool_name} is not in the {domain} domain; {domain} tools: {available}"
-                    )));
-                }
-                let arguments = match arguments.get("arguments") {
-                    None => json!({}),
-                    Some(value) if value.is_object() => value.clone(),
-                    Some(_) => return Err(ToolError::InvalidArgument(shape)),
+                // A long payload sometimes comes back with the provider's own
+                // markup folded into the tool value; recover the name and
+                // arguments instead of spending a whole step on a retry.
+                let repaired = if tool_domain(raw_tool) == domain {
+                    None
+                } else {
+                    repair_domain_call(raw_tool, arguments.get("arguments"))
+                        .filter(|(tool, _)| tool_domain(tool) == domain)
                 };
-                let tool = self.tools.get(tool_name).ok_or_else(|| {
+                let (tool_name, arguments): (std::borrow::Cow<'_, str>, Value) = match repaired {
+                    Some((tool, arguments)) => (std::borrow::Cow::Owned(tool), arguments),
+                    None => {
+                        if tool_domain(raw_tool) != domain {
+                            return Err(ToolError::InvalidArgument(format!(
+                                "tool {} is not in the {domain} domain; {shape}",
+                                preview(raw_tool)
+                            )));
+                        }
+                        let arguments = match arguments.get("arguments") {
+                            None => json!({}),
+                            Some(value) if value.is_object() => value.clone(),
+                            Some(Value::String(raw)) => serde_json::from_str(raw)
+                                .ok()
+                                .filter(Value::is_object)
+                                .ok_or_else(|| {
+                                    ToolError::InvalidArgument(format!(
+                                        "arguments came as a string that is not a JSON object; {shape}"
+                                    ))
+                                })?,
+                            Some(other) => {
+                                return Err(ToolError::InvalidArgument(format!(
+                                    "arguments must be a JSON object, not {}; {shape}",
+                                    preview(&other.to_string())
+                                )));
+                            }
+                        };
+                        (std::borrow::Cow::Borrowed(raw_tool), arguments)
+                    }
+                };
+                let tool = self.tools.get(tool_name.as_ref()).ok_or_else(|| {
                     ToolError::InvalidArgument(format!("unknown tool: {tool_name}"))
                 })?;
                 return finish_result(tool.execute(arguments, context).await, context);
@@ -1656,6 +1700,77 @@ impl ToolRegistry {
         serde_json::to_string_pretty(&json!({"domain": domain, "tools": tools}))
             .map_err(|error| ToolError::Failed(error.to_string()))
     }
+}
+
+/// The first balanced `{...}` object in `text`, string escapes respected.
+fn first_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let bytes = text.as_bytes();
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, byte) in bytes[start..].iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return text.get(start..start + offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Recover a domain call whose arguments the model mangled.
+///
+/// A long `arguments` payload sometimes comes back with the provider's own
+/// markup (`parameter name="arguments" ...>`) inside the `tool` value, either
+/// because the model fell back to its native tool syntax or because a nested
+/// quoted heredoc broke its JSON string. The real tool name is still the prefix
+/// and the payload is still a JSON object, so both are recoverable.
+fn repair_domain_call(tool_value: &str, arguments: Option<&Value>) -> Option<(String, Value)> {
+    let name = tool_value
+        .split(|c: char| c == '"' || c == '<' || c.is_whitespace())
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let embedded = || -> Option<Value> {
+        let payload = tool_value
+            .split_once("parameter name=")
+            .map(|(_, rest)| rest.split_once('>').map_or(rest, |(_, rest)| rest))
+            .unwrap_or(tool_value);
+        serde_json::from_str(first_json_object(payload)?).ok()
+    };
+    let arguments = match arguments {
+        Some(Value::Object(map)) if !map.is_empty() => arguments.cloned()?,
+        // An empty object means the payload travelled inside the tool value.
+        _ => embedded().or_else(|| arguments.cloned())?,
+    };
+    if !arguments.is_object() {
+        return None;
+    }
+    Some((name.to_owned(), arguments))
+}
+
+fn preview(value: &str) -> String {
+    truncate(value, 240)
 }
 
 fn finish_result(
@@ -1753,7 +1868,9 @@ fn domain_description(domain: &str) -> String {
         "artifacts" => "archives, diffs, citations, and presented artifacts",
         "collaboration" => "questions, filesystem access requests, and human input",
         "context" => "context residency, maps, budgets, and pin/exclude rules",
-        "exec" => "commands, tests, background jobs, and persistent terminals",
+        "exec" => {
+            "commands, tests, background jobs, and persistent terminals (write a script file and run it rather than embedding a long heredoc)"
+        }
         "files" => "workspace file reads, writes, edits, moves, and directory listing",
         "git" => "local Git state and the full GitHub surface",
         "governance" => "canon, ADRs, invariants, ledgers, and structured YAML",
@@ -4439,7 +4556,7 @@ impl Tool for RunCommandTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "run_command",
-            "Run a shell command in the workspace. Requires Full access. Commands are classified as read-only, write-workspace, network, destructive, or privileged; destructive commands need confirm_destructive=true.",
+            "Run a shell command in the workspace. Requires Full access. Commands are classified as read-only, write-workspace, network, destructive, or privileged; destructive commands need confirm_destructive=true. Keep the command short: for a multi-line script, write it with write_file and run the file, because long nested quoting (heredocs inside a quoted string) is where malformed tool calls come from.",
             RiskLevel::Execute,
         )
         .with_timeout(30)
@@ -19390,6 +19507,81 @@ invariants:
         let message = format!("{bad_arguments}");
         assert!(message.contains("expected"), "{message}");
         assert!(message.contains(r#""arguments""#), "{message}");
+    }
+
+    #[test]
+    fn first_json_object_respects_strings_and_escapes() {
+        let text = r#"junk {"command": "echo \"a}b\"", "nested": {"k": 1}} trailing {"x": 2}"#;
+        let object = first_json_object(text).expect("object");
+        assert_eq!(object, r#"{"command": "echo \"a}b\"", "nested": {"k": 1}}"#);
+        assert!(first_json_object("no object here").is_none());
+        assert!(first_json_object("{\"unterminated\": ").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_mangled_domain_call_is_repaired_instead_of_failing() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+        let registry = ToolRegistry::with_builtin_tools();
+
+        // What the model actually emitted: the provider's own markup landed
+        // inside the `tool` value and carried the arguments with it.
+        let mangled = "run_command\">\n<\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c} parameter name=\"arguments\" string=\"false\">{\"command\": \"echo repaired-ok\", \"cwd\": \".\"}";
+        let result = registry
+            .execute("exec_run", json!({"tool": mangled}), &context)
+            .await
+            .expect("repaired call runs");
+        assert!(result.content.contains("repaired-ok"), "{}", result.content);
+
+        // The same recovery keeps the approval decision pointed at the real tool.
+        assert_eq!(
+            registry.risk_for_call("exec_run", &json!({"tool": mangled})),
+            Some(RiskLevel::Execute)
+        );
+
+        // The payload may instead travel inside the tool value with an empty
+        // arguments object, which must not win over the embedded one.
+        let result = registry
+            .execute(
+                "exec_run",
+                json!({"tool": mangled, "arguments": {}}),
+                &context,
+            )
+            .await
+            .expect("embedded payload wins");
+        assert!(result.content.contains("repaired-ok"), "{}", result.content);
+
+        // A JSON-encoded arguments string is accepted too.
+        let result = registry
+            .execute(
+                "exec_run",
+                json!({"tool": "run_command", "arguments": "{\"command\": \"echo string-args\", \"cwd\": \".\"}"}),
+                &context,
+            )
+            .await
+            .expect("string arguments run");
+        assert!(result.content.contains("string-args"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn an_unrepairable_domain_call_names_the_shape_without_dumping_it() {
+        let directory = tempdir().expect("tempdir");
+        let context = context(directory.path());
+        let registry = ToolRegistry::with_builtin_tools();
+        let junk = format!("not_a_tool {}", "x".repeat(4000));
+        let error = registry
+            .execute("exec_run", json!({"tool": junk}), &context)
+            .await
+            .expect_err("unrepairable");
+        let message = error.to_string();
+        assert!(message.contains("is not in the exec domain"), "{message}");
+        assert!(message.contains("arguments as a JSON object"), "{message}");
+        assert!(
+            message.len() < 900,
+            "error message must stay bounded: {}",
+            message.len()
+        );
     }
 
     #[tokio::test]

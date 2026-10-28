@@ -245,7 +245,14 @@ snapshots, and web. The model sees two stable tools per domain:
 - `<domain>_list` returns the domain's tool names, descriptions, risk levels,
   and JSON input schemas. It takes no arguments.
 - `<domain>_run` takes `{ "tool": "...", "arguments": { ... } }`, verifies that
-  the tool belongs to that domain, and invokes it.
+  the tool belongs to that domain, and invokes it. `arguments` may also arrive
+  as a JSON-encoded string, and a call whose `tool` value was mangled by the
+  provider (its own markup folded in, with the argument object carried along) is
+  repaired before it is rejected: the real name is the prefix and the payload is
+  the first balanced JSON object. The risk used for approval is taken from the
+  repaired name, so a recovered call is still gated on the tool it really is.
+  When recovery fails, the error names the shape and previews the value instead
+  of pasting it whole.
 
 That is **36 schemas against the 128-tool cap**, leaving 92 slots free. Adding a
 tool to an existing domain does not change any model-facing schema or the
