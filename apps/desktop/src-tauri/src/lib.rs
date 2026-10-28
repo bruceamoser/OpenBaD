@@ -1969,6 +1969,8 @@ pub struct ChatReply {
 
 #[derive(Serialize)]
 pub struct UiMessage {
+    /// Store sequence of the message this bubble came from.
+    pub seq: u64,
     pub role: String,
     pub text: String,
     #[serde(default)]
@@ -3820,17 +3822,42 @@ fn session_view(state: State<'_, AppState>, session_id: String) -> Result<Sessio
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let _ = repair_interrupted_turn(&store, session);
+    view_for(&store, session)
+}
+
+fn view_for(store: &Store, session: SessionId) -> Result<SessionView, String> {
+    let _ = repair_interrupted_turn(store, session);
     let messages = store
         .load_messages(session)
         .map_err(|error| error.to_string())?;
     let turns = store.load_turns(session).unwrap_or_default();
     let (messages, total_duration_ms) = build_ui_messages(&messages, &turns);
     Ok(SessionView {
-        session_id,
+        session_id: session.to_string(),
         messages,
         total_duration_ms,
     })
+}
+
+/// Branch the conversation before `seq`, which must be a user message.
+#[tauri::command]
+fn fork_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    seq: u64,
+    title: Option<String>,
+) -> Result<SessionView, String> {
+    let session = SessionId::from(
+        Uuid::parse_str(&session_id).map_err(|error| format!("invalid session id: {error}"))?,
+    );
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let fork = store
+        .fork_session(session, seq, title)
+        .map_err(|error| error.to_string())?;
+    view_for(&store, fork)
 }
 
 /// Pure transcript projection: stored messages and turns become the bubbles
@@ -3886,6 +3913,7 @@ fn build_ui_messages(
             "user" => {
                 let payload = &message.content;
                 Some(UiMessage {
+                    seq: message.seq,
                     role: "user".to_owned(),
                     text: payload
                         .get("display")
@@ -3939,6 +3967,7 @@ fn build_ui_messages(
                     })
                     .collect::<Vec<_>>();
                 Some(UiMessage {
+                    seq: message.seq,
                     role: "assistant".to_owned(),
                     text: chat
                         .content
@@ -4009,6 +4038,7 @@ fn build_ui_messages(
             .any(|(message, turn)| *turn == Some(last.turn) && message.role == "assistant");
         if interrupted_turns.contains(&last.turn) && !has_assistant {
             ui_messages.push(UiMessage {
+                seq: 0,
                 role: "assistant".to_owned(),
                 text: "Stopped before any output.".to_owned(),
                 attachments: Vec::new(),
@@ -5640,6 +5670,7 @@ pub fn run() {
             checkpoint_diff,
             restore_checkpoint,
             session_view,
+            fork_session,
             chat
         ])
         .run(tauri::generate_context!())
@@ -6423,6 +6454,7 @@ mod tests {
         assert_eq!(total, 5_500);
 
         let message = |role: &str, duration: Option<u64>| UiMessage {
+            seq: 0,
             role: role.to_owned(),
             text: String::new(),
             attachments: Vec::new(),
