@@ -466,7 +466,10 @@ impl Store {
         session_id: SessionId,
         access_mode: &str,
     ) -> Result<(), StoreError> {
-        if !matches!(access_mode, "read" | "edit" | "full") {
+        if !matches!(
+            access_mode,
+            "read" | "edit" | "ask-writes" | "ask-commands" | "full"
+        ) {
             return Err(StoreError::InvalidData(format!(
                 "unknown access mode: {access_mode}"
             )));
@@ -3513,7 +3516,12 @@ fn access_mode_from_metadata(metadata_json: &str) -> String {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
-        .filter(|mode| matches!(mode.as_str(), "read" | "edit" | "full"))
+        .filter(|mode| {
+            matches!(
+                mode.as_str(),
+                "read" | "edit" | "ask-writes" | "ask-commands" | "full"
+            )
+        })
         .unwrap_or_else(|| "read".to_owned())
 }
 
@@ -4279,6 +4287,20 @@ mod tests {
         assert_eq!(
             store.list_sessions(10).expect("sessions")[0].access_mode,
             "edit"
+        );
+        store
+            .set_session_access_mode(session, "ask-writes")
+            .expect("set mode");
+        assert_eq!(
+            store.list_sessions(10).expect("sessions")[0].access_mode,
+            "ask-writes"
+        );
+        store
+            .set_session_access_mode(session, "ask-commands")
+            .expect("set mode");
+        assert_eq!(
+            store.list_sessions(10).expect("sessions")[0].access_mode,
+            "ask-commands"
         );
         assert!(matches!(
             store.set_session_access_mode(session, "admin"),

@@ -7,6 +7,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait = "0.1"
+openbad-governance = { path = "../openbad-governance" }
 openbad-harness = { path = "../openbad-harness" }
 openbad-llm = { path = "../openbad-llm" }
 openbad-tools = { path = "../openbad-tools" }

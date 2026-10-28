@@ -3051,6 +3051,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "tokio",
  "uuid",
  "zip 7.3.0",
 ]

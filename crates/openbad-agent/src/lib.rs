@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures_util::{StreamExt, future::join_all};
+use futures_util::{StreamExt, stream};
+use openbad_governance::{Access, ApprovalDecision, ApprovalRequest, RiskLevel, ToolPolicy};
 use openbad_harness::{ApiFormat, ReasoningEffort, RequestEnvelope, canonical_json, hash_bytes};
 use openbad_llm::DeepSeekClient;
 use openbad_llm::chat::{
@@ -212,8 +213,8 @@ pub struct AgentConfig {
     /// Provider context window in tokens. Requests are capped so that the
     /// estimated prompt plus the completion budget fits inside it.
     pub context_window: u32,
-    pub allow_writes: bool,
-    pub allow_commands: bool,
+    pub policy: ToolPolicy,
+    pub max_parallel_tool_calls: usize,
     pub stream: bool,
     pub system_prompt: Option<String>,
     /// Fraction of the context window that may be occupied by the prompt
@@ -231,8 +232,8 @@ impl Default for AgentConfig {
             max_steps: 0,
             max_output_tokens: 16_384,
             context_window: 1_000_000,
-            allow_writes: false,
-            allow_commands: false,
+            policy: ToolPolicy::ReadOnly,
+            max_parallel_tool_calls: 10,
             stream: true,
             system_prompt: None,
             compact_at_ratio: 0.8,
@@ -264,6 +265,15 @@ impl StepUsage {
             cost_usd: cost.total_usd(),
         }
     }
+}
+
+/// Live state of one tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Queued,
+    Running,
+    Settled,
 }
 
 /// The durable outcome of one step. Emitted exactly once per started step,
@@ -309,6 +319,23 @@ pub trait AgentObserver: Send + Sync {
     /// delta lands or none of it does.
     fn on_step_settled(&self, _settlement: &StepSettlement<'_>) {}
     fn on_attempt_failed(&self, _failure: &AttemptFailure) {}
+    /// Called when a tool call changes state. `duration_ms` is set on settle.
+    fn on_tool_status(
+        &self,
+        _step: u32,
+        _name: &str,
+        _status: ToolStatus,
+        _duration_ms: Option<u64>,
+    ) {
+    }
+    fn on_approval_request(&self, _step: u32, _request: &ApprovalRequest) {}
+    fn on_approval_decision(
+        &self,
+        _step: u32,
+        _request: &ApprovalRequest,
+        _decision: ApprovalDecision,
+    ) {
+    }
     /// Called when history was compacted, before the step's request is sent.
     fn on_compaction_settled(&self, _record: &CompactionRecord) {}
     /// Called before a request is sent, whenever the header differs from the
@@ -344,6 +371,22 @@ struct NoopObserver;
 
 impl AgentObserver for NoopObserver {}
 
+/// Asks the human (or a policy) whether a risky tool may run. Implementations
+/// must be cancellation-aware and fail closed.
+#[async_trait::async_trait]
+pub trait ApprovalGate: Send + Sync {
+    async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision;
+}
+
+struct DenyAllApprovals;
+
+#[async_trait::async_trait]
+impl ApprovalGate for DenyAllApprovals {
+    async fn decide(&self, _request: &ApprovalRequest) -> ApprovalDecision {
+        ApprovalDecision::Deny
+    }
+}
+
 fn report_step_end(
     observer: &dyn AgentObserver,
     step: u32,
@@ -370,6 +413,14 @@ fn report_attempt_failed(observer: &dyn AgentObserver, step: u32, error: &AgentE
         message: error.to_string(),
         cancelled: matches!(error, AgentError::Cancelled),
     });
+}
+
+fn truncate_detail(arguments: &str) -> String {
+    let mut detail: String = arguments.chars().take(500).collect();
+    if arguments.chars().count() > 500 {
+        detail.push('…');
+    }
+    detail
 }
 
 fn settle_step(
@@ -479,6 +530,7 @@ pub struct Agent<T: HttpTransport> {
     terminal: Option<Arc<dyn TerminalService>>,
     outside_grants: Vec<OutsideGrant>,
     inbox: Option<Arc<Inbox>>,
+    approvals: Arc<dyn ApprovalGate>,
     redactions: Vec<String>,
     config: AgentConfig,
 }
@@ -506,6 +558,7 @@ impl<T: HttpTransport> Agent<T> {
             terminal: None,
             outside_grants: Vec::new(),
             inbox: None,
+            approvals: Arc::new(DenyAllApprovals),
             redactions: Vec::new(),
             config,
         }
@@ -579,6 +632,12 @@ impl<T: HttpTransport> Agent<T> {
     }
 
     #[must_use]
+    pub fn with_approvals(mut self, approvals: Arc<dyn ApprovalGate>) -> Self {
+        self.approvals = approvals;
+        self
+    }
+
+    #[must_use]
     pub fn with_redactions(mut self, redactions: Vec<String>) -> Self {
         self.redactions = redactions;
         self
@@ -592,87 +651,126 @@ impl<T: HttpTransport> Agent<T> {
         observer: &dyn AgentObserver,
     ) -> String {
         let started = std::time::Instant::now();
+        let name = call.function.name.as_str();
+        observer.on_tool_status(step, name, ToolStatus::Queued, None);
         let content = match serde_json::from_str::<Value>(&call.function.arguments) {
             Ok(arguments) => {
-                let risk = self.tools.risk_for_call(&call.function.name, &arguments);
-                let blocked = risk.filter(|risk| risk.requires_approval());
-                if let Some(risk) = blocked.filter(|_| !context.allow_commands) {
-                    let risk_name = format!("{risk:?}").to_lowercase();
-                    let reason = format!(
-                        "{} needs {risk_name} access; approving switches this session to Full access",
-                        call.function.name
-                    );
-                    let content = redact_secrets(
-                        &format!(
-                            "error: approval required for {} ({reason})",
-                            call.function.name
-                        ),
-                        &self.redactions,
-                    );
-                    let metadata = json!({
-                        "openbad_approval": {
-                            "tool": call.function.name,
-                            "risk": risk_name,
-                            "reason": reason,
+                let risk = self
+                    .tools
+                    .risk_for_call(name, &arguments)
+                    .unwrap_or(RiskLevel::Read);
+                let mut blocked = None;
+                let mut approved = false;
+                match self.config.policy.access(risk) {
+                    Access::Deny => {
+                        blocked = Some((
+                            format!(
+                                "error: approval required for {name}: blocked by the {} policy",
+                                self.config.policy.access_mode()
+                            ),
+                            json!({
+                                "openbad_approval": {
+                                    "tool": name,
+                                    "risk": risk,
+                                    "policy": self.config.policy.access_mode(),
+                                    "outcome": "denied",
+                                }
+                            }),
+                        ));
+                    }
+                    Access::Ask => {
+                        let request = ApprovalRequest::new(
+                            risk,
+                            name,
+                            truncate_detail(&call.function.arguments),
+                        );
+                        observer.on_approval_request(step, &request);
+                        let decision = self.approvals.decide(&request).await;
+                        observer.on_approval_decision(step, &request, decision);
+                        if decision.is_allowed() {
+                            approved = true;
+                        } else {
+                            blocked = Some((
+                                format!(
+                                    "error: approval required for {name}: not approved ({decision:?})"
+                                ),
+                                json!({
+                                    "openbad_approval": {
+                                        "tool": name,
+                                        "risk": risk,
+                                        "policy": self.config.policy.access_mode(),
+                                        "outcome": "not-approved",
+                                        "decision": decision,
+                                    }
+                                }),
+                            ));
                         }
-                    });
-                    observer.on_tool_result(step, &call.function.name, &content, true, &metadata);
+                    }
+                    Access::Allow => {}
+                }
+
+                if let Some((reason, metadata)) = blocked {
+                    observer.on_tool_status(
+                        step,
+                        name,
+                        ToolStatus::Settled,
+                        Some(started.elapsed().as_millis() as u64),
+                    );
+                    let content = redact_secrets(&reason, &self.redactions);
+                    observer.on_tool_result(step, name, &content, true, &metadata);
                     content
                 } else {
-                    match self
-                        .tools
-                        .execute(&call.function.name, arguments, context)
-                        .await
-                    {
+                    // A per-call approval elevates only this invocation: the
+                    // tool context is cloned so no standing session access
+                    // changes.
+                    let mut call_context = context.clone();
+                    if approved {
+                        call_context.allow_writes = true;
+                        call_context.allow_commands = true;
+                    }
+                    observer.on_tool_status(step, name, ToolStatus::Running, None);
+                    let result = self.tools.execute(name, arguments, &call_context).await;
+                    observer.on_tool_status(
+                        step,
+                        name,
+                        ToolStatus::Settled,
+                        Some(started.elapsed().as_millis() as u64),
+                    );
+                    match result {
                         Ok(result) if result.is_error => {
                             let content = redact_secrets(
                                 &format!("error: {}", result.content),
                                 &self.redactions,
                             );
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &content,
-                                true,
-                                &result.metadata,
-                            );
+                            observer.on_tool_result(step, name, &content, true, &result.metadata);
                             content
                         }
                         Ok(result) => {
                             let content = redact_secrets(&result.content, &self.redactions);
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &content,
-                                false,
-                                &result.metadata,
-                            );
+                            observer.on_tool_result(step, name, &content, false, &result.metadata);
                             content
                         }
                         Err(error) => {
                             let content =
                                 redact_secrets(&format!("error: {error}"), &self.redactions);
-                            observer.on_tool_result(
-                                step,
-                                &call.function.name,
-                                &content,
-                                true,
-                                &Value::Null,
-                            );
+                            observer.on_tool_result(step, name, &content, true, &Value::Null);
                             content
                         }
                     }
                 }
             }
             Err(error) => {
+                observer.on_tool_status(
+                    step,
+                    name,
+                    ToolStatus::Settled,
+                    Some(started.elapsed().as_millis() as u64),
+                );
                 let content = redact_secrets(
-                    &format!(
-                        "error: invalid arguments for {}: {error}",
-                        call.function.name
-                    ),
+                    &format!("error: invalid arguments for {name}: {error}"),
                     &self.redactions,
                 );
-                observer.on_tool_result(step, &call.function.name, &content, true, &Value::Null);
+                observer.on_tool_result(step, name, &content, true, &Value::Null);
                 content
             }
         };
@@ -680,7 +778,7 @@ impl<T: HttpTransport> Agent<T> {
         append_tool_audit(
             self.workspace.root(),
             step,
-            &call.function.name,
+            name,
             &redact_secrets(&call.function.arguments, &self.redactions),
             &content,
             started.elapsed().as_millis() as u64,
@@ -688,7 +786,7 @@ impl<T: HttpTransport> Agent<T> {
         if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
             eprintln!(
                 "[agent]   result {}: {}",
-                call.function.name,
+                name,
                 content.chars().take(500).collect::<String>()
             );
         }
@@ -774,8 +872,8 @@ impl<T: HttpTransport> Agent<T> {
 
         let context = Arc::new({
             let mut context = ToolContext::new(self.workspace.clone());
-            context.allow_writes = self.config.allow_writes;
-            context.allow_commands = self.config.allow_commands;
+            context.allow_writes = self.config.policy != ToolPolicy::ReadOnly;
+            context.allow_commands = self.config.policy == ToolPolicy::FullAccess;
             context.search = self.search.clone();
             context.checkpoints = self.checkpoints.clone();
             context.memory = self.memory.clone();
@@ -1201,12 +1299,15 @@ impl<T: HttpTransport> Agent<T> {
                     messages.push(message.clone());
                     new_messages.push(message);
                 } else {
-                    let contents = join_all(
-                        batch
-                            .iter()
-                            .map(|call| self.execute_tool_call(step, call, &context, observer)),
-                    )
-                    .await;
+                    let limit = self.config.max_parallel_tool_calls.max(1);
+                    let futures = batch
+                        .iter()
+                        .map(|call| self.execute_tool_call(step, call, &context, observer))
+                        .collect::<Vec<_>>();
+                    let contents = stream::iter(futures)
+                        .buffered(limit)
+                        .collect::<Vec<_>>()
+                        .await;
                     for (call, content) in batch.iter().zip(contents) {
                         let message = ChatMessage::tool(call.id.clone(), content);
                         messages.push(message.clone());
@@ -2193,7 +2294,7 @@ mod tests {
             Arc::new(WorkspaceService::new(directory.path())),
             AgentConfig {
                 stream: false,
-                allow_commands: false,
+                policy: ToolPolicy::ReadOnly,
                 ..AgentConfig::default()
             },
         );
@@ -2213,6 +2314,181 @@ mod tests {
                     .content
                     .as_deref()
                     .is_some_and(|content| content.contains("approval required"))
+        }));
+    }
+
+    struct RecordingGate {
+        decision: ApprovalDecision,
+        requests: Mutex<Vec<ApprovalRequest>>,
+    }
+
+    #[async_trait]
+    impl ApprovalGate for RecordingGate {
+        async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
+            self.requests
+                .lock()
+                .expect("requests")
+                .push(request.clone());
+            self.decision
+        }
+    }
+
+    #[derive(Default)]
+    struct StatusObserver {
+        statuses: Mutex<Vec<(String, ToolStatus)>>,
+        decisions: Mutex<Vec<ApprovalDecision>>,
+    }
+
+    impl AgentObserver for StatusObserver {
+        fn on_tool_status(
+            &self,
+            _step: u32,
+            name: &str,
+            status: ToolStatus,
+            _duration_ms: Option<u64>,
+        ) {
+            self.statuses
+                .lock()
+                .expect("statuses")
+                .push((name.to_owned(), status));
+        }
+
+        fn on_approval_decision(
+            &self,
+            _step: u32,
+            _request: &ApprovalRequest,
+            decision: ApprovalDecision,
+        ) {
+            self.decisions.lock().expect("decisions").push(decision);
+        }
+    }
+
+    fn probe_agent(
+        directory: &std::path::Path,
+        policy: ToolPolicy,
+        ran: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Agent<MockTransport> {
+        let mut registry = ToolRegistry::new();
+        registry.register(ExecuteProbe {
+            ran: Arc::clone(ran),
+        });
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"execute_probe","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2}}"#,
+                ),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        Agent::new(
+            client,
+            registry,
+            Arc::new(WorkspaceService::new(directory)),
+            AgentConfig {
+                stream: false,
+                policy,
+                ..AgentConfig::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn approval_gate_allows_a_risky_tool_per_call() {
+        let directory = tempdir().expect("tempdir");
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = Arc::new(RecordingGate {
+            decision: ApprovalDecision::AllowOnce,
+            requests: Mutex::new(Vec::new()),
+        });
+        let agent = probe_agent(directory.path(), ToolPolicy::AskCommands, &ran)
+            .with_approvals(gate.clone());
+        let observer = StatusObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("run probe")], &observer)
+            .await
+            .expect("run");
+
+        assert!(ran.load(Ordering::SeqCst), "approved tool ran");
+        assert_eq!(gate.requests.lock().expect("requests").len(), 1);
+        assert_eq!(
+            *observer.decisions.lock().expect("decisions"),
+            vec![ApprovalDecision::AllowOnce]
+        );
+        assert_eq!(
+            *observer.statuses.lock().expect("statuses"),
+            vec![
+                ("execute_probe".to_owned(), ToolStatus::Queued),
+                ("execute_probe".to_owned(), ToolStatus::Running),
+                ("execute_probe".to_owned(), ToolStatus::Settled),
+            ]
+        );
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == ChatRole::Tool && message.content.as_deref() == Some("ran")
+        }));
+    }
+
+    #[tokio::test]
+    async fn denied_approval_never_runs_the_tool() {
+        let directory = tempdir().expect("tempdir");
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = Arc::new(RecordingGate {
+            decision: ApprovalDecision::Deny,
+            requests: Mutex::new(Vec::new()),
+        });
+        let agent = probe_agent(directory.path(), ToolPolicy::AskCommands, &ran)
+            .with_approvals(gate.clone());
+        let observer = StatusObserver::default();
+
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("run probe")], &observer)
+            .await
+            .expect("run");
+
+        assert!(!ran.load(Ordering::SeqCst), "denied tool must not run");
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == ChatRole::Tool
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("not approved"))
+        }));
+        assert_eq!(
+            *observer.decisions.lock().expect("decisions"),
+            vec![ApprovalDecision::Deny]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_approval_never_runs_the_tool() {
+        let directory = tempdir().expect("tempdir");
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = Arc::new(RecordingGate {
+            decision: ApprovalDecision::Cancelled,
+            requests: Mutex::new(Vec::new()),
+        });
+        let agent =
+            probe_agent(directory.path(), ToolPolicy::AskCommands, &ran).with_approvals(gate);
+
+        let run = agent
+            .run_with_observer(
+                vec![ChatMessage::user("run probe")],
+                &StatusObserver::default(),
+            )
+            .await
+            .expect("run");
+
+        assert!(!ran.load(Ordering::SeqCst), "cancelled tool must not run");
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == ChatRole::Tool
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("Cancelled"))
         }));
     }
 
