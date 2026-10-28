@@ -12,27 +12,51 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # CI never reads debug info, and emitting it dominates the link step of the
+  # Tauri binary and of every test executable.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  check:
+  # Cheap, no system dependencies and no compilation: fails fast on formatting
+  # and repository scripts while the Rust jobs spin up.
+  checks:
+    name: Formatting and scripts
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Documentation links
+        run: python3 scripts/check_docs.py
+
+      - name: Theme tokens
+        run: python3 scripts/check_theme_tokens.py
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Tauri system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgtk-3-dev libdbus-1-dev pkg-config patchelf xvfb
+          version: 1.0
+
+      - name: Install the WebKit web driver
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libgtk-3-dev \
-            libdbus-1-dev \
-            pkg-config \
-            patchelf \
-            xvfb
-          if ! sudo apt-get install -y webkit2gtk-driver; then
-            sudo apt-get install -y webkitgtk-webdriver
-          fi
+          sudo apt-get install -y webkit2gtk-driver || sudo apt-get install -y webkitgtk-webdriver
 
       - uses: pnpm/action-setup@v4
         with:
@@ -44,7 +68,47 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/desktop/ui/pnpm-lock.yaml
 
-      - name: Install and build the UI
+      # The desktop crate embeds the UI bundle at compile time, so it has to
+      # exist before anything builds.
+      - name: Build the UI
+        working-directory: apps/desktop/ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgtk-3-dev libdbus-1-dev pkg-config patchelf xvfb
+          version: 1.0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/ui/pnpm-lock.yaml
+
+      - name: Typecheck and build the UI
         working-directory: apps/desktop/ui
         run: |
           pnpm install --frozen-lockfile
@@ -52,8 +116,46 @@ jobs:
           pnpm build
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --workspace
+
+  e2e:
+    name: Native end-to-end tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          components: rustfmt, clippy
+          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libgtk-3-dev libdbus-1-dev pkg-config patchelf xvfb
+          version: 1.0
+
+      - name: Install the WebKit web driver
+        run: |
+          sudo apt-get install -y webkit2gtk-driver || sudo apt-get install -y webkitgtk-webdriver
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/ui/pnpm-lock.yaml
+
+      - name: Build the UI
+        working-directory: apps/desktop/ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
@@ -71,18 +173,3 @@ jobs:
         run: |
           export WEBKIT_WEBDRIVER_BIN="$(command -v WebKitWebDriver)"
           xvfb-run -a npm test
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test --workspace
-
-      - name: Documentation links
-        run: python3 scripts/check_docs.py
-
-      - name: Theme tokens
-        run: python3 scripts/check_theme_tokens.py
