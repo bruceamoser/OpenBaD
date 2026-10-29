@@ -58,7 +58,28 @@ Applies to all changes in `/home/bmoser/repos/OpenBaD`.
 4. Close stale/duplicate issues and delete stale branches created for this work.
 5. Update the plan/progress log.
 
-## 8. Release
+## 8. App icons
+
+`assets/app-icon.png` is the source of truth: the mark alone, no wordmark, on a
+transparent 1024×1024 canvas with ~8% padding. Regenerate the platform set with
+
+```bash
+node apps/desktop/ui/node_modules/@tauri-apps/cli/tauri.js icon assets/app-icon.png \
+  -o apps/desktop/src-tauri/icons
+rm -rf apps/desktop/src-tauri/icons/android apps/desktop/src-tauri/icons/ios
+```
+
+`bundle.icon` in `tauri.conf.json` must list `32x32`, `64x64`, `128x128`,
+`128x128@2x`, `256x256`, `512x512`, `icon.icns`, and `icon.ico`. The Linux
+bundler installs each PNG into `hicolor/<size>/apps/`, so a size it cannot name
+— anything that is not one of the standard sizes — lands in a directory no
+desktop environment looks in and the app shows a placeholder icon. That is what
+a 415×415 lockup with a wordmark produced: `hicolor/415x415/`.
+
+Never ship the wordmark lockup as the bundle icon: at 16–48 px it is an
+unreadable smudge, and the white sheet behind it renders as a square blob.
+
+## 9. Release
 
 1. Decide the semantic version (patch for fixes, minor for features).
 2. Bump all version locations: workspace `Cargo.toml`, `Cargo.lock`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/ui/package.json`.
