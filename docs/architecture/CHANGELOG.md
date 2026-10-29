@@ -315,6 +315,19 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.4
+
+Fix release on top of 0.3.3. A session could become permanently unusable with
+`Invalid assistant message: content or tool_calls must be set`: a step that
+returned only reasoning was recorded as an assistant message with no text and no
+tool call, and the provider rejects that shape on every later request, including
+compaction.
+
+The loop no longer records such a step, replayed and rehydrated histories drop
+any that are already stored, so an affected session recovers instead of staying
+broken. History is repaired before the compaction boundary is computed, which
+also stops a shifted boundary from indexing past the end.
+
 ## v0.3.3
 
 Fix release on top of 0.3.2. The packaged app icon was a placeholder on Linux:
