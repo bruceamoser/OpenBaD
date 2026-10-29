@@ -1290,24 +1290,40 @@ impl ToolContext {
         }
     }
 
-    fn was_read(&self, path: &Path) -> bool {
-        if self
-            .read_paths
-            .lock()
-            .map(|paths| paths.contains(path))
-            .unwrap_or(false)
-        {
-            return true;
-        }
+    /// Why a write to `path` still needs a read, if it does.
+    ///
+    /// A bare "read it first" is misleading once the file *has* been read: an
+    /// edit, a shell command, or another process can change it afterwards, and
+    /// the model cannot tell that apart from never having looked. Naming the
+    /// reason turns a blind retry into a single correct step.
+    fn write_blocked_reason(&self, path: &Path) -> Option<String> {
+        // The stamp is the only evidence that counts. A path in this turn's
+        // read set proves it was read, not that it still says what was read:
+        // an edit, a shell command, or another process may have moved it since.
         let recorded = self
             .session_reads
             .lock()
             .ok()
             .and_then(|reads| reads.get(path).copied());
-        match recorded {
-            Some(stamp) => FileStamp::of(path).is_some_and(|current| current == stamp),
-            None => false,
+        let current = FileStamp::of(path);
+        match (recorded, current) {
+            (_, None) => None,
+            (None, Some(_)) => Some("it has not been read in this session".to_owned()),
+            (Some(stamp), Some(current)) if current == stamp => None,
+            (Some(stamp), Some(current)) => Some(format!(
+                "it changed after you read it ({} bytes then, {} now)",
+                stamp.len, current.len
+            )),
         }
+    }
+
+    /// Record the file's current contents as known to this session.
+    ///
+    /// Called after every successful write, edit, move, or undo, and after a
+    /// validator rolls a write back: in each case the agent knows exactly what
+    /// is on disk, so a later write must not be refused for it.
+    fn settle_write(&self, path: &Path) {
+        self.mark_read(path);
     }
 
     /// Share a session read record, so a read from an earlier turn still
@@ -3413,11 +3429,13 @@ impl Tool for MoveFileTool {
                 from.display()
             )));
         }
-        if to.exists() && !context.was_read(&to) {
-            return Err(ToolError::Failed(format!(
-                "read the destination before overwriting it: {}",
-                to.display()
-            )));
+        if to.exists() {
+            if let Some(reason) = context.write_blocked_reason(&to) {
+                return Err(ToolError::Failed(format!(
+                    "read the destination before overwriting it: {} ({reason})",
+                    to.display()
+                )));
+            }
         }
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
@@ -3427,6 +3445,9 @@ impl Tool for MoveFileTool {
             std::fs::copy(&from, &to)?;
             std::fs::remove_file(&from)?;
         }
+        // A move leaves the content unchanged, so the destination is now known
+        // exactly as the source was.
+        context.settle_write(&to);
         Ok(
             ToolResult::ok(format!("moved {} to {}", from.display(), to.display()))
                 .with_metadata(json!({"from": from, "to": to, "checkpoint": checkpoint})),
@@ -4065,11 +4086,13 @@ impl Tool for WriteFileTool {
         }
         let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         check_write_policy(context, &path)?;
-        if path.exists() && !context.was_read(&path) {
-            return Err(ToolError::Failed(format!(
-                "read the file before overwriting it: {}",
-                path.display()
-            )));
+        if path.exists() {
+            if let Some(reason) = context.write_blocked_reason(&path) {
+                return Err(ToolError::Failed(format!(
+                    "read the file before overwriting it: {} ({reason})",
+                    path.display()
+                )));
+            }
         }
         let content = string_arg(&arguments, "content")?;
         if let Some(kind) = detect_secret(&content) {
@@ -4085,16 +4108,20 @@ impl Tool for WriteFileTool {
         let checkpoint = checkpoint_before_write(context, &path)?;
         let _undo = record_undo(context, &path)?;
         atomic_write(&path, &content)?;
-        // The agent authored this content, so the session record now describes
-        // the file it holds; a later turn may overwrite it again.
-        context.mark_read(&path);
         let validation = match run_validators(context, &path).await {
             Ok(validation) => validation,
             Err(error) => {
                 restore_previous(&path, previous.as_deref())?;
+                // The file is back to what the agent had, so the record must
+                // describe that state; recording the rejected content would
+                // refuse the next write for no reason.
+                context.settle_write(&path);
                 return Err(error);
             }
         };
+        // The agent authored this content, so the session record now describes
+        // the file it holds; a later turn may overwrite it again.
+        context.settle_write(&path);
         let warning = scope_warning(context, &path);
         Ok(ToolResult::ok(format!(
             "wrote {} bytes to {}{}{}",
@@ -4152,9 +4179,9 @@ impl Tool for EditFileTool {
         }
         let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         check_write_policy(context, &path)?;
-        if !context.was_read(&path) {
+        if let Some(reason) = context.write_blocked_reason(&path) {
             return Err(ToolError::Failed(format!(
-                "read the file before editing it: {}",
+                "read the file before editing it: {} ({reason})",
                 path.display()
             )));
         }
@@ -4194,9 +4221,13 @@ impl Tool for EditFileTool {
             Ok(validation) => validation,
             Err(error) => {
                 restore_previous(&path, previous.as_deref())?;
+                context.settle_write(&path);
                 return Err(error);
             }
         };
+        // An edit changes the file, so the session record has to follow it:
+        // without this the next write to the same file was refused as unread.
+        context.settle_write(&path);
         let warning = scope_warning(context, &path);
         Ok(ToolResult::ok(format!(
             "updated {}{}{}",
@@ -7258,6 +7289,11 @@ impl Tool for UndoLastTool {
             atomic_write(&path, value["content"].as_str().unwrap_or_default())?;
         } else if path.exists() {
             std::fs::remove_file(&path)?;
+        }
+        // The undo restores content the agent already had, so the record
+        // follows it rather than forcing a re-read before the next write.
+        if path.exists() {
+            context.settle_write(&path);
         }
         let done = record.path().with_extension("done");
         std::fs::rename(record.path(), done)?;
@@ -16045,6 +16081,175 @@ mod tests {
 
     fn context_with_session(root: &Path, reads: SessionReads) -> ToolContext {
         context(root).with_session_reads(reads)
+    }
+
+    #[tokio::test]
+    async fn an_edit_refreshes_the_record_so_a_later_write_is_allowed() {
+        let directory = tempdir().expect("tempdir");
+        let file = directory.path().join("NEXT_ACTION.md");
+        fs::write(&file, "# Next action\n\n- one\n").expect("file");
+        let reads = new_session_reads();
+        let mut context = context_with_session(directory.path(), Arc::clone(&reads));
+        context.allow_writes = true;
+
+        // The reported sequence: read, edit, then write in a later turn.
+        ReadFileTool
+            .execute(json!({"path": "NEXT_ACTION.md"}), &context)
+            .await
+            .expect("read");
+        EditFileTool
+            .execute(
+                json!({"path": "NEXT_ACTION.md", "old": "- one", "new": "- two"}),
+                &context,
+            )
+            .await
+            .expect("edit");
+
+        // A new turn rebuilds the context from the same session record.
+        let mut next_turn = context_with_session(directory.path(), reads);
+        next_turn.allow_writes = true;
+        WriteFileTool
+            .execute(
+                json!({"path": "NEXT_ACTION.md", "content": "# Next action\n\n- three\n"}),
+                &next_turn,
+            )
+            .await
+            .expect("the edit made the file known, so the write is allowed");
+    }
+
+    #[tokio::test]
+    async fn an_external_change_says_so_instead_of_claiming_the_file_was_never_read() {
+        let directory = tempdir().expect("tempdir");
+        let file = directory.path().join("notes.md");
+        fs::write(&file, "first").expect("file");
+        let reads = new_session_reads();
+        let mut context = context_with_session(directory.path(), Arc::clone(&reads));
+        context.allow_writes = true;
+        ReadFileTool
+            .execute(json!({"path": "notes.md"}), &context)
+            .await
+            .expect("read");
+
+        // Something outside the agent rewrites the file.
+        fs::write(&file, "a much longer replacement").expect("rewrite");
+
+        let blocked = WriteFileTool
+            .execute(json!({"path": "notes.md", "content": "mine"}), &context)
+            .await
+            .expect_err("a changed file must be re-read");
+        assert_eq!(
+            blocked.to_string(),
+            format!(
+                "tool failed: read the file before overwriting it: {} (it changed after you read it (5 bytes then, 25 now))",
+                file.display()
+            )
+        );
+
+        // Never read at all is a different reason, so the model can tell a
+        // stale read from a missing one.
+        fs::write(directory.path().join("other.md"), "x").expect("other");
+        let fresh = WriteFileTool
+            .execute(json!({"path": "other.md", "content": "y"}), &context)
+            .await
+            .expect_err("unread file");
+        assert!(
+            fresh
+                .to_string()
+                .contains("it has not been read in this session"),
+            "{fresh}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_edit_leaves_the_file_editable() {
+        let directory = tempdir().expect("tempdir");
+        let file = directory.path().join("conf.json");
+        fs::write(&file, "{\"ok\": true}").expect("file");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        ReadFileTool
+            .execute(json!({"path": "conf.json"}), &context)
+            .await
+            .expect("read");
+        // A secret in the replacement is refused before anything is written.
+        let blocked = EditFileTool
+            .execute(
+                json!({
+                    "path": "conf.json",
+                    "old": "true",
+                    "new": "\"sk-abcdefghijklmnopqrstuvwxyz012345\""
+                }),
+                &context,
+            )
+            .await;
+        assert!(blocked.is_err(), "a secret must be refused");
+        // The file is untouched, so the edit is still allowed afterwards.
+        EditFileTool
+            .execute(
+                json!({"path": "conf.json", "old": "true", "new": "false"}),
+                &context,
+            )
+            .await
+            .expect("the refused edit changed nothing, so the next one is allowed");
+    }
+
+    #[tokio::test]
+    async fn a_validator_rollback_leaves_the_file_writable() {
+        let directory = tempdir().expect("tempdir");
+        let file = directory.path().join("data.json");
+        fs::write(&file, "{\"ok\": true}").expect("file");
+        let reads = new_session_reads();
+        let mut context = context_with_session(directory.path(), Arc::clone(&reads));
+        context.allow_writes = true;
+        ReadFileTool
+            .execute(json!({"path": "data.json"}), &context)
+            .await
+            .expect("read");
+
+        // A manifest validator that rejects invalid JSON.
+        fs::create_dir_all(directory.path().join(".openbad")).expect("dir");
+        fs::write(
+            directory.path().join(".openbad/manifest.yaml"),
+            "name: test\nvalidators:\n  - glob: \"**/*.json\"\n    command: \"true\"\n",
+        )
+        .expect("manifest");
+
+        // Whether the validator runs or not, the record must describe what is
+        // actually on disk afterwards.
+        let _ = WriteFileTool
+            .execute(
+                json!({"path": "data.json", "content": "{\"ok\": false}"}),
+                &context,
+            )
+            .await;
+        let again = WriteFileTool
+            .execute(
+                json!({"path": "data.json", "content": "{\"ok\": null}"}),
+                &context,
+            )
+            .await;
+        assert!(
+            again.is_ok(),
+            "a write that settled, rolled back or not, must not block the next one: {again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_move_makes_the_destination_known() {
+        let directory = tempdir().expect("tempdir");
+        let from = directory.path().join("a.md");
+        fs::write(&from, "body").expect("file");
+        let reads = new_session_reads();
+        let mut context = context_with_session(directory.path(), Arc::clone(&reads));
+        context.allow_writes = true;
+        MoveFileTool
+            .execute(json!({"from": "a.md", "to": "b.md"}), &context)
+            .await
+            .expect("move");
+        WriteFileTool
+            .execute(json!({"path": "b.md", "content": "new body"}), &context)
+            .await
+            .expect("the moved file is known, so it can be overwritten");
     }
 
     #[tokio::test]
