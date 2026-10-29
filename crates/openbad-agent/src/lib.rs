@@ -10,6 +10,7 @@ use openbad_harness::{ApiFormat, ReasoningEffort, RequestEnvelope, canonical_jso
 use openbad_llm::DeepSeekClient;
 use openbad_llm::chat::{
     ChatMessage, ChatRole, FunctionCall, StreamEvent, ToolCall, ToolCallDelta,
+    drop_empty_assistant_messages,
 };
 use openbad_llm::pricing::{CostBreakdown, PeakCalendar, UsageTotals, deepseek_pricing};
 use openbad_llm::provider::{ProviderError, Usage};
@@ -934,6 +935,10 @@ impl<T: HttpTransport> Agent<T> {
             },
             None => None,
         };
+        // Repair the replayed history before anything indexes into it: a stored
+        // empty assistant turn is dropped here, so indices computed afterwards
+        // still describe the messages actually sent.
+        normalize_history(&mut messages);
         // The current turn and any steering messages appended to it stay
         // verbatim. Compaction only ever rewrites history before this point.
         let turn_start = messages
@@ -1025,7 +1030,7 @@ impl<T: HttpTransport> Agent<T> {
             // Reasoning is only required for the live tool loop. Keeping it on
             // every completed turn is what made long sessions balloon; strip it
             // only from assistant text messages that are already finished.
-            strip_completed_text_reasoning(&mut messages);
+            normalize_history(&mut messages);
             let catalog_tokens = mcp_catalog
                 .as_ref()
                 .map_or(0, |catalog| estimate_tokens(message_bytes(catalog)));
@@ -1280,8 +1285,10 @@ impl<T: HttpTransport> Agent<T> {
                     sanitize_tool_arguments(calls);
                 }
                 let calls = assistant.tool_calls.clone().unwrap_or_default();
-                new_messages.push(assistant.clone());
-                messages.push(assistant);
+                if !assistant.is_empty_assistant() {
+                    new_messages.push(assistant.clone());
+                    messages.push(assistant);
+                }
                 append_interrupted_results(&mut messages, &mut new_messages, &calls);
                 settle_step(observer, step, true, &new_messages[step_messages_start..]);
                 report_step_end(
@@ -1320,8 +1327,13 @@ impl<T: HttpTransport> Agent<T> {
             if let Some(calls) = assistant.tool_calls.as_mut() {
                 sanitize_tool_arguments(calls);
             }
-            new_messages.push(assistant.clone());
-            messages.push(assistant);
+            // An empty step (no text, no calls) has nothing to replay and would
+            // make every later request in this session fail.
+            let record_assistant = !assistant.is_empty_assistant();
+            if record_assistant {
+                new_messages.push(assistant.clone());
+                messages.push(assistant);
+            }
 
             if tool_calls.is_empty() {
                 settle_step(observer, step, false, &new_messages[step_messages_start..]);
@@ -1863,6 +1875,9 @@ fn select_compaction_end(
     turn_start: usize,
     retain_tokens: usize,
 ) -> Option<usize> {
+    // Repairs during the turn (an empty step dropped, a steering message added)
+    // can move the boundary; clamp so this never indexes past the end.
+    let turn_start = turn_start.min(messages.len().saturating_sub(1));
     if turn_start <= 1 {
         return None;
     }
@@ -1957,8 +1972,8 @@ fn checkpoint_message(summary: &str) -> ChatMessage {
     ))
 }
 
-fn strip_completed_text_reasoning(messages: &mut [ChatMessage]) {
-    for message in messages {
+fn normalize_history(messages: &mut Vec<ChatMessage>) {
+    for message in messages.iter_mut() {
         // Reasoning is required when the assistant message also carries tool
         // calls. It is not required on a finished text answer, and keeping it
         // makes long sessions balloon without helping the next request.
@@ -1971,6 +1986,11 @@ fn strip_completed_text_reasoning(messages: &mut [ChatMessage]) {
             message.reasoning_content = None;
         }
     }
+    // A step that returned neither text nor a tool call leaves an assistant
+    // message the provider refuses (`content or tool_calls must be set`), and
+    // one of them makes every later request in the session fail. Nothing can
+    // depend on it, so it is dropped rather than kept and repaired.
+    drop_empty_assistant_messages(messages);
 }
 
 fn append_tool_audit(
@@ -2707,6 +2727,173 @@ mod tests {
         assert_eq!(files.len(), 1);
         let full = std::fs::read_to_string(&files[0]).expect("spill file");
         assert_eq!(full.len(), 5_000);
+    }
+
+    /// Returns one textless, call-less assistant turn once, then answers.
+    struct EmptyFirstStepTransport {
+        requests: Arc<Mutex<Vec<HttpRequest>>>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for EmptyFirstStepTransport {
+        async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            let first = self.requests.lock().expect("requests").is_empty();
+            self.requests.lock().expect("requests").push(request);
+            // The first answer carries reasoning and nothing else: exactly the
+            // shape that produced `content or tool_calls must be set`.
+            let message = if first {
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "I should have called a tool but did not."
+                })
+            } else {
+                json!({"role": "assistant", "content": "Recovered."})
+            };
+            let body = json!({
+                "model": "deepseek-flash",
+                "choices": [{"message": message, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2}
+            });
+            Ok(response(&body.to_string()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
+    }
+
+    /// Every assistant message in every recorded request must satisfy the
+    /// provider's contract.
+    fn assert_no_empty_assistant_messages(requests: &Arc<Mutex<Vec<HttpRequest>>>) {
+        // Read the count out first: a lock guard held by the range expression
+        // would still be alive inside the body and deadlock `request_json`.
+        let count = requests.lock().expect("requests").len();
+        for index in 0..count {
+            let body = request_json(requests, index);
+            let invalid = body["messages"]
+                .as_array()
+                .expect("messages")
+                .iter()
+                .filter(|message| message["role"] == "assistant")
+                .find(|message| {
+                    message
+                        .get("tool_calls")
+                        .is_none_or(|calls| calls.as_array().is_none_or(Vec::is_empty))
+                        && message
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_none_or(|text| text.trim().is_empty())
+                });
+            assert!(
+                invalid.is_none(),
+                "request {index} carried an empty assistant message: {invalid:?}"
+            );
+        }
+    }
+
+    fn stale_empty_assistant() -> ChatMessage {
+        ChatMessage {
+            role: ChatRole::Assistant,
+            content: None,
+            reasoning_content: Some("stale reasoning".to_owned()),
+            tool_calls: None,
+            tool_call_id: None,
+            prefix: None,
+        }
+    }
+
+    #[test]
+    fn a_shifted_turn_start_never_indexes_past_the_repaired_history() {
+        // A stored empty assistant turn before the current question, which is
+        // the last message: after the repair the boundary would sit one past
+        // the end if it were taken from the un-repaired list.
+        let messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("old question"),
+            stale_empty_assistant(),
+            ChatMessage::user("current question"),
+        ];
+        let mut repaired = messages.clone();
+        normalize_history(&mut repaired);
+        assert_eq!(repaired.len(), 3);
+        // The stale boundary (4, from the original list) is clamped, so the
+        // selection still walks real indices instead of panicking.
+        let end = select_compaction_end(&repaired, messages.len(), 1);
+        assert!(end.is_none_or(|end| end < repaired.len()));
+    }
+
+    #[tokio::test]
+    async fn an_empty_assistant_step_is_neither_recorded_nor_replayed() {
+        let directory = tempdir().expect("tempdir");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let agent = default_agent(
+            DeepSeekClient::new(
+                EmptyFirstStepTransport {
+                    requests: Arc::clone(&requests),
+                },
+                "sk-test",
+            ),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+
+        let run = agent
+            .run(vec![
+                ChatMessage::user("earlier question"),
+                stale_empty_assistant(),
+                ChatMessage::user("do the thing"),
+            ])
+            .await
+            .expect("an empty step is an empty answer, not a failure");
+        assert_eq!(run.text, "");
+        assert!(
+            !run.new_messages
+                .iter()
+                .any(openbad_llm::chat::ChatMessage::is_empty_assistant),
+            "an empty step must not be recorded for the next turn"
+        );
+        assert_no_empty_assistant_messages(&requests);
+    }
+
+    #[tokio::test]
+    async fn a_stored_empty_assistant_turn_does_not_poison_the_next_request() {
+        let directory = tempdir().expect("tempdir");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let agent = default_agent(
+            DeepSeekClient::new(
+                EmptyFirstStepTransport {
+                    requests: Arc::clone(&requests),
+                },
+                "sk-test",
+            ),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+
+        // First request answers with an empty step, so consume it here…
+        let _ = agent
+            .run(vec![ChatMessage::user("first")])
+            .await
+            .expect("first turn");
+        // …then replay that history plus a new question. The stored empty turn
+        // is dropped on the way in, so the second request is valid.
+        let run = agent
+            .run(vec![
+                ChatMessage::user("first"),
+                stale_empty_assistant(),
+                ChatMessage::user("second"),
+            ])
+            .await
+            .expect("replay");
+        assert_eq!(run.text, "Recovered.");
+        assert_no_empty_assistant_messages(&requests);
     }
 
     #[tokio::test]

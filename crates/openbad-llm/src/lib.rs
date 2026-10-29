@@ -11,6 +11,7 @@ pub mod transport;
 
 pub use chat::{
     ChatMessage, ChatRequest, ChatResponse, DeepSeekStreamDecoder, ModelResponse, StreamEvent,
+    drop_empty_assistant_messages,
 };
 pub use deepseek::{DeepSeekClient, DeepSeekProvider, FLASH_MODEL, PRO_MODEL};
 pub use fim::{FIM_MAX_OUTPUT_TOKENS, FimChoice, FimRequest, FimResponse};
