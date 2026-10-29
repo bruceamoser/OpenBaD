@@ -5722,10 +5722,14 @@ fn load_history(
             (message.source.as_deref() != Some("compaction")).then_some(message.seq)
         })
         .collect();
-    let history = messages
+    let mut history = messages
         .iter()
         .map(chat_message_from_session)
         .collect::<Result<Vec<_>, _>>()?;
+    // Sessions recorded before empty assistant turns were skipped can still
+    // hold one, and replaying it fails every later request with `content or
+    // tool_calls must be set`. Drop them on the way in so old sessions work.
+    openbad_llm::drop_empty_assistant_messages(&mut history);
     Ok((history, entries))
 }
 

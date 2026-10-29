@@ -114,6 +114,23 @@ impl ChatMessage {
         }
     }
 
+    /// True when the message is an assistant turn carrying neither text nor a
+    /// tool call. The provider rejects that shape (`content or tool_calls must
+    /// be set`), and one such message poisons every later request in the
+    /// session, including compaction.
+    #[must_use]
+    pub fn is_empty_assistant(&self) -> bool {
+        self.role == ChatRole::Assistant
+            && self
+                .content
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+            && self
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty())
+    }
+
     fn text(role: ChatRole, content: impl Into<String>) -> Self {
         Self {
             role,
@@ -124,6 +141,17 @@ impl ChatMessage {
             prefix: None,
         }
     }
+}
+
+/// Remove assistant messages that carry neither text nor tool calls.
+///
+/// Nothing depends on such a message: it has no text to replay and no tool call
+/// to answer, so dropping it keeps the conversation valid and loses no
+/// information. Returns how many were dropped.
+pub fn drop_empty_assistant_messages(messages: &mut Vec<ChatMessage>) -> usize {
+    let before = messages.len();
+    messages.retain(|message| !message.is_empty_assistant());
+    before - messages.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,6 +622,80 @@ mod tests {
             workspace_hash: None,
             max_output_tokens: 32_000,
         }
+    }
+
+    #[test]
+    fn only_a_textless_callless_assistant_message_is_empty() {
+        let empty = ChatMessage {
+            role: ChatRole::Assistant,
+            content: None,
+            reasoning_content: Some("thinking only".to_owned()),
+            tool_calls: None,
+            tool_call_id: None,
+            prefix: None,
+        };
+        assert!(empty.is_empty_assistant());
+
+        let mut blank = ChatMessage::assistant("   \n");
+        assert!(blank.is_empty_assistant());
+        blank.tool_calls = Some(Vec::new());
+        assert!(blank.is_empty_assistant(), "an empty call list is no calls");
+
+        let mut answered = ChatMessage::assistant("done");
+        assert!(!answered.is_empty_assistant());
+        answered.tool_calls = Some(vec![ToolCall::function(
+            "call-1",
+            "read_file",
+            json!({"path": "a"}),
+        )]);
+        assert!(!answered.is_empty_assistant());
+
+        let mut calling = ChatMessage::assistant_tool_calls(
+            None,
+            None,
+            vec![ToolCall::function(
+                "call-2",
+                "read_file",
+                json!({"path": "b"}),
+            )],
+        );
+        assert!(!calling.is_empty_assistant());
+        calling.tool_calls = None;
+        assert!(calling.is_empty_assistant());
+
+        assert!(!ChatMessage::user("").is_empty_assistant());
+        assert!(!ChatMessage::tool("call-3", "").is_empty_assistant());
+    }
+
+    #[test]
+    fn dropping_empty_assistant_messages_keeps_the_rest_in_order() {
+        let mut messages = vec![
+            ChatMessage::user("first"),
+            ChatMessage::assistant(""),
+            ChatMessage::assistant("answer"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: None,
+                reasoning_content: Some("only reasoning".to_owned()),
+                tool_calls: None,
+                tool_call_id: None,
+                prefix: None,
+            },
+            ChatMessage::user("second"),
+        ];
+        assert_eq!(drop_empty_assistant_messages(&mut messages), 2);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.role, message.content.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ChatRole::User, Some("first")),
+                (ChatRole::Assistant, Some("answer")),
+                (ChatRole::User, Some("second")),
+            ]
+        );
+        assert_eq!(drop_empty_assistant_messages(&mut messages), 0);
     }
 
     #[test]

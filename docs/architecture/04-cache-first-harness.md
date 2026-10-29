@@ -110,6 +110,7 @@ These invariants are enforced in code and tested in CI.
 | C11 | Every request records its cache identity hashes. | `request_envelopes` table. |
 | C12 | Cache hit/miss is surfaced and never silently ignored. | Usage ledger + UI meter. |
 | C13 | `reasoning_content` is passed back verbatim when tools are present. | Adapter guard; request replay test. |
+| C14 | No request carries an assistant message with neither text nor tool calls. | The loop never records an empty step, `normalize_history` drops any from a replayed history, and rehydration filters stored ones. |
 | C14 | Thinking mode and effort are stable within a series. | Envelope guard. |
 
 ## 4. Prompt assembly
