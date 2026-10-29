@@ -322,8 +322,8 @@ Rules:
 | Tool | Risk | Concurrency | Notes |
 | --- | --- | --- | --- |
 | `read_file` | read | safe | Path, optional line range; content-addressed |
-| `write_file` | write | serial | Requires a prior read in the session; a read only counts while the file is unchanged |
-| `edit_file` | write | serial | Exact literal replacement; fails on ambiguity |
+| `write_file` | write | serial | Requires a prior read in the session; a read only counts while the file is unchanged. A successful write, edit, move, or undo records the file's new state, so the agent never has to re-read a file it just authored |
+| `edit_file` | write | serial | Exact literal replacement; fails on ambiguity. Records the file's new state like `write_file`, including after a validator rollback |
 | `apply_patch` | write | serial | Unified diff; atomic per file set |
 | `list_dir` | read | safe | Depth-limited |
 | `glob` | read | safe | `.gitignore`-aware |
@@ -490,6 +490,13 @@ executed check or be labelled UNVERIFIED.
 the effective cap. `context_report` estimates loaded evidence tokens and lists
 rules. `ledger` kind claim stores executed/read/inferred/assumed provenance,
 while kind unknown maintains the unresolved-question register.
+
+The read-before-write guard names its reason: never read in this session, or
+read and then changed (`5 bytes then, 25 now`). The distinction matters because a
+changed file needs a re-read while an unread one needs a first look, and the old
+message could not tell the model which situation it was in. Only the recorded
+stamp counts — the per-turn read set proves a file was read, not that it still
+says what was read.
 
 `write_file` and `edit_file` screen content for obvious secrets (private keys,
 cloud/API/GitHub/Slack tokens) before writing. `preview_write` lets the model
