@@ -315,6 +315,20 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.3
+
+Fix release on top of 0.3.2. The packaged app icon was a placeholder on Linux:
+the `.deb` installed a 415×415 lockup into `hicolor/415x415/`, a directory no
+desktop environment looks in, so `Icon=openbad-desktop` resolved to nothing. The
+icon set is now generated from `assets/app-icon.png` — the mark alone on a
+transparent 1024×1024 canvas — and installed at 32, 64, 128, 256, and 512, with
+`icon.icns` for macOS and an `icon.ico` whose 16–256 sizes come from the mark
+rather than a wordmark.
+
+On a `.deb` install the icon lives in `/usr/share/icons`, so the in-app updater
+does not replace it: reinstall the new `.deb` to pick it up. The AppImage updates
+in place.
+
 ## v0.3.2
 
 Fix release on top of 0.3.1. A steering message now renders where it arrived:
