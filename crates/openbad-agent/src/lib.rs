@@ -18,8 +18,8 @@ use openbad_llm::transport::HttpTransport;
 use openbad_tools::{
     CheckpointSink, LspService, McpService, MemoryStore, OutsideGrant, ProjectAreas,
     QuestionPrompt, RegistryWorkflowEngine, SessionHistory, SessionReads, SubagentRuntime,
-    TerminalService, ToolContext, ToolRegistry, WorkspaceSearch, discover_plugins, discover_skills,
-    new_session_reads,
+    TerminalService, ToolContext, ToolError, ToolRegistry, WorkspaceSearch, discover_plugins,
+    discover_skills, new_session_reads,
 };
 use openbad_workspace::{WorkspaceService, load_project_manifest};
 use serde::{Deserialize, Serialize};
@@ -397,6 +397,15 @@ impl AgentObserver for NoopObserver {}
 #[async_trait::async_trait]
 pub trait ApprovalGate: Send + Sync {
     async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision;
+
+    /// Whether a person answers this gate, as opposed to a fixed policy.
+    ///
+    /// A destructive command is put to a human when one is there to answer. When
+    /// nobody is (a script, a test), the tool's own `confirm_destructive` guard
+    /// stays in charge so the caller still gets an actionable error.
+    fn asks_humans(&self) -> bool {
+        false
+    }
 }
 
 struct DenyAllApprovals;
@@ -751,7 +760,8 @@ impl<T: HttpTransport> Agent<T> {
         let name = call.function.name.as_str();
         observer.on_tool_status(step, call, ToolStatus::Queued, None);
         let content = match serde_json::from_str::<Value>(&call.function.arguments) {
-            Ok(arguments) => {
+            Ok(mut arguments_value) => {
+                let arguments = arguments_value.clone();
                 let risk = self
                     .tools
                     .risk_for_call(name, &arguments)
@@ -806,6 +816,56 @@ impl<T: HttpTransport> Agent<T> {
                     Access::Allow => {}
                 }
 
+                // A destructive command the model cannot judge gets a real
+                // prompt: the human sees the target and why it qualified. An
+                // approval injects the confirmation flag, so the tool's own
+                // guard stays the last line of defence.
+                if blocked.is_none() && self.approvals.asks_humans() {
+                    // The model's own confirmation flag is not evidence of
+                    // anything: it cannot see the blast radius. With a human
+                    // present this always asks; "allow for session" is the
+                    // answer that stops it asking again for the same target.
+                    if let Some(destructive) =
+                        openbad_tools::destructive_command(name, &arguments, false)
+                    {
+                        let request = ApprovalRequest::new(
+                            RiskLevel::Execute,
+                            destructive.title.clone(),
+                            destructive.detail.clone(),
+                        );
+                        observer.on_approval_request(step, &request);
+                        let decision = self.approvals.decide(&request).await;
+                        observer.on_approval_decision(step, &request, decision);
+                        if decision.is_allowed() {
+                            if let Value::Object(map) = &mut arguments_value {
+                                map.insert("confirm_destructive".to_owned(), Value::Bool(true));
+                            }
+                        } else {
+                            blocked = Some((
+                                format!(
+                                    "error: run_command was not approved ({decision:?}): {}. Nothing was run.",
+                                    destructive
+                                        .detail
+                                        .lines()
+                                        .next()
+                                        .unwrap_or_default()
+                                        .trim_end_matches('.')
+                                ),
+                                json!({
+                                    "openbad_approval": {
+                                        "tool": name,
+                                        "risk": RiskLevel::Execute,
+                                        "policy": self.config.policy.access_mode(),
+                                        "outcome": "not-approved",
+                                        "decision": decision,
+                                        "destructive_targets": destructive.targets,
+                                    }
+                                }),
+                            ));
+                        }
+                    }
+                }
+
                 if let Some((reason, metadata)) = blocked {
                     observer.on_tool_status(
                         step,
@@ -826,7 +886,32 @@ impl<T: HttpTransport> Agent<T> {
                         call_context.allow_commands = true;
                     }
                     observer.on_tool_status(step, call, ToolStatus::Running, None);
-                    let result = self.tools.execute(name, arguments, &call_context).await;
+                    // A declaration is a promise, so enforce it: a tool that
+                    // opts into a budget and then hangs must not hold the turn
+                    // open forever. Tools that take their own `timeout_seconds`
+                    // declare none, so their partial output survives.
+                    let budget = self
+                        .tools
+                        .definition_for(name, &arguments_value)
+                        .and_then(|definition| definition.timeout_seconds);
+                    let result = match budget {
+                        Some(seconds) => {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(seconds),
+                                self.tools.execute(name, arguments_value, &call_context),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => Err(ToolError::Timeout(seconds)),
+                            }
+                        }
+                        None => {
+                            self.tools
+                                .execute(name, arguments_value, &call_context)
+                                .await
+                        }
+                    };
                     observer.on_tool_status(
                         step,
                         call,
@@ -2821,6 +2906,295 @@ mod tests {
         // selection still walks real indices instead of panicking.
         let end = select_compaction_end(&repaired, messages.len(), 1);
         assert!(end.is_none_or(|end| end < repaired.len()));
+    }
+
+    /// A gate that behaves like the desktop: it can answer for a human and its
+    /// answer is recorded so a test can assert on what was asked.
+    struct HumanGate {
+        decision: ApprovalDecision,
+        asked: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl ApprovalGate for HumanGate {
+        fn asks_humans(&self) -> bool {
+            true
+        }
+
+        async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
+            self.asked
+                .lock()
+                .expect("asked")
+                .push((request.title.clone(), request.detail.clone()));
+            self.decision
+        }
+    }
+
+    /// Answers with the same tool call once, then a plain answer, so a
+    /// destructive call can be driven without running anything real.
+    struct DestructiveTransport {
+        arguments: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl DestructiveTransport {
+        fn new(arguments: &str) -> Self {
+            Self {
+                arguments: arguments.to_owned(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpTransport for DestructiveTransport {
+        async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            let first = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let message = if first {
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "run_command", "arguments": self.arguments}
+                    }]
+                })
+            } else {
+                json!({"role": "assistant", "content": "done"})
+            };
+            let body = json!({
+                "model": "deepseek-flash",
+                "choices": [{
+                    "message": message,
+                    "finish_reason": if first { "tool_calls" } else { "stop" }
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            });
+            Ok(response(&body.to_string()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
+    }
+
+    async fn run_destructive(
+        directory: &std::path::Path,
+        gate: Arc<HumanGate>,
+        arguments: &str,
+    ) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+        let asked = Arc::clone(&gate.asked);
+        let agent = default_agent(
+            DeepSeekClient::new(DestructiveTransport::new(arguments), "sk-test"),
+            Arc::new(WorkspaceService::new(directory)),
+            AgentConfig {
+                stream: false,
+                policy: ToolPolicy::FullAccess,
+                ..AgentConfig::default()
+            },
+        )
+        .with_approvals(gate);
+        let mut context = ToolContext::new(Arc::new(WorkspaceService::new(directory)));
+        context.allow_commands = true;
+        let content = match agent.run(vec![ChatMessage::user("clean up")]).await {
+            Ok(run) => run
+                .new_messages
+                .iter()
+                .rev()
+                .find(|message| message.role == ChatRole::Tool)
+                .and_then(|message| message.content.clone())
+                .unwrap_or_default(),
+            Err(other) => other.to_string(),
+        };
+        (content, asked)
+    }
+
+    #[tokio::test]
+    async fn a_destructive_command_is_put_to_the_human_with_its_targets() {
+        let directory = tempdir().expect("tempdir");
+        // A path outside the workspace and outside any temp root, so it stays
+        // destructive; the gate denies it, so nothing runs.
+        let gate = Arc::new(HumanGate {
+            decision: ApprovalDecision::Deny,
+            asked: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (result, asked) = run_destructive(
+            directory.path(),
+            gate,
+            r#"{"command": "rm -rf /opt/someones-data"}"#,
+        )
+        .await;
+        let asked = asked.lock().expect("asked");
+        assert_eq!(asked.len(), 1, "the human must be asked exactly once");
+        let (title, detail) = &asked[0];
+        assert!(title.contains("destructive"), "{title}");
+        assert!(title.contains("/opt/someones-data"), "{title}");
+        assert!(detail.contains("/opt/someones-data"), "{detail}");
+        assert!(detail.contains("outside the workspace"), "{detail}");
+        assert!(detail.contains("rm -rf"), "{detail}");
+        assert!(result.contains("was not approved"), "{result}");
+        assert!(result.contains("Nothing was run"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn an_approved_destructive_command_runs_with_the_confirmation() {
+        let directory = tempdir().expect("tempdir");
+        let target = directory.path().join("scratch-dir");
+        fs::create_dir_all(&target).expect("dir");
+        let gate = Arc::new(HumanGate {
+            decision: ApprovalDecision::AllowOnce,
+            asked: Arc::new(Mutex::new(Vec::new())),
+        });
+        // Absolute path inside the workspace still counts as scoped, so use an
+        // out-of-scope looking path that is actually a no-op removal of a temp
+        // directory: the prompt is what is under test, not the deletion.
+        let (result, asked) = run_destructive(
+            directory.path(),
+            Arc::clone(&gate),
+            r#"{"command": "rm -rf /nonexistent-openbad-test-target"}"#,
+        )
+        .await;
+        assert_eq!(asked.lock().expect("asked").len(), 1);
+        assert!(!result.contains("was not approved"), "{result}");
+        assert!(
+            result.contains("exit:") || result.contains("$ rm -rf"),
+            "the command ran after approval: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_supplied_confirmation_cannot_skip_the_prompt() {
+        let directory = tempdir().expect("tempdir");
+        let gate = Arc::new(HumanGate {
+            decision: ApprovalDecision::Deny,
+            asked: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (result, asked) = run_destructive(
+            directory.path(),
+            gate,
+            r#"{"command": "rm -rf /opt/someones-data", "confirm_destructive": true}"#,
+        )
+        .await;
+        assert_eq!(
+            asked.lock().expect("asked").len(),
+            1,
+            "the flag is not evidence; a human still decides"
+        );
+        assert!(result.contains("was not approved"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn without_a_human_the_flag_remains_the_way_through() {
+        let directory = tempdir().expect("tempdir");
+        // The default gate is a policy stub, as in scripts and tests.
+        let agent = default_agent(
+            DeepSeekClient::new(
+                DestructiveTransport::new(r#"{"command": "rm -rf /opt/someones-data"}"#),
+                "sk-test",
+            ),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                policy: ToolPolicy::FullAccess,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("clean up")])
+            .await
+            .expect("turn");
+        let last = run
+            .new_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ChatRole::Tool)
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
+        assert!(last.contains("confirm_destructive"), "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_declared_tool_budget_is_enforced() {
+        let directory = tempdir().expect("tempdir");
+        // A tool that declares a one-second budget and never returns.
+        struct HangingTool;
+        #[async_trait]
+        impl openbad_tools::Tool for HangingTool {
+            fn definition(&self) -> openbad_tools::ToolDefinition {
+                openbad_tools::ToolDefinition::new("hang", "waits forever", RiskLevel::Read)
+                    .with_timeout(1)
+            }
+            async fn execute(
+                &self,
+                _arguments: Value,
+                _context: &ToolContext,
+            ) -> Result<openbad_tools::ToolResult, ToolError> {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+        struct HangingTransport {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl HttpTransport for HangingTransport {
+            async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+                let first = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                let message = if first {
+                    json!({"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "call-1", "type": "function",
+                        "function": {"name": "hang", "arguments": "{}"}
+                    }]})
+                } else {
+                    json!({"role": "assistant", "content": "done"})
+                };
+                let body = json!({
+                    "model": "deepseek-flash",
+                    "choices": [{
+                        "message": message,
+                        "finish_reason": if first { "tool_calls" } else { "stop" }
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                });
+                Ok(response(&body.to_string()))
+            }
+            async fn post_stream(
+                &self,
+                _request: HttpRequest,
+            ) -> Result<ByteStream, ProviderError> {
+                Err(ProviderError::Unsupported("streaming".to_owned()))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(HangingTool);
+        let agent = Agent::new(
+            DeepSeekClient::new(
+                HangingTransport {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                },
+                "sk-test",
+            ),
+            registry,
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("go")])
+            .await
+            .expect("the turn finishes instead of hanging");
+        let last = run
+            .new_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ChatRole::Tool)
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
+        assert!(last.contains("timed out after 1 second"), "{last}");
     }
 
     #[tokio::test]

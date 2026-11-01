@@ -2116,6 +2116,10 @@ impl DesktopApprovals {
 
 #[async_trait::async_trait]
 impl ApprovalGate for DesktopApprovals {
+    fn asks_humans(&self) -> bool {
+        true
+    }
+
     async fn decide(&self, request: &ApprovalRequest) -> ApprovalDecision {
         if let Some(decision) = self.cached(&request.title) {
             return decision;

@@ -17,6 +17,7 @@ futures-util = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { version = "1", features = ["time"] }
 uuid = { workspace = true }
 
 [dev-dependencies]

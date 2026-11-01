@@ -491,6 +491,13 @@ the effective cap. `context_report` estimates loaded evidence tokens and lists
 rules. `ledger` kind claim stores executed/read/inferred/assumed provenance,
 while kind unknown maintains the unresolved-question register.
 
+A tool declares a wall-clock budget with `with_timeout`, and the agent enforces
+it; a tool with no declaration has no deadline. A tool that takes a
+`timeout_seconds` argument must not declare one, because the two deadlines race
+and the outer one would discard the inner one's partial output. That means no
+tool carries a silent default; the old `ToolDefinition` field said 30 seconds for
+every tool and nothing read it.
+
 The read-before-write guard names its reason: never read in this session, or
 read and then changed (`5 bytes then, 25 now`). The distinction matters because a
 changed file needs a re-read while an unread one needs a first look, and the old
@@ -634,10 +641,20 @@ root (`/tmp`, `/var/tmp`, `$TMPDIR`) is an ordinary `write-workspace`, because
 `rm -rf build/` is cleanup, not a blast radius; only a target elsewhere (a home
 path, an absolute system path, `git reset --hard`) needs the confirmation.
 
+A destructive command is put to the human as an approval prompt, not an error:
+the request names the targets, says why they count as destructive (outside the
+workspace and outside any temporary directory), and shows the command. An
+approval injects `confirm_destructive`, so the tool's own guard stays as the last
+line of defence. A model-supplied `confirm_destructive` never skips the prompt —
+the model cannot see a blast radius — and only a gate with a human behind it
+(`ApprovalGate::asks_humans`) asks at all, which leaves scripts and tests with the
+old actionable error.
+
 A command that exceeds its budget returns `is_error` with the output produced so
 far, the timeout in the message, and `timed_out` in metadata, so a search that
 was killed still hands back what it found. The default budget is 120 seconds and
-`timeout_seconds` raises it to 600.
+`timeout_seconds` raises it to 600; `run_tests` defaults to 300 and accepts up to
+3600, because a real suite is not a 30-second operation.
 
 File deletion is reversible by default: the file moves to `.openbad/trash` and
 can be restored by name.
