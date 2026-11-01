@@ -43,12 +43,12 @@ jobs:
             os: ubuntu-22.04
             args: ""
             bundles: "appimage,deb"
-          # macos-14 is retired on 2026-11-02 (actions/runner-images#13518) and
-          # already browns out, cancelling the job one second after it starts.
-          # macos-15 is arm64, so the universal build cross-compiles x86_64 as
-          # it did before.
+          # macos-14 retired 2026-11-02 (actions/runner-images#13518) and
+          # browned out a release. macos-26 is the current image; it is arm64, so
+          # the universal build cross-compiles x86_64 as before. If a toolchain
+          # breaks there, macos-15 is still supported as the fallback.
           - platform: macos-universal
-            os: macos-15
+            os: macos-26
             args: "--target universal-apple-darwin"
             bundles: "dmg"
           - platform: windows-x86_64
@@ -109,7 +109,7 @@ jobs:
           --config '{"build":{"beforeBuildCommand":""}}'
 
       - name: Upload bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bundles-${{ matrix.platform }}
           if-no-files-found: error
