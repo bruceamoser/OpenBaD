@@ -43,8 +43,12 @@ jobs:
             os: ubuntu-22.04
             args: ""
             bundles: "appimage,deb"
+          # macos-14 is retired on 2026-11-02 (actions/runner-images#13518) and
+          # already browns out, cancelling the job one second after it starts.
+          # macos-15 is arm64, so the universal build cross-compiles x86_64 as
+          # it did before.
           - platform: macos-universal
-            os: macos-14
+            os: macos-15
             args: "--target universal-apple-darwin"
             bundles: "dmg"
           - platform: windows-x86_64
