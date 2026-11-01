@@ -1663,10 +1663,43 @@ impl ToolRegistry {
                 let shape = format!(
                     "expected {{\"tool\": <name>, \"arguments\": {{...}}}} with arguments as a JSON object; {domain} tools: {available}"
                 );
-                let raw_tool = arguments
-                    .get("tool")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ToolError::InvalidArgument(shape.clone()))?;
+                let raw_tool = match arguments.get("tool").and_then(Value::as_str) {
+                    Some(tool) => tool,
+                    None => {
+                        // No `tool` at all: either the wrapper was dropped and the
+                        // arguments are the tool's own, or the call is unusable.
+                        let payload = match arguments.get("arguments") {
+                            Some(value @ Value::Object(_)) => value.clone(),
+                            _ => arguments.clone(),
+                        };
+                        match self.tools_accepting(domain, &payload).as_slice() {
+                            [only] => {
+                                let tool = self.tools.get(*only).ok_or_else(|| {
+                                    ToolError::InvalidArgument(format!("unknown tool: {only}"))
+                                })?;
+                                return finish_result(
+                                    tool.execute(payload, context).await,
+                                    context,
+                                );
+                            }
+                            [] => {
+                                return Err(ToolError::InvalidArgument(format!(
+                                    "the call has no \"tool\" and its arguments match no {domain} tool; {shape}"
+                                )));
+                            }
+                            candidates => {
+                                return Err(ToolError::InvalidArgument(format!(
+                                    "the call has no \"tool\"; its arguments fit {} — pass \"tool\": \"<name>\" to say which",
+                                    candidates
+                                        .iter()
+                                        .map(|name| format!("\"{name}\""))
+                                        .collect::<Vec<_>>()
+                                        .join(" or ")
+                                )));
+                            }
+                        }
+                    }
+                };
                 // A long payload sometimes comes back with the provider's own
                 // markup folded into the tool value; recover the name and
                 // arguments instead of spending a whole step on a retry.
@@ -1717,6 +1750,44 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| ToolError::InvalidArgument(format!("unknown tool: {name}")))?;
         finish_result(tool.execute(arguments, context).await, context)
+    }
+
+    /// Tools in `domain` whose schema accepts exactly this payload.
+    ///
+    /// Used when a call arrives with no `tool` at all: if one tool's required
+    /// keys are all present and it accepts each key given, the model meant that
+    /// tool. Two tools with the same shape are reported as ambiguous rather than
+    /// guessed between, because `write_file` and `preview_write` differ only in
+    /// whether anything is written.
+    fn tools_accepting<'a>(&'a self, domain: &str, payload: &Value) -> Vec<&'a str> {
+        let Some(given) = payload.as_object() else {
+            return Vec::new();
+        };
+        let mut matches: Vec<&str> = self
+            .tools
+            .iter()
+            .filter(|(name, _)| tool_domain(name) == domain)
+            .filter(|(_, tool)| {
+                let schema = tool.definition().input_schema;
+                let properties = schema.get("properties").and_then(Value::as_object);
+                let required = schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|keys| keys.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if !required.iter().all(|key| given.contains_key(*key)) {
+                    return false;
+                }
+                match properties {
+                    Some(properties) => given.keys().all(|key| properties.contains_key(key)),
+                    // No declared properties: only an empty payload is a match.
+                    None => given.is_empty(),
+                }
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        matches.sort_unstable();
+        matches
     }
 
     /// Names registered in a domain, sorted, for catalogs and error messages.
@@ -4272,7 +4343,7 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "write_file",
-            "Write a complete UTF-8 file inside the workspace or an approved external path. Existing files must be read first.",
+            "Write a complete UTF-8 file inside the workspace or an approved external path, replacing any content. Existing files must be read first. Use it to create a file or apply a whole-body change; use edit_file for a targeted replacement and preview_write to see the diff first.",
             RiskLevel::Write,
         )
         .with_schema(json!({
@@ -9039,7 +9110,7 @@ impl Tool for PreviewWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "preview_write",
-            "Return a unified diff for a proposed write without changing the file.",
+            "Show the diff a write would produce, without changing the file. Use it to check a large or risky edit before applying it with write_file; it writes nothing.",
             RiskLevel::Read,
         )
         .with_schema(json!({
@@ -16315,6 +16386,74 @@ mod tests {
 
     fn context_with_session(root: &Path, reads: SessionReads) -> ToolContext {
         context(root).with_session_reads(reads)
+    }
+
+    #[tokio::test]
+    async fn a_call_with_no_tool_lists_the_tools_its_arguments_fit() {
+        let directory = tempdir().expect("tempdir");
+        let context = context(directory.path());
+        let registry = ToolRegistry::with_builtin_tools();
+
+        // The reported call: `files_run` with only the tool's own arguments.
+        // Many files tools take a bare `path`, so guessing would be wrong; the
+        // error names the omission and the candidates instead.
+        let error = registry
+            .execute(
+                "files_run",
+                json!({"arguments": {"path": "docs/06-classes.md", "content": "# x"}}),
+                &context,
+            )
+            .await
+            .expect_err("ambiguous");
+        let message = error.to_string();
+        assert!(message.contains("no \"tool\""), "{message}");
+        assert!(message.contains("preview_write"), "{message}");
+        assert!(message.contains("write_file"), "{message}");
+        assert!(!message.contains("files tools: delete_file"), "{message}");
+        assert!(
+            !directory.path().join("docs").exists(),
+            "nothing may be written on an ambiguous call"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_with_no_tool_but_one_fit_runs_it() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_writes = true;
+        let mut registry = ToolRegistry::new();
+        registry.register(ReadFileTool);
+        registry.grouped = true;
+        fs::write(directory.path().join("doc.md"), "inferred body").expect("file");
+
+        // One tool in the domain, so the arguments cannot mean anything else.
+        let result = registry
+            .execute(
+                "files_run",
+                json!({"arguments": {"path": "doc.md"}}),
+                &context,
+            )
+            .await
+            .expect("inferred");
+        assert!(
+            result.content.contains("inferred body"),
+            "read_file ran: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_with_no_tool_and_no_match_says_so() {
+        let directory = tempdir().expect("tempdir");
+        let context = context(directory.path());
+        let registry = ToolRegistry::with_builtin_tools();
+        let error = registry
+            .execute("files_run", json!({"arguments": {"nonsense": 1}}), &context)
+            .await
+            .expect_err("no candidate");
+        let message = error.to_string();
+        assert!(message.contains("no \"tool\""), "{message}");
+        assert!(message.contains("match no files tool"), "{message}");
     }
 
     #[test]
