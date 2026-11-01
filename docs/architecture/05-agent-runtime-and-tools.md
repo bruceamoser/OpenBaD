@@ -252,7 +252,11 @@ snapshots, and web. The model sees two stable tools per domain:
   the first balanced JSON object. The risk used for approval is taken from the
   repaired name, so a recovered call is still gated on the tool it really is.
   When recovery fails, the error names the shape and previews the value instead
-  of pasting it whole.
+  of pasting it whole. A call that arrives with **no `tool` at all** — which a
+  long argument payload can also cause — is resolved from the arguments when
+  exactly one tool in the domain accepts that shape; when several do, the error
+  names the omission and lists them rather than guessing. `{path}` fits six
+  files tools, so guessing there would be exactly the wrong thing.
 
 That is **36 schemas against the 128-tool cap**, leaving 92 slots free. Adding a
 tool to an existing domain does not change any model-facing schema or the
