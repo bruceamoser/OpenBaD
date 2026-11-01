@@ -1889,8 +1889,20 @@ fn repair_domain_call(tool_value: &str, arguments: Option<&Value>) -> Option<(St
     Some((name.to_owned(), arguments))
 }
 
+/// A bounded excerpt for an error message. Large enough to see the malformed
+/// part and fix it, with the dropped size named so the model knows the value was
+/// longer than what it can see.
 fn preview(value: &str) -> String {
-    truncate(value, 240)
+    const PREVIEW: usize = 2_048;
+    if value.len() <= PREVIEW {
+        return value.to_owned();
+    }
+    format!(
+        "{}\n… [{} of {} bytes shown]",
+        truncate(value, PREVIEW),
+        PREVIEW,
+        value.len()
+    )
 }
 
 fn finish_result(
@@ -2431,6 +2443,22 @@ fn required_string(arguments: &Value, name: &str) -> Result<String, ToolError> {
 
 fn optional_u64(arguments: &Value, name: &str) -> Option<u64> {
     arguments.get(name).and_then(Value::as_u64)
+}
+
+/// The last `max_bytes` of `content`, char-safe, with the dropped count named.
+fn tail_text(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    let mut start = content.len() - max_bytes;
+    while start < content.len() && !content.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[dropped the first {} bytes of this log]\n{}",
+        start,
+        &content[start..]
+    )
 }
 
 fn head_tail(content: &str, max_bytes: usize) -> String {
@@ -14897,17 +14925,19 @@ fn subagent_report(info: &SubagentInfo) -> String {
     );
     if !info.result.trim().is_empty() {
         report.push_str("\nResult:\n");
-        report.push_str(&truncate(&info.result, 12_000));
+        report.push_str(&info.result);
         report.push('\n');
     }
     if let Some(error) = &info.error {
         report.push_str("\nError:\n");
-        report.push_str(&truncate(error, 4_000));
+        report.push_str(error);
         report.push('\n');
     }
     if !info.log.trim().is_empty() {
+        // The activity log is the one part that grows without bound; it is a
+        // log, not a result, so it keeps a cap and says what it dropped.
         report.push_str("\nRecent activity:\n");
-        report.push_str(&truncate(&info.log, 6_000));
+        report.push_str(&tail_text(&info.log, 12_000));
         report.push('\n');
     }
     report
@@ -15536,11 +15566,10 @@ impl Tool for McpCallTool {
             .call(&server, &tool, tool_arguments)
             .await
             .map_err(ToolError::Failed)?;
-        Ok(ToolResult::ok(format!(
-            "[untrusted MCP output]\n{}",
-            truncate(&content, 32_000)
-        ))
-        .with_metadata(json!({"server": server, "tool": tool, "untrusted": true})))
+        // No local cap: `finish_result` spills anything over the model budget and
+        // hands back a path, which preserves the tail this used to discard.
+        Ok(ToolResult::ok(format!("[untrusted MCP output]\n{content}"))
+            .with_metadata(json!({"server": server, "tool": tool, "untrusted": true})))
     }
 }
 
@@ -20268,10 +20297,16 @@ invariants:
         let message = error.to_string();
         assert!(message.contains("is not in the exec domain"), "{message}");
         assert!(message.contains("arguments as a JSON object"), "{message}");
+        // Bounded, but large enough to show the offending part: the preview
+        // is 2 KiB and the surrounding text adds a few hundred bytes.
         assert!(
-            message.len() < 900,
+            message.len() < 4_000,
             "error message must stay bounded: {}",
             message.len()
+        );
+        assert!(
+            message.contains("bytes shown"),
+            "the preview must say how much it dropped: {message}"
         );
     }
 

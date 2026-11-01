@@ -495,6 +495,25 @@ the effective cap. `context_report` estimates loaded evidence tokens and lists
 rules. `ledger` kind claim stores executed/read/inferred/assumed provenance,
 while kind unknown maintains the unresolved-question register.
 
+### Limits and truncation
+
+A cap must have a stated reason, be visible where it bites, and leave a way to
+reach the full data. Silent truncation is a defect, not a policy.
+
+- **Provider caps are enforced, gracefully.** `finish_reason: "length"` means the
+  provider stopped at the output limit, so whatever arrived is a prefix. A step
+  that ends that way with tool calls does not run them: a call cut mid-string can
+  still parse and would write a partial file. Each pending call is answered with
+  a result naming the limit and how to proceed (split the work, then retry), and
+  the turn continues. A truncated text answer is recorded with the point it
+  stopped at, in the transcript and the next turn's history.
+- **Large tool output spills, it does not disappear.** `finish_result` writes
+  anything over the model budget to `.openbad/spill` and returns a path, so
+  `mcp_call` and subagent reports keep their tail instead of a local cut.
+- **A cut document says how much is missing.** Attachment extraction and error
+  previews state the included and total sizes, so neither the model nor the
+  reader mistakes a prefix for the whole.
+
 A tool declares a wall-clock budget with `with_timeout`, and the agent enforces
 it; a tool with no declaration has no deadline. A tool that takes a
 `timeout_seconds` argument must not declare one, because the two deadlines race
