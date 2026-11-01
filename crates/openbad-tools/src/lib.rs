@@ -1654,6 +1654,24 @@ impl ToolRegistry {
                         // A `tool` that named something unusable is the most
                         // common cause, and the fix differs from "no tool at
                         // all", so the two messages say different things.
+                        // A wrong name is a different mistake from a wrong
+                        // shape, so look for the near miss first.
+                        let misspelled = arguments
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|map| map.values())
+                            .filter_map(Value::as_str)
+                            .filter(|value| !self.tools.contains_key(*value))
+                            .find_map(|value| {
+                                nearest_tool(value, self.tools.keys().map(String::as_str))
+                                    .map(|nearest| (value.to_owned(), nearest.to_owned()))
+                            });
+                        if let Some((typo, near)) = misspelled {
+                            return Err(ToolError::InvalidArgument(format!(
+                                "no tool named {}; did you mean \"{near}\"? {shape}",
+                                preview(&typo)
+                            )));
+                        }
                         let message = match arguments.get("tool").and_then(Value::as_str) {
                             Some(tool) if tool_domain(tool) != domain => format!(
                                 "tool {} is not in the {domain} domain; {shape}",
@@ -1711,7 +1729,7 @@ impl ToolRegistry {
                 let payload = match arguments.get("arguments") {
                     None => json!({}),
                     Some(Value::Object(_)) => arguments.get("arguments").cloned()?,
-                    Some(Value::String(raw)) => serde_json::from_str(raw).ok()?,
+                    Some(Value::String(raw)) => parse_tool_arguments(raw).ok()?,
                     Some(_) => return None,
                 };
                 return Some((tool.to_owned(), payload));
@@ -1818,6 +1836,101 @@ impl ToolRegistry {
         serde_json::to_string_pretty(&json!({"domain": domain, "tools": tools}))
             .map_err(|error| ToolError::Failed(error.to_string()))
     }
+}
+
+/// Parse a tool call's argument string, repairing the damage providers do.
+///
+/// A long payload comes back as invalid JSON when the provider emits a raw
+/// control character inside a string (a real newline in a heredoc, a tab) or a
+/// trailing comma. Both are recoverable and both were costing a whole step, so
+/// the string is normalised and parsed again before the call is refused.
+pub fn parse_tool_arguments(raw: &str) -> Result<Value, String> {
+    let first = match serde_json::from_str(raw) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let repaired = repair_json_text(raw);
+    if repaired != raw {
+        if let Ok(value) = serde_json::from_str(&repaired) {
+            return Ok(value);
+        }
+    }
+    Err(format!(
+        "{first}. The arguments were not valid JSON as sent; if this repeats, write less in one call (split the file into parts and extend it with edit_file)"
+    ))
+}
+
+/// Escape raw control characters inside strings and drop trailing commas.
+fn repair_json_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 32);
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if in_string {
+            if escaped {
+                out.push(ch);
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    out.push(ch);
+                    escaped = true;
+                }
+                '"' => {
+                    out.push(ch);
+                    in_string = false;
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                control if (control as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", control as u32));
+                }
+                literal => out.push(literal),
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+        }
+    }
+    // A trailing comma before a closing bracket is the other common artefact.
+    out.replace(",}", "}").replace(",]", "]")
+}
+
+/// The tool name closest to `value`, when it is plausibly a typo.
+///
+/// `exec_command` for `run_command` is a wrong name, not a wrong shape, and
+/// naming the near miss turns a blind retry into a single correction.
+fn nearest_tool<'a>(value: &str, names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let distance = |a: &str, b: &str| -> usize {
+        // Bounded Levenshtein: enough for a typo, cheap on short names.
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let mut previous: Vec<usize> = (0..=b.len()).collect();
+        let mut current = vec![0; b.len() + 1];
+        for (i, left) in a.iter().enumerate() {
+            current[0] = i + 1;
+            for (j, right) in b.iter().enumerate() {
+                let cost = usize::from(left != right);
+                current[j + 1] = (previous[j] + cost)
+                    .min(previous[j + 1] + 1)
+                    .min(current[j] + 1);
+            }
+            std::mem::swap(&mut previous, &mut current);
+        }
+        previous[b.len()]
+    };
+    let mut best: Option<(&str, usize)> = None;
+    for name in names {
+        let score = distance(value, name);
+        let limit = (value.len() / 3).max(2);
+        if score <= limit && best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((name, score));
+        }
+    }
+    best.map(|(name, _)| name)
 }
 
 /// The first balanced `{...}` object in `text`, string escapes respected.
