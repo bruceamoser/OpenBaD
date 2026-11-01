@@ -315,6 +315,24 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.6
+
+Fix release on top of 0.3.5. A proxy call can arrive with its tool name under a
+different key — `{"command": "run_command", "arguments": {…}}` — because the
+provider's serializer mangles long payloads in more than one way. That shape is
+recoverable: a tool takes no argument named after another tool, and the sibling
+`arguments` object is the real payload, so the call now runs the tool it names.
+
+Execute, approval risk, parallel safety, and enforced budgets all resolve through
+one function, so a repaired `write_file` is still gated as a write instead of
+passing as a read. Failure messages also split by cause: an unusable name names
+the domain's tools, a missing name lists the tools the arguments fit.
+
+Workflow actions moved off the deprecated Node.js 20 runtime (checkout v7,
+setup-node v7, cache v6, pnpm/action-setup v6, upload-artifact v7), and the macOS
+bundle builds on `macos-26` — `macos-14` retired on 2026-11-02 and browned out a
+release.
+
 ## v0.3.5
 
 Fix release on top of 0.3.4, all of it from one session of proxy-call failures.
