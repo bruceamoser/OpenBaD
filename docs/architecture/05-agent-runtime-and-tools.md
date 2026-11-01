@@ -258,6 +258,14 @@ snapshots, and web. The model sees two stable tools per domain:
   names the omission and lists them rather than guessing. `{path}` fits six
   files tools, so guessing there would be exactly the wrong thing.
 
+  The name can also land under a **different key**
+  (`{"command": "run_command", "arguments": {…}}`). That one is unambiguous and
+  is repaired: a tool takes no argument named after another tool, and the sibling
+  object is the real payload. Every path that needs the tool identity — execute,
+  approval risk, parallelism, enforced budgets — resolves through the same
+  `resolve_call`, so a repaired call is never measured as a cheaper tool than the
+  one it names.
+
 That is **36 schemas against the 128-tool cap**, leaving 92 slots free. Adding a
 tool to an existing domain does not change any model-facing schema or the
 tool-schema hash; only adding a new domain does. Internal tool names remain

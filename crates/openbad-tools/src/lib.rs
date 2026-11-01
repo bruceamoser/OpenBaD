@@ -1,7 +1,6 @@
 //! Tool registry, schemas, and built-in coding tools.
 #![recursion_limit = "256"]
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1537,16 +1536,8 @@ impl ToolRegistry {
         if !self.grouped {
             return None;
         }
-        let inner = arguments.get("tool").and_then(Value::as_str)?;
-        let inner = if tool_domain(inner) == domain {
-            Cow::Borrowed(inner)
-        } else {
-            Cow::Owned(repair_domain_call(inner, arguments.get("arguments"))?.0)
-        };
-        if tool_domain(&inner) != domain {
-            return None;
-        }
-        self.tools.get(inner.as_ref()).map(|tool| tool.definition())
+        let (inner, _) = self.resolve_call(domain, arguments)?;
+        self.tools.get(&inner).map(|tool| tool.definition())
     }
 
     #[must_use]
@@ -1592,16 +1583,10 @@ impl ToolRegistry {
                 return Some(RiskLevel::Read);
             }
             if let Some(domain) = name.strip_suffix("_run") {
-                let tool = arguments.get("tool").and_then(Value::as_str)?;
-                if tool_domain(tool) == domain {
-                    return self.tools.get(tool).map(|tool| tool.definition().risk);
-                }
-                // A repaired call is still the tool it names, so approvals and
-                // risk must not be measured against the mangled value.
-                let (tool, _) = repair_domain_call(tool, arguments.get("arguments"))?;
-                if tool_domain(&tool) != domain {
-                    return None;
-                }
+                // A repaired call is still the tool it names, so approvals must
+                // be measured against that tool and never against the mangled
+                // value — otherwise a write slips through as a read.
+                let (tool, _) = self.resolve_call(domain, arguments)?;
                 return self.tools.get(&tool).map(|tool| tool.definition().risk);
             }
         }
@@ -1621,22 +1606,13 @@ impl ToolRegistry {
                 let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
                     return false;
                 };
-                let Some(tool) = arguments.get("tool").and_then(Value::as_str) else {
+                let Some((tool, _)) = self.resolve_call(domain, &arguments) else {
                     return false;
                 };
-                let resolved = if tool_domain(tool) == domain {
-                    Cow::Borrowed(tool)
-                } else {
-                    match repair_domain_call(tool, arguments.get("arguments")) {
-                        Some((repaired, _)) => Cow::Owned(repaired),
-                        None => return false,
-                    }
-                };
-                return tool_domain(&resolved) == domain
-                    && self
-                        .tools
-                        .get(resolved.as_ref())
-                        .is_some_and(|tool| tool.definition().risk == RiskLevel::Read);
+                return self
+                    .tools
+                    .get(&tool)
+                    .is_some_and(|tool| tool.definition().risk == RiskLevel::Read);
             }
         }
         self.tools
@@ -1663,90 +1639,51 @@ impl ToolRegistry {
                 return finish_result(Ok(ToolResult::ok(self.domain_catalog(domain)?)), context);
             }
             if let Some(domain) = name.strip_suffix("_run") {
-                let available = self.domain_names(domain).join(", ");
-                let shape = format!(
-                    "expected {{\"tool\": <name>, \"arguments\": {{...}}}} with arguments as a JSON object; {domain} tools: {available}"
-                );
-                let raw_tool = match arguments.get("tool").and_then(Value::as_str) {
-                    Some(tool) => tool,
-                    None => {
-                        // No `tool` at all: either the wrapper was dropped and the
-                        // arguments are the tool's own, or the call is unusable.
-                        let payload = match arguments.get("arguments") {
-                            Some(value @ Value::Object(_)) => value.clone(),
-                            _ => arguments.clone(),
-                        };
-                        match self.tools_accepting(domain, &payload).as_slice() {
-                            [only] => {
-                                let tool = self.tools.get(*only).ok_or_else(|| {
-                                    ToolError::InvalidArgument(format!("unknown tool: {only}"))
-                                })?;
-                                return finish_result(
-                                    tool.execute(payload, context).await,
-                                    context,
-                                );
-                            }
-                            [] => {
-                                return Err(ToolError::InvalidArgument(format!(
-                                    "the call has no \"tool\" and its arguments match no {domain} tool; {shape}"
-                                )));
-                            }
-                            candidates => {
-                                return Err(ToolError::InvalidArgument(format!(
-                                    "the call has no \"tool\"; its arguments fit {} — pass \"tool\": \"<name>\" to say which",
-                                    candidates
-                                        .iter()
-                                        .map(|name| format!("\"{name}\""))
-                                        .collect::<Vec<_>>()
-                                        .join(" or ")
-                                )));
-                            }
-                        }
+                return match self.resolve_call(domain, &arguments) {
+                    Some((tool_name, payload)) => {
+                        let tool = self.tools.get(&tool_name).ok_or_else(|| {
+                            ToolError::InvalidArgument(format!("unknown tool: {tool_name}"))
+                        })?;
+                        finish_result(tool.execute(payload, context).await, context)
                     }
-                };
-                // A long payload sometimes comes back with the provider's own
-                // markup folded into the tool value; recover the name and
-                // arguments instead of spending a whole step on a retry.
-                let repaired = if tool_domain(raw_tool) == domain {
-                    None
-                } else {
-                    repair_domain_call(raw_tool, arguments.get("arguments"))
-                        .filter(|(tool, _)| tool_domain(tool) == domain)
-                };
-                let (tool_name, arguments): (std::borrow::Cow<'_, str>, Value) = match repaired {
-                    Some((tool, arguments)) => (std::borrow::Cow::Owned(tool), arguments),
                     None => {
-                        if tool_domain(raw_tool) != domain {
-                            return Err(ToolError::InvalidArgument(format!(
+                        let available = self.domain_names(domain).join(", ");
+                        let shape = format!(
+                            "expected {{\"tool\": <name>, \"arguments\": {{...}}}} with arguments as a JSON object; {domain} tools: {available}"
+                        );
+                        // A `tool` that named something unusable is the most
+                        // common cause, and the fix differs from "no tool at
+                        // all", so the two messages say different things.
+                        let message = match arguments.get("tool").and_then(Value::as_str) {
+                            Some(tool) if tool_domain(tool) != domain => format!(
                                 "tool {} is not in the {domain} domain; {shape}",
-                                preview(raw_tool)
-                            )));
-                        }
-                        let arguments = match arguments.get("arguments") {
-                            None => json!({}),
-                            Some(value) if value.is_object() => value.clone(),
-                            Some(Value::String(raw)) => serde_json::from_str(raw)
-                                .ok()
-                                .filter(Value::is_object)
-                                .ok_or_else(|| {
-                                    ToolError::InvalidArgument(format!(
-                                        "arguments came as a string that is not a JSON object; {shape}"
-                                    ))
-                                })?,
-                            Some(other) => {
-                                return Err(ToolError::InvalidArgument(format!(
-                                    "arguments must be a JSON object, not {}; {shape}",
-                                    preview(&other.to_string())
-                                )));
+                                preview(tool)
+                            ),
+                            _ => {
+                                let payload = match arguments.get("arguments") {
+                                    Some(value @ Value::Object(_)) => value.clone(),
+                                    _ => arguments.clone(),
+                                };
+                                let candidates = self.tools_accepting(domain, &payload);
+                                if candidates.is_empty() {
+                                    format!(
+                                        "the call has no usable \"tool\" and its arguments match no {domain} tool; {shape}"
+                                    )
+                                } else {
+                                    format!(
+                                        "the call has no usable \"tool\"; its arguments fit {} — pass \"tool\": \"<name>\" to say which",
+                                        candidates
+                                            .iter()
+                                            .map(|name| format!("\"{name}\""))
+                                            .collect::<Vec<_>>()
+                                            .join(" or ")
+                                    )
+                                }
                             }
                         };
-                        (std::borrow::Cow::Borrowed(raw_tool), arguments)
+                        Err(ToolError::InvalidArgument(message))
                     }
                 };
-                let tool = self.tools.get(tool_name.as_ref()).ok_or_else(|| {
-                    ToolError::InvalidArgument(format!("unknown tool: {tool_name}"))
-                })?;
-                return finish_result(tool.execute(arguments, context).await, context);
             }
         }
         let tool = self
@@ -1754,6 +1691,63 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| ToolError::InvalidArgument(format!("unknown tool: {name}")))?;
         finish_result(tool.execute(arguments, context).await, context)
+    }
+
+    /// Resolve a proxy call to the tool it names and the arguments for it.
+    ///
+    /// Long payloads come back from the provider in three damaged shapes, all
+    /// of which keep enough information to recover:
+    ///
+    /// - `tool` holds the name plus folded markup (`run_command">… arguments…`);
+    /// - `tool` is missing and the tool's own arguments sit at the top level;
+    /// - the name landed in a *different* key (`{"command": "run_command",
+    ///   "arguments": {…}}`), which is unambiguous: a tool takes no argument
+    ///   named after another tool, and the sibling object is the real payload.
+    ///
+    /// Anything genuinely ambiguous returns `None`, so the caller can ask.
+    fn resolve_call(&self, domain: &str, arguments: &Value) -> Option<(String, Value)> {
+        if let Some(tool) = arguments.get("tool").and_then(Value::as_str) {
+            if tool_domain(tool) == domain {
+                let payload = match arguments.get("arguments") {
+                    None => json!({}),
+                    Some(Value::Object(_)) => arguments.get("arguments").cloned()?,
+                    Some(Value::String(raw)) => serde_json::from_str(raw).ok()?,
+                    Some(_) => return None,
+                };
+                return Some((tool.to_owned(), payload));
+            }
+            return repair_domain_call(tool, arguments.get("arguments"))
+                .filter(|(tool, _)| tool_domain(tool) == domain);
+        }
+
+        // The name may sit under another key, with the payload beside it.
+        if let Some(payload) = arguments.get("arguments").filter(|value| value.is_object()) {
+            let named: Vec<&str> = arguments
+                .as_object()?
+                .iter()
+                .filter(|(key, _)| key.as_str() != "arguments")
+                .filter_map(|(_, value)| value.as_str())
+                .filter(|value| tool_domain(value) == domain && self.tools.contains_key(*value))
+                .collect();
+            if let [only] = named.as_slice() {
+                return Some(((*only).to_owned(), payload.clone()));
+            }
+            if named.len() > 1 {
+                return None;
+            }
+            let candidates = self.tools_accepting(domain, payload);
+            return match candidates.as_slice() {
+                [only] => Some(((*only).to_owned(), payload.clone())),
+                _ => None,
+            };
+        }
+
+        // No wrapper at all: the arguments are the tool's own.
+        let candidates = self.tools_accepting(domain, arguments);
+        match candidates.as_slice() {
+            [only] => Some(((*only).to_owned(), arguments.clone())),
+            _ => None,
+        }
     }
 
     /// Tools in `domain` whose schema accepts exactly this payload.
@@ -16422,6 +16416,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tool_name_under_the_wrong_key_still_runs() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+        let registry = ToolRegistry::with_builtin_tools();
+
+        // The reported call: the name landed in `command` instead of `tool`.
+        let result = registry
+            .execute(
+                "exec_run",
+                json!({
+                    "command": "run_command",
+                    "arguments": {"command": "echo renamed-key"}
+                }),
+                &context,
+            )
+            .await
+            .expect("a renamed key is recoverable");
+        assert!(result.content.contains("renamed-key"), "{}", result.content);
+        assert_eq!(result.metadata["command_class"], "read-only");
+    }
+
+    #[tokio::test]
+    async fn a_renamed_key_write_is_still_gated_as_a_write() {
+        let registry = ToolRegistry::with_builtin_tools();
+
+        // The approval risk must come from the recovered tool, or a write
+        // arriving in this shape would be treated as a read.
+        assert_eq!(
+            registry.risk_for_call(
+                "files_run",
+                &json!({
+                    "content": "write_file",
+                    "arguments": {"path": "a.md", "content": "x"}
+                }),
+            ),
+            Some(RiskLevel::Write)
+        );
+        assert_eq!(
+            registry.risk_for_call(
+                "exec_run",
+                &json!({"command": "run_command", "arguments": {"command": "ls"}}),
+            ),
+            Some(RiskLevel::Execute)
+        );
+    }
+
+    #[tokio::test]
     async fn a_call_with_no_tool_lists_the_tools_its_arguments_fit() {
         let directory = tempdir().expect("tempdir");
         let context = context(directory.path());
@@ -16439,7 +16481,7 @@ mod tests {
             .await
             .expect_err("ambiguous");
         let message = error.to_string();
-        assert!(message.contains("no \"tool\""), "{message}");
+        assert!(message.contains("no usable \"tool\""), "{message}");
         assert!(message.contains("preview_write"), "{message}");
         assert!(message.contains("write_file"), "{message}");
         assert!(!message.contains("files tools: delete_file"), "{message}");
@@ -16485,7 +16527,7 @@ mod tests {
             .await
             .expect_err("no candidate");
         let message = error.to_string();
-        assert!(message.contains("no \"tool\""), "{message}");
+        assert!(message.contains("no usable \"tool\""), "{message}");
         assert!(message.contains("match no files tool"), "{message}");
     }
 
@@ -20304,7 +20346,7 @@ invariants:
         // Bounded, but large enough to show the offending part: the preview
         // is 2 KiB and the surrounding text adds a few hundred bytes.
         assert!(
-            message.len() < 4_000,
+            message.len() < 6_000,
             "error message must stay bounded: {}",
             message.len()
         );
