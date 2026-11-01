@@ -3470,7 +3470,14 @@ fn truncate_chars(text: &str, max_bytes: usize) -> String {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", &text[..end])
+    // Name what was dropped: an attachment silently cut in half reads as a
+    // complete document to both the model and the person reading the transcript.
+    format!(
+        "{}\n\n[truncated: {} of {} bytes included]",
+        &text[..end],
+        end,
+        text.len()
+    )
 }
 
 fn ocr_image(path: &Path) -> Option<String> {
@@ -3592,6 +3599,11 @@ fn compose_chat_message(
                     extracted_budget = extracted_budget.saturating_sub(text.len());
                     text
                 }
+                _ if file.bytes > MAX_OCR_IMAGE_BYTES => format!(
+                    "[image attached but not read: {} bytes is over the {} MB OCR limit]",
+                    file.bytes,
+                    MAX_OCR_IMAGE_BYTES / (1024 * 1024)
+                ),
                 _ => "[image attached; no text was extracted]".to_owned(),
             };
             blocks.push(format!(
@@ -3613,6 +3625,11 @@ fn compose_chat_message(
                     extracted_budget = extracted_budget.saturating_sub(text.len());
                     text
                 }
+                _ if file.bytes > MAX_PDF_BYTES => format!(
+                    "[PDF attached but not read: {} bytes is over the {} MB extraction limit]",
+                    file.bytes,
+                    MAX_PDF_BYTES / (1024 * 1024)
+                ),
                 _ => "[PDF attached; no text could be extracted]".to_owned(),
             };
             blocks.push(format!(

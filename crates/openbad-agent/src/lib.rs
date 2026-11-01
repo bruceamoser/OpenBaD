@@ -1388,6 +1388,10 @@ impl<T: HttpTransport> Agent<T> {
                 return Err(AgentError::Cancelled);
             }
 
+            // `length` means the provider stopped at the output limit. Whatever
+            // arrived is a prefix: a tool call cut mid-string still parses often
+            // enough to look valid, so executing it would write a partial file.
+            let output_truncated = finish_reason.as_deref() == Some("length");
             let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
             let text = assistant.content.clone().unwrap_or_default();
             let trimmed = text.trim();
@@ -1412,6 +1416,47 @@ impl<T: HttpTransport> Agent<T> {
             if let Some(calls) = assistant.tool_calls.as_mut() {
                 sanitize_tool_arguments(calls);
             }
+            if output_truncated && !tool_calls.is_empty() {
+                // Do not run a call that was cut off. Answer every pending call
+                // with a result that names the cause and the way forward, so the
+                // next request is valid and the model can split the work.
+                let limit = self.config.max_output_tokens;
+                if !assistant
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.trim().is_empty())
+                {
+                    assistant.content = Some(format!(
+                        "{}\n\n[response truncated at the {limit}-token output limit]",
+                        assistant.content.clone().unwrap_or_default()
+                    ));
+                }
+                new_messages.push(assistant.clone());
+                messages.push(assistant);
+                for call in &tool_calls {
+                    let content = format!(
+                        "error: not executed. Your response hit the {limit}-token output limit, so this call ({}) may be incomplete — arguments that parse can still have lost data. Split the work: write a smaller file and extend it with edit_file, or shorten the body, then call again.",
+                        call.function.name
+                    );
+                    let message = ChatMessage::tool(call.id.clone(), content);
+                    messages.push(message.clone());
+                    new_messages.push(message);
+                }
+                settle_step(observer, step, false, &new_messages[step_messages_start..]);
+                report_step_end(
+                    observer,
+                    step,
+                    finish_reason,
+                    tool_calls.len(),
+                    step_usage,
+                    step_started,
+                    false,
+                );
+                if step == step_budget {
+                    return Err(AgentError::MaxSteps(step_budget));
+                }
+                continue;
+            }
             // An empty step (no text, no calls) has nothing to replay and would
             // make every later request in this session fail.
             let record_assistant = !assistant.is_empty_assistant();
@@ -1421,6 +1466,28 @@ impl<T: HttpTransport> Agent<T> {
             }
 
             if tool_calls.is_empty() {
+                if output_truncated {
+                    // The answer itself was cut; say so everywhere it is read —
+                    // the transcript, the reply, and the next turn's history.
+                    visible_text.push_str(&format!(
+                        "\n\n[response truncated at the {}-token output limit; ask to continue]",
+                        self.config.max_output_tokens
+                    ));
+                    if let Some(last) = new_messages.last_mut() {
+                        let body = last.content.clone().unwrap_or_default();
+                        last.content = Some(format!(
+                            "{body}\n\n[response truncated at the {}-token output limit; continue from here]",
+                            self.config.max_output_tokens
+                        ));
+                    }
+                    if let Some(last) = messages.last_mut() {
+                        let body = last.content.clone().unwrap_or_default();
+                        last.content = Some(format!(
+                            "{body}\n\n[response truncated at the {}-token output limit; continue from here]",
+                            self.config.max_output_tokens
+                        ));
+                    }
+                }
                 settle_step(observer, step, false, &new_messages[step_messages_start..]);
                 let pending = self
                     .inbox
@@ -3195,6 +3262,133 @@ mod tests {
             .and_then(|message| message.content.clone())
             .unwrap_or_default();
         assert!(last.contains("timed out after 1 second"), "{last}");
+    }
+
+    /// Answers with a tool call that reports `finish_reason: length`, which is
+    /// what the provider sends when the output limit cut the response.
+    struct TruncatedTransport {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HttpTransport for TruncatedTransport {
+        async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            let first = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let (message, finish) = if first {
+                (
+                    json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"path\": \"out.md\", \"content\": \"# half a doc"
+                            }
+                        }]
+                    }),
+                    "length",
+                )
+            } else {
+                (json!({"role": "assistant", "content": "ok"}), "stop")
+            };
+            let body = json!({
+                "model": "deepseek-flash",
+                "choices": [{"message": message, "finish_reason": finish}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            });
+            Ok(response(&body.to_string()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_tool_call_is_not_executed_and_says_why() {
+        let directory = tempdir().expect("tempdir");
+        let agent = default_agent(
+            DeepSeekClient::new(
+                TruncatedTransport {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                },
+                "sk-test",
+            ),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                policy: ToolPolicy::FullAccess,
+                max_output_tokens: 16_384,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("write the doc")])
+            .await
+            .expect("the turn continues instead of failing");
+
+        // The partial call must not have written anything.
+        assert!(
+            !directory.path().join("out.md").exists(),
+            "a response cut mid-argument must never be executed"
+        );
+        let notice = run
+            .new_messages
+            .iter()
+            .find(|message| message.role == ChatRole::Tool)
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("not executed"), "{notice}");
+        assert!(notice.contains("16384-token output limit"), "{notice}");
+        assert!(notice.contains("Split the work"), "{notice}");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_text_answer_records_where_it_stopped() {
+        struct CutTextTransport;
+        #[async_trait]
+        impl HttpTransport for CutTextTransport {
+            async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+                let body = json!({
+                    "model": "deepseek-flash",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "The first half of an answer"},
+                        "finish_reason": "length"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                });
+                Ok(response(&body.to_string()))
+            }
+            async fn post_stream(
+                &self,
+                _request: HttpRequest,
+            ) -> Result<ByteStream, ProviderError> {
+                Err(ProviderError::Unsupported("streaming".to_owned()))
+            }
+        }
+
+        let directory = tempdir().expect("tempdir");
+        let agent = default_agent(
+            DeepSeekClient::new(CutTextTransport, "sk-test"),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                max_output_tokens: 200,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("tell me a long story")])
+            .await
+            .expect("the turn ends normally");
+        assert!(run.text.contains("The first half"), "{}", run.text);
+        assert!(
+            run.text.contains("truncated at the 200-token output limit"),
+            "a cut answer must say where it stopped: {}",
+            run.text
+        );
     }
 
     #[tokio::test]
