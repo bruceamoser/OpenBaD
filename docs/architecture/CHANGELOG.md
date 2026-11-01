@@ -315,6 +315,32 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.5
+
+Fix release on top of 0.3.4, all of it from one session of proxy-call failures.
+
+**Truncation is handled instead of corrupting calls.** `max_output_tokens` is
+sent as `max_tokens`, and `finish_reason: "length"` was never handled: a
+response cut at the budget was parsed and executed as if complete. Two mangled
+proxy calls this week — a folded provider tag and a missing `tool` key, both on
+~10 KB writes — have exactly that signature. A step that ends with `length` no
+longer runs its tool calls; each is answered with the limit and how to split the
+work, and the turn continues. A truncated text answer says where it stopped.
+
+**No silent cuts.** `mcp_call` and subagent results keep their tails (spill
+holds a path), attachment extraction states included and total bytes, an
+oversize PDF or image says it was too large rather than unreadable, and error
+previews went from 240 characters to 2 KiB with the dropped size named.
+
+**Two caps became settings.** Settings → General → Limits carries the response
+budget (256–65 536, default 16 384) and files per `read_files` call (1–200,
+default 20).
+
+**Ask instead of refusing.** A destructive command raises the approval dialog
+with its targets and reasoning, and a model-supplied `confirm_destructive` can
+no longer skip it. A proxy call that arrives with no `tool` names the omission
+and the tools its arguments fit, instead of only restating the expected shape.
+
 ## v0.3.4
 
 Fix release on top of 0.3.3. A session could become permanently unusable with
