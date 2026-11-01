@@ -5015,6 +5015,13 @@ pub struct ChatInput {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub attachments: Vec<UploadSource>,
+    /// Response budget sent to the provider as `max_tokens`. Absent keeps the
+    /// agent default; the provider's own ceiling still applies.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    /// How many paths one `read_files` call may take.
+    #[serde(default)]
+    pub read_files_max: Option<usize>,
 }
 
 #[tauri::command]
@@ -5213,6 +5220,8 @@ async fn chat(
         thinking,
         reasoning_effort,
         attachments,
+        max_output_tokens,
+        read_files_max,
     } = request;
     let prompt = message.trim().to_owned();
     if !resume && prompt.is_empty() && attachments.is_empty() {
@@ -5403,6 +5412,12 @@ async fn chat(
                 cancel: Arc::clone(&cancel),
                 events: on_event.clone(),
             }))),
+            // A caller-set budget wins over the default; the provider enforces
+            // its own ceiling regardless, and exceeding it is handled as a
+            // truncated response rather than a failed turn.
+            max_output_tokens: max_output_tokens
+                .unwrap_or_else(|| AgentConfig::default().max_output_tokens),
+            read_files_max: read_files_max.unwrap_or(20).clamp(1, 200),
             ..AgentConfig::default()
         },
     );

@@ -514,6 +514,11 @@ reach the full data. Silent truncation is a defect, not a policy.
   previews state the included and total sizes, so neither the model nor the
   reader mistakes a prefix for the whole.
 
+Two caps are settings rather than constants: **response budget** (`max_tokens`,
+256–65 536, default 16 384) and **files per `read_files` call** (1–200, default
+20). Both live in Settings → General → Limits and are stored with the other
+preferences, so a limit that bites can be raised without a rebuild.
+
 A tool declares a wall-clock budget with `with_timeout`, and the agent enforces
 it; a tool with no declaration has no deadline. A tool that takes a
 `timeout_seconds` argument must not declare one, because the two deadlines race
