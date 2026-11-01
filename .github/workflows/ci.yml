@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,13 +46,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Prepare the apt archive cache
         run: sudo chown -R "$USER" /var/cache/apt/archives
 
       - name: Restore cached apt archives
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: apt-archives-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -76,11 +76,11 @@ jobs:
         run: |
           sudo apt-get install -y webkit2gtk-driver || sudo apt-get install -y webkitgtk-webdriver
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -108,13 +108,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Prepare the apt archive cache
         run: sudo chown -R "$USER" /var/cache/apt/archives
 
       - name: Restore cached apt archives
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: apt-archives-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -134,11 +134,11 @@ jobs:
             patchelf \
             xvfb
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -163,13 +163,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Prepare the apt archive cache
         run: sudo chown -R "$USER" /var/cache/apt/archives
 
       - name: Restore cached apt archives
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: apt-archives-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -193,11 +193,11 @@ jobs:
         run: |
           sudo apt-get install -y webkit2gtk-driver || sudo apt-get install -y webkitgtk-webdriver
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
