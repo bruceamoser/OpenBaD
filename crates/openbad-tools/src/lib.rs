@@ -28,7 +28,8 @@ pub struct ToolDefinition {
     pub description: String,
     pub risk: RiskLevel,
     pub strict: bool,
-    pub timeout_seconds: u64,
+    /// Cooperative budget enforced by the agent, or `None` for no deadline.
+    pub timeout_seconds: Option<u64>,
     pub input_schema: Value,
 }
 
@@ -40,7 +41,10 @@ impl ToolDefinition {
             description: description.into(),
             risk,
             strict: false,
-            timeout_seconds: 30,
+            // No deadline unless a tool asks for one. A blanket 30s was
+            // declared on every tool and read by nobody, which made the number
+            // look like a policy when it was a placeholder.
+            timeout_seconds: None,
             input_schema: json!({"type": "object", "properties": {}}),
         }
     }
@@ -51,9 +55,15 @@ impl ToolDefinition {
         self
     }
 
+    /// Declare a cooperative wall-clock budget, enforced by the agent.
+    ///
+    /// Only for a tool that cannot bound itself. A tool that takes a
+    /// `timeout_seconds` argument owns its own budget and must not declare one,
+    /// or the two deadlines race and the outer one throws away the inner one's
+    /// partial output.
     #[must_use]
     pub fn with_timeout(mut self, timeout_seconds: u64) -> Self {
-        self.timeout_seconds = timeout_seconds;
+        self.timeout_seconds = Some(timeout_seconds);
         self
     }
 
@@ -1512,6 +1522,29 @@ impl ToolRegistry {
             .insert(tool.definition().name.clone(), Arc::new(tool));
     }
 
+    /// The definition a call actually resolves to, including through a domain
+    /// proxy, so a caller can read the budget the tool declared.
+    #[must_use]
+    pub fn definition_for(&self, name: &str, arguments: &Value) -> Option<ToolDefinition> {
+        if let Some(tool) = self.tools.get(name) {
+            return Some(tool.definition());
+        }
+        let domain = name.strip_suffix("_run")?;
+        if !self.grouped {
+            return None;
+        }
+        let inner = arguments.get("tool").and_then(Value::as_str)?;
+        let inner = if tool_domain(inner) == domain {
+            Cow::Borrowed(inner)
+        } else {
+            Cow::Owned(repair_domain_call(inner, arguments.get("arguments"))?.0)
+        };
+        if tool_domain(&inner) != domain {
+            return None;
+        }
+        self.tools.get(inner.as_ref()).map(|tool| tool.definition())
+    }
+
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         if !self.grouped {
@@ -2141,6 +2174,60 @@ fn destructive_is_scoped(text: &str) -> bool {
         SCRATCH_ROOTS
             .iter()
             .any(|root| value.starts_with(root) || value == root.trim_end_matches('/'))
+    })
+}
+
+/// A destructive command that has not been confirmed yet.
+///
+/// Returned by [`destructive_command`] so the agent can put the decision to the
+/// human with a real prompt, instead of failing the call and hoping the model
+/// guesses how to satisfy a flag it cannot evaluate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestructiveCommand {
+    /// One line naming the tool and why it counts as destructive.
+    pub title: String,
+    /// What will happen: the command, its targets, and the rule it broke.
+    pub detail: String,
+    /// The targets outside the workspace or a temp directory.
+    pub targets: Vec<String>,
+}
+
+/// Inspect a tool call and return the destructive command it would run.
+///
+/// `confirmed` is the model's own `confirm_destructive`, which a caller that
+/// already obtained approval sets. Only `run_command` can be destructive at this
+/// level; every other tool's blast radius is bounded by its own path checks.
+#[must_use]
+pub fn destructive_command(
+    name: &str,
+    arguments: &Value,
+    confirmed: bool,
+) -> Option<DestructiveCommand> {
+    if name != "run_command" || confirmed {
+        return None;
+    }
+    let command = arguments.get("command").and_then(Value::as_str)?;
+    if classify_command(command) != CommandClass::Destructive {
+        return None;
+    }
+    let targets = destructive_targets(&executable_text(command));
+    let scoped = if targets.is_empty() {
+        "it rewrites history or removes files by pattern".to_owned()
+    } else {
+        format!("it removes {}", targets.join(", "))
+    };
+    let subject = if targets.is_empty() {
+        "git history rewrite".to_owned()
+    } else {
+        truncate(&targets.join(", "), 60)
+    };
+    Some(DestructiveCommand {
+        title: format!("run_command: destructive ({subject})"),
+        detail: format!(
+            "{scoped}. That is outside the workspace and outside any temporary directory, so the change cannot be undone from OpenBaD.\n\n$ {}",
+            truncate(command.trim(), 600)
+        ),
+        targets,
     })
 }
 
@@ -4713,7 +4800,6 @@ impl Tool for RunCommandTool {
             "Run a shell command in the workspace. Requires Full access. Commands are classified as read-only, write-workspace, network, destructive, or privileged; a destructive command (one that removes or rewrites data outside the workspace or a temp directory) needs confirm_destructive=true. Removals inside the workspace or a temp directory are ordinary writes and need no confirmation. Default timeout 120s, raise timeout_seconds for a long search or build; a timeout returns whatever the command produced so far. For a multi-line script, write it with write_file and run the file: writing one through a heredoc works, but long nested quoting is where malformed tool calls come from.",
             RiskLevel::Execute,
         )
-        .with_timeout(120)
         .with_schema(json!({
             "type": "object",
             "properties": {
@@ -12775,7 +12861,6 @@ impl Tool for RunTaskTool {
             "Run a named task declared in .openbad/project.yaml. Requires Full access, like run_command.",
             RiskLevel::Execute,
         )
-        .with_timeout(600)
         .with_schema(json!({
             "type": "object",
             "properties": {
@@ -12890,7 +12975,6 @@ impl Tool for RunGateTool {
             "Run a named verification gate: every declared recipe in order, with a pass/fail checklist and evidence written to .openbad/gates/. Requires Full access.",
             RiskLevel::Execute,
         )
-        .with_timeout(600)
         .with_schema(json!({
             "type": "object",
             "properties": {
@@ -13069,7 +13153,6 @@ impl Tool for RunRecipeTool {
             "Run a named verification recipe from .openbad/project.yaml. Requires Full access.",
             RiskLevel::Execute,
         )
-        .with_timeout(600)
         .with_schema(json!({
             "type": "object",
             "properties": {
@@ -14452,14 +14535,14 @@ impl Tool for RunTestsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "run_tests",
-            "Detect and run the workspace test suite (Cargo, pnpm/npm, pytest, Go, or make). Requires command approval.",
+            "Detect and run the workspace test suite (Cargo, pnpm/npm, pytest, Go, or make). Requires command approval. Default timeout 300s; raise it for a full suite.",
             RiskLevel::Execute,
         )
-        .with_timeout(120)
         .with_schema(json!({
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Workspace-relative project directory"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock budget. Defaults to 300."},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
             },
             "additionalProperties": false
@@ -14482,7 +14565,7 @@ impl Tool for RunTestsTool {
         let (command, kind) = detect_test_command(&directory)?;
         let timeout = optional_usize(&arguments, "timeout_seconds")
             .unwrap_or(300)
-            .clamp(1, 600);
+            .clamp(1, 3600);
         let result = RunCommandTool
             .execute(
                 json!({
