@@ -762,7 +762,10 @@ impl<T: HttpTransport> Agent<T> {
         let started = std::time::Instant::now();
         let name = call.function.name.as_str();
         observer.on_tool_status(step, call, ToolStatus::Queued, None);
-        let content = match serde_json::from_str::<Value>(&call.function.arguments) {
+        // Providers emit invalid JSON for long payloads: a raw newline inside a
+        // string or a trailing comma. Repair before refusing, because the call
+        // is otherwise complete.
+        let content = match openbad_tools::parse_tool_arguments(&call.function.arguments) {
             Ok(mut arguments_value) => {
                 let arguments = arguments_value.clone();
                 let risk = self
@@ -3183,6 +3186,125 @@ mod tests {
             .and_then(|message| message.content.clone())
             .unwrap_or_default();
         assert!(last.contains("confirm_destructive"), "{last}");
+    }
+
+    /// Replays the exact argument strings the provider produced in the field.
+    struct RawArgumentsTransport {
+        tool: String,
+        arguments: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HttpTransport for RawArgumentsTransport {
+        async fn post(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            let first = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let message = if first {
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        // Sent as a string, exactly as the provider delivered it.
+                        "function": {"name": self.tool, "arguments": self.arguments}
+                    }]
+                })
+            } else {
+                json!({"role": "assistant", "content": "ok"})
+            };
+            let body = json!({
+                "model": "deepseek-flash",
+                "choices": [{
+                    "message": message,
+                    "finish_reason": if first { "tool_calls" } else { "stop" }
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+            });
+            Ok(response(&body.to_string()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
+    }
+
+    async fn tool_result_for(directory: &std::path::Path, tool: &str, arguments: &str) -> String {
+        let agent = default_agent(
+            DeepSeekClient::new(
+                RawArgumentsTransport {
+                    tool: tool.to_owned(),
+                    arguments: arguments.to_owned(),
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                },
+                "sk-test",
+            ),
+            Arc::new(WorkspaceService::new(directory)),
+            AgentConfig {
+                stream: false,
+                policy: ToolPolicy::FullAccess,
+                ..AgentConfig::default()
+            },
+        );
+        let run = agent
+            .run(vec![ChatMessage::user("go")])
+            .await
+            .expect("turn completes");
+        run.new_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ChatRole::Tool)
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn the_field_reports_resolve_end_to_end() {
+        let directory = tempdir().expect("tempdir");
+        // 1. Name under the wrong key (reported twice, fixed in 0.3.6).
+        let renamed = tool_result_for(
+            directory.path(),
+            "exec_run",
+            r#"{"command": "run_command", "arguments": {"command": "echo renamed-ok"}}"#,
+        )
+        .await;
+        assert!(renamed.contains("renamed-ok"), "{renamed}");
+
+        // 2. Name under the wrong key with a heredoc and escaped newlines.
+        let heredoc = tool_result_for(
+            directory.path(),
+            "exec_run",
+            r#"{"command": "run_command", "arguments": {"command": "cd . && python3 - <<'PY'\nprint('heredoc-ok')\nPY"}}"#,
+        )
+        .await;
+        assert!(heredoc.contains("heredoc-ok"), "{heredoc}");
+
+        // 3. A tool name that does not exist at all.
+        let unknown = tool_result_for(
+            directory.path(),
+            "exec_run",
+            r#"{"name": "exec_command", "arguments": {"command": "true"}}"#,
+        )
+        .await;
+        assert!(
+            unknown.contains("exec_command"),
+            "the unknown name must be quoted back: {unknown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn arguments_with_a_raw_newline_inside_a_string_are_repaired() {
+        let directory = tempdir().expect("tempdir");
+        // The field report: valid shape, but the provider put a real newline
+        // inside a JSON string, so the arguments do not parse.
+        let broken = "{\"tool\": \"write_file\", \"arguments\": {\"path\": \"note.md\", \"content\": \"line one\nline two\"}}";
+        let result = tool_result_for(directory.path(), "files_run", broken).await;
+        assert!(
+            !result.contains("invalid arguments"),
+            "a raw newline must be repaired, not rejected: {result}"
+        );
+        let written = std::fs::read_to_string(directory.path().join("note.md")).expect("file");
+        assert_eq!(written, "line one\nline two");
     }
 
     #[tokio::test]
