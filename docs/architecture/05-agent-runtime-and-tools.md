@@ -625,9 +625,22 @@ returns a run id for `action: "status"`.
 
 `run_command` classifies each command as `read-only`, `write-workspace`,
 `network`, `destructive`, or `privileged`, reports the class in metadata, and
-requires `confirm_destructive=true` before running destructive commands such as
-`rm -rf` or `git reset --hard`. File deletion is reversible by default: the
-file moves to `.openbad/trash` and can be restored by name.
+requires `confirm_destructive=true` before running a destructive command. Two
+rules keep that prompt meaningful. A heredoc written into a file is data, not
+code — `cat > sync.sh <<'EOF' … rm -rf … EOF` creates a script and removes
+nothing — so only heredocs fed to an interpreter (`bash`, `python`, `node`) are
+scanned. And a removal whose targets are all workspace-relative or under a temp
+root (`/tmp`, `/var/tmp`, `$TMPDIR`) is an ordinary `write-workspace`, because
+`rm -rf build/` is cleanup, not a blast radius; only a target elsewhere (a home
+path, an absolute system path, `git reset --hard`) needs the confirmation.
+
+A command that exceeds its budget returns `is_error` with the output produced so
+far, the timeout in the message, and `timed_out` in metadata, so a search that
+was killed still hands back what it found. The default budget is 120 seconds and
+`timeout_seconds` raises it to 600.
+
+File deletion is reversible by default: the file moves to `.openbad/trash` and
+can be restored by name.
 
 `read_file` and `read_repo_file` return `total_lines`, `start_line`, `end_line`,
 `has_more`, and `next_start_line` metadata. Reference discovery follows the

@@ -2033,8 +2033,122 @@ impl CommandClass {
     }
 }
 
+/// Directories a `rm -rf` may touch without counting as destructive.
+const SCRATCH_ROOTS: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/"];
+
+/// The command with heredoc bodies removed, leaving only what a shell runs.
+///
+/// A heredoc fed to a file is data: `cat > sync.sh <<'EOF' … rm -rf … EOF`
+/// creates a script, it does not delete anything. Scanning that body for `rm`
+/// refused a plain file write. A heredoc fed to an interpreter is still code, so
+/// its body is kept.
+fn executable_text(command: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut lines = command.lines();
+    while let Some(line) = lines.next() {
+        kept.push(line);
+        let Some(at) = line.find("<<") else {
+            continue;
+        };
+        let rest = line[at + 2..].trim_start_matches('-').trim_start();
+        let delimiter: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '|')
+            .filter(|c| *c != '\'' && *c != '"')
+            .collect();
+        if delimiter.is_empty() {
+            continue;
+        }
+        // A redirection on the same line means the body becomes a file.
+        let writes_file = line[..at].contains('>');
+        let first = line.split_whitespace().next().unwrap_or_default();
+        let interpreter = matches!(
+            first.rsplit('/').next().unwrap_or_default(),
+            "sh" | "bash"
+                | "zsh"
+                | "dash"
+                | "ksh"
+                | "python"
+                | "python3"
+                | "node"
+                | "perl"
+                | "ruby"
+        );
+        for candidate in lines.by_ref() {
+            if candidate.trim() == delimiter {
+                break;
+            }
+            if writes_file && !interpreter {
+                continue;
+            }
+            kept.push(candidate);
+        }
+    }
+    kept.join("\n")
+}
+
+/// Paths a destructive command names, ignoring flags and `--`.
+fn destructive_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut words = text.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        let bare = word.trim_matches(|c: char| c == '"' || c == '\'');
+        let is_remove = bare == "rm" || bare.ends_with("/rm");
+        let flag = words.peek().map(|next| {
+            let next = next.trim_matches(|c: char| c == '"' || c == '\'');
+            next.starts_with('-') && (next.contains('r') || next.contains('R'))
+        });
+        if !is_remove || flag != Some(true) {
+            continue;
+        }
+        for argument in words.by_ref() {
+            let argument = argument.trim_matches(|c: char| c == '"' || c == '\'' || c == ';');
+            if argument.starts_with('-') {
+                continue;
+            }
+            if argument.is_empty() || argument == "&&" || argument == "||" || argument == "|" {
+                break;
+            }
+            targets.push(argument.to_owned());
+            if targets.len() >= 16 {
+                return targets;
+            }
+        }
+    }
+    targets
+}
+
+/// True when every destructive target is scratch space: relative to the
+/// workspace (the tool runs with the workspace as cwd) or under a temp root.
+fn destructive_is_scoped(text: &str) -> bool {
+    let targets = destructive_targets(text);
+    if targets.is_empty() {
+        return false;
+    }
+    targets.iter().all(|target| {
+        let expanded = target.replace("${TMPDIR:-/tmp}", "/tmp/");
+        let value = expanded
+            .trim_start_matches("$TMPDIR/")
+            .trim_start_matches("$HOME/");
+        if value.starts_with('~') {
+            // A home path is absolute for this purpose, whatever it expands to.
+            return false;
+        }
+        if !value.starts_with('/') {
+            // Relative: resolved against the workspace cwd.
+            return true;
+        }
+        SCRATCH_ROOTS
+            .iter()
+            .any(|root| value.starts_with(root) || value == root.trim_end_matches('/'))
+    })
+}
+
 fn classify_command(command: &str) -> CommandClass {
-    let lower = command.to_ascii_lowercase();
+    let text = executable_text(command);
+    // A newline separates commands exactly like `;`, so it has to become a
+    // space before any " rm -rf" style substring test can see the next line.
+    let lower = text.to_ascii_lowercase().replace(['\n', '\r'], " ");
     let padded = format!(" {lower} ");
     if [" sudo ", " doas ", " su -", " pkexec "]
         .iter()
@@ -2057,8 +2171,17 @@ fn classify_command(command: &str) -> CommandClass {
         " chmod -r 777",
         " chown -r",
     ];
-    if destructive.iter().any(|needle| padded.contains(needle)) || lower.contains(":(){") {
+    if lower.contains(":(){") {
         return CommandClass::Destructive;
+    }
+    if destructive.iter().any(|needle| padded.contains(needle)) {
+        // `rm -rf build/` or `rm -rf /tmp/x` is ordinary cleanup; only a target
+        // outside scratch space is worth a confirmation prompt.
+        return if destructive_is_scoped(&text) {
+            CommandClass::WriteWorkspace
+        } else {
+            CommandClass::Destructive
+        };
     }
     let network = [
         "curl ",
@@ -4587,16 +4710,16 @@ impl Tool for RunCommandTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "run_command",
-            "Run a shell command in the workspace. Requires Full access. Commands are classified as read-only, write-workspace, network, destructive, or privileged; destructive commands need confirm_destructive=true. Keep the command short: for a multi-line script, write it with write_file and run the file, because long nested quoting (heredocs inside a quoted string) is where malformed tool calls come from.",
+            "Run a shell command in the workspace. Requires Full access. Commands are classified as read-only, write-workspace, network, destructive, or privileged; a destructive command (one that removes or rewrites data outside the workspace or a temp directory) needs confirm_destructive=true. Removals inside the workspace or a temp directory are ordinary writes and need no confirmation. Default timeout 120s, raise timeout_seconds for a long search or build; a timeout returns whatever the command produced so far. For a multi-line script, write it with write_file and run the file: writing one through a heredoc works, but long nested quoting is where malformed tool calls come from.",
             RiskLevel::Execute,
         )
-        .with_timeout(30)
+        .with_timeout(120)
         .with_schema(json!({
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "description": "Workspace-relative directory, or an approved absolute directory with allow_external_cwd"},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "Wall-clock budget. Defaults to 120."},
                 "confirm_destructive": {"type": "boolean", "description": "Explicitly allow a destructive command such as rm -rf or git reset --hard"},
                 "allow_external_cwd": {"type": "boolean", "description": "Allow an absolute cwd outside the workspace"},
                 "parse": {"type": "string", "enum": ["auto", "rust", "pytest", "eslint", "typescript"], "description": "Extract structured diagnostics from output"}
@@ -4651,7 +4774,7 @@ impl Tool for RunCommandTool {
             None => context.workspace.root().to_path_buf(),
         };
         let timeout = optional_usize(&arguments, "timeout_seconds")
-            .unwrap_or(30)
+            .unwrap_or(120)
             .clamp(1, 600) as u64;
 
         let mut process = if cfg!(windows) {
@@ -4690,19 +4813,47 @@ impl Tool for RunCommandTool {
 
         let status = child.wait_timeout(Duration::from_secs(timeout))?;
         kill_process_tree(&mut child);
-        let status = match status {
-            Some(status) => status,
-            None => {
-                let _ = child.wait();
-                return Err(ToolError::Timeout(timeout));
-            }
-        };
+        let timed_out = status.is_none();
+        if timed_out {
+            let _ = child.wait();
+        }
+        // Read what the process produced even on a timeout: a search that was
+        // killed after thirty seconds has still found things, and throwing that
+        // away forces the model to guess or repeat the whole command.
         let stdout = stdout_reader
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
         let stderr = stderr_reader
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
+        let status = match status {
+            Some(status) => status,
+            None => {
+                let partial = format!(
+                    "timed out after {timeout}s; partial output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                );
+                let content = if partial.trim().len() > 40 {
+                    format!(
+                        "{partial}\n\nhint: narrow the command (a bounded path or a smaller time range) or raise timeout_seconds (max 600)"
+                    )
+                } else {
+                    format!(
+                        "timed out after {timeout}s with no output yet; narrow the command or raise timeout_seconds (max 600)"
+                    )
+                };
+                return Ok(
+                    ToolResult::error(truncate(&content, context.max_output_bytes)).with_metadata(
+                        json!({
+                            "timed_out": true,
+                            "timeout_seconds": timeout,
+                            "command_class": class.label(),
+                            "stdout_bytes": stdout.len(),
+                            "stderr_bytes": stderr.len(),
+                        }),
+                    ),
+                );
+            }
+        };
 
         let parse = optional_string(&arguments, "parse").unwrap_or_else(|| "auto".to_owned());
         let diagnostics = parse_diagnostics(&parse, &format!("{stderr}\n{stdout}"));
@@ -16083,6 +16234,101 @@ mod tests {
         context(root).with_session_reads(reads)
     }
 
+    #[test]
+    fn a_heredoc_written_to_a_file_is_content_not_commands() {
+        // The reported command: creating a script whose body contains rm -rf.
+        let script = "mkdir -p ~/.local/bin && cat > ~/.local/bin/sync <<'SCRIPT'\n#!/usr/bin/env bash\nset -euo pipefail\ntrap 'rm -rf \"$TMP\"' EXIT\nrm -rf \"$TMP/root\"\nSCRIPT\nchmod 755 ~/.local/bin/sync";
+        assert_eq!(classify_command(script), CommandClass::WriteWorkspace);
+        let text = executable_text(script);
+        assert!(!text.contains("rm -rf"), "{text}");
+        assert!(text.contains("chmod 755"), "{text}");
+
+        // A heredoc fed to a shell still runs, so its body must be scanned.
+        let piped = "bash <<'EOF'\nrm -rf /var/data\nEOF";
+        assert_eq!(classify_command(piped), CommandClass::Destructive);
+        assert!(executable_text(piped).contains("rm -rf"));
+    }
+
+    #[test]
+    fn removing_scratch_directories_is_a_write_not_a_destructive_act() {
+        for command in [
+            "rm -rf /tmp/craftinstall && echo removed",
+            "cd /tmp && rm -rf appimg && mkdir appimg",
+            "rm -rf build/ dist/",
+            "rm -rf ./target/debug",
+            "rm -rf \"$TMPDIR/junk\"",
+            "mktemp -d && rm -rf /var/tmp/scratch",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                CommandClass::WriteWorkspace,
+                "{command}"
+            );
+        }
+
+        for command in [
+            "rm -rf /etc/nginx",
+            "rm -rf ~/Documents",
+            "rm -rf /home/someone/code",
+            "git reset --hard HEAD",
+            "git clean -fd",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                CommandClass::Destructive,
+                "{command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_command_reports_what_it_found() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+        let result = RunCommandTool
+            .execute(
+                json!({
+                    "command": "echo found-something; sleep 30",
+                    "timeout_seconds": 1
+                }),
+                &context,
+            )
+            .await
+            .expect("a timeout is a result, not a lost turn");
+        assert!(result.is_error, "a timeout must read as a failure");
+        assert!(
+            result.content.contains("found-something"),
+            "partial output must survive the timeout: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("timed out after 1s"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("timeout_seconds"),
+            "{}",
+            result.content
+        );
+        assert_eq!(result.metadata["timed_out"], true);
+    }
+
+    #[tokio::test]
+    async fn a_scratch_removal_runs_without_a_confirmation_flag() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+        fs::create_dir_all(directory.path().join("scratch/deep")).expect("dir");
+        let result = RunCommandTool
+            .execute(json!({"command": "rm -rf scratch"}), &context)
+            .await
+            .expect("a workspace removal needs no confirmation");
+        assert!(!directory.path().join("scratch").exists());
+        assert_eq!(result.metadata["command_class"], "write-workspace");
+    }
+
     #[tokio::test]
     async fn an_edit_refreshes_the_record_so_a_later_write_is_allowed() {
         let directory = tempdir().expect("tempdir");
@@ -17718,11 +17964,24 @@ invariants:
         );
 
         context.allow_commands = true;
+        // Removals inside the workspace are ordinary writes now; only a target
+        // outside it needs the confirmation flag.
         let denied = RunCommandTool
-            .execute(json!({"command": "rm -rf target"}), &context)
+            .execute(json!({"command": "rm -rf /etc/nginx"}), &context)
             .await
             .expect_err("destructive command");
         assert!(denied.to_string().contains("confirm_destructive"));
+        // The flag only satisfies the confirmation; the class is unchanged, so
+        // the policy check still sees a destructive command. Asserted on the
+        // classifier rather than by running it: a unit test must never delete
+        // anything outside its own temp directory.
+        assert_eq!(
+            classify_command("rm -rf /etc/nginx"),
+            CommandClass::Destructive
+        );
+        assert!(
+            check_command_policy(&context, CommandClass::Destructive, "rm -rf /etc/nginx").is_ok()
+        );
     }
 
     #[tokio::test]
@@ -17871,13 +18130,18 @@ invariants:
         assert_eq!(large.metadata["success"], true);
 
         let started = std::time::Instant::now();
+        // A timeout is a result carrying the partial output, not a lost turn:
+        // a search killed after its budget has still found things.
         let timed_out = RunCommandTool
             .execute(
                 json!({"command": "sleep 5", "timeout_seconds": 1}),
                 &context,
             )
-            .await;
-        assert!(matches!(timed_out, Err(ToolError::Timeout(1))));
+            .await
+            .expect("a timeout returns a result");
+        assert!(timed_out.is_error);
+        assert!(timed_out.content.contains("timed out after 1s"));
+        assert_eq!(timed_out.metadata["timed_out"], true);
         assert!(started.elapsed() < std::time::Duration::from_secs(4));
     }
 
