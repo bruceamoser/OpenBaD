@@ -1837,6 +1837,9 @@ export type ChatInput = {
   thinking: boolean;
   reasoningEffort: string;
   attachments: UploadSource[];
+  /** Provider response budget; the provider's own ceiling still applies. */
+  maxOutputTokens?: number;
+  readFilesMax?: number;
 };
 
 export async function respondToApproval(
@@ -1871,6 +1874,8 @@ export async function chat(
         thinking: input.thinking,
         reasoningEffort: input.reasoningEffort,
         attachments: input.attachments,
+        maxOutputTokens: input.maxOutputTokens,
+        readFilesMax: input.readFilesMax,
       },
       onEvent: channel,
     });

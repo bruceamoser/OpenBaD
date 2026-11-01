@@ -217,6 +217,8 @@ pub struct AgentConfig {
     pub context_window: u32,
     pub policy: ToolPolicy,
     pub max_parallel_tool_calls: usize,
+    /// Largest number of paths one `read_files` call may take.
+    pub read_files_max: usize,
     /// Tool output larger than this is written to a spill file and replaced
     /// with a preview plus a retrieval hint. `0` disables spilling.
     pub spill_threshold_bytes: usize,
@@ -248,6 +250,7 @@ impl Default for AgentConfig {
             context_window: 1_000_000,
             policy: ToolPolicy::ReadOnly,
             max_parallel_tool_calls: 10,
+            read_files_max: 20,
             spill_threshold_bytes: 64 * 1024,
             stream: true,
             system_prompt: None,
@@ -1064,6 +1067,7 @@ impl<T: HttpTransport> Agent<T> {
             let mut context = ToolContext::new(self.workspace.clone());
             context.allow_writes = self.config.policy != ToolPolicy::ReadOnly;
             context.allow_commands = self.config.policy == ToolPolicy::FullAccess;
+            context.read_files_max = self.config.read_files_max.max(1);
             context.search = self.search.clone();
             context.checkpoints = self.checkpoints.clone();
             context.memory = self.memory.clone();

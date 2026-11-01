@@ -1118,6 +1118,8 @@ pub struct ToolContext {
     pub allow_commands: bool,
     pub max_output_bytes: usize,
     pub model_output_bytes: usize,
+    /// How many paths one `read_files` call may take.
+    pub read_files_max: usize,
     pub search: Option<Arc<dyn WorkspaceSearch>>,
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     pub memory: Option<Arc<dyn MemoryStore>>,
@@ -1149,6 +1151,7 @@ impl Clone for ToolContext {
             allow_commands: self.allow_commands,
             max_output_bytes: self.max_output_bytes,
             model_output_bytes: self.model_output_bytes,
+            read_files_max: self.read_files_max,
             search: self.search.clone(),
             checkpoints: self.checkpoints.clone(),
             memory: self.memory.clone(),
@@ -1183,6 +1186,7 @@ impl ToolContext {
             allow_commands: false,
             max_output_bytes: 256 * 1024,
             model_output_bytes: 64 * 1024,
+            read_files_max: 20,
             search: None,
             checkpoints: None,
             memory: None,
@@ -3481,7 +3485,7 @@ impl Tool for ReadFilesTool {
         arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let paths = string_array_arg(&arguments, "paths", 20)?;
+        let paths = string_array_arg(&arguments, "paths", context.read_files_max.max(1))?;
         let cap = (context.max_output_bytes / paths.len()).max(1_024);
         let mut sections = Vec::new();
         let mut files = Vec::new();
@@ -3549,7 +3553,7 @@ impl Tool for ReadRepoFilesTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let (repo, root) = repo_root(context, &string_arg(&arguments, "repo")?)?;
-        let paths = string_array_arg(&arguments, "paths", 20)?;
+        let paths = string_array_arg(&arguments, "paths", context.read_files_max.max(1))?;
         let cap = (context.max_output_bytes / paths.len()).max(1_024);
         let mut sections = Vec::new();
         let mut files = Vec::new();

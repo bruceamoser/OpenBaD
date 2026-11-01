@@ -146,6 +146,13 @@ type Preferences = {
   reasoningEffort: string;
   /** Raise an OS notification when a turn finishes while the window is hidden. */
   notifyOnCompletion: boolean;
+  /**
+   * Provider response budget (`max_tokens`). The provider enforces its own
+   * ceiling; a response that hits either limit is reported, not corrupted.
+   */
+  maxOutputTokens: number;
+  /** Paths one `read_files` call may take. */
+  readFilesMax: number;
 };
 
 type PermissionMode = AccessMode;
@@ -171,7 +178,21 @@ const defaultPreferences: Preferences = {
   thinking: true,
   reasoningEffort: "high",
   notifyOnCompletion: true,
+  maxOutputTokens: 16384,
+  readFilesMax: 20,
 };
+
+function clampNumber(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
 
 function loadPreferences(): Preferences {
   try {
@@ -190,6 +211,18 @@ function loadPreferences(): Preferences {
           typeof parsed.notifyOnCompletion === "boolean"
             ? parsed.notifyOnCompletion
             : defaultPreferences.notifyOnCompletion,
+        maxOutputTokens: clampNumber(
+          parsed.maxOutputTokens,
+          256,
+          65536,
+          defaultPreferences.maxOutputTokens,
+        ),
+        readFilesMax: clampNumber(
+          parsed.readFilesMax,
+          1,
+          200,
+          defaultPreferences.readFilesMax,
+        ),
       };
     }
   } catch {
@@ -432,6 +465,8 @@ export default function App() {
   const [notifyOnCompletion, setNotifyOnCompletion] = useState(
     preferences.notifyOnCompletion,
   );
+  const [maxOutputTokens, setMaxOutputTokens] = useState(preferences.maxOutputTokens);
+  const [readFilesMax, setReadFilesMax] = useState(preferences.readFilesMax);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [indexSummary, setIndexSummary] = useState<WorkspaceIndexSummary | null>(null);
@@ -844,12 +879,19 @@ export default function App() {
     try {
       localStorage.setItem(
         "openbad.preferences",
-        JSON.stringify({ model, thinking, reasoningEffort, notifyOnCompletion }),
+        JSON.stringify({
+          model,
+          thinking,
+          reasoningEffort,
+          notifyOnCompletion,
+          maxOutputTokens,
+          readFilesMax,
+        }),
       );
     } catch {
       // Storage can be unavailable in hardened webviews; preferences are optional.
     }
-  }, [model, notifyOnCompletion, reasoningEffort, thinking]);
+  }, [maxOutputTokens, model, notifyOnCompletion, readFilesMax, reasoningEffort, thinking]);
 
   useEffect(() => {
     setProjectNameDraft(activeProject?.name ?? "");
@@ -1609,6 +1651,8 @@ export default function App() {
           thinking,
           reasoningEffort,
           attachments: pending,
+          maxOutputTokens,
+          readFilesMax,
         },
         (event) => {
           if (event.type === "content" || event.type === "reasoning") {
@@ -3085,6 +3129,10 @@ export default function App() {
           onReasoningEffort={setReasoningEffort}
           notifyOnCompletion={notifyOnCompletion}
           onNotifyOnCompletion={setNotifyOnCompletion}
+          maxOutputTokens={maxOutputTokens}
+          onMaxOutputTokens={setMaxOutputTokens}
+          readFilesMax={readFilesMax}
+          onReadFilesMax={setReadFilesMax}
           permissionMode={permissionMode}
           onPermissionMode={changePermissionMode}
           accessGrants={accessGrants}
@@ -3955,6 +4003,10 @@ function SettingsDialog({
   onReasoningEffort,
   notifyOnCompletion,
   onNotifyOnCompletion,
+  maxOutputTokens,
+  onMaxOutputTokens,
+  readFilesMax,
+  onReadFilesMax,
   permissionMode,
   onPermissionMode,
   accessGrants,
@@ -3985,6 +4037,10 @@ function SettingsDialog({
   onReasoningEffort: (value: string) => void;
   notifyOnCompletion: boolean;
   onNotifyOnCompletion: (value: boolean) => void;
+  maxOutputTokens: number;
+  onMaxOutputTokens: (value: number) => void;
+  readFilesMax: number;
+  onReadFilesMax: (value: number) => void;
   permissionMode: PermissionMode;
   onPermissionMode: (value: PermissionMode) => void;
   accessGrants: OutsideAccessGrant[];
@@ -4072,6 +4128,52 @@ function SettingsDialog({
                     checked={notifyOnCompletion}
                     onChange={(event) => onNotifyOnCompletion(event.target.checked)}
                     className="mt-0.5 accent-obd-accent"
+                  />
+                </label>
+              </Section>
+
+              <Section
+                title="Limits"
+                description="Every cap is stated, and hitting one is reported rather than silently applied."
+              >
+                <label className="block text-[12px] text-obd-body">
+                  Response budget (tokens)
+                  <span className="mt-0.5 block text-[11px] leading-5 text-obd-subtle">
+                    Sent as max_tokens. The provider enforces its own ceiling too; a
+                    response that hits either limit says where it stopped instead of
+                    returning a cut-off tool call.
+                  </span>
+                  <input
+                    type="number"
+                    min={256}
+                    max={65536}
+                    step={256}
+                    value={maxOutputTokens}
+                    onChange={(event) =>
+                      onMaxOutputTokens(
+                        Math.min(65536, Math.max(256, Number(event.target.value) || 256)),
+                      )
+                    }
+                    className="mt-1 w-32 rounded border border-obd-line bg-obd-inset px-2 py-1 text-[12px] text-obd-body"
+                  />
+                </label>
+                <label className="block text-[12px] text-obd-body">
+                  Files per read_files call
+                  <span className="mt-0.5 block text-[11px] leading-5 text-obd-subtle">
+                    How many paths one call may take. The per-file share of the result
+                    budget shrinks as this grows.
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={readFilesMax}
+                    onChange={(event) =>
+                      onReadFilesMax(
+                        Math.min(200, Math.max(1, Number(event.target.value) || 1)),
+                      )
+                    }
+                    className="mt-1 w-32 rounded border border-obd-line bg-obd-inset px-2 py-1 text-[12px] text-obd-body"
                   />
                 </label>
               </Section>
