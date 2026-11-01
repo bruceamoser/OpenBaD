@@ -315,6 +315,21 @@ the parent's reads. The transcript no longer repeats every tool result under
 the final message, and tool cards render before the answer so the turn ends
 with the answer.
 
+## v0.3.7
+
+Fix release on top of 0.3.6. A tool call arrives as invalid JSON when the
+provider puts a raw newline inside a string (long Typst or Python edits); the
+whole call was refused at the parse error. Control characters inside strings and
+trailing commas are now normalised and parsed again, at both the agent's
+tool-call parse and the proxy's nested `arguments` string.
+
+A misspelled tool name was reported as a wrong shape, sending the model after a
+shape error it could not fix. The nearest registry name is suggested:
+`no tool named "exec_command"; did you mean "run_command"?`
+
+Also confirms the renamed-key repair from 0.3.6 works end to end, which the
+field report could not show because the installed binary predated that release.
+
 ## v0.3.6
 
 Fix release on top of 0.3.5. A proxy call can arrive with its tool name under a
