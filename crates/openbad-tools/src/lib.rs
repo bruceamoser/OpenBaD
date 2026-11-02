@@ -8,6 +8,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+/// Command output logs live under `.openbad/logs` and are kept for five days.
+/// The ceilings are generous on purpose: they exist so one runaway day cannot
+/// fill a disk, not to shorten the window on a busy one.
+const COMMAND_LOG_RETENTION: openbad_workspace::Retention =
+    openbad_workspace::Retention::days(5).with_ceilings(4_000, 256 * 1024 * 1024);
+
+/// Spill files are read within the turn that created them, but they age out on
+/// the same window as the logs.
+const SPILL_RETENTION: openbad_workspace::Retention =
+    openbad_workspace::Retention::days(5).with_ceilings(2_000, 128 * 1024 * 1024);
+
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
@@ -2033,6 +2044,9 @@ fn finish_result(
         let path = directory.join(format!("spill-{}-{hash}.txt", now_millis()));
         std::fs::write(&path, &full).ok().map(|()| path)
     });
+    // Spill files exist to be read within the turn that made them; older ones
+    // are dead weight.
+    openbad_workspace::prune_directory(&directory, SPILL_RETENTION);
     result.content = head_tail(&full, context.model_output_bytes);
     match path {
         Some(path) => {
@@ -5162,6 +5176,8 @@ impl Tool for RunCommandTool {
         let log_path = log_directory.join(format!("command-{}.log", now_millis()));
         std::fs::create_dir_all(&log_directory)?;
         std::fs::write(&log_path, &full)?;
+        // Every command writes a full-output log and nothing else removes them.
+        openbad_workspace::prune_directory(&log_directory, COMMAND_LOG_RETENTION);
         let preview_cap = (context.max_output_bytes / 2).max(2_048);
         let content = if full.len() <= preview_cap {
             full.clone()
@@ -20757,6 +20773,40 @@ invariants:
             "files": ["../escape.zip"]
         }));
         assert!(matches!(traversal, Err(ToolError::InvalidArgument(_))));
+    }
+
+    #[tokio::test]
+    async fn running_a_command_drops_command_logs_older_than_the_window() {
+        let workspace = tempdir().expect("workspace");
+        let logs = workspace.path().join(".openbad/logs");
+        fs::create_dir_all(&logs).expect("logs");
+        let stale = logs.join("command-1.log");
+        let recent = logs.join("command-2.log");
+        fs::write(&stale, "old").expect("stale log");
+        fs::write(&recent, "recent").expect("recent log");
+        let ten_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(864_000);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .expect("open stale");
+        file.set_times(fs::FileTimes::new().set_modified(ten_days_ago))
+            .expect("backdate");
+        let mut context = context(workspace.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+
+        RunCommandTool
+            .execute(json!({"command": "echo kept"}), &context)
+            .await
+            .expect("command runs");
+
+        assert!(!stale.exists(), "a log past the window is removed");
+        assert!(recent.is_file(), "a log inside the window is kept");
+        assert_eq!(
+            fs::read_dir(&logs).expect("read logs").count(),
+            2,
+            "the recent log and the one just written survive"
+        );
     }
 
     #[tokio::test]

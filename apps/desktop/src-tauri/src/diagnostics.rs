@@ -39,21 +39,11 @@ pub fn record(level: &str, message: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    rotate(&path);
+    openbad_workspace::rotate_file(&path, MAX_BYTES);
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
         return;
     };
     let _ = writeln!(file, "{} {level} {message}", timestamp());
-}
-
-fn rotate(path: &Path) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
-    if metadata.len() < MAX_BYTES {
-        return;
-    }
-    let _ = fs::rename(path, path.with_extension("log.1"));
 }
 
 /// Records startup and any panic, then returns the log path for the caller to
