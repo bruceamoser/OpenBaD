@@ -29,6 +29,10 @@ use uuid::Uuid;
 /// Conservative bytes-per-token estimate. English is closer to 4, but code,
 /// JSON, and tool output tokenize denser, so 3 leaves headroom.
 const ESTIMATED_BYTES_PER_TOKEN: usize = 3;
+
+/// The per-tool audit trail rotates rather than growing forever; one archive is
+/// kept, so the previous generation survives a rollover.
+const AUDIT_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// Room for tokenizer drift and provider-side framing.
 const CONTEXT_SAFETY_TOKENS: usize = 8_192;
 
@@ -2182,10 +2186,14 @@ fn append_tool_audit(
         return;
     };
     use std::io::Write;
+    let path = directory.join("audit.jsonl");
+    // Keep one archive of the trail; the hash chain that matters lives in the
+    // store, not in this file.
+    openbad_workspace::rotate_file(&path, AUDIT_LOG_BYTES);
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(directory.join("audit.jsonl"))
+        .open(&path)
     {
         let _ = writeln!(file, "{line}");
     }
