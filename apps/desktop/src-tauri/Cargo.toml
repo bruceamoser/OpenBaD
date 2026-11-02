@@ -57,6 +57,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.7", features = ["wayland-data-control"] }
 png = "0.18"
+# Only to narrow GLib's fatal log mask and route criticals to our own log.
+glib = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
