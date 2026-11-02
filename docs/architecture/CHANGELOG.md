@@ -475,3 +475,24 @@ now carry an enum of their domain's tools in the schema, name those tools in
 the description, and repeat both in argument errors — so a model that skips
 `<domain>_list` gets a correctable message instead of `missing string argument:
 tool` or `tool … is not in the exec domain`.
+
+## v0.3.8
+
+**A `cwd` inside the workspace is just a path.** `run_command` treated every
+absolute path as external without first asking whether it was inside the
+workspace, so a session's own root, passed as a `cwd`, was refused with "path is
+outside the workspace" and the model retried in a loop. An absolute `cwd` now
+resolves like a relative one: accepted inside the workspace, accepted outside
+once the human granted write access, with `allow_external_cwd` kept for declared
+recipes. Refusals name every remedy — request write access, use a relative cwd,
+or pass the flag — and `ToolError::OutsideRoot` gains the same guidance for file
+tools. The phrase "outside the workspace" is unchanged, because the agent system
+prompt keys off it.
+
+**Diagnostics you can read.** `scripts/diagnostics.py` opens `openbad.db`
+read-only, joins each session's workspace root, redacts credentials, and prints
+either a summary or, with `--full`, the exchange with tool calls and reasoning;
+`--errors` filters to failures and `--log` tails the new app log. The desktop
+now writes `openbad.log` beside the database — startup version, pid, and
+platform, plus any panic with its message and location — capped at 4 MiB with
+one rotation and following `OPENBAD_DB_PATH` for isolated runs.
