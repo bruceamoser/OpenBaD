@@ -8,16 +8,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-/// Command output logs live under `.openbad/logs` and are kept for five days.
-/// The ceilings are generous on purpose: they exist so one runaway day cannot
-/// fill a disk, not to shorten the window on a busy one.
-const COMMAND_LOG_RETENTION: openbad_workspace::Retention =
-    openbad_workspace::Retention::days(5).with_ceilings(4_000, 256 * 1024 * 1024);
+/// The window comes from the user's setting; these ceilings are generous on
+/// purpose, so they stop one runaway day filling a disk without ever shortening
+/// the window on an ordinary one.
+fn log_retention(days: u64) -> openbad_workspace::Retention {
+    openbad_workspace::Retention::days(days.clamp(1, 365)).with_ceilings(4_000, 256 * 1024 * 1024)
+}
 
 /// Spill files are read within the turn that created them, but they age out on
 /// the same window as the logs.
-const SPILL_RETENTION: openbad_workspace::Retention =
-    openbad_workspace::Retention::days(5).with_ceilings(2_000, 128 * 1024 * 1024);
+fn spill_retention(days: u64) -> openbad_workspace::Retention {
+    openbad_workspace::Retention::days(days.clamp(1, 365)).with_ceilings(2_000, 128 * 1024 * 1024)
+}
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -1132,6 +1134,9 @@ pub struct ToolContext {
     pub model_output_bytes: usize,
     /// How many paths one `read_files` call may take.
     pub read_files_max: usize,
+    /// How many days of command logs and spill files to keep. Age decides;
+    /// the byte ceilings in `log_retention` only stop a runaway day.
+    pub log_retention_days: u64,
     pub search: Option<Arc<dyn WorkspaceSearch>>,
     pub checkpoints: Option<Arc<dyn CheckpointSink>>,
     pub memory: Option<Arc<dyn MemoryStore>>,
@@ -1164,6 +1169,7 @@ impl Clone for ToolContext {
             max_output_bytes: self.max_output_bytes,
             model_output_bytes: self.model_output_bytes,
             read_files_max: self.read_files_max,
+            log_retention_days: self.log_retention_days,
             search: self.search.clone(),
             checkpoints: self.checkpoints.clone(),
             memory: self.memory.clone(),
@@ -1199,6 +1205,7 @@ impl ToolContext {
             max_output_bytes: 256 * 1024,
             model_output_bytes: 64 * 1024,
             read_files_max: 20,
+            log_retention_days: 5,
             search: None,
             checkpoints: None,
             memory: None,
@@ -2046,7 +2053,7 @@ fn finish_result(
     });
     // Spill files exist to be read within the turn that made them; older ones
     // are dead weight.
-    openbad_workspace::prune_directory(&directory, SPILL_RETENTION);
+    openbad_workspace::prune_directory(&directory, spill_retention(context.log_retention_days));
     result.content = head_tail(&full, context.model_output_bytes);
     match path {
         Some(path) => {
@@ -5177,7 +5184,10 @@ impl Tool for RunCommandTool {
         std::fs::create_dir_all(&log_directory)?;
         std::fs::write(&log_path, &full)?;
         // Every command writes a full-output log and nothing else removes them.
-        openbad_workspace::prune_directory(&log_directory, COMMAND_LOG_RETENTION);
+        openbad_workspace::prune_directory(
+            &log_directory,
+            log_retention(context.log_retention_days),
+        );
         let preview_cap = (context.max_output_bytes / 2).max(2_048);
         let content = if full.len() <= preview_cap {
             full.clone()
@@ -20807,6 +20817,44 @@ invariants:
             2,
             "the recent log and the one just written survive"
         );
+    }
+
+    #[tokio::test]
+    async fn the_retention_setting_decides_the_window() {
+        let workspace = tempdir().expect("workspace");
+        let logs = workspace.path().join(".openbad/logs");
+        fs::create_dir_all(&logs).expect("logs");
+        let ten_days_old = logs.join("command-1.log");
+        fs::write(&ten_days_old, "old").expect("log");
+        let ten_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(864_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&ten_days_old)
+            .expect("open")
+            .set_times(fs::FileTimes::new().set_modified(ten_days_ago))
+            .expect("backdate");
+        let mut context = context(workspace.path());
+        context.allow_writes = true;
+        context.allow_commands = true;
+
+        // A month-long window keeps the ten-day-old log.
+        context.log_retention_days = 30;
+        RunCommandTool
+            .execute(json!({"command": "echo kept"}), &context)
+            .await
+            .expect("command runs");
+        assert!(
+            ten_days_old.is_file(),
+            "a 30 day window keeps a ten day old log"
+        );
+
+        // A one-day window removes it.
+        context.log_retention_days = 1;
+        RunCommandTool
+            .execute(json!({"command": "echo pruned"}), &context)
+            .await
+            .expect("command runs");
+        assert!(!ten_days_old.exists(), "a one day window removes it");
     }
 
     #[tokio::test]

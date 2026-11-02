@@ -475,3 +475,8 @@ Tail it with `scripts/diagnostics.py --log 50`.
 
 Neither record contains secrets: credentials are never written, and the reader
 redacts anything that looks like one.
+
+How long those files live is a setting: **Settings → General → Limits → Log
+retention (days)**, default 5, clamped 1–365. It governs command logs and spill
+files; the audit trail and `openbad.log` rotate by size instead, keeping one
+archive each.

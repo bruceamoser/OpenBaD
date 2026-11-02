@@ -1840,6 +1840,8 @@ export type ChatInput = {
   /** Provider response budget; the provider's own ceiling still applies. */
   maxOutputTokens?: number;
   readFilesMax?: number;
+  /** Days of command logs and spilled output to keep before they are deleted. */
+  logRetentionDays?: number;
 };
 
 export async function respondToApproval(
@@ -1876,6 +1878,7 @@ export async function chat(
         attachments: input.attachments,
         maxOutputTokens: input.maxOutputTokens,
         readFilesMax: input.readFilesMax,
+        logRetentionDays: input.logRetentionDays,
       },
       onEvent: channel,
     });

@@ -5023,6 +5023,10 @@ pub struct ChatInput {
     /// How many paths one `read_files` call may take.
     #[serde(default)]
     pub read_files_max: Option<usize>,
+    /// How many days of command logs and spill files to keep. Absent keeps the
+    /// agent default, which is five.
+    #[serde(default)]
+    pub log_retention_days: Option<u64>,
 }
 
 #[tauri::command]
@@ -5223,6 +5227,7 @@ async fn chat(
         attachments,
         max_output_tokens,
         read_files_max,
+        log_retention_days,
     } = request;
     let prompt = message.trim().to_owned();
     if !resume && prompt.is_empty() && attachments.is_empty() {
@@ -5419,6 +5424,7 @@ async fn chat(
             max_output_tokens: max_output_tokens
                 .unwrap_or_else(|| AgentConfig::default().max_output_tokens),
             read_files_max: read_files_max.unwrap_or(20).clamp(1, 200),
+            log_retention_days: log_retention_days.unwrap_or(5).clamp(1, 365),
             ..AgentConfig::default()
         },
     );
