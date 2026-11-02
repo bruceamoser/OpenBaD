@@ -72,6 +72,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0017_tool_approvals",
         include_str!("../migrations/0017_tool_approvals.sql"),
     ),
+    (
+        "0018_session_fts_text_only",
+        include_str!("../migrations/0018_session_fts_text_only.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.

@@ -190,8 +190,12 @@ CREATE VIRTUAL TABLE session_events_fts USING fts5(
 ```
 
 The application writes `search_text` for surface events, and triggers keep the
-FTS index in sync on insert, update, and delete. Session search joins the FTS
-rows back to `session_events` and filters by `sessions.workspace_id`.
+FTS index in sync on insert, update, and delete. The index holds that column and
+nothing else. Because the table is external-content, `snippet()` re-reads
+`search_text` to build a preview, so a row indexed from anything else produced a
+NULL snippet and failed the whole call. Terms that exist only inside a payload —
+a tool-call argument, say — are therefore not searchable. Session search joins
+the FTS rows back to `session_events` and filters by `sessions.workspace_id`.
 
 ### 4.4 Projections
 
