@@ -15651,7 +15651,7 @@ impl Tool for SessionTool {
                     .with_metadata(json!({"events": events.len(), "session_id": session_id})))
             }
             action => Err(ToolError::InvalidArgument(format!(
-                "unsupported session action: {action}"
+                "unsupported session action: {action}. Use \"search\" to find events by text or \"read\" to read a sequence range from one session"
             ))),
         }
     }

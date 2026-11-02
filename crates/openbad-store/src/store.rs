@@ -2098,7 +2098,10 @@ impl Store {
                     session_title: row.get(1)?,
                     seq: row.get::<_, i64>(2)?.max(0) as u64,
                     kind: row.get(3)?,
-                    snippet: row.get(4)?,
+                    // Even with the index rebuilt from `search_text`, a row can
+                    // arrive without a preview. That should cost the preview,
+                    // never the whole search.
+                    snippet: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     created_at: row.get(5)?,
                 })
             },
@@ -4080,7 +4083,7 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         assert_eq!(
             store.schema_version().expect("version"),
-            "0017_tool_approvals"
+            "0018_session_fts_text_only"
         );
     }
 
@@ -4351,6 +4354,51 @@ mod tests {
             .expect("prune");
         assert_eq!(pruned, 1);
         assert!(store.get_subagent("agent-1").expect("get").is_none());
+    }
+
+    #[test]
+    fn search_never_dies_on_an_event_without_text() {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace("demo", "/tmp/openbad-session-search-text")
+            .expect("workspace");
+        let session = store
+            .create_session(Some(workspace), Some("Cache design"))
+            .expect("session");
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::UserMessage)
+                    .with_payload(json!({"content": "How should the cache prefix stay stable?"})),
+            )
+            .expect("user event");
+        // A tool-call-only step: its payload carries text, its `search_text` is
+        // NULL. Indexing the payload is what used to make `snippet()` return
+        // NULL and fail every search that matched this row.
+        store
+            .append_event(
+                session,
+                NewEvent::new(SessionEventKind::AssistantMessage).with_payload(json!({
+                    "tool_calls": [{"function": {"name": "exec_run", "arguments": "{\"command\":\"ripgrep kamvas\"}"}}]
+                })),
+            )
+            .expect("assistant event");
+
+        let hits = store
+            .search_session_events(workspace, "cache", 10)
+            .expect("search over a session containing a textless event");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].snippet,
+            "How should the [cache] prefix stay stable?"
+        );
+
+        // The accepted trade: a term that lives only inside a payload is no
+        // longer searchable, and its absence is a miss rather than an error.
+        let payload_only = store
+            .search_session_events(workspace, "kamvas", 10)
+            .expect("search for a payload-only term");
+        assert!(payload_only.is_empty(), "{payload_only:?}");
     }
 
     #[test]
