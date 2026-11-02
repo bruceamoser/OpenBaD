@@ -117,6 +117,67 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year + i64::from(month <= 2), month, day)
 }
 
+/// Stops GLib criticals from killing the window.
+///
+/// GTK reaches into GSettings while opening the display, and a desktop whose
+/// schemas disagree — or a recent-files list pointing at a CIFS share that
+/// returns no size — makes it raise a critical. GLib aborts on a *fatal* level
+/// and skips every handler while doing so, so registering a handler is not
+/// enough: the fatal mask has to be narrowed first.
+///
+/// `g_error` stays fatal on purpose. It is GLib's "this cannot continue"
+/// contract, and the app should not pretend otherwise.
+#[cfg(target_os = "linux")]
+pub fn init_glib_logging() {
+    let previous = glib::log_set_always_fatal(glib::LogLevels::LEVEL_ERROR);
+    if previous.contains(glib::LogLevels::LEVEL_CRITICAL) {
+        record(
+            "WARN",
+            &format!(
+                "glib treated criticals as fatal ({previous:?}); narrowed to errors so a \
+                 desktop-integration warning cannot kill the window"
+            ),
+        );
+    }
+    // The default handler is the one that runs for every domain and every
+    // level, which is what routes "GLib-GIO" and friends here instead of to the
+    // handler that aborts.
+    glib::log_set_default_handler(|domain, level, message| {
+        record(
+            "GLIB",
+            &format!("{} {level:?}: {message}", domain.unwrap_or("GLib")),
+        );
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn init_glib_logging() {}
+
+/// Handles `--version` and `--help` before anything touches the display.
+///
+/// Returns the exit code when the process should stop there. This used to reach
+/// GTK, which aborted on a desktop-integration `g_error` — so the version probe
+/// needed a working session bus, a display, and a compatible schema set.
+pub fn early_exit_for(arguments: &[String]) -> Option<i32> {
+    for argument in arguments {
+        match argument.as_str() {
+            "--version" | "-V" => {
+                println!("openbad-desktop {}", env!("CARGO_PKG_VERSION"));
+                return Some(0);
+            }
+            "--help" | "-h" => {
+                println!(
+                    "openbad-desktop {}\n\nUsage: openbad-desktop [--version] [--help]\n\nWith no flag, opens the desktop application.",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Some(0);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,19 +193,26 @@ mod tests {
         assert!(stamp.ends_with('Z'), "{stamp}");
     }
 
-    // One test owns OPENBAD_DB_PATH: two tests setting it in parallel would race.
+    // One test owns OPENBAD_DB_PATH: two setting it in parallel would race. It
+    // also proves the crash behind the core dumps cannot recur — a critical that
+    // GLib considered fatal used to abort the process, and would abort this test
+    // binary if the narrowing were removed.
     #[test]
-    fn init_records_startup_and_a_real_panic_beside_the_database() {
+    fn startup_panics_and_fatal_criticals_all_reach_the_log() {
         let directory = tempfile::tempdir().expect("directory");
         let database = directory.path().join("openbad.db");
         // SAFETY: no other test in this binary reads the variable, and this test
         // is the only one that sets it.
         unsafe { std::env::set_var("OPENBAD_DB_PATH", &database) };
         let path = init().expect("log path");
+        init_glib_logging();
         record("INFO", "diagnostics test line");
 
         let panicked = panic::catch_unwind(|| panic!("the hook records this"));
         assert!(panicked.is_err(), "the panic unwound");
+
+        #[cfg(target_os = "linux")]
+        glib::g_critical!("openbad-test", "a critical the window must survive");
 
         let written = fs::read_to_string(&path).expect("log file");
         assert!(written.contains("start openbad-desktop"), "{written}");
@@ -152,6 +220,11 @@ mod tests {
         assert!(
             written.contains("PANIC the hook records this at"),
             "{written}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            written.contains("a critical the window must survive"),
+            "the critical was logged instead of aborting: {written}"
         );
         unsafe { std::env::remove_var("OPENBAD_DB_PATH") };
     }

@@ -3067,6 +3067,7 @@ dependencies = [
  "blake3",
  "calamine",
  "directories",
+ "glib",
  "ignore",
  "openbad-agent",
  "openbad-core",

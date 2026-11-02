@@ -480,3 +480,31 @@ How long those files live is a setting: **Settings → General → Limits → Lo
 retention (days)**, default 5, clamped 1–365. It governs command logs and spill
 files; the audit trail and `openbad.log` rotate by size instead, keeping one
 archive each.
+
+### Startup resilience
+
+Two ways the window used to die before it could draw, both recorded in
+`openbad.log` now:
+
+**GLib criticals.** GTK touches GSettings and the recent-files list while it
+opens the display, and a desktop that answers badly — a CIFS share that reports
+no file size, a theme package with a mismatched schema — raises a critical.
+GLib aborts on any level marked *fatal*, and while aborting it **skips every
+installed handler**, so registering one is not enough. Startup therefore narrows
+the always-fatal mask to errors before GTK initialises, then installs a default
+handler that writes warnings and criticals to the log. `g_error` stays fatal:
+that is GLib's "cannot continue" contract, and pretending otherwise would hide a
+real fault.
+
+**A schema that cannot say what it needs.** GTK3 reads
+`org.gnome.settings-daemon.plugins.xsettings` for `antialiasing` and calls
+`g_error` when the key is absent, which no handler can stop. Compiled schemas are
+resolved through `GSETTINGS_SCHEMA_DIR` and `XDG_DATA_DIRS`; launching from a
+terminal that inherits the VS Code **snap** puts a stale compiled schema ahead of
+the system one, so the key disappears and every GTK3 app started from that
+terminal aborts. The launcher is unaffected because a Plasma session's
+`XDG_DATA_DIRS` does not include the snap paths.
+
+`--version` and `--help` therefore exit before anything touches the display.
+They used to reach GTK, which made a version probe require a display, a session
+bus, and a compatible schema set — and produced core dumps when it had none.
