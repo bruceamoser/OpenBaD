@@ -518,3 +518,18 @@ clamped 1–365, and it travels `ChatInput` → `AgentConfig` →
 ceilings stay fixed as last-resort guards for a runaway day, and because they
 trim newest-first within the chosen window they can never shorten it behind your
 back. The audit trail and `openbad.log` keep size-based rotation.
+
+## v0.3.11
+
+**Session search works again.** Searching history failed with a SQLite
+"Invalid column type Null" whenever a match landed on an event with no
+`search_text` — 4867 of 6840 assistant messages, and every step and usage event.
+The index is external-content, so `snippet()` re-reads that column; the triggers
+had been indexing a JSON fallback the column never held, so those rows matched on
+keys like `cache_read_tokens` and then returned a NULL preview that failed the
+whole call. Migration 0018 rebuilds the index from `search_text` alone and the
+snippet is read as optional. Measured on a live database, searching "cache" goes
+from 4352 matches — 4193 of them JSON keys, and 79 of 82 assistant matches
+failing the call — to 80 matches, all conversation text. A term that exists only
+inside a payload is no longer searchable. `unsupported session action` also names
+the valid actions now.
