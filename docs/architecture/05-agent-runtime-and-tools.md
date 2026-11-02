@@ -359,7 +359,7 @@ Revoking a grant in Settings → Access takes effect on the next turn.
 
 | Tool | Risk | Concurrency | Notes |
 | --- | --- | --- | --- |
-| `run_command` | execute | serial | One-shot command; cwd confined to the workspace unless `allow_external_cwd` and an approved write grant cover it |
+| `run_command` | execute | serial | One-shot command; an absolute cwd needs a write grant for that directory or a declared recipe passing `allow_external_cwd` |
 | `terminal` | execute | serial | Persistent PTY session with `create`/`send`/`read`/`close` |
 | `workflow` | execute | serial | JSON workflow of tool calls with sequential steps and `for_each` fan-out |
 | `start_job` | execute | serial | Background process with ID |
@@ -627,8 +627,10 @@ previews, error state, and duration. `run_command` tees its full output to
 so large builds do not flood context.
 
 Recipes and invariant checks may declare an absolute `cwd`; named tools pass
-`allow_external_cwd` for declared recipes, while raw `run_command` refuses
-absolute cwd unless explicitly allowed. `check: manual` (or `~`/`attested`)
+`allow_external_cwd` for declared recipes. Raw `run_command` also accepts an
+absolute cwd inside the workspace, and an outside one the human already granted
+write access to through `request_fs_access`, so the flag is not needed twice.
+The refusal names every remedy instead of only the path. `check: manual` (or `~`/`attested`)
 records an attested, non-executed invariant. `canon_lint` skips fenced code,
 `<!-- canon-lint: off -->` regions, and `paths_ignore` globs. `yaml_query`
 flattens nested mappings and supports dotted paths/default fields.

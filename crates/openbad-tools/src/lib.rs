@@ -125,7 +125,9 @@ pub enum ToolError {
     InvalidArgument(String),
     #[error("approval required for tool: {0}")]
     ApprovalRequired(String),
-    #[error("path is outside the workspace: {0}")]
+    #[error(
+        "path is outside the workspace: {0}. Use a workspace-relative path, or call request_fs_access with that absolute path and retry once the human approves it"
+    )]
     OutsideRoot(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -4781,7 +4783,7 @@ impl Tool for VaultExecTool {
             ));
         }
         check_command_policy(context, class, &command)?;
-        let cwd = vault_command_cwd(&arguments, context)?;
+        let cwd = command_cwd(&arguments, context, false)?;
         let timeout = optional_usize(&arguments, "timeout_seconds")
             .unwrap_or(30)
             .clamp(1, 600) as u64;
@@ -4904,21 +4906,41 @@ fn vault_tool_error(error: openbad_vault::VaultError) -> ToolError {
     ToolError::Failed(format!("vault: {error}"))
 }
 
-fn vault_command_cwd(arguments: &Value, context: &ToolContext) -> Result<PathBuf, ToolError> {
+/// Resolves a command's working directory. An absolute path is accepted once the
+/// human granted it, or when the caller opts in with `allow_external_cwd`; a
+/// relative path resolves like any other workspace target.
+fn command_cwd(
+    arguments: &Value,
+    context: &ToolContext,
+    accepts_flag: bool,
+) -> Result<PathBuf, ToolError> {
     let Some(cwd) = optional_string(arguments, "cwd") else {
         return Ok(context.workspace.root().to_path_buf());
     };
     let candidate = Path::new(&cwd);
-    if candidate.is_absolute() {
-        return Err(ToolError::OutsideRoot(cwd));
+    if !candidate.is_absolute() {
+        return context.resolve_write(candidate);
     }
-    let path = context.workspace.resolve(candidate)?;
-    if !path.is_dir() {
+    // Inside the workspace, or covered by a grant, an absolute path is just as
+    // valid as a relative one and needs no flag.
+    if let Ok(resolved) = context.resolve_write(candidate) {
+        return Ok(resolved);
+    }
+    let opted_in = accepts_flag && optional_bool(arguments, "allow_external_cwd").unwrap_or(false);
+    if !opted_in {
+        return Err(ToolError::InvalidArgument(format!(
+            "cwd is outside the workspace: {cwd}. Call request_fs_access for that directory with write access and retry once the human approves it, use a workspace-relative cwd, or pass allow_external_cwd: true"
+        )));
+    }
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|error| ToolError::InvalidArgument(format!("cwd: {error}")))?;
+    if !canonical.is_dir() {
         return Err(ToolError::InvalidArgument(format!(
             "cwd is not a directory: {cwd}"
         )));
     }
-    Ok(path)
+    Ok(canonical)
 }
 
 fn read_output_stream(
@@ -5047,28 +5069,7 @@ impl Tool for RunCommandTool {
             ));
         }
         check_command_policy(context, class, &command)?;
-        let cwd = match optional_string(&arguments, "cwd") {
-            Some(cwd) => {
-                let candidate = Path::new(&cwd);
-                if candidate.is_absolute() {
-                    if !optional_bool(&arguments, "allow_external_cwd").unwrap_or(false) {
-                        return Err(ToolError::OutsideRoot(cwd));
-                    }
-                    let canonical = candidate
-                        .canonicalize()
-                        .map_err(|error| ToolError::InvalidArgument(format!("cwd: {error}")))?;
-                    if !canonical.is_dir() {
-                        return Err(ToolError::InvalidArgument(format!(
-                            "cwd is not a directory: {cwd}"
-                        )));
-                    }
-                    canonical
-                } else {
-                    context.resolve_write(candidate)?
-                }
-            }
-            None => context.workspace.root().to_path_buf(),
-        };
+        let cwd = command_cwd(&arguments, context, true)?;
         let timeout = optional_usize(&arguments, "timeout_seconds")
             .unwrap_or(120)
             .clamp(1, 600) as u64;
@@ -17226,14 +17227,17 @@ invariants:
             .await
             .expect("external recipe");
         assert!(recipe.content.contains("passed"));
+        let external_cwd = external.path().to_string_lossy().into_owned();
         let denied = RunCommandTool
-            .execute(
-                json!({"command": "pwd", "cwd": external.path().to_string_lossy()}),
-                &context,
-            )
+            .execute(json!({"command": "pwd", "cwd": external_cwd}), &context)
             .await
             .expect_err("external cwd requires flag");
-        assert!(denied.to_string().contains("outside the workspace"));
+        assert_eq!(
+            denied.to_string(),
+            format!(
+                "invalid argument: cwd is outside the workspace: {external_cwd}. Call request_fs_access for that directory with write access and retry once the human approves it, use a workspace-relative cwd, or pass allow_external_cwd: true"
+            )
+        );
 
         let invariants = CheckInvariantsTool
             .execute(json!({}), &context)
@@ -20753,6 +20757,58 @@ invariants:
             "files": ["../escape.zip"]
         }));
         assert!(matches!(traversal, Err(ToolError::InvalidArgument(_))));
+    }
+
+    #[tokio::test]
+    async fn an_absolute_cwd_inside_the_workspace_is_accepted_without_a_flag() {
+        let workspace = tempdir().expect("workspace");
+        let inner = workspace.path().join("sub");
+        fs::create_dir(&inner).expect("sub");
+        let mut context = context(workspace.path());
+        context.allow_commands = true;
+
+        let ran = RunCommandTool
+            .execute(
+                json!({"command": "pwd", "cwd": inner.to_string_lossy()}),
+                &context,
+            )
+            .await
+            .expect("absolute cwd inside the workspace runs without a flag");
+        let canonical = inner.canonicalize().expect("canonical");
+        assert!(
+            ran.content.contains(canonical.to_string_lossy().as_ref()),
+            "command ran in the requested directory: {}",
+            ran.content
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_directory_is_accepted_as_command_cwd_without_the_flag() {
+        let workspace = tempdir().expect("workspace");
+        let approved = tempdir().expect("approved");
+        let mut context = context(workspace.path());
+        context.allow_commands = true;
+
+        context.set_outside_grants(vec![OutsideGrant {
+            id: "grant-1".to_owned(),
+            path: approved.path().to_path_buf(),
+            write_access: true,
+            reason: "test".to_owned(),
+        }]);
+        let ran = RunCommandTool
+            .execute(
+                json!({"command": "pwd", "cwd": approved.path().to_string_lossy()}),
+                &context,
+            )
+            .await
+            .expect("approved cwd runs without the flag");
+        let approved_dir = approved.path().canonicalize().expect("canonical");
+        assert!(
+            ran.content
+                .contains(approved_dir.to_string_lossy().as_ref()),
+            "command ran in the approved directory: {}",
+            ran.content
+        );
     }
 
     #[tokio::test]
