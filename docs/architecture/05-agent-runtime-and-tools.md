@@ -627,18 +627,24 @@ previews, error state, and duration. `run_command` tees its full output to
 so large builds do not flood context.
 
 **Retention.** None of that bookkeeping grows without bound, and **age decides**:
-logs live five days. `openbad_workspace::prune_directory` removes anything older
-than the window, and the file-count and byte ceilings exist only so one runaway
-day cannot fill a disk — they trim the newest first, so a busy day never shortens
-the window for an ordinary one. `rotate_file` renames a file to `<name>.1` at a
-size threshold, replacing the previous archive so one generation always survives.
+the window is a setting (Settings → General → Limits → *Log retention (days)*,
+default five, clamped to 1–365). `openbad_workspace::prune_directory` removes
+anything older than the window, and the file-count and byte ceilings exist only
+so one runaway day cannot fill a disk — they trim the newest first, so a busy day
+never shortens the window for an ordinary one. `rotate_file` renames a file to
+`<name>.1` at a size threshold, replacing the previous archive so one generation
+always survives.
 
 | Location | Window | Ceiling |
 | --- | --- | --- |
-| `.openbad/logs` | 5 days | 4000 files, 256 MiB |
-| `.openbad/spill` | 5 days | 2000 files, 128 MiB |
-| `.openbad/audit.jsonl` | rotates at 8 MiB | one archive |
-| `openbad.log` | rotates at 4 MiB | one archive |
+| `.openbad/logs` | the setting (default 5 days) | 4000 files, 256 MiB |
+| `.openbad/spill` | the setting (default 5 days) | 2000 files, 128 MiB |
+| `.openbad/audit.jsonl` | n/a — single append-only file | rotates at 8 MiB, one archive |
+| `openbad.log` | n/a — rotates by size | rotates at 4 MiB, one archive |
+
+The setting reaches the tools as `ToolContext::log_retention_days`, set from
+`AgentConfig` by the host. The two ceilings are not settings: they are last-resort
+guards, and changing them changes nothing until a single window exceeds them.
 
 Pruning is best effort: a directory that cannot be read is left alone, because
 tidying up must never fail the tool call that triggered it. A file stamped in the

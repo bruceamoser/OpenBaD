@@ -153,6 +153,8 @@ type Preferences = {
   maxOutputTokens: number;
   /** Paths one `read_files` call may take. */
   readFilesMax: number;
+  /** Days of command logs and spill files to keep. */
+  logRetentionDays: number;
 };
 
 type PermissionMode = AccessMode;
@@ -180,6 +182,7 @@ const defaultPreferences: Preferences = {
   notifyOnCompletion: true,
   maxOutputTokens: 16384,
   readFilesMax: 20,
+  logRetentionDays: 5,
 };
 
 function clampNumber(
@@ -222,6 +225,12 @@ function loadPreferences(): Preferences {
           1,
           200,
           defaultPreferences.readFilesMax,
+        ),
+        logRetentionDays: clampNumber(
+          parsed.logRetentionDays,
+          1,
+          365,
+          defaultPreferences.logRetentionDays,
         ),
       };
     }
@@ -467,6 +476,7 @@ export default function App() {
   );
   const [maxOutputTokens, setMaxOutputTokens] = useState(preferences.maxOutputTokens);
   const [readFilesMax, setReadFilesMax] = useState(preferences.readFilesMax);
+  const [logRetentionDays, setLogRetentionDays] = useState(preferences.logRetentionDays);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [indexSummary, setIndexSummary] = useState<WorkspaceIndexSummary | null>(null);
@@ -886,12 +896,21 @@ export default function App() {
           notifyOnCompletion,
           maxOutputTokens,
           readFilesMax,
+          logRetentionDays,
         }),
       );
     } catch {
       // Storage can be unavailable in hardened webviews; preferences are optional.
     }
-  }, [maxOutputTokens, model, notifyOnCompletion, readFilesMax, reasoningEffort, thinking]);
+  }, [
+    logRetentionDays,
+    maxOutputTokens,
+    model,
+    notifyOnCompletion,
+    readFilesMax,
+    reasoningEffort,
+    thinking,
+  ]);
 
   useEffect(() => {
     setProjectNameDraft(activeProject?.name ?? "");
@@ -1653,6 +1672,7 @@ export default function App() {
           attachments: pending,
           maxOutputTokens,
           readFilesMax,
+          logRetentionDays,
         },
         (event) => {
           if (event.type === "content" || event.type === "reasoning") {
@@ -3133,6 +3153,8 @@ export default function App() {
           onMaxOutputTokens={setMaxOutputTokens}
           readFilesMax={readFilesMax}
           onReadFilesMax={setReadFilesMax}
+          logRetentionDays={logRetentionDays}
+          onLogRetentionDays={setLogRetentionDays}
           permissionMode={permissionMode}
           onPermissionMode={changePermissionMode}
           accessGrants={accessGrants}
@@ -4007,6 +4029,8 @@ function SettingsDialog({
   onMaxOutputTokens,
   readFilesMax,
   onReadFilesMax,
+  logRetentionDays,
+  onLogRetentionDays,
   permissionMode,
   onPermissionMode,
   accessGrants,
@@ -4041,6 +4065,8 @@ function SettingsDialog({
   onMaxOutputTokens: (value: number) => void;
   readFilesMax: number;
   onReadFilesMax: (value: number) => void;
+  logRetentionDays: number;
+  onLogRetentionDays: (value: number) => void;
   permissionMode: PermissionMode;
   onPermissionMode: (value: PermissionMode) => void;
   accessGrants: OutsideAccessGrant[];
@@ -4171,6 +4197,25 @@ function SettingsDialog({
                     onChange={(event) =>
                       onReadFilesMax(
                         Math.min(200, Math.max(1, Number(event.target.value) || 1)),
+                      )
+                    }
+                    className="mt-1 w-32 rounded border border-obd-line bg-obd-inset px-2 py-1 text-[12px] text-obd-body"
+                  />
+                </label>
+                <label className="block text-[12px] text-obd-body">
+                  Log retention (days)
+                  <span className="mt-0.5 block text-[11px] leading-5 text-obd-subtle">
+                    Command logs and spilled tool output older than this are deleted.
+                    Nothing survives forever; a busy day cannot shorten the window.
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={logRetentionDays}
+                    onChange={(event) =>
+                      onLogRetentionDays(
+                        Math.min(365, Math.max(1, Number(event.target.value) || 1)),
                       )
                     }
                     className="mt-1 w-32 rounded border border-obd-line bg-obd-inset px-2 py-1 text-[12px] text-obd-body"
