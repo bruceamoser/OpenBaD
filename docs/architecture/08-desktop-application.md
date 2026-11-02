@@ -446,3 +446,32 @@ locally with:
 cd apps/desktop && ./ui/node_modules/.bin/tauri build --no-bundle --debug
 cd native-e2e && npm test
 ```
+
+## 12. Diagnostics
+
+Two records exist, for different questions.
+
+**What happened in a turn** lives in `openbad.db`. `session_events` holds the
+user message, the assistant text and reasoning, every tool call with its exact
+arguments, every tool result with full content and duration, token usage, and
+provider errors verbatim, including the provider's `request_id`. Sessions point
+at their root through `sessions.workspace_id`, and `workspaces.path` holds it.
+
+Read it with `scripts/diagnostics.py`, which opens the database read-only so a
+running app is undisturbed, redacts credentials, and summarises by default:
+
+```bash
+scripts/diagnostics.py --since 2h --errors        # failures only
+scripts/diagnostics.py --list                     # sessions, with workspace roots
+scripts/diagnostics.py --session <id> --full      # the exchange, tool calls included
+```
+
+**What happened before a session existed** lives in `openbad.log`, beside the
+database. Startup writes the version, pid, and platform; a panic hook records
+the message and source location before the process dies. The file is capped at
+4 MiB with one rotation, so it cannot grow without bound, and it honors
+`OPENBAD_DB_PATH` so an isolated automation run logs beside its own database.
+Tail it with `scripts/diagnostics.py --log 50`.
+
+Neither record contains secrets: credentials are never written, and the reader
+redacts anything that looks like one.

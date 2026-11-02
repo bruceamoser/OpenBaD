@@ -1,4 +1,5 @@
 mod clipboard;
+mod diagnostics;
 mod git;
 mod preview;
 mod process;
@@ -5972,8 +5973,10 @@ fn ensure_defaults(store: &Store) -> Result<(), String> {
 }
 
 pub fn run() {
+    diagnostics::init();
     let store = Store::open_default().expect("failed to open the OpenBaD store");
     ensure_defaults(&store).expect("failed to seed default providers");
+    diagnostics::record("INFO", "store opened");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
