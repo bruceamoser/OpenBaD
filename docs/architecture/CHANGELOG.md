@@ -496,3 +496,15 @@ either a summary or, with `--full`, the exchange with tool calls and reasoning;
 now writes `openbad.log` beside the database — startup version, pid, and
 platform, plus any panic with its message and location — capped at 4 MiB with
 one rotation and following `OPENBAD_DB_PATH` for isolated runs.
+
+## v0.3.9
+
+**Five days of logs, then gone.** Nothing pruned `.openbad/`: one workspace had
+2195 command logs, another 1326, and `spill/` and `audit.jsonl` only grew. Age is
+now the rule — command logs and spill files live five days — with file-count and
+byte ceilings kept only as a backstop so a runaway day cannot fill a disk. The
+audit trail rotates at 8 MiB keeping one archive, and `openbad.log` rotates at
+4 MiB through the same helper. Pruning is best effort, never prunes directories
+or symlinks, and keeps a file whose timestamp is in the future rather than
+deleting it over a clock disagreement. `.openbad/undo` and the session database
+are recovery and product data and stay outside the policy.
