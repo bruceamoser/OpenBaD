@@ -533,3 +533,17 @@ from 4352 matches — 4193 of them JSON keys, and 79 of 82 assistant matches
 failing the call — to 80 matches, all conversation text. A term that exists only
 inside a payload is no longer searchable. `unsupported session action` also names
 the valid actions now.
+
+## v0.3.12
+
+**Startup no longer dies on a GLib log.** Seven core dumps in seven days were
+SIGABRT. GLib aborts on any level in its always-fatal mask and **skips every
+installed handler** while doing so, so the fix is to narrow that mask to errors
+before GTK initialises and then route warnings and criticals to `openbad.log` —
+verified with a throwaway C program, not assumed. `g_error` stays fatal on
+purpose. `--version` and `--help` also exit before anything touches the display:
+they used to reach `gtk_init_check`, which calls `g_error` when the xsettings
+schema has no `antialiasing` key — the case in any terminal inheriting the VS
+Code snap's schema paths. Four of the seven dumps came from a version probe that
+never needed a display. The six CIFS-share entries behind the original critical
+were removed from the recent-files list, with a backup.
