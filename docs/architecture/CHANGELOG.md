@@ -508,3 +508,13 @@ audit trail rotates at 8 MiB keeping one archive, and `openbad.log` rotates at
 or symlinks, and keeps a file whose timestamp is in the future rather than
 deleting it over a clock disagreement. `.openbad/undo` and the session database
 are recovery and product data and stay outside the policy.
+
+## v0.3.10
+
+**Log retention is yours to set.** The five-day window from v0.3.9 was hardcoded;
+it is now **Settings → General → Limits → Log retention (days)**, default 5,
+clamped 1–365, and it travels `ChatInput` → `AgentConfig` →
+`ToolContext::log_retention_days` to the prune sites. The file-count and byte
+ceilings stay fixed as last-resort guards for a runaway day, and because they
+trim newest-first within the chosen window they can never shorten it behind your
+back. The audit trail and `openbad.log` keep size-based rotation.
