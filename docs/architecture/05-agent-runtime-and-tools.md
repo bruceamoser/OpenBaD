@@ -237,14 +237,21 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-**Advertised surface (ADR-008).** The model is given `discover_tools` plus the
+**Advertised surface (ADR-008).** The model is given `tool_search` plus the
 active tool set — by default the six hot tools (`read_file`, `write_file`,
 `edit_file`, `run_command`, `grep`, `list_dir`) — flat, one level of arguments,
-capped at 30 advertised definitions. `discover_tools` searches the built-in
-catalogue, returns each match with its full argument schema, and names what it
-found in `metadata.activate`; the host carries that set into the next turn, so a
-discovery step pays for itself once. Activation is per session because an agent
-is built per turn.
+capped at 30 advertised definitions. `tool_search` covers **both** the built-in
+catalogue and any configured MCP server, returns each built-in match with its
+full argument schema, and names what it found in `metadata.activate`. The
+advertised set is rebuilt every step, so an activated tool is callable on the
+step that follows; the host also carries the set into the next turn, per
+session, because an agent is built per turn.
+
+A model that keeps emitting unreadable arguments is re-asked twice and then the
+turn stops with an explanation, rather than looping. Scratch directories
+(`/tmp`, `/var/tmp`, `/dev/shm`, `/run/user`, and the platform temp root) need
+no outside-access grant — scratch space is ephemeral, not a trust boundary —
+unless `ToolContext::scratch_access` is turned off.
 
 The `_run` facades below are **no longer advertised**. They remain callable so
 the workflow engine, older transcripts, and tests keep working, and the repair
