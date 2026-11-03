@@ -9,6 +9,7 @@
 | [005](005-capability-seams.md) | Capability seams and plugin strategy | Accepted |
 | [006](006-desktop-first-deepseek-first.md) | Desktop-first, DeepSeek-first | Accepted |
 | [007](007-deepseek-first-provider-strategy.md) | DeepSeek-first provider strategy | Accepted |
+| [008](008-flat-tools-activation-discovery.md) | Flat tools with activation-based discovery | Proposed |
 
 ADRs are immutable once accepted. A changed decision is a new ADR that
 supersedes the old one.
