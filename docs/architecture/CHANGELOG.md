@@ -547,3 +547,24 @@ schema has no `antialiasing` key — the case in any terminal inheriting the VS
 Code snap's schema paths. Four of the seven dumps came from a version probe that
 never needed a display. The six CIFS-share entries behind the original critical
 were removed from the recent-files list, with a backup.
+
+## v0.3.13
+
+**The envelope is gone from the advertised surface.** ADR-008's first slice: the
+model now sees `discover_tools` plus the active set — six hot tools by default —
+flat, one level of arguments, capped at 30 definitions. `<domain>_run` is no
+longer advertised but stays callable for the workflow engine, older transcripts,
+and tests. `discover_tools` returns each match with its full argument schema and
+reports the names in `metadata.activate`; the agent records them and the desktop
+carries the wider set into the next turn, per session.
+
+Why: 39% of 150 measured tool errors were proxy-envelope or JSON serialization
+failures, and three repair patches never moved that share. No provider or
+surveyed harness nests JSON inside JSON, and Anthropic documents that tool
+selection degrades past 30–50 advertised tools — we sat at 36 while paying the
+error share. Evidence, sources, and unverified flags live in
+`docs/architecture/research/tool-call-serialization-survey.md`.
+
+Known limitation: the advertised list is fixed for a turn because it is part of
+the cached prompt prefix, so an activated tool becomes selectable on the next
+turn. Moving schema construction into the step loop is the follow-up.
