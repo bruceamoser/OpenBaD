@@ -20,7 +20,9 @@
 | 11 | [Project Areas and the Split Workspace](11-project-areas-and-split-workspace.md) | Project-scoped repos, knowledge, RAG, memory, tools, artifacts |
 
 Implementation planning lives in [`../plans/`](../plans/). Decisions live in
-[`../adr/`](../adr/).
+[`../adr/`](../adr/). External evidence that informs a pending decision lives in
+[`research/`](research/), currently
+[tool-call serialization](research/tool-call-serialization-survey.md).
 
 ## Reading order
 
