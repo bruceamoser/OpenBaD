@@ -1,7 +1,8 @@
 # ADR-008 — Flat tools with activation-based discovery
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-03
+- **Accepted:** 2026-11-03
 
 ## Context
 
@@ -137,14 +138,23 @@ Measured from the session store, before and after, over comparable traffic:
   does not document. Revisit after the flat surface lands.
 - **Do nothing.** Rejected: a measured 2.1% failure rate with a known cause.
 
+## Resolved during acceptance
+
+**Activation is session-scoped, carried by the host.** The desktop constructs a
+fresh agent per chat invocation (`default_agent` inside the `chat` command), so
+nothing inside the agent survives a turn. The active set therefore travels in
+`AgentConfig` into each turn, and the host owns persisting what a turn activated.
+Within a turn, a tool that activates others updates the set the agent uses for
+its following steps, so a discovery call still pays off immediately.
+
 ## Open questions
 
 - Should discovery return full schemas, or names plus one-line descriptions with
   a second call for the schema? (Affects activation cost and prompt size.)
 - What happens when activation would exceed the 30-tool cap — evict least-recently
   activated, or refuse and explain?
-- Does activation belong to the session or the turn, and how does it interact with
-  subagents that inherit a parent's set?
+- How do subagents inherit a parent's active set, and may a child activate tools
+  the parent never saw?
 
 ## Supersedes
 
