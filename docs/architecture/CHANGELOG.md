@@ -568,3 +568,24 @@ error share. Evidence, sources, and unverified flags live in
 Known limitation: the advertised list is fixed for a turn because it is part of
 the cached prompt prefix, so an activated tool becomes selectable on the next
 turn. Moving schema construction into the step loop is the follow-up.
+
+## v0.3.14
+
+**ADR-008 finished.** The advertised tool set is rebuilt every step, so a tool
+found by `tool_search` is callable on the step that follows instead of the next
+turn. An unreadable argument payload is still reported in band, but two in a row
+now end the turn with an explanation rather than looping — repair cannot fix
+DeepSeek's value-level corruption, so re-asking is the whole remedy. Scratch
+directories (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/user`, the platform temp root)
+need no outside-access grant; a live session writing a script to `/tmp` was
+refused, and scratch space is ephemeral rather than a trust boundary
+(`ToolContext::scratch_access` turns it off for locked-down deployments).
+
+DeepSeek **strict mode** is available behind an off-by-default setting: schemas
+are rewritten so every property is required and no extras are allowed, with
+optional arguments made nullable, and requests move to the beta endpoint that
+serves it. It is unmeasured — one session with it on is the way to know.
+
+`discover_tools` and the MCP-only `tool_search` are now one `tool_search`
+covering both catalogues; an unconfigured MCP reads as an empty list instead of
+failing.
