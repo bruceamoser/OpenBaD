@@ -100,6 +100,10 @@ pub struct AppState {
     /// Reads recorded per session, so a file read in one turn does not have to
     /// be read again by the next one while it is unchanged.
     session_reads: Arc<Mutex<HashMap<SessionId, SessionReads>>>,
+    /// Tools advertised per session. An agent is built per turn, so activation
+    /// from `tool_search` has to live here to survive into the next one
+    /// (ADR-008).
+    active_tools: Arc<Mutex<HashMap<SessionId, Vec<String>>>>,
     /// Questions waiting for the human, keyed by request id.
     pending_questions: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<QuestionAnswer>>>>,
 }
@@ -5426,6 +5430,17 @@ async fn chat(
                 .unwrap_or_else(|| AgentConfig::default().max_output_tokens),
             read_files_max: read_files_max.unwrap_or(20).clamp(1, 200),
             log_retention_days: log_retention_days.unwrap_or(5).clamp(1, 365),
+            active_tools: state
+                .active_tools
+                .lock()
+                .ok()
+                .and_then(|sets| sets.get(&session).cloned())
+                .unwrap_or_else(|| {
+                    openbad_tools::HOT_TOOLS
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect()
+                }),
             ..AgentConfig::default()
         },
     );
@@ -5539,7 +5554,13 @@ async fn chat(
     let outcome = agent.run_with_observer(history, &observer).await;
     run_guard.finish_inbox();
     let run = match outcome {
-        Ok(run) => run,
+        Ok(run) => {
+            // Carry whatever `tool_search` activated into the next turn.
+            if let Ok(mut sets) = state.active_tools.lock() {
+                sets.insert(session, run.active_tools.clone());
+            }
+            run
+        }
         Err(error) => {
             if let Ok(store) = state.store.lock() {
                 if !matches!(error, AgentError::Cancelled) {
@@ -5999,6 +6020,7 @@ pub fn run() {
             terminal: Arc::new(openbad_terminal::TerminalManager::new()),
             mcp: McpManagers::default(),
             session_reads: Arc::new(Mutex::new(HashMap::new())),
+            active_tools: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(NotificationFocus::default())

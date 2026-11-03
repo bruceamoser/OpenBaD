@@ -8,6 +8,32 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+/// Tools the model may call without spending a step on discovery.
+pub const HOT_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "run_command",
+    "grep",
+    "list_dir",
+];
+
+/// Selection accuracy degrades past 30-50 advertised tools, so this is a
+/// ceiling and not a target (ADR-008).
+pub const MAX_ADVERTISED_TOOLS: usize = 30;
+
+/// The built-in discovery entry point. Names and schemas arrive together, so a
+/// discovered tool can be called on the very next step.
+///
+/// `tool_search` is a different, older tool that searches *MCP* servers; this
+/// one searches the built-in catalogue. Merging them is follow-up work, and
+/// keeping the names distinct means neither silently changes behaviour.
+pub const TOOL_SEARCH: &str = "discover_tools";
+
+/// How many matches one search returns, which also bounds how much a single
+/// discovery call can activate.
+const TOOL_SEARCH_LIMIT: usize = 10;
+
 /// The window comes from the user's setting; these ceilings are generous on
 /// purpose, so they stop one runaway day filling a disk without ever shortening
 /// the window on an ordinary one.
@@ -1593,10 +1619,90 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Definitions advertised for one request: the discovery tool plus every
+    /// active tool, flat.
+    ///
+    /// `_run` facades are never advertised any more — they were the source of
+    /// the envelope failures ADR-008 removes. They stay callable so the workflow
+    /// engine, tests, and older transcripts keep working.
+    #[must_use]
+    pub fn advertised(&self, active: &[String]) -> Vec<ToolDefinition> {
+        if !self.grouped {
+            return self.definitions();
+        }
+        let mut definitions = vec![tool_search_definition()];
+        // Deterministic order keeps the prompt prefix stable when the set is
+        // unchanged, which is what makes activation cache-cheap.
+        let mut names: Vec<&str> = active
+            .iter()
+            .map(String::as_str)
+            .filter(|name| *name != TOOL_SEARCH)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        for name in names {
+            if definitions.len() >= MAX_ADVERTISED_TOOLS {
+                break;
+            }
+            if let Some(tool) = self.tools.get(name) {
+                definitions.push(tool.definition());
+            }
+        }
+        definitions
+    }
+
+    #[must_use]
+    pub fn openai_tools_for(&self, active: &[String]) -> Vec<Value> {
+        self.advertised(active)
+            .iter()
+            .map(ToolDefinition::openai_schema)
+            .collect()
+    }
+
+    /// Tools matching `query`, so `tool_search` can hand back names, purposes,
+    /// and schemas in one answer. Matching is deliberately simple and local:
+    /// domain name, tool name, or description.
+    #[must_use]
+    pub fn search(&self, query: &str, domain: Option<&str>, limit: usize) -> Vec<ToolDefinition> {
+        let needle = query.trim().to_lowercase();
+        let mut matches: Vec<ToolDefinition> = self
+            .tools
+            .values()
+            .map(|tool| tool.definition())
+            .filter(|definition| definition.name != TOOL_SEARCH)
+            .filter(|definition| {
+                domain.is_none_or(|domain| tool_domain(&definition.name) == domain)
+            })
+            .filter(|definition| {
+                if needle.is_empty() {
+                    return true;
+                }
+                // Every term has to appear somewhere in the name, the purpose,
+                // or the domain, so "write file" finds `write_file`.
+                let haystack = format!(
+                    "{} {} {}",
+                    definition.name,
+                    definition.description,
+                    tool_domain(&definition.name)
+                )
+                .to_lowercase();
+                needle
+                    .split_whitespace()
+                    .all(|term| haystack.contains(term))
+            })
+            .collect();
+        matches.sort_by(|a, b| a.name.cmp(&b.name));
+        matches.truncate(limit.clamp(1, TOOL_SEARCH_LIMIT));
+        matches
+    }
+
     #[must_use]
     pub fn risk_for_call(&self, name: &str, arguments: &Value) -> Option<RiskLevel> {
         if let Some(tool) = self.tools.get(name) {
             return Some(tool.definition().risk);
+        }
+        if name == TOOL_SEARCH {
+            return Some(RiskLevel::Read);
         }
         if self.grouped {
             if name.ends_with("_list") {
@@ -1617,6 +1723,9 @@ impl ToolRegistry {
     pub fn parallel_safe(&self, name: &str, arguments: &str) -> bool {
         if let Some(tool) = self.tools.get(name) {
             return tool.definition().risk == RiskLevel::Read;
+        }
+        if name == TOOL_SEARCH {
+            return true;
         }
         if self.grouped {
             if name.ends_with("_list") {
@@ -1648,6 +1757,33 @@ impl ToolRegistry {
     ) -> Result<ToolResult, ToolError> {
         if let Some(tool) = self.tools.get(name) {
             return finish_result(tool.execute(arguments, context).await, context);
+        }
+        if name == TOOL_SEARCH {
+            let query = optional_string(&arguments, "query").unwrap_or_default();
+            let domain = optional_string(&arguments, "domain");
+            let limit = optional_usize(&arguments, "limit").unwrap_or(TOOL_SEARCH_LIMIT);
+            let matches = self.search(&query, domain.as_deref(), limit);
+            let activate: Vec<String> = matches.iter().map(|tool| tool.name.clone()).collect();
+            let body = serde_json::to_string_pretty(&json!({
+                "query": query,
+                "matches": matches
+                    .iter()
+                    .map(|definition| json!({
+                        "name": definition.name,
+                        "description": definition.description,
+                        "risk": risk_name(definition.risk),
+                        "arguments": definition.input_schema,
+                    }))
+                    .collect::<Vec<_>>(),
+                "activated": activate,
+            }))
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+            // The names travel in metadata so the agent can widen its next step
+            // without parsing the rendered text.
+            return finish_result(
+                Ok(ToolResult::ok(body).with_metadata(json!({"activate": activate}))),
+                context,
+            );
         }
         if self.grouped {
             if let Some(domain) = name.strip_suffix("_list") {
@@ -2082,6 +2218,24 @@ fn risk_name(risk: RiskLevel) -> &'static str {
         RiskLevel::Network => "network",
         RiskLevel::Destructive => "destructive",
     }
+}
+
+fn tool_search_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        TOOL_SEARCH,
+        "Find a built-in tool that does what you need, when it is not already available. Returns matching tools with their full argument schemas and makes them callable on the next turn. Search by domain (files, exec, git, memory, web, ...) or by what you want to do. To search tools on an MCP server, use tool_search instead.",
+        RiskLevel::Read,
+    )
+    .with_schema(json!({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What you want to do, or a domain name"},
+            "domain": {"type": "string", "description": "Restrict the search to one domain"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": TOOL_SEARCH_LIMIT}
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    }))
 }
 
 fn domain_list_definition(domain: &str) -> ToolDefinition {
@@ -20783,6 +20937,57 @@ invariants:
             "files": ["../escape.zip"]
         }));
         assert!(matches!(traversal, Err(ToolError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn the_advertised_surface_is_flat_and_bounded() {
+        let registry = ToolRegistry::with_builtin_tools();
+        let active: Vec<String> = HOT_TOOLS.iter().map(|name| (*name).to_owned()).collect();
+        let advertised = registry.advertised(&active);
+        let names: Vec<&str> = advertised
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+
+        assert!(names.contains(&TOOL_SEARCH), "{names:?}");
+        for hot in HOT_TOOLS {
+            assert!(names.contains(hot), "{hot} must be advertised: {names:?}");
+        }
+        assert!(
+            !names.iter().any(|name| name.ends_with("_run")),
+            "no proxy envelope may be advertised: {names:?}"
+        );
+        assert_eq!(advertised.len(), HOT_TOOLS.len() + 1);
+
+        // The cap holds even when the whole catalogue is active.
+        let all: Vec<String> = registry.tools.keys().cloned().collect();
+        assert!(registry.advertised(&all).len() <= MAX_ADVERTISED_TOOLS);
+    }
+
+    #[tokio::test]
+    async fn tool_search_returns_schemas_and_activates_its_matches() {
+        let workspace = tempdir().expect("workspace");
+        let registry = ToolRegistry::with_builtin_tools();
+        let context = context(workspace.path());
+
+        let result = registry
+            .execute(TOOL_SEARCH, json!({"query": "write file"}), &context)
+            .await
+            .expect("search runs");
+
+        let activated = result.metadata["activate"]
+            .as_array()
+            .expect("activate list");
+        assert!(
+            activated.iter().any(|name| name == "write_file"),
+            "{activated:?}"
+        );
+        // The schema travels with the match, so the next step can call it.
+        assert!(
+            result.content.contains("\"arguments\""),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]

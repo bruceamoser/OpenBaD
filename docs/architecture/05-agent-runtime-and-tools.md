@@ -237,7 +237,20 @@ The registry scopes tools by session and workspace:
 The model-facing schema list is sorted by name and hashed. It is stable for a
 series. Dynamic tools are proxied, not injected.
 
-**Domain facades.** The registry contains 136 internal tools grouped into 18
+**Advertised surface (ADR-008).** The model is given `discover_tools` plus the
+active tool set — by default the six hot tools (`read_file`, `write_file`,
+`edit_file`, `run_command`, `grep`, `list_dir`) — flat, one level of arguments,
+capped at 30 advertised definitions. `discover_tools` searches the built-in
+catalogue, returns each match with its full argument schema, and names what it
+found in `metadata.activate`; the host carries that set into the next turn, so a
+discovery step pays for itself once. Activation is per session because an agent
+is built per turn.
+
+The `_run` facades below are **no longer advertised**. They remain callable so
+the workflow engine, older transcripts, and tests keep working, and the repair
+machinery described here still applies to them.
+
+**Domain facades (legacy execution path).** The registry contains 136 internal tools grouped into 18
 domains: artifacts, collaboration, context, exec, files, git, governance,
 knowledge, mcp, memory, orchestration, plan, plugins, repos, search, session,
 snapshots, and web. The model sees two stable tools per domain:
