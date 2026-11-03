@@ -155,6 +155,8 @@ type Preferences = {
   readFilesMax: number;
   /** Days of command logs and spill files to keep. */
   logRetentionDays: number;
+  /** Ask the provider to constrain tool arguments to their schema (beta). */
+  strictTools: boolean;
 };
 
 type PermissionMode = AccessMode;
@@ -183,6 +185,7 @@ const defaultPreferences: Preferences = {
   maxOutputTokens: 16384,
   readFilesMax: 20,
   logRetentionDays: 5,
+  strictTools: false,
 };
 
 function clampNumber(
@@ -232,6 +235,10 @@ function loadPreferences(): Preferences {
           365,
           defaultPreferences.logRetentionDays,
         ),
+        strictTools:
+          typeof parsed.strictTools === "boolean"
+            ? parsed.strictTools
+            : defaultPreferences.strictTools,
       };
     }
   } catch {
@@ -477,6 +484,7 @@ export default function App() {
   const [maxOutputTokens, setMaxOutputTokens] = useState(preferences.maxOutputTokens);
   const [readFilesMax, setReadFilesMax] = useState(preferences.readFilesMax);
   const [logRetentionDays, setLogRetentionDays] = useState(preferences.logRetentionDays);
+  const [strictTools, setStrictTools] = useState(preferences.strictTools);
   const [apiKeyStatus, setApiKeyStatus] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [indexSummary, setIndexSummary] = useState<WorkspaceIndexSummary | null>(null);
@@ -897,6 +905,7 @@ export default function App() {
           maxOutputTokens,
           readFilesMax,
           logRetentionDays,
+          strictTools,
         }),
       );
     } catch {
@@ -909,6 +918,7 @@ export default function App() {
     notifyOnCompletion,
     readFilesMax,
     reasoningEffort,
+    strictTools,
     thinking,
   ]);
 
@@ -1673,6 +1683,7 @@ export default function App() {
           maxOutputTokens,
           readFilesMax,
           logRetentionDays,
+          strictTools,
         },
         (event) => {
           if (event.type === "content" || event.type === "reasoning") {
@@ -3155,6 +3166,8 @@ export default function App() {
           onReadFilesMax={setReadFilesMax}
           logRetentionDays={logRetentionDays}
           onLogRetentionDays={setLogRetentionDays}
+          strictTools={strictTools}
+          onStrictTools={setStrictTools}
           permissionMode={permissionMode}
           onPermissionMode={changePermissionMode}
           accessGrants={accessGrants}
@@ -4031,6 +4044,8 @@ function SettingsDialog({
   onReadFilesMax,
   logRetentionDays,
   onLogRetentionDays,
+  strictTools,
+  onStrictTools,
   permissionMode,
   onPermissionMode,
   accessGrants,
@@ -4067,6 +4082,8 @@ function SettingsDialog({
   onReadFilesMax: (value: number) => void;
   logRetentionDays: number;
   onLogRetentionDays: (value: number) => void;
+  strictTools: boolean;
+  onStrictTools: (value: boolean) => void;
   permissionMode: PermissionMode;
   onPermissionMode: (value: PermissionMode) => void;
   accessGrants: OutsideAccessGrant[];
@@ -4201,6 +4218,21 @@ function SettingsDialog({
                     }
                     className="mt-1 w-32 rounded border border-obd-line bg-obd-inset px-2 py-1 text-[12px] text-obd-body"
                   />
+                </label>
+                <label className="flex items-start gap-2 text-[12px] text-obd-body">
+                  <input
+                    type="checkbox"
+                    checked={strictTools}
+                    onChange={(event) => onStrictTools(event.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Constrain tool arguments to their schema (beta)
+                    <span className="mt-0.5 block text-[11px] leading-5 text-obd-subtle">
+                      Asks the provider to make malformed arguments impossible instead of
+                      recovering from them. Uses the beta endpoint; leave off if it errors.
+                    </span>
+                  </span>
                 </label>
                 <label className="block text-[12px] text-obd-body">
                   Log retention (days)

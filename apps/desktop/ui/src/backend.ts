@@ -1842,6 +1842,8 @@ export type ChatInput = {
   readFilesMax?: number;
   /** Days of command logs and spilled output to keep before they are deleted. */
   logRetentionDays?: number;
+  /** Ask the provider to constrain tool arguments to their schema (beta). */
+  strictTools?: boolean;
 };
 
 export async function respondToApproval(
@@ -1879,6 +1881,7 @@ export async function chat(
         maxOutputTokens: input.maxOutputTokens,
         readFilesMax: input.readFilesMax,
         logRetentionDays: input.logRetentionDays,
+        strictTools: input.strictTools,
       },
       onEvent: channel,
     });

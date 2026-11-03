@@ -5032,6 +5032,10 @@ pub struct ChatInput {
     /// agent default, which is five.
     #[serde(default)]
     pub log_retention_days: Option<u64>,
+    /// Ask the provider to constrain tool arguments to the schema. Beta: it
+    /// needs the strict endpoint, so the base URL follows this flag.
+    #[serde(default)]
+    pub strict_tools: Option<bool>,
 }
 
 #[tauri::command]
@@ -5233,6 +5237,7 @@ async fn chat(
         max_output_tokens,
         read_files_max,
         log_retention_days,
+        strict_tools,
     } = request;
     let prompt = message.trim().to_owned();
     if !resume && prompt.is_empty() && attachments.is_empty() {
@@ -5382,8 +5387,15 @@ async fn chat(
     };
 
     let (history, user_id, surface_seqs) = history;
-    let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
-        .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
+    let strict_tools = strict_tools.unwrap_or(false);
+    let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL").unwrap_or_else(|_| {
+        if strict_tools {
+            // Strict mode is served from the beta endpoint only.
+            openbad_llm::deepseek::BETA_BASE_URL.to_owned()
+        } else {
+            "https://api.deepseek.com".to_owned()
+        }
+    });
     let model_name = model.unwrap_or_else(|| FLASH_MODEL.to_owned());
     let thinking_enabled = thinking.unwrap_or(true);
     let effort = reasoning_effort.map(|effort| match effort.as_str() {
@@ -5410,6 +5422,20 @@ async fn chat(
             .map_err(|error| format!("session reads lock poisoned: {error}"))?;
         Arc::clone(records.entry(session).or_insert_with(new_session_reads))
     };
+    // Taken in its own block so the lock guard cannot outlive this statement.
+    let active_tools: Vec<String> = {
+        let stored = state
+            .active_tools
+            .lock()
+            .ok()
+            .and_then(|sets| sets.get(&session).cloned());
+        stored.unwrap_or_else(|| {
+            openbad_tools::HOT_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect()
+        })
+    };
     let mut agent = default_agent(
         client,
         Arc::new(WorkspaceService::new(workspace_path.clone())),
@@ -5430,17 +5456,8 @@ async fn chat(
                 .unwrap_or_else(|| AgentConfig::default().max_output_tokens),
             read_files_max: read_files_max.unwrap_or(20).clamp(1, 200),
             log_retention_days: log_retention_days.unwrap_or(5).clamp(1, 365),
-            active_tools: state
-                .active_tools
-                .lock()
-                .ok()
-                .and_then(|sets| sets.get(&session).cloned())
-                .unwrap_or_else(|| {
-                    openbad_tools::HOT_TOOLS
-                        .iter()
-                        .map(|name| (*name).to_owned())
-                        .collect()
-                }),
+            strict_tools,
+            active_tools: active_tools.clone(),
             ..AgentConfig::default()
         },
     );

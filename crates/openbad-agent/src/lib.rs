@@ -229,6 +229,10 @@ pub struct AgentConfig {
     /// tool. The host owns this across turns because an agent is built per
     /// turn (ADR-008).
     pub active_tools: Vec<String>,
+    /// Ask the provider to constrain generation to the tool schemas. Requires
+    /// the provider's strict endpoint, so the host only enables it when the
+    /// route is known to support it.
+    pub strict_tools: bool,
     /// Tool output larger than this is written to a spill file and replaced
     /// with a preview plus a retrieval hint. `0` disables spilling.
     pub spill_threshold_bytes: usize,
@@ -266,6 +270,7 @@ impl Default for AgentConfig {
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
+            strict_tools: false,
             spill_threshold_bytes: 64 * 1024,
             stream: true,
             system_prompt: None,
@@ -774,15 +779,19 @@ impl<T: HttpTransport> Agent<T> {
         self
     }
 
+    /// Runs one tool call. The flag is false when the arguments could not be
+    /// read at all, which the turn loop counts so a model that keeps emitting
+    /// unusable payloads is stopped instead of looping.
     async fn execute_tool_call(
         &self,
         step: u32,
         call: &ToolCall,
         context: &ToolContext,
         observer: &dyn AgentObserver,
-    ) -> String {
+    ) -> (String, bool) {
         let started = std::time::Instant::now();
         let name = call.function.name.as_str();
+        let mut usable = true;
         observer.on_tool_status(step, call, ToolStatus::Queued, None);
         // Providers emit invalid JSON for long payloads: a raw newline inside a
         // string or a trailing comma. Repair before refusing, because the call
@@ -984,6 +993,7 @@ impl<T: HttpTransport> Agent<T> {
                 }
             }
             Err(error) => {
+                usable = false;
                 observer.on_tool_status(
                     step,
                     call,
@@ -1014,7 +1024,7 @@ impl<T: HttpTransport> Agent<T> {
                 content.chars().take(500).collect::<String>()
             );
         }
-        content
+        (content, usable)
     }
 
     async fn close_terminals(&self) {
@@ -1071,33 +1081,11 @@ impl<T: HttpTransport> Agent<T> {
         let mut new_messages: Vec<ChatMessage> = Vec::new();
         let mut compaction: Option<CompactionRecord> = None;
         let mut compaction_attempted = false;
+        // Bounded re-ask: an unusable payload is reported in band so the model
+        // can fix it, but a model that keeps emitting them is stopped rather
+        // than looped (ADR-008).
+        let mut unusable_arguments = 0_u32;
 
-        // Activation is recorded here and applied by the host on the next
-        // turn; the advertised list for this turn is fixed once, because the
-        // tool list is part of the cached prompt prefix.
-        let tool_schemas = self
-            .tools
-            .openai_tools_for(&self.active_tools.lock().expect("active tools"));
-        let tool_tokens = estimate_tokens(
-            tool_schemas
-                .iter()
-                .map(|schema| schema.to_string().len())
-                .sum(),
-        );
-        if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
-            let names: Vec<&str> = tool_schemas
-                .iter()
-                .filter_map(|tool| tool.get("function").and_then(|f| f.get("name")))
-                .filter_map(Value::as_str)
-                .collect();
-            eprintln!(
-                "[agent] tools={} subagents={} names={}",
-                tool_schemas.len(),
-                self.subagents.is_some(),
-                names.join(",")
-            );
-        }
-        let tools_hash = hash_bytes(canonical_json(&Value::Array(tool_schemas.clone())).as_bytes());
         let system_hash = hash_bytes(system_prompt.as_bytes());
         let series_id = Uuid::now_v7();
         let mut usage_totals = UsageTotals::default();
@@ -1148,6 +1136,41 @@ impl<T: HttpTransport> Agent<T> {
                 return Err(AgentError::Cancelled);
             }
             let step_started = std::time::Instant::now();
+            // Rebuilt every step so a tool activated by discovery is selectable
+            // on the step that follows it, not only on the next turn. The order
+            // is stable, so an unchanged set hashes the same and keeps the
+            // cached prompt prefix intact.
+            // Snapshot the set so no lock guard is held across an await.
+            let active_snapshot: Vec<String> = {
+                let active = self.active_tools.lock().expect("active tools");
+                active.clone()
+            };
+            let tool_schemas = if self.config.strict_tools {
+                self.tools.openai_tools_for_strict(&active_snapshot)
+            } else {
+                self.tools.openai_tools_for(&active_snapshot)
+            };
+            let tool_tokens = estimate_tokens(
+                tool_schemas
+                    .iter()
+                    .map(|schema| schema.to_string().len())
+                    .sum(),
+            );
+            if std::env::var_os("OPENBAD_DEBUG_AGENT").is_some() {
+                let names: Vec<&str> = tool_schemas
+                    .iter()
+                    .filter_map(|tool| tool.get("function").and_then(|f| f.get("name")))
+                    .filter_map(Value::as_str)
+                    .collect();
+                eprintln!(
+                    "[agent] step={step} tools={} subagents={} names={}",
+                    tool_schemas.len(),
+                    self.subagents.is_some(),
+                    names.join(",")
+                );
+            }
+            let tools_hash =
+                hash_bytes(canonical_json(&Value::Array(tool_schemas.clone())).as_bytes());
             observer.on_step_start(step);
             let step_messages_start = new_messages.len();
             if let Some(inbox) = &self.inbox {
@@ -1618,9 +1641,14 @@ impl<T: HttpTransport> Agent<T> {
                     observer.on_tool_call(step, call);
                 }
                 if batch.len() == 1 {
-                    let content = self
+                    let (content, usable) = self
                         .execute_tool_call(step, &batch[0], &context, observer)
                         .await;
+                    unusable_arguments = if usable { 0 } else { unusable_arguments + 1 };
+                    if ensure_arguments_usable(unusable_arguments).is_err() {
+                        self.close_terminals().await;
+                        ensure_arguments_usable(unusable_arguments)?;
+                    }
                     let message = ChatMessage::tool(batch[0].id.clone(), content);
                     messages.push(message.clone());
                     new_messages.push(message);
@@ -1634,7 +1662,12 @@ impl<T: HttpTransport> Agent<T> {
                         .buffered(limit)
                         .collect::<Vec<_>>()
                         .await;
-                    for (call, content) in batch.iter().zip(contents) {
+                    for (call, (content, usable)) in batch.iter().zip(contents) {
+                        unusable_arguments = if usable { 0 } else { unusable_arguments + 1 };
+                        if ensure_arguments_usable(unusable_arguments).is_err() {
+                            self.close_terminals().await;
+                            ensure_arguments_usable(unusable_arguments)?;
+                        }
                         let message = ChatMessage::tool(call.id.clone(), content);
                         messages.push(message.clone());
                         new_messages.push(message);
@@ -2191,6 +2224,23 @@ fn normalize_history(messages: &mut Vec<ChatMessage>) {
     drop_empty_assistant_messages(messages);
 }
 
+/// How many unusable argument payloads in a row end a turn. Two re-asks lets a
+/// model correct a mistake; a third means the payload shape is beyond it and
+/// looping would only burn tokens.
+const MAX_UNUSABLE_ARGUMENTS: u32 = 2;
+
+fn ensure_arguments_usable(count: u32) -> Result<(), AgentError> {
+    if count > MAX_UNUSABLE_ARGUMENTS {
+        return Err(AgentError::InvalidToolArguments {
+            tool: "last call".to_owned(),
+            message: format!(
+                "the arguments could not be read {count} times in a row. Retrying the same shape will not help: write less in one call, split the work into smaller steps, or send the text through a tool that takes a plain string"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn append_tool_audit(
     root: &std::path::Path,
     turn: u32,
@@ -2325,6 +2375,29 @@ mod tests {
     struct MockTransport {
         responses: Mutex<VecDeque<HttpResponse>>,
         requests: Mutex<Vec<HttpRequest>>,
+    }
+
+    /// Records requests through a handle the test keeps, so the transport itself
+    /// can stay owned by the client.
+    struct SharedTransport {
+        responses: Mutex<VecDeque<HttpResponse>>,
+        requests: Arc<Mutex<Vec<openbad_llm::HttpRequest>>>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for SharedTransport {
+        async fn post(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            self.requests.lock().expect("requests").push(request);
+            self.responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .ok_or_else(|| ProviderError::Request("no mock response".to_owned()))
+        }
+
+        async fn post_stream(&self, _request: HttpRequest) -> Result<ByteStream, ProviderError> {
+            Err(ProviderError::Unsupported("streaming".to_owned()))
+        }
     }
 
     #[async_trait]
@@ -2628,6 +2701,183 @@ mod tests {
             self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(openbad_tools::ToolResult::ok("ran"))
         }
+    }
+
+    #[tokio::test]
+    async fn strict_tools_put_strict_and_all_required_on_the_wire() {
+        let directory = tempdir().expect("tempdir");
+        let body = r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#;
+
+        let requests: Arc<Mutex<Vec<openbad_llm::HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let transport = SharedTransport {
+            responses: Mutex::new(VecDeque::from([response(body)])),
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::with_builtin_tools(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                strict_tools: true,
+                ..AgentConfig::default()
+            },
+        );
+        agent.run(vec![ChatMessage::user("hi")]).await.expect("run");
+
+        let sent = requests.lock().expect("requests");
+        let payload: Value = serde_json::from_slice(&sent[0].body).expect("json");
+        let tools = payload["tools"].as_array().expect("tools");
+        assert!(!tools.is_empty());
+        for tool in tools {
+            let function = &tool["function"];
+            assert_eq!(function["strict"], json!(true), "{}", function["name"]);
+            let parameters = &function["parameters"];
+            if let Some(properties) = parameters["properties"].as_object() {
+                assert_eq!(
+                    parameters["additionalProperties"],
+                    json!(false),
+                    "{}",
+                    function["name"]
+                );
+                let required: Vec<&str> = parameters["required"]
+                    .as_array()
+                    .map(|names| names.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                for property in properties.keys() {
+                    assert!(
+                        required.contains(&property.as_str()),
+                        "{} is missing {property} from required",
+                        function["name"]
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unusable_arguments_are_reraised_twice_then_the_turn_stops() {
+        let directory = tempdir().expect("tempdir");
+        let bad = r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-x","type":"function","function":{"name":"read_file","arguments":"{\"path\": \"unterminated"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+        let transport = MockTransport {
+            responses: Mutex::new(VecDeque::from([
+                response(bad),
+                response(bad),
+                response(bad),
+                response(bad),
+            ])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::with_builtin_tools(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                policy: ToolPolicy::ReadOnly,
+                ..AgentConfig::default()
+            },
+        );
+
+        let error = agent
+            .run(vec![ChatMessage::user("read it")])
+            .await
+            .expect_err("the turn stops rather than looping");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("could not be read 3 times in a row"),
+            "{message}"
+        );
+        assert!(
+            message.contains("write less in one call"),
+            "the error says what to do differently: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_activates_a_tool_for_the_next_step_of_the_same_turn() {
+        let directory = tempdir().expect("tempdir");
+        let requests: Arc<Mutex<Vec<openbad_llm::HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let transport = SharedTransport {
+            responses: Mutex::new(VecDeque::from([
+                // Step 1: discover only. `write_todos` is deliberately not one
+                // of the hot tools, so it is not advertised yet.
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"todos\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                ),
+                // Step 2: call it, which can only work if the schema arrived.
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-2","type":"function","function":{"name":"todo_write","arguments":"{\"todos\":[{\"id\":\"a\",\"text\":\"activated\",\"state\":\"pending\"}]}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":5}}"#,
+                ),
+                response(
+                    r#"{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":2}}"#,
+                ),
+            ])),
+            requests: Arc::clone(&requests),
+        };
+        let client = DeepSeekClient::new(transport, "sk-test");
+        let agent = Agent::new(
+            client,
+            ToolRegistry::with_builtin_tools(),
+            Arc::new(WorkspaceService::new(directory.path())),
+            AgentConfig {
+                stream: false,
+                policy: ToolPolicy::FullAccess,
+                ..AgentConfig::default()
+            },
+        );
+
+        let observer = MetadataObserver {
+            metadata: Mutex::new(Value::Null),
+        };
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user("add a todo")], &observer)
+            .await
+            .expect("run");
+
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3, "three model calls");
+        let advertised = |index: usize| -> Vec<String> {
+            let body: Value =
+                serde_json::from_slice(&requests[index].body).expect("request body is json");
+            body["tools"]
+                .as_array()
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|tool| tool["function"]["name"].as_str())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let first = advertised(0);
+        assert!(first.contains(&"tool_search".to_owned()), "{first:?}");
+        assert!(
+            !first.contains(&"todo_write".to_owned()),
+            "an inactive tool must not be advertised yet: {first:?}"
+        );
+
+        let second = advertised(1);
+        assert!(
+            second.contains(&"todo_write".to_owned()),
+            "discovery must advertise its matches on the next step: {second:?}"
+        );
+
+        // The activation also leaves the turn, so the host can keep it.
+        assert!(run.active_tools.iter().any(|name| name == "todo_write"));
+        drop(requests);
+        assert!(run.new_messages.iter().any(|message| {
+            message.role == ChatRole::Tool
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| !content.starts_with("error:"))
+        }));
     }
 
     #[tokio::test]
