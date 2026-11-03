@@ -225,6 +225,10 @@ pub struct AgentConfig {
     pub read_files_max: usize,
     /// How many days of command logs and spill files to keep.
     pub log_retention_days: u64,
+    /// Tools advertised to the model for this turn, on top of the discovery
+    /// tool. The host owns this across turns because an agent is built per
+    /// turn (ADR-008).
+    pub active_tools: Vec<String>,
     /// Tool output larger than this is written to a spill file and replaced
     /// with a preview plus a retrieval hint. `0` disables spilling.
     pub spill_threshold_bytes: usize,
@@ -258,6 +262,10 @@ impl Default for AgentConfig {
             max_parallel_tool_calls: 10,
             read_files_max: 20,
             log_retention_days: 5,
+            active_tools: openbad_tools::HOT_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
             spill_threshold_bytes: 64 * 1024,
             stream: true,
             system_prompt: None,
@@ -599,6 +607,9 @@ pub struct AgentRun {
     /// The checkpoint created during this run, when the conversation had to be
     /// compacted to fit the model window.
     pub compaction: Option<CompactionRecord>,
+    /// The advertised tool set after this run, including anything `tool_search`
+    /// activated, so the host can carry it into the next turn.
+    pub active_tools: Vec<String>,
 }
 
 /// A streamed step. `cancelled` means the stream was cut short after some
@@ -649,6 +660,9 @@ pub struct Agent<T: HttpTransport> {
     approvals: Arc<dyn ApprovalGate>,
     redactions: Vec<String>,
     config: AgentConfig,
+    /// The advertised tool set for this turn. `tool_search` widens it, and the
+    /// host carries the result into the next turn (ADR-008).
+    active_tools: Arc<Mutex<Vec<String>>>,
 }
 
 impl<T: HttpTransport> Agent<T> {
@@ -676,6 +690,7 @@ impl<T: HttpTransport> Agent<T> {
             inbox: None,
             approvals: Arc::new(DenyAllApprovals),
             redactions: Vec::new(),
+            active_tools: Arc::new(Mutex::new(config.active_tools.clone())),
             config,
         }
     }
@@ -941,6 +956,16 @@ impl<T: HttpTransport> Agent<T> {
                             content
                         }
                         Ok(result) => {
+                            if let Some(names) =
+                                result.metadata.get("activate").and_then(Value::as_array)
+                            {
+                                let mut active = self.active_tools.lock().expect("active tools");
+                                for name in names.iter().filter_map(Value::as_str) {
+                                    if !active.iter().any(|existing| existing == name) {
+                                        active.push(name.to_owned());
+                                    }
+                                }
+                            }
                             let content = spill_oversized(
                                 redact_secrets(&result.content, &self.redactions),
                                 self.workspace.root(),
@@ -1047,7 +1072,12 @@ impl<T: HttpTransport> Agent<T> {
         let mut compaction: Option<CompactionRecord> = None;
         let mut compaction_attempted = false;
 
-        let tool_schemas = self.tools.openai_tools();
+        // Activation is recorded here and applied by the host on the next
+        // turn; the advertised list for this turn is fixed once, because the
+        // tool list is part of the cached prompt prefix.
+        let tool_schemas = self
+            .tools
+            .openai_tools_for(&self.active_tools.lock().expect("active tools"));
         let tool_tokens = estimate_tokens(
             tool_schemas
                 .iter()
@@ -1544,6 +1574,7 @@ impl<T: HttpTransport> Agent<T> {
                     usage: usage_totals,
                     steps: step,
                     compaction,
+                    active_tools: self.active_tools.lock().expect("active tools").clone(),
                 });
             }
 
