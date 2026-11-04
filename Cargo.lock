@@ -3253,6 +3253,7 @@ dependencies = [
  "libc",
  "openbad-core",
  "openbad-governance",
+ "openbad-pipeline",
  "openbad-vault",
  "openbad-workspace",
  "regex",

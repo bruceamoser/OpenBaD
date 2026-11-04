@@ -479,6 +479,7 @@ Implemented:
 | `git_worktree` | command | Add, list, and remove worktrees |
 | `repo_health` / `git_commit_context` | read | Ahead/behind, dirty state, and commit-message context |
 | `github` | command | Full GitHub surface through `gh`: status, repositories, branches and protection, issues, labels, milestones, pull requests, reviews and merges, Actions, releases, Pages, search, and generic `gh api`; destructive actions require `confirm=true` |
+| `pipeline` | read/write/command | Read, validate, or write `.openbad/pipeline.yaml`, and check the branch protection that gates auto-merge. The description carries the schema and the rules that change behaviour, the write path uses the loader's own parser, and `guards` names each missing setting instead of accepting a promise |
 | `subagent` | execute | Spawn, list, wait for, inspect, or cancel a focused background worker. `spawn` returns immediately; `wait` blocks until a terminal status or timeout, and `status` returns the result and recent activity. Workers inherit the session access mode and cannot spawn further workers |
 | `team_task_create` / `team_task_list` / `team_task_update` / `team_task_get` | write/read/write/read | The shared board in `.openbad/team.json`: units of work with a state (`open`, `claimed`, `blocked`, `done`, `dropped`), an owner, and a result. A parent lays work out and names each task id in a subagent's instructions; the child claims it and records the outcome |
 | `plugin_list` / `plugin_describe` | read | Discover installed and bundled plugins and their actions |

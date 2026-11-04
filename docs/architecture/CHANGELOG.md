@@ -668,3 +668,12 @@ same executor.
 Not in this release: auto-merge (the guard check exists, the merge action does not),
 the main-area ticket screen with the diff, attention questions, and per-project
 provider settings for the runner.
+
+**The agent can configure the pipeline.** A `pipeline` tool in the plan domain reads
+the project's configuration, validates a change with the loader's own parser, writes
+it only when asked to, and reports what branch protection actually says. Its
+description carries the document's shape and the four rules that change behaviour —
+labels admit, `allowed` authorizes, a disabled source keeps its read position, and a
+failing prepare fails the ticket — so the model does not have to guess a schema it
+cannot see. Guard rules moved into `openbad-pipeline::guards`, so the panel and the
+agent get the same answer.

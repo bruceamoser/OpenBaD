@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod error;
 pub mod eval;
 pub mod execution;
+pub mod guards;
 pub mod mandate;
 pub mod source;
 pub mod stage;
