@@ -182,6 +182,29 @@ impl SourceConfig {
     }
 }
 
+/// Parses and validates a pipeline configuration without touching the file
+/// system, so a surface can refuse to save what the loader would refuse to run.
+pub fn parse_pipeline_config(text: &str) -> Result<PipelineConfig, String> {
+    let config: PipelineConfig = serde_yaml::from_str(text).map_err(|error| error.to_string())?;
+    if config.execution.slots == 0 {
+        return Err(
+            "execution.slots must be at least 1; disable a source to stop its work".to_owned(),
+        );
+    }
+    for source in &config.sources {
+        if source.id.trim().is_empty() {
+            return Err("a source needs an id".to_owned());
+        }
+        if !source.repository.contains('/') {
+            return Err(format!(
+                "source {} needs a repository as owner/repo, found {:?}",
+                source.id, source.repository
+            ));
+        }
+    }
+    Ok(config)
+}
+
 #[must_use]
 pub fn pipeline_config_path(project_root: &Path) -> PathBuf {
     project_root.join(PIPELINE_CONFIG_PATH)
@@ -203,31 +226,8 @@ pub fn load_pipeline_config(project_root: &Path) -> Result<PipelineConfig, Sourc
             return Err(SourceError::Config(format!("{}: {error}", path.display())));
         }
     };
-    let config: PipelineConfig = serde_yaml::from_str(&text)
-        .map_err(|error| SourceError::Config(format!("{}: {error}", path.display())))?;
-    if config.execution.slots == 0 {
-        return Err(SourceError::Config(format!(
-            "{}: execution.slots must be at least 1; disable a source to stop its work",
-            path.display()
-        )));
-    }
-    for source in &config.sources {
-        if source.id.trim().is_empty() {
-            return Err(SourceError::Config(format!(
-                "{}: a source needs an id",
-                path.display()
-            )));
-        }
-        if !source.repository.contains('/') {
-            return Err(SourceError::Config(format!(
-                "{}: source {} needs a repository as owner/repo, found {:?}",
-                path.display(),
-                source.id,
-                source.repository
-            )));
-        }
-    }
-    Ok(config)
+    parse_pipeline_config(&text)
+        .map_err(|error| SourceError::Config(format!("{}: {error}", path.display())))
 }
 
 #[cfg(test)]

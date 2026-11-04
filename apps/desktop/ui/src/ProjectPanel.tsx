@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import AgentsPanel from "./AgentsPanel";
+import PipelinePanel from "./PipelinePanel";
 import { KnowledgePanel, RetrievalPanel } from "./KnowledgePanels";
 import RevealButton from "./RevealButton";
 import { droppedToUploads, fileName, useFileDropZone } from "./dropzone";
@@ -57,6 +58,7 @@ export type PanelTab =
   | "overview"
   | "workspace"
   | "agents"
+  | "pipeline"
   | "repos"
   | "knowledge"
   | "retrieval"
@@ -68,6 +70,7 @@ const panelTabs: { id: PanelTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "workspace", label: "Workspace" },
   { id: "agents", label: "Agents" },
+  { id: "pipeline", label: "Pipeline" },
   { id: "repos", label: "References" },
   { id: "knowledge", label: "Knowledge" },
   { id: "retrieval", label: "Retrieval" },
@@ -538,6 +541,12 @@ export default function ProjectPanel(props: ProjectPanelProps) {
               revision={revision}
               onArtifact={onArtifact}
             />
+          </div>
+        )}
+
+        {tab === "pipeline" && (
+          <div className="flex min-h-[320px] flex-1 flex-col">
+            <PipelinePanel workspacePath={workspacePath} revision={revision} />
           </div>
         )}
 

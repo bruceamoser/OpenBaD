@@ -2416,6 +2416,12 @@ impl Store {
         crate::pipeline::last_session_for_ticket(&connection, ticket_id)
     }
 
+    /// Whether the ticket is waiting on a person's answer.
+    pub fn pipeline_open_attention(&self, ticket_id: &str) -> Result<bool, StoreError> {
+        let connection = self.reader()?;
+        Ok(crate::pipeline::open_attention(&connection, ticket_id)?.is_some())
+    }
+
     /// The newest report on a ticket, or `None` before any of its executors
     /// reported anything.
     pub fn pipeline_report(

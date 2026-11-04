@@ -59,6 +59,14 @@ overflow. See the 2026-10-27 compaction entry for details.
   with the numbers in the reason. The prompt carries the mandate, where the
   worktree and branch are, and the two things a mandate does not buy. The real
   runner is the app's own agent rooted at the worktree with `FullAccess`.
+- **Watching, streaming, stage, and setup.** A per-project watcher ticks, launches,
+  and runs tickets until stopped; the executor streams steps to `pipeline:progress`
+  and stops at a step boundary as `waiting`. One `worker-<ticket>` session is
+  resumed across assignments, slots are enforced, and a message on a live ticket
+  wakes its executor. The panel lists tickets by derived stage (needs-a-person
+  first) and edits `.openbad/pipeline.yaml`, refusing to save what the loader would
+  refuse to run; the branch-protection check names each missing guard rather than
+  accepting a promise.
 
 ## 2026-10-27
 

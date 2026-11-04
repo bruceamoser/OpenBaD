@@ -494,6 +494,8 @@ export type ProjectAreaCounts = {
   questions_total: number;
   plan_steps: number;
   plan_open_steps: number;
+  pipeline_needs_person: number;
+  pipeline_working: number;
 };
 
 export type UploadSource = {
@@ -687,3 +689,87 @@ export type InstallOutcome =
   | { kind: "package_installed"; path: string; installer: string }
   | { kind: "installer_launched"; path: string; installer: string }
   | { kind: "installer_saved"; path: string; installer: string };
+
+export type PipelineStage =
+  | "person/delivery"
+  | "person/answer"
+  | "person/review"
+  | "person/blocked"
+  | "person/failed"
+  | "working/queued"
+  | "idle"
+  | "working"
+  | "ended";
+
+export type PipelineTicketRow = {
+  id: string;
+  source_id: string;
+  thread: string;
+  state: string;
+  stage: PipelineStage;
+  needs_a_person: boolean;
+  summary: string | null;
+  pull_request: string | null;
+  updated_at: number;
+};
+
+export type PipelineSource = {
+  id: string;
+  repository: string;
+  enabled: boolean;
+  labels: string[];
+  poll_interval_secs: number;
+};
+
+export type PipelineStatus = {
+  configured: boolean;
+  sources: PipelineSource[];
+  tickets: Record<string, number>;
+};
+
+export type PipelineTickReport = {
+  sources: {
+    source_id: string;
+    triggers: number;
+    dropped_own_bot: number;
+    dropped_duplicate: number;
+    error: string | null;
+    advanced: boolean;
+  }[];
+  admitted: { source_id: string; thread: string; actor: string; ticket_id: string | null }[];
+  deferred: number;
+  skipped: string | null;
+};
+
+export type PipelineLaunchReport = {
+  ticket_id: string;
+  assignment_id: string;
+  session: string;
+  branch: string;
+  directory: string;
+  failure: string | null;
+  prepare_output: string;
+};
+
+export type PipelineExecutionReport = {
+  ticket_id: string;
+  assignment_id: string;
+  session: string;
+  outcome: string;
+  last_words: string;
+  steps: number;
+  tokens: number;
+  failure: string | null;
+};
+
+export type PipelineConfigFile = {
+  path: string;
+  exists: boolean;
+  text: string;
+};
+
+export type PipelineGuards = {
+  branch: string;
+  protected: boolean;
+  missing: string[];
+};

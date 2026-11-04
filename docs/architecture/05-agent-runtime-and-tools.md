@@ -1437,9 +1437,41 @@ that keeps the protocol testable without a model:
   `FullAccess`, so the workspace boundary is what refuses the rest rather than an
   approval prompt nobody would answer.
 
-Two limits worth naming: nothing schedules the turn yet (the same cadence decision
-the tick is waiting on), and the runner uses the default model rather than the
-project's provider settings.
+The runner uses the default model rather than the project's provider settings; a
+project-level provider choice is a follow-up.
+
+### Watching
+
+`pipeline_watch` starts one watcher per project: it ticks on an interval, launches
+tickets that were admitted, and runs the ones a launch prepared, until a person
+stops it. The interval is a floor (5s–1h) so a project cannot ask for a poll storm.
+Every tick emits `pipeline:tick`; the runner emits `pipeline:progress` per step,
+tool call, and tool result. `pipeline_stop` sets the flag the observer polls, so a
+stop lands at a step boundary and is recorded as `waiting` — idle, not a failure.
+
+A message on a live ticket **wakes** its executor: the tick creates a pending
+assignment instead of deferring, so review comments reach the worker that already
+owns the thread. A ticket that opens a pull request subscribes to its thread and
+records the URL on its report.
+
+### Stage
+
+`openbad_pipeline::stage` derives a stage from rows, first match wins: an open
+attention outranks a review, a review outranks a block or a failure, and a ticket
+with no assignment or a pending one is `working/queued`. Nothing is inferred from
+report prose. `pipeline_tickets` returns each ticket with its stage for the panel,
+and the project area counts derive `pipeline_needs_person` and `pipeline_working`
+from the same function, so the sidebar cannot drift from the panel.
+
+### Setup
+
+The panel edits `.openbad/pipeline.yaml` verbatim and saves through
+`pipeline_save_config`, which parses and validates before writing: a file that
+saves but does not load would leave a project that looks configured and silently
+polls nothing. `pipeline_guards` reads the repository's branch protection and names
+each missing setting — approving reviews, stale-approval dismissal, required
+checks — because ADR-009 makes that protection the only thing between a large
+unreviewed change and `main`.
 
 ## 17. Runtime pseudocode
 

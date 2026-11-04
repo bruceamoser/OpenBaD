@@ -460,6 +460,198 @@ fn describe(
     }
 }
 
+/// One ticket as the panel lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineTicketRow {
+    pub id: String,
+    pub source_id: String,
+    pub thread: String,
+    pub state: &'static str,
+    pub stage: openbad_pipeline::stage::Stage,
+    pub needs_a_person: bool,
+    /// The last report's first line, which is what a row can show.
+    pub summary: Option<String>,
+    pub pull_request: Option<String>,
+    pub updated_at: i64,
+}
+
+/// A project's pipeline configuration as the setup surface edits it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineConfigFile {
+    pub path: String,
+    pub exists: bool,
+    pub text: String,
+}
+
+/// Reads `.openbad/pipeline.yaml` verbatim, so the surface edits what is there.
+#[tauri::command]
+pub fn pipeline_config_file(project_path: String) -> Result<PipelineConfigFile, String> {
+    let path = pipeline_config_path(&PathBuf::from(&project_path));
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    Ok(PipelineConfigFile {
+        path: path.display().to_string(),
+        exists: path.is_file(),
+        text,
+    })
+}
+
+/// Saves a configuration, refusing anything the loader would refuse to run.
+///
+/// Validating the text and writing it are one step on purpose: a file that saves
+/// but does not load would leave a project that looks configured and silently
+/// polls nothing.
+#[tauri::command]
+pub fn pipeline_save_config(project_path: String, text: String) -> Result<(), String> {
+    use openbad_pipeline::config::parse_pipeline_config;
+
+    parse_pipeline_config(&text)?;
+    let path = pipeline_config_path(&PathBuf::from(&project_path));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(&path, text).map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+/// Whether a repository's branch protection is real enough to allow auto-merge.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineGuards {
+    pub branch: String,
+    pub protected: bool,
+    /// The specific settings that are absent, named so a person can fix them.
+    pub missing: Vec<String>,
+}
+
+/// Reads the branch protection rule and names what is missing.
+///
+/// The refusal is the feature: ADR-009 makes branch protection the only thing
+/// between a large unreviewed change and `main`, so a surface must never accept a
+/// promise that it is on.
+#[tauri::command]
+pub async fn pipeline_guards(repository: String) -> Result<PipelineGuards, String> {
+    let api = GhCli;
+    let repo: serde_json::Value = api
+        .get(&format!("/repos/{repository}"))
+        .await
+        .map_err(|error| error.to_string())?;
+    let branch = repo
+        .get("default_branch")
+        .and_then(|value| value.as_str())
+        .unwrap_or("main")
+        .to_owned();
+
+    let protection = api
+        .get(&format!("/repos/{repository}/branches/{branch}/protection"))
+        .await
+        .ok();
+    Ok(guards_from(&branch, protection.as_ref()))
+}
+
+/// The guard rules, kept separate from the call that fetches them.
+fn guards_from(branch: &str, protection: Option<&serde_json::Value>) -> PipelineGuards {
+    let mut missing = Vec::new();
+    let reviews = protection.and_then(|value| value.get("required_pull_request_reviews"));
+    let approvals = reviews
+        .and_then(|value| value.get("required_approving_review_count"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if approvals < 1 {
+        missing.push("required approving reviews (at least 1)".to_owned());
+    }
+    let dismiss_stale = reviews
+        .and_then(|value| value.get("dismiss_stale_reviews"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !dismiss_stale {
+        missing.push("dismiss stale approvals when new commits arrive".to_owned());
+    }
+    let checks = protection
+        .and_then(|value| value.get("required_status_checks"))
+        .and_then(|value| {
+            value
+                .get("checks")
+                .and_then(|checks| checks.as_array())
+                .map(|checks| !checks.is_empty())
+                .or_else(|| {
+                    value
+                        .get("contexts")
+                        .and_then(|contexts| contexts.as_array())
+                        .map(|contexts| !contexts.is_empty())
+                })
+        })
+        .unwrap_or(false);
+    if !checks {
+        missing.push("required status checks".to_owned());
+    }
+
+    PipelineGuards {
+        branch: branch.to_owned(),
+        protected: protection.is_some(),
+        missing,
+    }
+}
+
+/// Lists the project's tickets with the stage derived from their rows.
+#[tauri::command]
+pub fn pipeline_tickets(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<Vec<PipelineTicketRow>, String> {
+    use openbad_pipeline::stage::{StageInput, stage_of};
+
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let workspace = crate::project_workspace(&store, &project_path)?;
+    let tickets = store
+        .list_pipeline_tickets(workspace, 500)
+        .map_err(|error| error.to_string())?;
+
+    let mut rows = Vec::with_capacity(tickets.len());
+    for ticket in tickets {
+        let assignment = store
+            .active_pipeline_assignment(&ticket.id)
+            .map_err(|error| error.to_string())?;
+        let report = store
+            .pipeline_report(&ticket.id)
+            .map_err(|error| error.to_string())?;
+        let attention = store
+            .pipeline_open_attention(&ticket.id)
+            .map_err(|error| error.to_string())?;
+        let stage = stage_of(StageInput {
+            ticket: ticket.state,
+            assignment: assignment.as_ref().map(|record| record.state),
+            report: report.as_ref().map(|record| record.outcome),
+            attention,
+            // A delivery failure is not modelled yet; when it is, it arrives here.
+            delivery_failed: false,
+        });
+
+        rows.push(PipelineTicketRow {
+            id: ticket.id,
+            source_id: ticket.source_id,
+            thread: ticket.thread.0,
+            state: ticket.state.as_str(),
+            stage,
+            needs_a_person: stage.needs_a_person(),
+            summary: report.as_ref().map(|record| {
+                record
+                    .last_words
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(160)
+                    .collect()
+            }),
+            pull_request: report.and_then(|record| record.pull_request),
+            updated_at: ticket.updated_at,
+        });
+    }
+    Ok(rows)
+}
+
 /// Polls every enabled source once and records what its triggers were allowed to
 /// do.
 ///
@@ -875,6 +1067,51 @@ mod tests {
                 .len(),
             1,
             "the healthy source still admitted its issue"
+        );
+    }
+
+    #[test]
+    fn guards_name_each_missing_setting_instead_of_refusing_generically() {
+        let unprotected = guards_from("main", None);
+        let partial = guards_from(
+            "main",
+            Some(&serde_json::json!({
+                "required_pull_request_reviews": {
+                    "required_approving_review_count": 1,
+                    "dismiss_stale_reviews": false
+                },
+                "required_status_checks": { "contexts": ["ci"] }
+            })),
+        );
+        let complete = guards_from(
+            "main",
+            Some(&serde_json::json!({
+                "required_pull_request_reviews": {
+                    "required_approving_review_count": 1,
+                    "dismiss_stale_reviews": true
+                },
+                "required_status_checks": { "checks": [{ "context": "ci" }] }
+            })),
+        );
+
+        assert_eq!(
+            (
+                unprotected.protected,
+                unprotected.missing.len(),
+                partial.missing.clone(),
+                complete.protected,
+                complete.missing.clone(),
+                complete.branch.clone(),
+            ),
+            (
+                false,
+                3,
+                vec!["dismiss stale approvals when new commits arrive".to_owned()],
+                true,
+                Vec::<String>::new(),
+                "main".to_owned(),
+            ),
+            "each absent setting is named, and only a real rule passes"
         );
     }
 
