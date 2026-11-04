@@ -1376,6 +1376,26 @@ The loop itself is exercised end to end against a scripted executor in
 reports, apply their effects. A unit test per rule cannot catch a slot released for
 a report that never ended its assignment.
 
+### Host surface
+
+The desktop host exposes the supervisor through two commands in
+`apps/desktop/src-tauri/src/pipeline.rs`, both taking the project path:
+
+- **`pipeline_status`** — whether the project has a config at all, each source
+  with its enabled flag and cadence (a disabled source stays listed, so toggling it
+  keeps its read position), and the ticket count per state. It reads rows; it does
+  not poll.
+- **`pipeline_tick`** — polls every enabled source once through `gh api`, judges
+  each trigger, admits what it may, and returns the report. A quiet tick stays out
+  of the log; one that admitted, deferred, or failed writes a single diagnostics
+  line.
+
+Nothing schedules a tick yet: the loop is started by whoever asks for one, which
+keeps the cadence decision with the setup surface rather than the plumbing. Launch
+and event streaming — the executor half of ADR-009 — are still absent, which is why
+a trigger that needs one is reported as deferred and holds its source's position
+instead of being read past.
+
 ## 17. Runtime pseudocode
 
 ```rust

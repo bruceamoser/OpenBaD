@@ -25,6 +25,18 @@ pub trait GitHubApi: Send + Sync {
     async fn get(&self, path: &str) -> Result<serde_json::Value, SourceError>;
 }
 
+/// Lets a source borrow a reader instead of taking it.
+///
+/// A source only reads, so requiring ownership would force every caller to hand
+/// over something it may still need — the supervisor polling several sources, for
+/// one.
+#[async_trait]
+impl<T: GitHubApi + Sync> GitHubApi for &T {
+    async fn get(&self, path: &str) -> Result<serde_json::Value, SourceError> {
+        (**self).get(path).await
+    }
+}
+
 /// Runs `gh api`, which is how this project already reaches GitHub.
 pub struct GhCli;
 

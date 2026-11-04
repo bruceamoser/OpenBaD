@@ -2,6 +2,7 @@ mod clipboard;
 mod diagnostics;
 pub use diagnostics::early_exit_for;
 mod git;
+mod pipeline;
 mod preview;
 mod process;
 mod services;
@@ -6074,6 +6075,8 @@ pub fn run() {
             delete_session,
             workspace_index_status,
             refresh_workspace_index,
+            pipeline::pipeline_status,
+            pipeline::pipeline_tick,
             workspace_default,
             project_agents,
             cancel_agent,

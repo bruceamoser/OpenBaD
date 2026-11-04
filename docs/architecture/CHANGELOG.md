@@ -38,6 +38,18 @@ a `session_messages.surface` projection. This fixes long sessions that lost the
 previous answer, re-ran completed tool work, and failed with a provider context
 overflow. See the 2026-10-27 compaction entry for details.
 
+## 2026-11-04
+
+- **Supervised work pipeline (ADR-009), through admission.** A project opts in with
+  `.openbad/pipeline.yaml`; a tick polls each enabled source through `gh api`,
+  judges every trigger against its thread, and records the tickets, mandates, and
+  read positions in the existing store. The host now exposes `pipeline_status` and
+  `pipeline_tick`, so the panel can show what a project listens to and a person can
+  ask for a poll. Triggers that need an executor are reported as deferred and hold
+  their source's read position rather than being read past; the executor itself is
+  the remaining half of #963. See section 16 of
+  `05-agent-runtime-and-tools.md`.
+
 ## 2026-10-27
 
 - **Playwright browser suite removed.** The `apps/desktop/ui/e2e` harness and
