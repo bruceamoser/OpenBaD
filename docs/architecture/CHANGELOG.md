@@ -607,3 +607,12 @@ do: read the file, then retry.
 trained on — `file_path`, `old_string`, `new_string`, `search`, `replace` — rewritten
 once at dispatch from each tool's own schema, so `lsp`'s genuine `file_path` is
 left alone.
+
+## v0.3.16
+
+**The chat column uses the width it has.** Transcript and composer were pinned to
+768px each, so a 1500px pane was half empty and three-column tables in a reply
+were squeezed into about 400px. They now share one `.chat-column` that grows with
+the pane and stops at 1280px — wide enough to fill the space, narrow enough to
+stay readable. Sharing the rule also fixed a 7px misalignment: only the transcript
+reserves a scrollbar gutter, so the composer sat right of the text above it.
