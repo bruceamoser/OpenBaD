@@ -6,6 +6,10 @@
 //! a label changes the issue's `updated_at`, so the next poll sees it inside the
 //! `since` window and emits the same admission trigger a fresh issue would.
 
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -40,10 +44,74 @@ impl<T: GitHubApi + Sync> GitHubApi for &T {
 /// Runs `gh api`, which is how this project already reaches GitHub.
 pub struct GhCli;
 
+/// Where `gh` is, remembering the answer for the life of the process.
+///
+/// A desktop app inherits the session's PATH, not a login shell's, so a per-user
+/// install under `~/.local/bin` is invisible to it — every poll then fails to
+/// launch and the pipeline admits nothing while looking idle. `OPENBAD_GH` names
+/// the binary outright; otherwise PATH, then the directories installers use.
+fn gh_binary() -> Option<&'static Path> {
+    static BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            if let Some(explicit) = std::env::var_os("OPENBAD_GH") {
+                return Some(PathBuf::from(explicit));
+            }
+            if let Some(found) = find_gh(
+                std::env::var_os("PATH").as_deref(),
+                std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            ) {
+                return Some(found);
+            }
+            None
+        })
+        .as_deref()
+}
+
+/// The lookup itself, taking PATH and HOME as arguments so it can be asserted.
+fn find_gh(path: Option<&OsStr>, home: Option<&Path>) -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["gh.exe", "gh.cmd", "gh"]
+    } else {
+        &["gh"]
+    };
+    if let Some(path) = path {
+        for directory in std::env::split_paths(path) {
+            for name in names {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
+        candidates.push(home.join(".local/bin/gh"));
+    }
+    candidates.extend([
+        PathBuf::from("/usr/local/bin/gh"),
+        PathBuf::from("/usr/bin/gh"),
+        PathBuf::from("/opt/homebrew/bin/gh"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin/gh"),
+    ]);
+    if let Some(home) = home {
+        candidates.push(home.join(".nix-profile/bin/gh"));
+        candidates.push(home.join(".asdf/shims/gh"));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
 #[async_trait]
 impl GitHubApi for GhCli {
     async fn get(&self, path: &str) -> Result<serde_json::Value, SourceError> {
-        let output = tokio::process::Command::new("gh")
+        let binary = gh_binary().ok_or_else(|| {
+            SourceError::Api(
+                "cannot find gh: install the GitHub CLI or set OPENBAD_GH to its path".to_owned(),
+            )
+        })?;
+        let output = tokio::process::Command::new(binary)
             .args(["api", "--method", "GET", path])
             .output()
             .await
@@ -733,5 +801,32 @@ mod tests {
         }
         assert!(parse_iso8601_ms("not a date").is_none());
         assert!(parse_iso8601_ms("2026-13-01T00:00:00Z").is_none());
+    }
+
+    #[test]
+    fn gh_is_found_without_a_login_shells_path() {
+        let empty = tempfile::tempdir().expect("empty");
+        let home = tempfile::tempdir().expect("home");
+        assert_eq!(
+            find_gh(Some(empty.path().as_os_str()), Some(home.path())),
+            None,
+            "nothing installed, and PATH alone does not have it"
+        );
+
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).expect("dir");
+        let binary = bin.join("gh");
+        std::fs::write(&binary, "").expect("write");
+        assert_eq!(
+            find_gh(Some(empty.path().as_os_str()), Some(home.path())),
+            Some(binary.clone()),
+            "a per-user install is found even though the session PATH omits it"
+        );
+
+        assert_eq!(
+            find_gh(Some(home.path().join(".local/bin").as_os_str()), None),
+            Some(binary.clone()),
+            "PATH is still consulted first when it has the binary"
+        );
     }
 }

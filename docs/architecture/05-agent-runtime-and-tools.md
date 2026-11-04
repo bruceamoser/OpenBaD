@@ -1461,6 +1461,11 @@ project that could not start its watcher (no model credential, for instance) say
 so instead of looking healthy. Nothing is admitted until a tick runs: a panel with
 no tickets and no `pipeline:tick` has simply never polled.
 
+Polling runs `gh api`, and a desktop app inherits the session's `PATH` rather than
+a login shell's — so `gh` under `~/.local/bin` is invisible to it, and every poll
+fails to launch. The lookup therefore checks `PATH` first and then the directories
+installers use, and `OPENBAD_GH` overrides it outright.
+
 Every tick emits `pipeline:tick`; the runner emits `pipeline:progress` per step,
 tool call, and tool result. `pipeline_stop` sets the flag the observer polls, so a
 stop lands at a step boundary and is recorded as `waiting` — idle, not a failure.

@@ -722,3 +722,14 @@ intent (`watching`) and the fact (`running`) separately, so a project whose watc
 could not start says so rather than looking healthy, and the empty state names the
 step that is missing. Tickets appearing in the panel is a consequence of a tick:
 until a project polls once, a correctly configured pipeline is empty by design.
+
+**`gh` is found even when the app was not started from a shell.** A desktop app
+inherits the session's `PATH`, not a login shell's, so a per-user install under
+`~/.local/bin` is invisible to it. Every poll then failed to launch `gh`, no source
+reported anything but an error, and the pipeline admitted nothing while looking
+idle — the same empty panel for a completely different reason. The Git CLI lookup
+now checks `PATH` first, then the directories installers actually use
+(`~/.local/bin`, `/usr/local/bin`, Homebrew on both Linux and macOS,
+`~/.nix-profile/bin`, `~/.asdf/shims`), and `OPENBAD_GH` names the binary outright.
+Failing that, the source error says `gh` could not be found instead of reporting a
+bare spawn failure.
