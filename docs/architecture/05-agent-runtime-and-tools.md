@@ -1236,6 +1236,11 @@ sources:
     bot_logins: ["openbad-bot"]  # the agent's own account, dropped on sight
     known_bots: ["sweeper-bot"]  # bots that may propose work, never request it
     poll_interval_secs: 120
+execution:
+  slots: 1                       # concurrent executors for this project
+  budget:                        # per ticket; 0 means no limit
+    steps: 0
+    tokens: 0
 ```
 
 `openbad-pipeline` turns repository activity into immutable triggers with a
@@ -1325,6 +1330,36 @@ keeps listening and a later message resumes it without a new admission.
 
 A stored state the code cannot read is an error, never a default. A `paused` ticket
 that silently reads as `open` would be delivered work it was never authorized for.
+
+### Concurrency, budget, and recovery
+
+`openbad-pipeline::execution` holds the rules a host applies around a turn. None of
+them starts a process, so they are testable — including the cases that need a crash
+to reproduce — and the host only performs them.
+
+- **Slots** bound how many executors run at once, per project. A person's message is
+  ordered ahead of new work, so a queue of tickets cannot keep them waiting behind
+  it. The prototype also keeps one slot in reserve so a person is never blocked;
+  that is deliberately not done here, because a bound that can be exceeded is not a
+  bound. Ordering gives a person priority without breaking the configured limit.
+- **Budget** is steps and tokens per ticket, and `0` on either axis means no limit.
+  A limit exists so an unattended loop cannot run forever, not to keep work small.
+  When one is reached the ticket ends as `failed` with the numbers in the report —
+  "stopped after 40 steps; the ticket allows 40" is actionable, "budget exceeded"
+  is not.
+- **A final report ends the assignment and frees its slot.** An assignment that has
+  reported a final outcome is not working, so holding the slot would keep the next
+  ticket waiting for nothing. `progress` neither ends nor frees anything.
+- **Recovery asks whether a session is alive, not how long it has been.** A pending
+  assignment with no session never got going, so it is relaunched. A running one
+  whose session is gone is ended and replaced. Relaunching something that is still
+  running would give a ticket two executors; leaving a dead assignment as `running`
+  would leave the ticket stuck forever.
+
+The loop itself is exercised end to end against a scripted executor in
+`crates/openbad-store/tests/pipeline_loop.rs`: admit, take a slot, launch, take
+reports, apply their effects. A unit test per rule cannot catch a slot released for
+a report that never ended its assignment.
 
 ## 17. Runtime pseudocode
 

@@ -20,6 +20,66 @@ pub struct PipelineConfig {
     /// turning a source back on does not lose its read position.
     #[serde(default)]
     pub sources: Vec<SourceConfig>,
+    /// How much work the project lets run.
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+}
+
+/// Concurrency and cost limits for one project's executors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionConfig {
+    /// How many executors may run at once.
+    ///
+    /// One by default: the pipeline runs unattended, and serialized work is
+    /// easier to follow than four tickets moving at once. Raise it to run tickets
+    /// concurrently. Zero is refused rather than clamped, because a pipeline that
+    /// silently never starts is harder to diagnose than a configuration error.
+    #[serde(default = "default_slots")]
+    pub slots: u32,
+    /// What one ticket may spend.
+    #[serde(default)]
+    pub budget: BudgetConfig,
+}
+
+/// A ticket's budget, in the project's own terms.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetConfig {
+    /// Steps allowed per ticket. `0` means no limit.
+    #[serde(default)]
+    pub steps: u64,
+    /// Tokens allowed per ticket. `0` means no limit.
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            slots: default_slots(),
+            budget: BudgetConfig::default(),
+        }
+    }
+}
+
+impl From<BudgetConfig> for crate::execution::Budget {
+    fn from(config: BudgetConfig) -> Self {
+        Self {
+            steps: config.steps,
+            tokens: config.tokens,
+        }
+    }
+}
+
+impl From<ExecutionConfig> for crate::execution::Slots {
+    fn from(config: ExecutionConfig) -> Self {
+        Self::new(config.slots)
+    }
+}
+
+const fn default_slots() -> u32 {
+    1
 }
 
 /// One configured source: a repository plus what to listen to.
@@ -133,6 +193,12 @@ pub fn load_pipeline_config(project_root: &Path) -> Result<PipelineConfig, Sourc
     };
     let config: PipelineConfig = serde_yaml::from_str(&text)
         .map_err(|error| SourceError::Config(format!("{}: {error}", path.display())))?;
+    if config.execution.slots == 0 {
+        return Err(SourceError::Config(format!(
+            "{}: execution.slots must be at least 1; disable a source to stop its work",
+            path.display()
+        )));
+    }
     for source in &config.sources {
         if source.id.trim().is_empty() {
             return Err(SourceError::Config(format!(
@@ -213,5 +279,59 @@ mod tests {
         );
         let config = load_pipeline_config(project.path()).expect("load");
         assert!(!config.sources[0].admits(&["bug".to_owned()]));
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+
+    #[test]
+    fn a_project_that_says_nothing_runs_one_executor_with_no_budget() {
+        let config = PipelineConfig::default();
+        assert_eq!(config.execution.slots, 1);
+        assert!(crate::execution::Budget::from(config.execution.budget).is_unlimited());
+    }
+
+    #[test]
+    fn slots_and_budget_are_read_from_the_file() {
+        let project = tempfile::tempdir().expect("project");
+        let path = pipeline_config_path(project.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(
+            &path,
+            "execution:\n  slots: 3\n  budget:\n    steps: 40\n    tokens: 500000\n",
+        )
+        .expect("write");
+
+        let config = load_pipeline_config(project.path()).expect("load");
+
+        assert_eq!(config.execution.slots, 3);
+        assert_eq!(config.execution.budget.steps, 40);
+        assert_eq!(config.execution.budget.tokens, 500_000);
+    }
+
+    #[test]
+    fn zero_slots_is_a_configuration_error_not_a_silent_clamp() {
+        let project = tempfile::tempdir().expect("project");
+        let path = pipeline_config_path(project.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(&path, "execution:\n  slots: 0\n").expect("write");
+
+        let error = load_pipeline_config(project.path()).expect_err("no slots");
+
+        assert!(error.to_string().contains("at least 1"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_execution_key_is_refused_rather_than_ignored() {
+        let project = tempfile::tempdir().expect("project");
+        let path = pipeline_config_path(project.path());
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(&path, "execution:\n  slot: 3\n").expect("write");
+
+        let error = load_pipeline_config(project.path()).expect_err("typo");
+
+        assert!(error.to_string().contains("pipeline.yaml"), "{error}");
     }
 }
