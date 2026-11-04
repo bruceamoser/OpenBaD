@@ -177,6 +177,10 @@ pub enum ToolError {
     Timeout(u64),
     #[error("tool failed: {0}")]
     Failed(String),
+    /// The tool needs a fresher view of the world before it can act. Recoverable
+    /// by definition: read, then retry.
+    #[error("stale state: {0}")]
+    Stale(String),
 }
 
 impl ToolError {
@@ -195,6 +199,7 @@ impl ToolError {
                 | Self::ApprovalRequired(_)
                 | Self::InvalidArgument(_)
                 | Self::Timeout(_)
+                | Self::Stale(_)
         )
     }
 }
@@ -1840,6 +1845,8 @@ impl ToolRegistry {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         if let Some(tool) = self.tools.get(name) {
+            let mut arguments = arguments;
+            normalize_argument_aliases(&tool.definition().input_schema, &mut arguments);
             return finish_result(tool.execute(arguments, context).await, context);
         }
         if name == TOOL_SEARCH {
@@ -2577,6 +2584,49 @@ fn string_arg(arguments: &Value, name: &str) -> Result<String, ToolError> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| ToolError::InvalidArgument(format!("missing string argument: {name}")))
+}
+
+/// The spellings other harnesses taught models to use for the same argument.
+const ARGUMENT_ALIASES: &[(&str, &[&str])] = &[
+    ("path", &["file_path", "filename"]),
+    ("old", &["old_string", "search", "find"]),
+    ("new", &["new_string", "replace", "replacement"]),
+];
+
+/// Rewrites a call's arguments to the names the tool actually declares.
+///
+/// Models arrive trained on `old_string`/`new_string` and `file_path`; ours are
+/// `old`/`new`/`path`. Refusing one spelling taught the model nothing, so it
+/// retried with another guess — the same failure as the envelope, one layer
+/// down.
+///
+/// The rewrite is schema-aware on purpose: `lsp` really does declare
+/// `file_path`, so a blanket rename would break it.
+fn normalize_argument_aliases(schema: &Value, arguments: &mut Value) {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(map) = arguments.as_object_mut() else {
+        return;
+    };
+    for (canonical, aliases) in ARGUMENT_ALIASES {
+        if !properties.contains_key(*canonical) {
+            continue;
+        }
+        // If the tool declares the alias itself, it means something else there.
+        if aliases.iter().any(|alias| properties.contains_key(*alias)) {
+            continue;
+        }
+        if map.contains_key(*canonical) {
+            continue;
+        }
+        for alias in *aliases {
+            if let Some(value) = map.remove(*alias) {
+                map.insert((*canonical).to_owned(), value);
+                break;
+            }
+        }
+    }
 }
 
 fn optional_string(arguments: &Value, name: &str) -> Option<String> {
@@ -4260,8 +4310,8 @@ impl Tool for MoveFileTool {
         }
         if to.exists() {
             if let Some(reason) = context.write_blocked_reason(&to) {
-                return Err(ToolError::Failed(format!(
-                    "read the destination before overwriting it: {} ({reason})",
+                return Err(ToolError::Stale(format!(
+                    "read the destination before overwriting it: {} ({reason}); call read_file on it, then retry",
                     to.display()
                 )));
             }
@@ -4917,8 +4967,8 @@ impl Tool for WriteFileTool {
         check_write_policy(context, &path)?;
         if path.exists() {
             if let Some(reason) = context.write_blocked_reason(&path) {
-                return Err(ToolError::Failed(format!(
-                    "read the file before overwriting it: {} ({reason})",
+                return Err(ToolError::Stale(format!(
+                    "read the file before overwriting it: {} ({reason}); call read_file on it, then retry this write",
                     path.display()
                 )));
             }
@@ -5009,8 +5059,8 @@ impl Tool for EditFileTool {
         let path = context.resolve_write(Path::new(&string_arg(&arguments, "path")?))?;
         check_write_policy(context, &path)?;
         if let Some(reason) = context.write_blocked_reason(&path) {
-            return Err(ToolError::Failed(format!(
-                "read the file before editing it: {} ({reason})",
+            return Err(ToolError::Stale(format!(
+                "read the file before editing it: {} ({reason}); call read_file on it, then retry this edit",
                 path.display()
             )));
         }
@@ -17145,7 +17195,7 @@ mod tests {
         assert_eq!(
             blocked.to_string(),
             format!(
-                "tool failed: read the file before overwriting it: {} (it changed after you read it (5 bytes then, 25 now))",
+                "stale state: read the file before overwriting it: {} (it changed after you read it (5 bytes then, 25 now)); call read_file on it, then retry this write",
                 file.display()
             )
         );
@@ -21293,6 +21343,51 @@ invariants:
             .await
             .expect("command runs");
         assert!(!ten_days_old.exists(), "a one day window removes it");
+    }
+
+    #[tokio::test]
+    async fn edit_accepts_the_argument_names_other_harnesses_use() {
+        let workspace = tempdir().expect("workspace");
+        let file = workspace.path().join("plan.md");
+        fs::write(&file, "| Action mix | 39/3/4/2 Main/Man/Move/React |").expect("file");
+        let mut context = context(workspace.path());
+        context.allow_writes = true;
+        ReadFileTool
+            .execute(json!({"path": "plan.md"}), &context)
+            .await
+            .expect("read");
+
+        // The exact shape a live model emitted: `new_string` beside `old`.
+        let registry = ToolRegistry::with_builtin_tools();
+        registry
+            .execute(
+                "edit_file",
+                json!({
+                    "file_path": "plan.md",
+                    "old_string": "Main/Man/Move/React",
+                    "new_string": "Main · Maneuver · Reaction"
+                }),
+                &context,
+            )
+            .await
+            .expect("aliases are accepted");
+
+        let written = fs::read_to_string(&file).expect("read back");
+        assert!(written.contains("Main · Maneuver · Reaction"), "{written}");
+    }
+
+    #[test]
+    fn aliases_never_overwrite_a_name_the_tool_declares() {
+        // `lsp` declares `file_path`; it must not be renamed to `path`.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "file_path": {"type": "string"}}
+        });
+        let _ = &mut schema;
+        let mut arguments = json!({"file_path": "main.rs"});
+        normalize_argument_aliases(&schema, &mut arguments);
+        assert_eq!(arguments["file_path"], json!("main.rs"));
+        assert!(arguments.get("path").is_none());
     }
 
     #[tokio::test]
