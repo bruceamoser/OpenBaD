@@ -698,3 +698,11 @@ auto-merge is never promised on a guess.
 
 The guard rules moved into `openbad-pipeline::guards`, which means the panel that
 refuses the switch and the agent that checks it compute the same answer.
+
+## v0.3.19
+
+**The pipeline configuration is readable again.** The setup panel's textarea used
+the canvas surface — the white page used for previews — with light body text, so in
+the dark theme the configuration was light grey on white: present, selectable, and
+impossible to read. It now uses the same inset field as the rest of the app's forms,
+and the report detail got the same treatment. No behaviour changed.
