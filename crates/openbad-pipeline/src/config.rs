@@ -40,6 +40,16 @@ pub struct ExecutionConfig {
     /// What one ticket may spend.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Where ticket worktrees are created. A relative path is resolved against the
+    /// project; the default keeps them beside the project rather than inside it, so
+    /// a worktree never becomes untracked noise in the repository it checks out.
+    #[serde(default)]
+    pub execution_root: Option<String>,
+    /// Run in the new worktree before the executor's turn. Its failure fails the
+    /// ticket with the output recorded; without it the worker starts in a checkout
+    /// nothing has been done to.
+    #[serde(default)]
+    pub prepare: Option<String>,
 }
 
 /// A ticket's budget, in the project's own terms.
@@ -59,6 +69,8 @@ impl Default for ExecutionConfig {
         Self {
             slots: default_slots(),
             budget: BudgetConfig::default(),
+            execution_root: None,
+            prepare: None,
         }
     }
 }

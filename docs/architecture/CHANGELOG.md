@@ -49,6 +49,11 @@ overflow. See the 2026-10-27 compaction entry for details.
   their source's read position rather than being read past; the executor itself is
   the remaining half of #963. See section 16 of
   `05-agent-runtime-and-tools.md`.
+- **Launch.** `pipeline_launch` checks a ticket out into its own worktree on its
+  own branch under the project's execution root, runs a bounded prepare command
+  there, and records the assignment. A broken prepare ends the ticket with the
+  output in its report; a good one leaves it pending, ready for its turn. The turn
+  itself — session, streaming, stop — is still to come.
 
 ## 2026-10-27
 

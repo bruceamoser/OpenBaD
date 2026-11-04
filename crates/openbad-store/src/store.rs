@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::audit;
 use openbad_pipeline::cursor::SourceCursor;
 use openbad_pipeline::eval::ThreadContext;
-use openbad_pipeline::ticket::TicketState;
+use openbad_pipeline::ticket::{ReportOutcome, TicketState};
 
 use crate::error::StoreError;
 use crate::migrations;
@@ -284,6 +284,13 @@ enum WriteCommand {
         id: String,
         next: openbad_pipeline::ticket::AssignmentState,
         reply: SyncSender<Result<crate::pipeline::AssignmentRecord, StoreError>>,
+    },
+    WritePipelineReport {
+        assignment_id: String,
+        outcome: ReportOutcome,
+        last_words: String,
+        pull_request: Option<String>,
+        reply: SyncSender<Result<crate::pipeline::ReportRecord, StoreError>>,
     },
     Shutdown,
 }
@@ -2318,6 +2325,55 @@ impl Store {
         self.write(|reply| WriteCommand::MovePipelineAssignment { id, next, reply })
     }
 
+    /// Writes what an assignment's executor last reported, replacing its previous
+    /// report. Kept verbatim: it is what a person reads when that is all they have.
+    pub fn write_pipeline_report(
+        &self,
+        assignment_id: &str,
+        outcome: openbad_pipeline::ticket::ReportOutcome,
+        last_words: &str,
+        pull_request: Option<&str>,
+    ) -> Result<crate::pipeline::ReportRecord, StoreError> {
+        let assignment_id = assignment_id.to_owned();
+        let last_words = last_words.to_owned();
+        let pull_request = pull_request.map(str::to_owned);
+        self.write(|reply| WriteCommand::WritePipelineReport {
+            assignment_id,
+            outcome,
+            last_words,
+            pull_request,
+            reply,
+        })
+    }
+
+    /// The assignment a ticket currently has, if any.
+    pub fn active_pipeline_assignment(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Option<crate::pipeline::AssignmentRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::active_assignment(&connection, ticket_id)
+    }
+
+    /// One ticket, or `None` when it has been removed.
+    pub fn pipeline_ticket(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::pipeline::TicketRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::ticket(&connection, id)
+    }
+
+    /// The newest report on a ticket, or `None` before any of its executors
+    /// reported anything.
+    pub fn pipeline_report(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Option<crate::pipeline::ReportRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::latest_report(&connection, ticket_id)
+    }
+
     /// What the pipeline already knows about a thread.
     ///
     /// Only the newest ticket on the thread counts. A thread that was stopped and
@@ -3802,6 +3858,22 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             }
             WriteCommand::MovePipelineAssignment { id, next, reply } => {
                 let result = crate::pipeline::move_assignment(&connection, &id, next);
+                let _ = reply.send(result);
+            }
+            WriteCommand::WritePipelineReport {
+                assignment_id,
+                outcome,
+                last_words,
+                pull_request,
+                reply,
+            } => {
+                let result = crate::pipeline::write_report(
+                    &connection,
+                    &assignment_id,
+                    outcome,
+                    &last_words,
+                    pull_request.as_deref(),
+                );
                 let _ = reply.send(result);
             }
             WriteCommand::Shutdown => break,

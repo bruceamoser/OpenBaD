@@ -1396,6 +1396,30 @@ and event streaming — the executor half of ADR-009 — are still absent, which
 a trigger that needs one is reported as deferred and holds its source's position
 instead of being read past.
 
+### Launch
+
+`pipeline_launch` takes a ticket to the point where a turn can run, and no further:
+
+- **One worktree, one branch, one session.** The names come from
+  `openbad-pipeline::execution::launch_plan`, not from the call site, so
+  `worker-<ticket>` and `worker/<ticket>` hold by construction. A ticket id becomes
+  a path and a branch there, so anything that could leave the execution root is
+  neutralized first.
+- **The execution root** is `execution.execution_root` (relative paths resolve
+  against the project), defaulting to a sibling
+  `<parent>/.openbad-executors/<project>` — beside the repository, never inside it,
+  so a worktree does not become untracked noise in the checkout its own agent reads.
+- **Prepare** is `execution.prepare`, run in the new worktree with the launch's
+  variables and `PREPARE_TIMEOUT` (ten minutes). Its output goes to `prepare.log`
+  in the worktree and its tail to the report. A failure ends the ticket with those
+  words; nothing retries by itself.
+- **A prepared ticket stops at a pending assignment.** That is the state
+  `recovery_for` already knows how to relaunch, so the ticket is never left
+  `running` with nothing running.
+
+The turn itself — the session, the streaming, the stop path — is the next slice and
+is what turns a pending assignment into work.
+
 ## 17. Runtime pseudocode
 
 ```rust

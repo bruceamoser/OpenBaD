@@ -1,6 +1,7 @@
 mod clipboard;
 mod diagnostics;
 pub use diagnostics::early_exit_for;
+mod executor;
 mod git;
 mod pipeline;
 mod preview;
@@ -6077,6 +6078,7 @@ pub fn run() {
             refresh_workspace_index,
             pipeline::pipeline_status,
             pipeline::pipeline_tick,
+            executor::pipeline_launch,
             workspace_default,
             project_agents,
             cancel_agent,
