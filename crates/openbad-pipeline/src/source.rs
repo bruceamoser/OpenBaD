@@ -528,6 +528,7 @@ mod tests {
             labels: labels.iter().map(|l| (*l).to_owned()).collect(),
             allowed: Vec::new(),
             bot_logins: bots.iter().map(|b| (*b).to_owned()).collect(),
+            known_bots: Vec::new(),
             poll_interval_secs: 120,
         }
     }

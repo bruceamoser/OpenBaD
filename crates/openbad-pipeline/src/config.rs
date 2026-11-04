@@ -47,6 +47,11 @@ pub struct SourceConfig {
     /// Accounts whose activity the source drops outright — the agent's own.
     #[serde(default)]
     pub bot_logins: Vec<String>,
+    /// Bots whose proposals are **candidates**. A known bot can start work; it can
+    /// never claim that a person asked, so its mandate is `inferred`. Any other
+    /// bot is not admitted at all.
+    #[serde(default)]
+    pub known_bots: Vec<String>,
     /// How often to poll.
     #[serde(default = "default_poll_seconds")]
     pub poll_interval_secs: u64,
@@ -82,6 +87,26 @@ impl SourceConfig {
         self.bot_logins
             .iter()
             .any(|bot| bot.eq_ignore_ascii_case(login))
+    }
+
+    /// Whether this login may propose work as a candidate.
+    #[must_use]
+    pub fn is_bot_known(&self, login: &str) -> bool {
+        self.known_bots
+            .iter()
+            .any(|bot| bot.eq_ignore_ascii_case(login))
+    }
+
+    /// Whether this login may originate or continue work.
+    ///
+    /// A known bot is not "allowed" in this sense: allowed means a person whose
+    /// request is explicit, and mixing the two would let a bot inherit a person's
+    /// authority.
+    #[must_use]
+    pub fn is_allowed(&self, login: &str) -> bool {
+        self.allowed
+            .iter()
+            .any(|person| person.eq_ignore_ascii_case(login))
     }
 }
 
