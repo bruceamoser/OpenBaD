@@ -20,6 +20,7 @@ members = [
     "crates/openbad-terminal",
     "crates/openbad-transfer",
     "crates/openbad-vault",
+    "crates/openbad-pipeline",
 ]
 
 [workspace.package]
