@@ -1220,7 +1220,41 @@ pub struct TurnBudget {
   messages remain in `session_messages` with `surface = 0` for the transcript
   and audit.
 
-## 16. Runtime pseudocode
+## 16. Pipeline sources
+
+A project opts into the supervised pipeline (ADR-009) with `.openbad/pipeline.yaml`:
+
+```yaml
+sources:
+  - id: main
+    repository: owner/repo
+    enabled: true
+    labels: ["agent:run"]        # an issue must carry one to be admitted
+    allowed: ["bruceamoser"]     # who may originate work; enforced by Eval
+    bot_logins: ["openbad-bot"]  # the agent's own account, dropped on sight
+    poll_interval_secs: 120
+```
+
+`openbad-pipeline` turns repository activity into immutable triggers with a
+persisted read position. Three decisions worth knowing:
+
+- **The label filter travels in the GitHub query**, not in a post-filter. Adding a
+  label to an existing issue changes its `updated_at`, so the next poll admits it
+  exactly as a new issue would, and the source never has to remember every issue's
+  labels.
+- **The source drops only what it does not listen to** — its own bot's activity and
+  duplicates from the read overlap. It does **not** authorize: the allowed list
+  travels with the source because it is that source's part of the policy, but
+  judging who may originate work is Eval's job. A trigger from someone else is
+  still recorded, so the decision to ignore it is visible rather than silent.
+- **The read position is a watermark plus recent ids.** The watermark sits a minute
+  behind the newest event and the id set suppresses the re-read, because provider
+  clocks and our ordering are not the same thing: a re-read costs one comparison,
+  a gap costs work that silently never happens. `PollOutcome` reports how many
+  triggers were dropped as the bot's own and how many were duplicates, so "the
+  agent ignored my issue" is answerable.
+
+## 17. Runtime pseudocode
 
 ```rust
 pub async fn run_turn(
@@ -1267,7 +1301,7 @@ pub async fn run_turn(
 }
 ```
 
-## 17. Testing
+## 18. Testing
 
 | Test | What it proves |
 | --- | --- |
@@ -1282,7 +1316,7 @@ pub async fn run_turn(
 | Budget exhaustion | Turn stops gracefully with a summary |
 | Prompt prefix equality | Integration with the cache-first harness |
 
-## 18. Related documents
+## 19. Related documents
 
 - [Cache-First Harness](04-cache-first-harness.md)
 - [Memory and Knowledge](06-memory-and-knowledge.md)

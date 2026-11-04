@@ -3200,6 +3200,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "openbad-pipeline"
+version = "0.3.16"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "openbad-store"
 version = "0.3.16"
 dependencies = [
@@ -5307,6 +5320,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
