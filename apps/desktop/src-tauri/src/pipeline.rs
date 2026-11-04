@@ -21,7 +21,7 @@ use openbad_pipeline::config::{
 use openbad_pipeline::eval::{Decision, DecisionKind, EvalInput, evaluate};
 use openbad_pipeline::source::{GhCli, GitHubApi, GitHubSource};
 use openbad_store::Store;
-use openbad_store::pipeline::{NewTicket, TicketRecord};
+use openbad_store::pipeline::{NewAssignment, NewTicket, TicketRecord};
 use serde::Serialize;
 use tauri::State;
 
@@ -235,9 +235,37 @@ impl Supervisor {
                         ticket_id: None,
                     });
                 }
-                // Everything else has to reach an executor, which this slice does
-                // not run. Stop here so nothing is read past and forgotten.
-                DecisionKind::Attach | DecisionKind::Stop => {
+                // A message on a live ticket is delivered by waking its executor:
+                // a pending assignment the scheduler will run. Only a stop waits
+                // for a person, and it holds the position rather than losing the
+                // event nobody acted on.
+                DecisionKind::Attach => match self.wake(source, trigger) {
+                    Ok(Some(ticket)) => {
+                        report.admitted.push(Admitted {
+                            source_id: source.id.clone(),
+                            thread: trigger.thread.0.clone(),
+                            actor: trigger.actor.clone(),
+                            decision,
+                            ticket_id: Some(ticket.id),
+                        });
+                    }
+                    Ok(None) => {
+                        report.admitted.push(Admitted {
+                            source_id: source.id.clone(),
+                            thread: trigger.thread.0.clone(),
+                            actor: trigger.actor.clone(),
+                            decision,
+                            ticket_id: None,
+                        });
+                        report.deferred += 1;
+                        break;
+                    }
+                    Err(error) => {
+                        tick.error = Some(error);
+                        break;
+                    }
+                },
+                DecisionKind::Stop => {
                     report.admitted.push(Admitted {
                         source_id: source.id.clone(),
                         thread: trigger.thread.0.clone(),
@@ -282,6 +310,40 @@ impl Supervisor {
         store
             .pipeline_thread_context(self.workspace_id, &source.id, thread_key)
             .map_err(|error| error.to_string())
+    }
+
+    /// Gives the live ticket on this thread a pending assignment, so the
+    /// scheduler picks the message up. One already in flight is not duplicated.
+    fn wake(
+        &self,
+        source: &SourceConfig,
+        trigger: &openbad_pipeline::trigger::Trigger,
+    ) -> Result<Option<TicketRecord>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let Some(ticket) = store
+            .live_pipeline_ticket(self.workspace_id, &source.id, &trigger.thread.0)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        if store
+            .active_pipeline_assignment(&ticket.id)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(Some(ticket));
+        }
+        store
+            .create_pipeline_assignment(NewAssignment {
+                workspace_id: self.workspace_id,
+                ticket_id: ticket.id.clone(),
+                executor: format!("worker-{}", ticket.id),
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Some(ticket))
     }
 
     fn admit(
@@ -641,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_message_on_a_live_ticket_is_deferred_rather_than_lost() {
+    async fn a_message_on_a_live_ticket_wakes_its_executor() {
         let project = project_with_source();
         let (supervisor, store, workspace) = supervisor(&project);
         let first = FakeGitHub::new(vec![
@@ -669,15 +731,15 @@ mod tests {
         let report = supervisor.tick(&comment).await.expect("attach");
         let after = supervisor.tick(&comment).await.expect("again");
 
-        assert_eq!(report.deferred, 1);
+        assert_eq!(report.deferred, 0);
         assert_eq!(report.admitted[0].decision.kind, DecisionKind::Attach);
         assert!(
-            !report.sources[0].advanced,
-            "the position stops at the message"
+            report.sources[0].advanced,
+            "a message that reached its executor is delivered, not re-read"
         );
         assert_eq!(
-            after.deferred, 1,
-            "a deferred trigger is re-read, not skipped"
+            after.sources[0].triggers, 0,
+            "the position moved past the message"
         );
         let tickets = store
             .lock()
@@ -685,10 +747,21 @@ mod tests {
             .list_pipeline_tickets(workspace, 10)
             .expect("tickets");
         assert_eq!(tickets.len(), 1, "no second ticket on the same thread");
+        let assignment = store
+            .lock()
+            .expect("lock")
+            .active_pipeline_assignment(&tickets[0].id)
+            .expect("assignment")
+            .expect("assignment");
+        assert_eq!(
+            assignment.state,
+            openbad_pipeline::ticket::AssignmentState::Pending,
+            "the wake is a pending assignment the scheduler runs"
+        );
     }
 
     #[tokio::test]
-    async fn a_deferral_holds_only_the_source_it_happened_in() {
+    async fn one_sources_message_does_not_stop_another_source_from_advancing() {
         let project = tempfile::tempdir().expect("project");
         let path = project.path().join(".openbad/pipeline.yaml");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
@@ -714,9 +787,9 @@ mod tests {
         ]);
         supervisor.tick(&admit).await.expect("admit both");
 
-        // A message on the first source's live ticket needs an executor, so that
-        // source holds its position. The second source has nothing to wait for
-        // and must still advance.
+        // A message on the first source's live ticket wakes its executor. The
+        // second source has nothing waiting and must still advance: one source
+        // never holds another back.
         let mixed = FakeGitHub::new(vec![
             (
                 "/repos/o/first/issues/comments",
@@ -744,7 +817,7 @@ mod tests {
             .iter()
             .find(|source| source.source_id == "second")
             .expect("second");
-        assert!(!first.advanced, "the deferred source waits");
+        assert!(first.advanced, "the message was delivered to its executor");
         assert!(second.advanced, "the other source is unaffected");
         assert_eq!(
             store

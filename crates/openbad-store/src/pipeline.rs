@@ -65,6 +65,25 @@ pub struct AssignmentRecord {
     pub ended_at: Option<i64>,
 }
 
+/// The session the ticket's most recent assignment ran in.
+///
+/// A ticket keeps one executor session across its assignments, so the work has a
+/// history rather than starting cold every time it is woken.
+pub fn last_session_for_ticket(
+    connection: &Connection,
+    ticket_id: &str,
+) -> Result<Option<String>, StoreError> {
+    Ok(connection
+        .query_row(
+            "SELECT session_id FROM pipeline_assignments
+             WHERE ticket_id = ?1 AND session_id IS NOT NULL
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            [ticket_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// What a caller supplies to start an assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAssignment {

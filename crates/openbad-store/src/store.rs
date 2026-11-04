@@ -285,6 +285,13 @@ enum WriteCommand {
         next: openbad_pipeline::ticket::AssignmentState,
         reply: SyncSender<Result<crate::pipeline::AssignmentRecord, StoreError>>,
     },
+    SubscribePipelineThread {
+        workspace_id: WorkspaceId,
+        ticket_id: String,
+        source_id: String,
+        thread_key: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
     WritePipelineReport {
         assignment_id: String,
         outcome: ReportOutcome,
@@ -2364,6 +2371,51 @@ impl Store {
         crate::pipeline::ticket(&connection, id)
     }
 
+    /// Binds the session that runs an assignment.
+    pub fn bind_pipeline_assignment_session(
+        &self,
+        assignment_id: &str,
+        session_id: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::bind_assignment_session(&connection, assignment_id, session_id)
+    }
+
+    /// The ticket a thread is currently working under, if any.
+    pub fn live_pipeline_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: &str,
+        thread_key: &str,
+    ) -> Result<Option<crate::pipeline::TicketRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::live_ticket(&connection, workspace_id, source_id, thread_key)
+    }
+
+    /// Subscribes a ticket to its thread, so later activity wakes the same
+    /// executor instead of needing a new admission.
+    pub fn subscribe_pipeline_thread(
+        &self,
+        workspace_id: WorkspaceId,
+        ticket_id: &str,
+        source_id: &str,
+        thread_key: &str,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::SubscribePipelineThread {
+            workspace_id,
+            ticket_id: ticket_id.to_owned(),
+            source_id: source_id.to_owned(),
+            thread_key: thread_key.to_owned(),
+            reply,
+        })
+    }
+
+    /// The session the ticket's most recent assignment ran in.
+    pub fn pipeline_ticket_session(&self, ticket_id: &str) -> Result<Option<String>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::last_session_for_ticket(&connection, ticket_id)
+    }
+
     /// The newest report on a ticket, or `None` before any of its executors
     /// reported anything.
     pub fn pipeline_report(
@@ -3858,6 +3910,22 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
             }
             WriteCommand::MovePipelineAssignment { id, next, reply } => {
                 let result = crate::pipeline::move_assignment(&connection, &id, next);
+                let _ = reply.send(result);
+            }
+            WriteCommand::SubscribePipelineThread {
+                workspace_id,
+                ticket_id,
+                source_id,
+                thread_key,
+                reply,
+            } => {
+                let result = crate::pipeline::subscribe(
+                    &connection,
+                    workspace_id,
+                    &ticket_id,
+                    &source_id,
+                    &thread_key,
+                );
                 let _ = reply.send(result);
             }
             WriteCommand::WritePipelineReport {

@@ -108,6 +108,12 @@ pub struct AppState {
     active_tools: Arc<Mutex<HashMap<SessionId, Vec<String>>>>,
     /// Questions waiting for the human, keyed by request id.
     pending_questions: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<QuestionAnswer>>>>,
+    /// Cancellation flags for tickets whose pipeline executor is running.
+    pipeline_runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Execution slots per project, so concurrent tickets respect `execution.slots`.
+    pipeline_slots: Arc<Mutex<HashMap<WorkspaceId, openbad_pipeline::execution::Slots>>>,
+    /// Projects being watched, keyed by their path, with the flag that stops them.
+    pipeline_watchers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// Puts a question in front of the human and blocks until it is answered, so
@@ -6041,6 +6047,9 @@ pub fn run() {
             session_reads: Arc::new(Mutex::new(HashMap::new())),
             active_tools: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_runs: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_slots: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_watchers: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(NotificationFocus::default())
         .on_window_event(|window, event| {
@@ -6080,6 +6089,9 @@ pub fn run() {
             pipeline::pipeline_tick,
             executor::pipeline_launch,
             executor::pipeline_execute,
+            executor::pipeline_stop,
+            executor::pipeline_watch,
+            executor::pipeline_unwatch,
             workspace_default,
             project_agents,
             cancel_agent,

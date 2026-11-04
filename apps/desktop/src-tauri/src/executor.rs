@@ -11,15 +11,21 @@
 //! and a pipeline that retried by itself would hide a broken prepare behind an
 //! infinite loop.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use openbad_core::event::NewEvent;
+use openbad_core::{SessionId, WorkspaceId};
+use openbad_llm::chat::ChatMessage;
 use openbad_pipeline::config::{ExecutionConfig, load_pipeline_config};
 use openbad_pipeline::execution::{
-    Budget, LaunchPlan, PREPARE_TIMEOUT, Spent, effects_of, launch_plan, ticket_prompt,
+    Budget, LaunchPlan, PREPARE_TIMEOUT, SlotPriority, Slots, Spent, effects_of, launch_plan,
+    ticket_prompt,
 };
 use openbad_pipeline::ticket::{AssignmentState, ReportOutcome, TicketState};
 use openbad_store::Store;
@@ -358,11 +364,27 @@ pub struct TurnResult {
 
 /// Runs a ticket's turn.
 ///
-/// A seam, so the protocol around the turn — the states it moves, the report it
-/// writes, the budget it enforces — can be tested without a model or a network.
+/// A seam, so the protocol around the turn — the session it resumes, the states it
+/// moves, the report it writes, the budget it enforces, the stop it honours — can
+/// be tested without a model or a network.
 #[async_trait::async_trait]
 pub trait TurnRunner: Send + Sync {
-    async fn run(&self, worktree: &Path, prompt: &str) -> Result<TurnResult, String>;
+    async fn run(
+        &self,
+        worktree: &Path,
+        history: &[ChatMessage],
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<TurnResult, String>;
+}
+
+/// What a running turn shares with the rest of the app.
+#[derive(Clone, Default)]
+pub struct ExecutionOptions {
+    /// Set by `pipeline_stop`; the observer the agent polls between steps reads it,
+    /// so a stop lands at a step boundary instead of killing a process mid-write.
+    pub cancel: Arc<AtomicBool>,
+    /// Shared per project, so two tickets cannot run when the project allows one.
+    pub slots: Arc<Mutex<HashMap<WorkspaceId, Slots>>>,
 }
 
 /// What an execution did with its ticket.
@@ -370,6 +392,8 @@ pub trait TurnRunner: Send + Sync {
 pub struct ExecutionReport {
     pub ticket_id: String,
     pub assignment_id: String,
+    /// The ticket's session, which its next assignment resumes.
+    pub session: String,
     pub outcome: ReportOutcome,
     /// The executor's own words, verbatim.
     pub last_words: String,
@@ -382,12 +406,47 @@ pub struct ExecutionReport {
 /// Runs one ticket's executor turn and records what it said.
 #[tauri::command]
 pub async fn pipeline_execute(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_path: String,
     ticket_id: String,
 ) -> Result<ExecutionReport, String> {
-    let turn = AgentTurn::resolve(&state)?;
-    execute(&state.store, &project_path, &ticket_id, &turn).await
+    let turn = AgentTurn::resolve(&app, &state, &ticket_id)?;
+    let options = {
+        let mut runs = state
+            .pipeline_runs
+            .lock()
+            .map_err(|error| format!("pipeline runs lock poisoned: {error}"))?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        runs.insert(ticket_id.clone(), Arc::clone(&cancel));
+        ExecutionOptions {
+            cancel,
+            slots: Arc::clone(&state.pipeline_slots),
+        }
+    };
+
+    let result = execute(&state.store, &project_path, &ticket_id, &turn, &options).await;
+
+    if let Ok(mut runs) = state.pipeline_runs.lock() {
+        runs.remove(&ticket_id);
+    }
+    result
+}
+
+/// Stops a running ticket, if one is running. Answers whether anything was.
+#[tauri::command]
+pub fn pipeline_stop(state: State<'_, AppState>, ticket_id: String) -> Result<bool, String> {
+    let runs = state
+        .pipeline_runs
+        .lock()
+        .map_err(|error| format!("pipeline runs lock poisoned: {error}"))?;
+    Ok(match runs.get(&ticket_id) {
+        Some(cancel) => {
+            cancel.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    })
 }
 
 /// Runs the turn a launch prepared, then lets the rules decide what its report
@@ -397,6 +456,7 @@ pub async fn execute<R: TurnRunner>(
     project_path: &str,
     ticket_id: &str,
     runner: &R,
+    options: &ExecutionOptions,
 ) -> Result<ExecutionReport, String> {
     let project_root = PathBuf::from(project_path);
     let config = load_pipeline_config(&project_root).map_err(|error| error.to_string())?;
@@ -459,16 +519,65 @@ pub async fn execute<R: TurnRunner>(
     }
 
     {
+        let mut all = options
+            .slots
+            .lock()
+            .map_err(|error| format!("pipeline slots lock poisoned: {error}"))?;
+        let slots = all
+            .entry(ticket.workspace_id)
+            .or_insert_with(|| Slots::from(config.execution.clone()));
+        if !slots.try_acquire(&ticket.id, SlotPriority::Background) {
+            return Err(format!(
+                "all {} slots are busy; this ticket waits for one",
+                slots.capacity()
+            ));
+        }
+    }
+
+    let session = {
+        let store = lock(store)?;
+        start_session(
+            &store,
+            ticket.workspace_id,
+            &plan.session,
+            &ticket.id,
+            &assignment.id,
+        )?
+    };
+    let turn = turn_number_store(store, session)?;
+    if let Ok(store) = store.lock() {
+        let _ = store.append_event(
+            session,
+            NewEvent::new(openbad_core::event::SessionEventKind::TurnStart).with_turn(turn),
+        );
+    }
+
+    let prompt = ticket_prompt(&plan, &ticket.mandate);
+    let history = {
+        let store = lock(store)?;
+        let (mut history, _) = crate::load_history(&store, session)?;
+        history.push(ChatMessage::user(prompt));
+        history
+    };
+
+    {
         let store = lock(store)?;
         store
             .move_pipeline_assignment(&assignment.id, AssignmentState::Running)
             .map_err(|error| error.to_string())?;
     }
 
-    let prompt = ticket_prompt(&plan, &ticket.mandate);
-    let turn = runner.run(&plan.directory, &prompt).await;
+    let outcome_of_turn = runner.run(&plan.directory, &history, &options.cancel).await;
+    let stopped = options.cancel.load(Ordering::SeqCst);
 
-    let (outcome, last_words, steps, tokens, failure) = match turn {
+    let (outcome, last_words, steps, tokens, failure) = match outcome_of_turn {
+        _ if stopped => (
+            ReportOutcome::Waiting,
+            "stopped by a person".to_owned(),
+            0,
+            0,
+            None,
+        ),
         Ok(run) => {
             let budget = Budget::from(config.execution.budget);
             let spent = Spent {
@@ -495,31 +604,349 @@ pub async fn execute<R: TurnRunner>(
         Err(error) => (ReportOutcome::Failed, error.clone(), 0, 0, Some(error)),
     };
 
+    // A ticket that opened a pull request subscribes to its thread, so review
+    // activity wakes this executor instead of needing a new admission.
+    let pull_request = if outcome == ReportOutcome::Ready {
+        detect_pull_request(&plan.directory, &plan.branch)
+    } else {
+        None
+    };
+
+    {
+        let store = lock(store)?;
+        let record = store
+            .write_pipeline_report(
+                &assignment.id,
+                outcome,
+                &last_words,
+                pull_request.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        if pull_request.is_some() {
+            store
+                .subscribe_pipeline_thread(
+                    ticket.workspace_id,
+                    &ticket.id,
+                    &ticket.source_id,
+                    &ticket.thread.0,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let effects = effects_of(record.outcome);
+        if effects.end_assignment {
+            store
+                .move_pipeline_assignment(&assignment.id, AssignmentState::Ended)
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(next) = effects.ticket {
+            store
+                .move_pipeline_ticket(&ticket.id, next)
+                .map_err(|error| error.to_string())?;
+        }
+        if effects.release_slot {
+            if let Ok(mut all) = options.slots.lock() {
+                if let Some(slots) = all.get_mut(&ticket.workspace_id) {
+                    slots.release(&ticket.id);
+                }
+            }
+        }
+        finish_session(&store, session, turn, &last_words);
+    }
+
     let store = lock(store)?;
     let record = store
-        .write_pipeline_report(&assignment.id, outcome, &last_words, None)
-        .map_err(|error| error.to_string())?;
-    let effects = effects_of(record.outcome);
-    if effects.end_assignment {
-        store
-            .move_pipeline_assignment(&assignment.id, AssignmentState::Ended)
-            .map_err(|error| error.to_string())?;
-    }
-    if let Some(next) = effects.ticket {
-        store
-            .move_pipeline_ticket(&ticket.id, next)
-            .map_err(|error| error.to_string())?;
-    }
+        .pipeline_report(&ticket.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("ticket {ticket_id} has no report after its turn"))?;
 
     Ok(ExecutionReport {
         ticket_id: ticket.id,
         assignment_id: assignment.id,
+        session: session.to_string(),
         outcome: record.outcome,
         last_words: record.last_words,
         steps,
         tokens,
         failure,
     })
+}
+
+/// The pull request this ticket's branch has open, if it has one.
+///
+/// Asked of `gh` rather than of the model: the executor may describe its work
+/// however it likes, but the branch is the fact that decides whether review can
+/// reach it.
+fn detect_pull_request(worktree: &Path, branch: &str) -> Option<String> {
+    let output = Command::new("gh")
+        .current_dir(worktree)
+        .args([
+            "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Resumes the ticket's session when an earlier assignment ran one — the executor
+/// keeps its history — and binds it to this assignment.
+fn start_session(
+    store: &Store,
+    workspace: WorkspaceId,
+    name: &str,
+    ticket_id: &str,
+    assignment_id: &str,
+) -> Result<SessionId, String> {
+    let session = match store
+        .pipeline_ticket_session(ticket_id)
+        .map_err(|error| error.to_string())?
+        .and_then(|id| uuid::Uuid::parse_str(&id).ok())
+        .map(SessionId::from)
+    {
+        Some(session) => session,
+        None => store
+            .create_session(Some(workspace), Some(name))
+            .map_err(|error| error.to_string())?,
+    };
+    store
+        .bind_pipeline_assignment_session(assignment_id, &session.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(session)
+}
+
+fn turn_number_store(store: &Arc<Mutex<Store>>, session: SessionId) -> Result<u32, String> {
+    let store = lock(store)?;
+    Ok(store
+        .load_turns(session)
+        .map(|turns| turns.len() as u32 + 1)
+        .unwrap_or(1))
+}
+
+fn finish_session(store: &Store, session: SessionId, turn: u32, text: &str) {
+    let _ = store.append_events(
+        session,
+        vec![
+            NewEvent::new(openbad_core::event::SessionEventKind::AssistantMessage)
+                .with_turn(turn)
+                .with_step(1)
+                .with_payload(serde_json::json!({ "content": text })),
+            NewEvent::new(openbad_core::event::SessionEventKind::TurnEnd)
+                .with_turn(turn)
+                .with_payload(serde_json::json!({ "reason": "complete" })),
+        ],
+    );
+}
+
+/// Watches one project: polls its sources, launches what was admitted, and runs
+/// what was prepared, until a person stops it.
+pub struct Watcher {
+    app: tauri::AppHandle,
+    store: Arc<Mutex<Store>>,
+    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    slots: Arc<Mutex<HashMap<WorkspaceId, Slots>>>,
+    api_key: String,
+    base_url: String,
+    user_id: String,
+}
+
+/// Starts watching a project. Idempotent: watching twice is still one watcher.
+#[tauri::command]
+pub fn pipeline_watch(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project_path: String,
+    interval_seconds: Option<u64>,
+) -> Result<bool, String> {
+    let mut watchers = state
+        .pipeline_watchers
+        .lock()
+        .map_err(|error| format!("pipeline watchers lock poisoned: {error}"))?;
+    if watchers.contains_key(&project_path) {
+        return Ok(false);
+    }
+
+    let api_key = crate::resolve_api_key(&state)?;
+    let user_id = {
+        let store = lock(&state.store)?;
+        crate::ensure_user_id(&store)?
+    };
+    let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
+        .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
+    let cancel = Arc::new(AtomicBool::new(false));
+    watchers.insert(project_path.clone(), Arc::clone(&cancel));
+
+    let watcher = Arc::new(Watcher {
+        app,
+        store: Arc::clone(&state.store),
+        runs: Arc::clone(&state.pipeline_runs),
+        slots: Arc::clone(&state.pipeline_slots),
+        api_key,
+        base_url,
+        user_id,
+    });
+    // A source's own cadence decides the tick; the interval is the floor, so a
+    // project cannot ask for a poll storm with `poll_interval_secs: 0`.
+    let interval = Duration::from_secs(interval_seconds.unwrap_or(60).clamp(5, 3_600));
+
+    tauri::async_runtime::spawn(async move {
+        watcher.watch(project_path, cancel, interval).await;
+    });
+    Ok(true)
+}
+
+/// Stops watching a project. Answers whether a watcher was running.
+#[tauri::command]
+pub fn pipeline_unwatch(state: State<'_, AppState>, project_path: String) -> Result<bool, String> {
+    let mut watchers = state
+        .pipeline_watchers
+        .lock()
+        .map_err(|error| format!("pipeline watchers lock poisoned: {error}"))?;
+    Ok(match watchers.remove(&project_path) {
+        Some(cancel) => {
+            cancel.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    })
+}
+
+impl Watcher {
+    async fn watch(&self, project_path: String, cancel: Arc<AtomicBool>, interval: Duration) {
+        while !cancel.load(Ordering::SeqCst) {
+            self.poll_once(&project_path).await;
+
+            // Slept in one-second steps so a stop does not wait out the interval.
+            let deadline = Instant::now() + interval;
+            while Instant::now() < deadline {
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+
+    /// One pass: poll the sources, then move every ready ticket one step forward.
+    async fn poll_once(&self, project_path: &str) {
+        use tauri::Emitter as _;
+
+        let workspace = match self.workspace(project_path) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                crate::diagnostics::record("WARN", &format!("pipeline watch: {error}"));
+                return;
+            }
+        };
+
+        let supervisor = crate::pipeline::Supervisor::new(
+            Arc::clone(&self.store),
+            workspace,
+            PathBuf::from(project_path),
+        );
+        match supervisor.tick(&openbad_pipeline::source::GhCli).await {
+            Ok(report) => {
+                let _ = self.app.emit(
+                    "pipeline:tick",
+                    serde_json::json!({ "project": project_path, "report": report }),
+                );
+            }
+            Err(error) => {
+                crate::diagnostics::record("WARN", &format!("pipeline tick: {error}"));
+                return;
+            }
+        }
+
+        let ready = match self.store.lock() {
+            Ok(store) => match store.list_pipeline_tickets(workspace, 500) {
+                Ok(tickets) => tickets,
+                Err(error) => {
+                    crate::diagnostics::record("WARN", &format!("pipeline tickets: {error}"));
+                    return;
+                }
+            },
+            Err(_) => return,
+        };
+
+        for ticket in ready {
+            if ticket.state != TicketState::Open {
+                continue;
+            }
+            if self
+                .runs
+                .lock()
+                .map(|runs| runs.contains_key(&ticket.id))
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            self.advance(project_path, &ticket).await;
+        }
+    }
+
+    /// Launches a ticket that has no assignment, and runs one that is prepared.
+    async fn advance(&self, project_path: &str, ticket: &TicketRecord) {
+        let assignment = match self.store.lock() {
+            Ok(store) => store.active_pipeline_assignment(&ticket.id).ok().flatten(),
+            Err(_) => return,
+        };
+
+        match assignment {
+            None => {
+                if let Err(error) = launch(&self.store, project_path, &ticket.id) {
+                    crate::diagnostics::record(
+                        "WARN",
+                        &format!("pipeline launch {}: {error}", ticket.id),
+                    );
+                }
+            }
+            Some(assignment) if assignment.state == AssignmentState::Pending => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                if let Ok(mut runs) = self.runs.lock() {
+                    if runs.contains_key(&ticket.id) {
+                        return;
+                    }
+                    runs.insert(ticket.id.clone(), Arc::clone(&cancel));
+                }
+                let turn = AgentTurn {
+                    app: self.app.clone(),
+                    ticket: ticket.id.clone(),
+                    api_key: self.api_key.clone(),
+                    model: openbad_llm::FLASH_MODEL.to_owned(),
+                    base_url: self.base_url.clone(),
+                    user_id: self.user_id.clone(),
+                    max_steps: 0,
+                };
+                let options = ExecutionOptions {
+                    cancel,
+                    slots: Arc::clone(&self.slots),
+                };
+                let project = project_path.to_owned();
+                let id = ticket.id.clone();
+                let store = Arc::clone(&self.store);
+                let runs = Arc::clone(&self.runs);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = execute(&store, &project, &id, &turn, &options).await {
+                        crate::diagnostics::record("WARN", &format!("pipeline turn {id}: {error}"));
+                    }
+                    if let Ok(mut runs) = runs.lock() {
+                        runs.remove(&id);
+                    }
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn workspace(&self, project_path: &str) -> Result<WorkspaceId, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        crate::project_workspace(&store, project_path)
+    }
 }
 
 /// The real runner: the app's own agent, rooted at the ticket's worktree.
@@ -529,6 +956,8 @@ pub async fn execute<R: TurnRunner>(
 /// not buy stay refused by the tool layer rather than by an approval prompt
 /// nobody is there to answer.
 pub struct AgentTurn {
+    app: tauri::AppHandle,
+    ticket: String,
     api_key: String,
     model: String,
     base_url: String,
@@ -537,7 +966,7 @@ pub struct AgentTurn {
 }
 
 impl AgentTurn {
-    fn resolve(state: &AppState) -> Result<Self, String> {
+    fn resolve(app: &tauri::AppHandle, state: &AppState, ticket: &str) -> Result<Self, String> {
         let api_key = crate::resolve_api_key(state)?;
         let user_id = {
             let store = lock(&state.store)?;
@@ -546,6 +975,8 @@ impl AgentTurn {
         let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
         Ok(Self {
+            app: app.clone(),
+            ticket: ticket.to_owned(),
             api_key,
             model: openbad_llm::FLASH_MODEL.to_owned(),
             base_url,
@@ -555,9 +986,66 @@ impl AgentTurn {
     }
 }
 
+/// Forwards the turn's steps to the panel and stops when a person says so.
+struct PipelineObserver {
+    app: tauri::AppHandle,
+    ticket: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl PipelineObserver {
+    fn emit(&self, payload: serde_json::Value) {
+        use tauri::Emitter as _;
+        let _ = self.app.emit("pipeline:progress", payload);
+    }
+}
+
+impl openbad_agent::AgentObserver for PipelineObserver {
+    fn on_step(&self, step: u32) {
+        self.emit(serde_json::json!({ "ticket": self.ticket, "kind": "step", "step": step }));
+    }
+
+    fn on_tool_call(&self, step: u32, call: &openbad_llm::chat::ToolCall) {
+        self.emit(serde_json::json!({
+            "ticket": self.ticket,
+            "kind": "tool_call",
+            "step": step,
+            "tool": call.function.name,
+            "arguments": call.function.arguments,
+        }));
+    }
+
+    fn on_tool_result(
+        &self,
+        step: u32,
+        call: &openbad_llm::chat::ToolCall,
+        content: &str,
+        is_error: bool,
+        _metadata: &serde_json::Value,
+    ) {
+        self.emit(serde_json::json!({
+            "ticket": self.ticket,
+            "kind": "tool_result",
+            "step": step,
+            "tool": call.function.name,
+            "is_error": is_error,
+            "content": content.chars().take(2_000).collect::<String>(),
+        }));
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
 #[async_trait::async_trait]
 impl TurnRunner for AgentTurn {
-    async fn run(&self, worktree: &Path, prompt: &str) -> Result<TurnResult, String> {
+    async fn run(
+        &self,
+        worktree: &Path,
+        history: &[ChatMessage],
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<TurnResult, String> {
         let client = openbad_llm::DeepSeekClient::new(
             openbad_llm::ReqwestTransport::new(),
             self.api_key.clone(),
@@ -578,12 +1066,21 @@ impl TurnRunner for AgentTurn {
             },
         )
         .with_redactions(vec![self.api_key.clone()]);
+        let observer = PipelineObserver {
+            app: self.app.clone(),
+            ticket: self.ticket.clone(),
+            cancel: Arc::clone(cancel),
+        };
         let run = agent
-            .run(vec![openbad_llm::chat::ChatMessage::user(
-                prompt.to_owned(),
-            )])
+            .run_with_observer(history.to_vec(), &observer)
             .await
-            .map_err(|error| error.to_string().replace(&self.api_key, "[redacted]"))?;
+            .map_err(|error| {
+                if cancel.load(Ordering::SeqCst) {
+                    "stopped by a person".to_owned()
+                } else {
+                    error.to_string().replace(&self.api_key, "[redacted]")
+                }
+            })?;
         Ok(TurnResult {
             text: run.text,
             steps: run.steps,
@@ -794,8 +1291,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TurnRunner for FakeTurn {
-        async fn run(&self, _worktree: &Path, prompt: &str) -> Result<TurnResult, String> {
-            self.seen.lock().expect("prompts").push(prompt.to_owned());
+        async fn run(
+            &self,
+            _worktree: &Path,
+            history: &[ChatMessage],
+            _cancel: &Arc<AtomicBool>,
+        ) -> Result<TurnResult, String> {
+            if let Some(prompt) = history.last() {
+                self.seen
+                    .lock()
+                    .expect("prompts")
+                    .push(prompt.content.clone().unwrap_or_default());
+            }
             self.result.clone()
         }
     }
@@ -814,9 +1321,15 @@ mod tests {
         let launch = project.launch().expect("launch");
         let runner = FakeTurn::new(turn("opened #12", 7, 1_200));
 
-        let report = execute(&project.store, &project.path(), &project.ticket.id, &runner)
-            .await
-            .expect("execute");
+        let report = execute(
+            &project.store,
+            &project.path(),
+            &project.ticket.id,
+            &runner,
+            &ExecutionOptions::default(),
+        )
+        .await
+        .expect("execute");
 
         let store = project.store.lock().expect("lock");
         let record = store
@@ -866,9 +1379,15 @@ mod tests {
         std::fs::write(project.root.path().join(".openbad/pipeline.yaml"), config).expect("config");
         let runner = FakeTurn::new(turn("still going", 5, 0));
 
-        let report = execute(&project.store, &project.path(), &project.ticket.id, &runner)
-            .await
-            .expect("execute");
+        let report = execute(
+            &project.store,
+            &project.path(),
+            &project.ticket.id,
+            &runner,
+            &ExecutionOptions::default(),
+        )
+        .await
+        .expect("execute");
 
         assert_eq!(
             (
@@ -902,9 +1421,15 @@ mod tests {
         project.launch().expect("launch");
         let runner = FakeTurn::new(Err("the provider refused the request".to_owned()));
 
-        let report = execute(&project.store, &project.path(), &project.ticket.id, &runner)
-            .await
-            .expect("execute");
+        let report = execute(
+            &project.store,
+            &project.path(),
+            &project.ticket.id,
+            &runner,
+            &ExecutionOptions::default(),
+        )
+        .await
+        .expect("execute");
 
         assert_eq!(
             (
@@ -934,9 +1459,15 @@ mod tests {
         let runner = FakeTurn::new(turn("unused", 1, 0));
 
         assert_eq!(
-            execute(&project.store, &project.path(), &project.ticket.id, &runner)
-                .await
-                .map(|_| ()),
+            execute(
+                &project.store,
+                &project.path(),
+                &project.ticket.id,
+                &runner,
+                &ExecutionOptions::default()
+            )
+            .await
+            .map(|_| ()),
             Err(format!(
                 "ticket {} has no assignment; launch it before running it",
                 project.ticket.id
@@ -944,6 +1475,114 @@ mod tests {
             "the turn waits for the launch that prepared it"
         );
         assert!(runner.prompts().is_empty(), "nothing ran");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_keeps_one_session_across_its_assignments() {
+        let project = project("true");
+        let options = ExecutionOptions::default();
+
+        project.launch().expect("launch");
+        let first = execute(
+            &project.store,
+            &project.path(),
+            &project.ticket.id,
+            &FakeTurn::new(turn("first pass", 1, 0)),
+            &options,
+        )
+        .await
+        .expect("first turn");
+
+        project.launch().expect("relaunch");
+        let second = execute(
+            &project.store,
+            &project.path(),
+            &project.ticket.id,
+            &FakeTurn::new(turn("second pass", 1, 0)),
+            &options,
+        )
+        .await
+        .expect("second turn");
+
+        assert_eq!(
+            (first.session.as_str(), second.session.as_str()),
+            (first.session.as_str(), first.session.as_str()),
+            "the executor resumes its session instead of starting cold"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_lands_as_waiting_rather_than_a_failure() {
+        let project = project("true");
+        project.launch().expect("launch");
+        let options = ExecutionOptions::default();
+        options.cancel.store(true, Ordering::SeqCst);
+
+        let report = execute(
+            &project.store,
+            &project.path(),
+            &project.ticket.id,
+            &FakeTurn::new(turn("kept working", 3, 10)),
+            &options,
+        )
+        .await
+        .expect("execute");
+
+        let store = project.store.lock().expect("lock");
+        assert_eq!(
+            (
+                report.outcome,
+                report.failure,
+                store
+                    .pipeline_ticket(&project.ticket.id)
+                    .expect("ticket")
+                    .expect("ticket")
+                    .state,
+                store
+                    .active_pipeline_assignment(&project.ticket.id)
+                    .expect("assignment")
+                    .is_none(),
+            ),
+            (ReportOutcome::Waiting, None, TicketState::Open, true),
+            "a person's stop is idle, not a failed ticket"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_runs_no_more_tickets_than_its_slots() {
+        let project = project("true");
+        project.launch().expect("launch");
+        let options = ExecutionOptions::default();
+        {
+            let mut all = options.slots.lock().expect("slots");
+            let slots = all
+                .entry(
+                    project
+                        .store
+                        .lock()
+                        .expect("lock")
+                        .pipeline_ticket(&project.ticket.id)
+                        .expect("ticket")
+                        .expect("ticket")
+                        .workspace_id,
+                )
+                .or_insert_with(|| Slots::new(1));
+            assert!(slots.try_acquire("someone-else", SlotPriority::Background));
+        }
+
+        assert_eq!(
+            execute(
+                &project.store,
+                &project.path(),
+                &project.ticket.id,
+                &FakeTurn::new(turn("unused", 1, 0)),
+                &options,
+            )
+            .await
+            .map(|_| ()),
+            Err("all 1 slots are busy; this ticket waits for one".to_owned()),
+            "the configured bound is a bound, even for a person's ticket"
+        );
     }
 
     #[test]
