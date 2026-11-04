@@ -730,6 +730,7 @@ export type PipelineStatus = {
   configured: boolean;
   sources: PipelineSource[];
   tickets: Record<string, number>;
+  watching: boolean;
 };
 
 export type PipelineTickReport = {

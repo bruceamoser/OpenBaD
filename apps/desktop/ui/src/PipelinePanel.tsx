@@ -109,6 +109,7 @@ export default function PipelinePanel({
       if (stopped.current) return;
       setStatus(nextStatus);
       setTickets(nextTickets);
+      setWatching(nextStatus.watching);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

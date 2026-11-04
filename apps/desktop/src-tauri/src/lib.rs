@@ -6098,6 +6098,13 @@ pub fn run() {
             pipeline_watchers: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(NotificationFocus::default())
+        .setup(|app| {
+            // Resumes the pipelines the last session left watching: an unattended
+            // pipeline that forgets itself on restart is not unattended.
+            let handle = app.handle().clone();
+            executor::resume_watchers(&handle, &app.state::<AppState>());
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if !matches!(event, tauri::WindowEvent::Focused(true)) {
                 return;

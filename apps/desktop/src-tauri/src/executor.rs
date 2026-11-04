@@ -740,6 +740,155 @@ fn finish_session(store: &Store, session: SessionId, turn: u32, text: &str) {
     );
 }
 
+/// Whether this project asked to be watched.
+///
+/// Persisted rather than remembered in the process: an unattended pipeline that
+/// forgets it was running as soon as the window closes is not unattended. The
+/// setting is the human's decision; the watcher is what carries it out.
+fn watch_key(workspace: WorkspaceId) -> String {
+    format!("pipeline.watch.{workspace}")
+}
+
+fn is_watched(store: &Store, workspace: WorkspaceId) -> bool {
+    store
+        .get_setting(&watch_key(workspace))
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn remember_watch(store: &Store, workspace: WorkspaceId, watched: bool) {
+    let _ = store.set_setting(watch_key(workspace), serde_json::json!(watched));
+}
+
+/// How often to tick a project: the fastest enabled source's own cadence.
+fn watcher_interval(root: &Path) -> Duration {
+    let seconds = load_pipeline_config(root)
+        .ok()
+        .and_then(|config| {
+            config
+                .sources
+                .iter()
+                .filter(|source| source.enabled)
+                .map(|source| source.poll_interval_secs)
+                .min()
+        })
+        .unwrap_or(60);
+    Duration::from_secs(seconds.clamp(5, 3_600))
+}
+
+/// What a watcher needs to run turns, resolved once per start.
+#[derive(Clone)]
+pub struct WatcherCredentials {
+    api_key: String,
+    base_url: String,
+    user_id: String,
+}
+
+impl WatcherCredentials {
+    fn from_state(state: &AppState) -> Result<Self, String> {
+        let api_key = crate::resolve_api_key(state)?;
+        let user_id = {
+            let store = lock(&state.store)?;
+            crate::ensure_user_id(&store)?
+        };
+        let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
+        Ok(Self {
+            api_key,
+            base_url,
+            user_id,
+        })
+    }
+}
+
+/// Starts one watcher, unless this project already has one.
+pub fn start_watcher(
+    app: tauri::AppHandle,
+    store: Arc<Mutex<Store>>,
+    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    slots: Arc<Mutex<HashMap<WorkspaceId, Slots>>>,
+    watchers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    project_path: String,
+    interval: Duration,
+    credentials: WatcherCredentials,
+) -> bool {
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut watchers = match watchers.lock() {
+            Ok(watchers) => watchers,
+            Err(_) => return false,
+        };
+        if watchers.contains_key(&project_path) {
+            return false;
+        }
+        watchers.insert(project_path.clone(), Arc::clone(&cancel));
+    }
+
+    let watcher = Arc::new(Watcher {
+        app,
+        store,
+        runs,
+        slots,
+        api_key: credentials.api_key,
+        base_url: credentials.base_url,
+        user_id: credentials.user_id,
+    });
+    tauri::async_runtime::spawn(async move {
+        watcher.watch(project_path, cancel, interval).await;
+    });
+    true
+}
+
+/// Resumes the watchers the last session left on, so a restart does not silently
+/// stop a pipeline the human already asked to run.
+pub fn resume_watchers(app: &tauri::AppHandle, state: &AppState) {
+    let credentials = match WatcherCredentials::from_state(state) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            // No model credential is not a reason to skip polling: ticking and
+            // admitting still work, and the panel can start it by hand once a key
+            // exists. Say so rather than fail quietly.
+            crate::diagnostics::record("INFO", &format!("pipeline watchers not resumed: {error}"));
+            return;
+        }
+    };
+
+    let projects: Vec<(WorkspaceId, String)> = match state.store.lock() {
+        Ok(store) => match store.list_workspaces() {
+            Ok(workspaces) => workspaces
+                .into_iter()
+                .map(|workspace| (workspace.id, workspace.path))
+                .collect(),
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+
+    for (workspace, path) in projects {
+        let root = PathBuf::from(&path);
+        let wanted = match state.store.lock() {
+            Ok(store) => is_watched(&store, workspace),
+            Err(_) => false,
+        };
+        if !wanted || !openbad_pipeline::config::pipeline_config_path(&root).is_file() {
+            continue;
+        }
+        let interval = watcher_interval(&root);
+        start_watcher(
+            app.clone(),
+            Arc::clone(&state.store),
+            Arc::clone(&state.pipeline_runs),
+            Arc::clone(&state.pipeline_slots),
+            Arc::clone(&state.pipeline_watchers),
+            path,
+            interval,
+            credentials.clone(),
+        );
+    }
+}
+
 /// Watches one project: polls its sources, launches what was admitted, and runs
 /// what was prepared, until a person stops it.
 pub struct Watcher {
@@ -760,41 +909,37 @@ pub fn pipeline_watch(
     project_path: String,
     interval_seconds: Option<u64>,
 ) -> Result<bool, String> {
-    let mut watchers = state
+    if state
         .pipeline_watchers
         .lock()
-        .map_err(|error| format!("pipeline watchers lock poisoned: {error}"))?;
-    if watchers.contains_key(&project_path) {
+        .map_err(|error| format!("pipeline watchers lock poisoned: {error}"))?
+        .contains_key(&project_path)
+    {
         return Ok(false);
     }
 
-    let api_key = crate::resolve_api_key(&state)?;
-    let user_id = {
-        let store = lock(&state.store)?;
-        crate::ensure_user_id(&store)?
-    };
-    let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
-        .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
-    let cancel = Arc::new(AtomicBool::new(false));
-    watchers.insert(project_path.clone(), Arc::clone(&cancel));
+    let credentials = WatcherCredentials::from_state(&state)?;
+    let root = PathBuf::from(&project_path);
+    let interval = interval_seconds
+        .map(|seconds| Duration::from_secs(seconds.clamp(5, 3_600)))
+        .unwrap_or_else(|| watcher_interval(&root));
 
-    let watcher = Arc::new(Watcher {
+    let started = start_watcher(
         app,
-        store: Arc::clone(&state.store),
-        runs: Arc::clone(&state.pipeline_runs),
-        slots: Arc::clone(&state.pipeline_slots),
-        api_key,
-        base_url,
-        user_id,
-    });
-    // A source's own cadence decides the tick; the interval is the floor, so a
-    // project cannot ask for a poll storm with `poll_interval_secs: 0`.
-    let interval = Duration::from_secs(interval_seconds.unwrap_or(60).clamp(5, 3_600));
-
-    tauri::async_runtime::spawn(async move {
-        watcher.watch(project_path, cancel, interval).await;
-    });
-    Ok(true)
+        Arc::clone(&state.store),
+        Arc::clone(&state.pipeline_runs),
+        Arc::clone(&state.pipeline_slots),
+        Arc::clone(&state.pipeline_watchers),
+        project_path.clone(),
+        interval,
+        credentials,
+    );
+    if started {
+        let store = lock(&state.store)?;
+        let workspace = crate::project_workspace(&store, &project_path)?;
+        remember_watch(&store, workspace, true);
+    }
+    Ok(started)
 }
 
 /// Stops watching a project. Answers whether a watcher was running.
@@ -804,13 +949,21 @@ pub fn pipeline_unwatch(state: State<'_, AppState>, project_path: String) -> Res
         .pipeline_watchers
         .lock()
         .map_err(|error| format!("pipeline watchers lock poisoned: {error}"))?;
-    Ok(match watchers.remove(&project_path) {
+    let stopped = match watchers.remove(&project_path) {
         Some(cancel) => {
             cancel.store(true, Ordering::SeqCst);
             true
         }
         None => false,
-    })
+    };
+    drop(watchers);
+
+    if let Ok(store) = state.store.lock() {
+        if let Ok(workspace) = crate::project_workspace(&store, &project_path) {
+            remember_watch(&store, workspace, false);
+        }
+    }
+    Ok(stopped)
 }
 
 impl Watcher {
@@ -1582,6 +1735,43 @@ mod tests {
             .map(|_| ()),
             Err("all 1 slots are busy; this ticket waits for one".to_owned()),
             "the configured bound is a bound, even for a person's ticket"
+        );
+    }
+
+    #[test]
+    fn watching_is_remembered_on_the_project_and_ticked_at_its_fastest_cadence() {
+        let project = project("true");
+        let workspace = {
+            let store = project.store.lock().expect("lock");
+            store
+                .pipeline_ticket(&project.ticket.id)
+                .expect("ticket")
+                .expect("ticket")
+                .workspace_id
+        };
+
+        {
+            let store = project.store.lock().expect("lock");
+            assert!(!is_watched(&store, workspace), "off until asked");
+            remember_watch(&store, workspace, true);
+            assert!(
+                is_watched(&store, workspace),
+                "the decision survives the call"
+            );
+            remember_watch(&store, workspace, false);
+            assert!(!is_watched(&store, workspace));
+        }
+
+        std::fs::write(
+            project.root.path().join(".openbad/pipeline.yaml"),
+            "sources:\n  - id: slow\n    repository: o/r\n    poll_interval_secs: 300\n  - id: fast\n    repository: o/r2\n    poll_interval_secs: 30\n  - id: off\n    repository: o/r3\n    enabled: false\n    poll_interval_secs: 1\n",
+        )
+        .expect("config");
+
+        assert_eq!(
+            watcher_interval(project.root.path()),
+            Duration::from_secs(30),
+            "the fastest enabled source decides, and a disabled one is not polled"
         );
     }
 

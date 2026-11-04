@@ -1445,7 +1445,16 @@ project-level provider choice is a follow-up.
 
 `pipeline_watch` starts one watcher per project: it ticks on an interval, launches
 tickets that were admitted, and runs the ones a launch prepared, until a person
-stops it. The interval is a floor (5s–1h) so a project cannot ask for a poll storm.
+stops it. The interval is the fastest cadence the project's enabled sources ask for
+(clamped to 5s–1h), so a source that insists on a minute does not get polled every
+five seconds and a project cannot ask for a poll storm.
+
+Watching is a setting on the project, not a flag in the running process: `watch`
+persists `pipeline.watch.<workspace_id>` and startup calls `resume_watchers`, so a
+project that was watched is watched again after a restart. Nothing is admitted
+until a tick runs, which is why a configured pipeline with open, labelled work can
+still show an empty panel — it has never been watched or checked.
+
 Every tick emits `pipeline:tick`; the runner emits `pipeline:progress` per step,
 tool call, and tool result. `pipeline_stop` sets the flag the observer polls, so a
 stop lands at a step boundary and is recorded as `waiting` — idle, not a failure.

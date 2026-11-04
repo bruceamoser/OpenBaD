@@ -402,6 +402,8 @@ pub struct PipelineStatus {
     pub sources: Vec<SourceStatus>,
     /// Tickets by state, so a stage can be shown without loading the tickets.
     pub tickets: HashMap<String, usize>,
+    /// Whether this project asked to be watched, which survives a restart.
+    pub watching: bool,
 }
 
 /// One configured source, as the panel shows it.
@@ -443,6 +445,12 @@ pub fn pipeline_status(
         &config,
         pipeline_config_path(&root).is_file(),
         ticket_counts(&store, workspace)?,
+        store
+            .get_setting(&format!("pipeline.watch.{workspace}"))
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
     ))
 }
 
@@ -452,11 +460,13 @@ fn describe(
     config: &PipelineConfig,
     configured: bool,
     tickets: HashMap<String, usize>,
+    watching: bool,
 ) -> PipelineStatus {
     PipelineStatus {
         configured,
         sources: config.sources.iter().map(SourceStatus::from).collect(),
         tickets,
+        watching,
     }
 }
 
@@ -1052,6 +1062,7 @@ mod tests {
             &config,
             pipeline_config_path(project.path()).is_file(),
             HashMap::from([("open".to_owned(), 2usize)]),
+            true,
         );
 
         assert_eq!(

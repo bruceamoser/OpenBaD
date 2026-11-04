@@ -706,3 +706,13 @@ the canvas surface — the white page used for previews — with light body text
 the dark theme the configuration was light grey on white: present, selectable, and
 impossible to read. It now uses the same inset field as the rest of the app's forms,
 and the report detail got the same treatment. No behaviour changed.
+
+**Watching survives a restart.** Watch used to live only in the running process, so
+a project that had been watched went quiet the moment the app closed — nothing
+polled, no ticket was ever admitted, and the panel looked empty even though the
+configuration named sources with open, labelled work waiting behind them. Watching
+is now a setting on the project (`pipeline.watch.<workspace_id>`), restored for
+every project when the app starts, and the watcher polls at the fastest cadence its
+enabled sources ask for — clamped to 5–3600 seconds — instead of a fixed interval.
+Tickets appearing in the panel is therefore a consequence of a tick: until a project
+is watched or checked once, a correctly configured pipeline is empty by design.
