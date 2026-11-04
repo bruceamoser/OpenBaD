@@ -378,7 +378,11 @@ function ChatComposer({
 
   return (
     <div className="shrink-0 border-t border-obd-line bg-obd-surface/95 px-4 py-3">
-      <div className="mx-auto max-w-3xl">
+      {/* The transcript is a scroll container with a stable gutter, so its
+          column sits a scrollbar-width left of centre. Reserving the same
+          gutter here keeps the composer flush with the text above it. */}
+      <div className="chat-gutter">
+        <div className="chat-column">
         {accessNotice !== null && (
           <div className="mb-2 flex items-start gap-2 rounded-md border border-obd-accent/20 bg-obd-accent/10 px-3 py-2 text-[11px] text-obd-accent">
             <Shield size={13} className="mt-0.5 shrink-0" />
@@ -636,6 +640,7 @@ function ChatComposer({
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

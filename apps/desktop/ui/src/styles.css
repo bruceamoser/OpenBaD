@@ -616,3 +616,21 @@ code {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
+
+/* One column for the transcript and the composer, so they cannot drift apart.
+   It grows with the pane and stops at a width that still reads as prose: a
+   fixed 48rem column left half an ultrawide pane empty and pushed the composer
+   away from the text it belongs to. Measured in rem so the cap follows the
+   root font size rather than the monitor. */
+.chat-column {
+  width: 100%;
+  max-width: min(100%, 80rem);
+  margin-inline: auto;
+}
+
+/* Reserves the transcript's scrollbar gutter so the composer's column lines up
+   with the text above it instead of sitting a scrollbar-width to the right. */
+.chat-gutter {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
