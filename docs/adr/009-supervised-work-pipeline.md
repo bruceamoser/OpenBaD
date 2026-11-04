@@ -1,6 +1,6 @@
 # ADR-009 — Supervised work pipeline
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-04
 
 ## Context
@@ -37,6 +37,10 @@ inventing:
    — the classification needs structured facts."*
 
 ## Decision
+
+Accepted. Slices are tracked as separate issues and each lands on its own: sources
+and read positions, admission and mandates, persistence, the assignment lifecycle,
+the real executor, pull-request subscriptions, and the needs-a-person surface.
 
 Add a **per-project supervised work pipeline** to OpenBaD. A project opts in;
 projects that do not are unaffected and remain purely interactive.
@@ -97,6 +101,13 @@ Two deviations from the prototype are deliberate and stay:
 The Executor enables auto-merge on its own pull request with **no size limit**.
 The unlock is the reviewing agent's approval.
 
+The reviewing agent runs as a **GitHub App**, not as a second bot account and not
+as the operator. An App has its own identity, so its review is a distinct actor
+that branch protection can require specifically, and its approval cannot be
+confused with a person's. A plain bot token would make the review
+indistinguishable from a human one; the operator's own account would make every
+merge need a person, which is the thing this pipeline exists to avoid.
+
 Recorded consequence: GitHub attributes a merge to whoever enabled it, so the
 merge is attributed to the agent account. Because there is no line cap, the only
 guard against a large change merging unreviewed is **branch protection**, which a
@@ -106,8 +117,15 @@ dependency: *"These instructions govern the agent, not GitHub's merge rules."*
 
 ### Reports and stage
 
-Every report carries a structured outcome — `ready`, `dropped`, `blocked`,
-`failed`, `waiting` — plus an explicit attention field when a person is needed.
+Every report carries a structured outcome — `progress`, `waiting`, `ready`,
+`blocked`, `failed`, `dropped` — and is the ticket's current state rather than an
+event in a stream: one per assignment, updated as it works. `progress` is the only
+interim value; `ready` and `blocked` ask for a person; `dropped` and `failed` end
+the ticket from the executor's side.
+
+A question for a person is its own record, not a flag on a report: the executor
+asks, then waits, and **one question at a time per ticket** — two competing
+questions cost a person more than they return.
 Stage is derived from those facts, in this order, first match wins:
 
 | Stage | Condition |
@@ -132,6 +150,14 @@ the Ticket as `failed` with the reason, rather than running unbounded.
 Tickets, assignments, reports, subscriptions and source read positions are rows
 keyed by `workspace_id` in the existing store. Pipeline configuration lives in
 `.openbad/pipeline.yaml` in the project. No new database.
+
+The decisions are split from the plumbing. State rules — admission, the ticket
+state machine, slots, budgets, stage — live in `openbad-pipeline` as pure
+functions, so they are testable without a database, a session, or a model. Launch
+and event streaming live in the desktop host, where the single turn entrypoint
+already exists, so there is one implementation of starting a turn rather than two
+that drift. The lifecycle is proven against a fake executor before the real one is
+wired to it.
 
 ## UI surface
 
@@ -249,9 +275,8 @@ they are looking at.
 
 ## Open questions
 
-- Where does the reviewing agent's identity live — a separate GitHub account, a
-  GitHub App, or the operator's own account approving by hand? It decides whether
-  its approval can satisfy branch protection without a person.
+- ~~Where does the reviewing agent's identity live?~~ Decided: a GitHub App. See
+  [Merge](#merge).
 
 
 - Label taxonomy: one label per pipeline stage, or a single `agent:run` plus
