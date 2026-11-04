@@ -1262,6 +1262,13 @@ persisted read position. Three decisions worth knowing:
   triggers were dropped as the bot's own and how many were duplicates, so "the
   agent ignored my issue" is answerable.
 
+  The position is persisted per source, and **written after the triggers it
+  accounts for are admitted**, never before: a crash between the two then costs
+  one re-read, which the id set absorbs, while advancing first would lose the
+  events the cursor claims to have seen. A stored position the code cannot read is
+  an error rather than an empty one, because silently replaying everything is the
+  failure the cursor exists to prevent.
+
 ### Admission
 
 `openbad-pipeline::eval` decides what each trigger may do. It takes the source's
@@ -1291,6 +1298,14 @@ authority. A bot may propose work; it cannot claim a person asked for it.
 Stop is never inferred from text. Only an explicit command withdraws a mandate —
 `Decision::stop` is what the panel's stop button produces — because reading a
 comment as a stop is a guess and withdrawing authority on a guess is unrecoverable.
+
+### Thread context
+
+Eval judges one trigger against what is already on its thread, and only the
+**newest** ticket on that thread decides it: a thread stopped by a person and then
+re-admitted by one has a newer open ticket, and it has to behave like a live thread
+rather than staying dead because of the older one. A thread with no ticket at all
+is neutral, so a new admission is possible.
 
 ### Tickets, mandates, and reports
 
@@ -1360,6 +1375,103 @@ The loop itself is exercised end to end against a scripted executor in
 `crates/openbad-store/tests/pipeline_loop.rs`: admit, take a slot, launch, take
 reports, apply their effects. A unit test per rule cannot catch a slot released for
 a report that never ended its assignment.
+
+### Host surface
+
+The desktop host exposes the supervisor through two commands in
+`apps/desktop/src-tauri/src/pipeline.rs`, both taking the project path:
+
+- **`pipeline_status`** — whether the project has a config at all, each source
+  with its enabled flag and cadence (a disabled source stays listed, so toggling it
+  keeps its read position), and the ticket count per state. It reads rows; it does
+  not poll.
+- **`pipeline_tick`** — polls every enabled source once through `gh api`, judges
+  each trigger, admits what it may, and returns the report. A quiet tick stays out
+  of the log; one that admitted, deferred, or failed writes a single diagnostics
+  line.
+
+Nothing schedules a tick yet: the loop is started by whoever asks for one, which
+keeps the cadence decision with the setup surface rather than the plumbing. Launch
+and event streaming — the executor half of ADR-009 — are still absent, which is why
+a trigger that needs one is reported as deferred and holds its source's position
+instead of being read past.
+
+### Launch
+
+`pipeline_launch` takes a ticket to the point where a turn can run, and no further:
+
+- **One worktree, one branch, one session.** The names come from
+  `openbad-pipeline::execution::launch_plan`, not from the call site, so
+  `worker-<ticket>` and `worker/<ticket>` hold by construction. A ticket id becomes
+  a path and a branch there, so anything that could leave the execution root is
+  neutralized first.
+- **The execution root** is `execution.execution_root` (relative paths resolve
+  against the project), defaulting to a sibling
+  `<parent>/.openbad-executors/<project>` — beside the repository, never inside it,
+  so a worktree does not become untracked noise in the checkout its own agent reads.
+- **Prepare** is `execution.prepare`, run in the new worktree with the launch's
+  variables and `PREPARE_TIMEOUT` (ten minutes). Its output goes to `prepare.log`
+  in the worktree and its tail to the report. A failure ends the ticket with those
+  words; nothing retries by itself.
+- **A prepared ticket stops at a pending assignment.** That is the state
+  `recovery_for` already knows how to relaunch, so the ticket is never left
+  `running` with nothing running.
+
+### Turn
+
+`pipeline_execute` runs the turn a launch prepared, through a `TurnRunner` seam
+that keeps the protocol testable without a model:
+
+- **The assignment moves `pending` → `running` → `ended`**, and the report's
+  outcome decides the last two steps through `effects_of`, not through code here.
+  `ready` asks for a person and leaves the ticket open for its next turn; `failed`
+  ends it with the reason on the record.
+- **The budget is the project's**, in steps and tokens, `0` meaning no limit. A
+  turn that reaches it is reported with the numbers — "stopped after 40 steps; the
+  ticket allows 40" — because "budget exceeded" leaves a person guessing.
+- **The prompt carries the mandate and its limits.** `ticket_prompt` states full
+  access inside the worktree, the two things a mandate does not buy (destructive
+  commands outside it, pushes to a protected branch), and that nobody is watching:
+  a blocked executor reports rather than asking.
+- **The real runner** builds the app's own agent rooted at the worktree with
+  `FullAccess`, so the workspace boundary is what refuses the rest rather than an
+  approval prompt nobody would answer.
+
+The runner uses the default model rather than the project's provider settings; a
+project-level provider choice is a follow-up.
+
+### Watching
+
+`pipeline_watch` starts one watcher per project: it ticks on an interval, launches
+tickets that were admitted, and runs the ones a launch prepared, until a person
+stops it. The interval is a floor (5s–1h) so a project cannot ask for a poll storm.
+Every tick emits `pipeline:tick`; the runner emits `pipeline:progress` per step,
+tool call, and tool result. `pipeline_stop` sets the flag the observer polls, so a
+stop lands at a step boundary and is recorded as `waiting` — idle, not a failure.
+
+A message on a live ticket **wakes** its executor: the tick creates a pending
+assignment instead of deferring, so review comments reach the worker that already
+owns the thread. A ticket that opens a pull request subscribes to its thread and
+records the URL on its report.
+
+### Stage
+
+`openbad_pipeline::stage` derives a stage from rows, first match wins: an open
+attention outranks a review, a review outranks a block or a failure, and a ticket
+with no assignment or a pending one is `working/queued`. Nothing is inferred from
+report prose. `pipeline_tickets` returns each ticket with its stage for the panel,
+and the project area counts derive `pipeline_needs_person` and `pipeline_working`
+from the same function, so the sidebar cannot drift from the panel.
+
+### Setup
+
+The panel edits `.openbad/pipeline.yaml` verbatim and saves through
+`pipeline_save_config`, which parses and validates before writing: a file that
+saves but does not load would leave a project that looks configured and silently
+polls nothing. `pipeline_guards` reads the repository's branch protection and names
+each missing setting — approving reviews, stale-approval dismissal, required
+checks — because ADR-009 makes that protection the only thing between a large
+unreviewed change and `main`.
 
 ## 17. Runtime pseudocode
 

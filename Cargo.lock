@@ -3077,6 +3077,7 @@ dependencies = [
  "openbad-llm",
  "openbad-lsp",
  "openbad-mcp",
+ "openbad-pipeline",
  "openbad-store",
  "openbad-terminal",
  "openbad-tools",

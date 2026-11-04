@@ -29,6 +29,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 openbad-core = { path = "../../../crates/openbad-core" }
 openbad-store = { path = "../../../crates/openbad-store" }
+openbad-pipeline = { path = "../../../crates/openbad-pipeline" }
 openbad-agent = { path = "../../../crates/openbad-agent" }
 openbad-harness = { path = "../../../crates/openbad-harness" }
 openbad-llm = { path = "../../../crates/openbad-llm" }
@@ -62,3 +63,4 @@ glib = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

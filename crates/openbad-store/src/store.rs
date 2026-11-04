@@ -10,6 +10,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::audit;
+use openbad_pipeline::cursor::SourceCursor;
+use openbad_pipeline::eval::ThreadContext;
+use openbad_pipeline::ticket::{ReportOutcome, TicketState};
+
 use crate::error::StoreError;
 use crate::migrations;
 use crate::now_millis;
@@ -256,6 +260,44 @@ enum WriteCommand {
         workspace_id: WorkspaceId,
         older_than: i64,
         reply: SyncSender<Result<u64, StoreError>>,
+    },
+    SavePipelineCursor {
+        workspace_id: WorkspaceId,
+        source_id: String,
+        cursor: Box<SourceCursor>,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    CreatePipelineTicket {
+        new: Box<crate::pipeline::NewTicket>,
+        reply: SyncSender<Result<crate::pipeline::TicketRecord, StoreError>>,
+    },
+    MovePipelineTicket {
+        id: String,
+        next: TicketState,
+        reply: SyncSender<Result<bool, StoreError>>,
+    },
+    CreatePipelineAssignment {
+        new: crate::pipeline::NewAssignment,
+        reply: SyncSender<Result<crate::pipeline::AssignmentRecord, StoreError>>,
+    },
+    MovePipelineAssignment {
+        id: String,
+        next: openbad_pipeline::ticket::AssignmentState,
+        reply: SyncSender<Result<crate::pipeline::AssignmentRecord, StoreError>>,
+    },
+    SubscribePipelineThread {
+        workspace_id: WorkspaceId,
+        ticket_id: String,
+        source_id: String,
+        thread_key: String,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    WritePipelineReport {
+        assignment_id: String,
+        outcome: ReportOutcome,
+        last_words: String,
+        pull_request: Option<String>,
+        reply: SyncSender<Result<crate::pipeline::ReportRecord, StoreError>>,
     },
     Shutdown,
 }
@@ -2235,6 +2277,205 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// A source's read position, empty until it first polls.
+    pub fn pipeline_cursor(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: &str,
+    ) -> Result<SourceCursor, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::cursor(&connection, workspace_id, source_id)
+    }
+
+    pub fn save_pipeline_cursor(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: &str,
+        cursor: &SourceCursor,
+    ) -> Result<(), StoreError> {
+        let cursor = Box::new(cursor.clone());
+        let source_id = source_id.to_owned();
+        self.write(|reply| WriteCommand::SavePipelineCursor {
+            workspace_id,
+            source_id,
+            cursor,
+            reply,
+        })
+    }
+
+    pub fn create_pipeline_ticket(
+        &self,
+        new: crate::pipeline::NewTicket,
+    ) -> Result<crate::pipeline::TicketRecord, StoreError> {
+        let new = Box::new(new);
+        self.write(|reply| WriteCommand::CreatePipelineTicket { new, reply })
+    }
+
+    pub fn move_pipeline_ticket(&self, id: &str, next: TicketState) -> Result<bool, StoreError> {
+        let id = id.to_owned();
+        self.write(|reply| WriteCommand::MovePipelineTicket { id, next, reply })
+    }
+
+    pub fn create_pipeline_assignment(
+        &self,
+        new: crate::pipeline::NewAssignment,
+    ) -> Result<crate::pipeline::AssignmentRecord, StoreError> {
+        self.write(|reply| WriteCommand::CreatePipelineAssignment { new, reply })
+    }
+
+    pub fn move_pipeline_assignment(
+        &self,
+        id: &str,
+        next: openbad_pipeline::ticket::AssignmentState,
+    ) -> Result<crate::pipeline::AssignmentRecord, StoreError> {
+        let id = id.to_owned();
+        self.write(|reply| WriteCommand::MovePipelineAssignment { id, next, reply })
+    }
+
+    /// Writes what an assignment's executor last reported, replacing its previous
+    /// report. Kept verbatim: it is what a person reads when that is all they have.
+    pub fn write_pipeline_report(
+        &self,
+        assignment_id: &str,
+        outcome: openbad_pipeline::ticket::ReportOutcome,
+        last_words: &str,
+        pull_request: Option<&str>,
+    ) -> Result<crate::pipeline::ReportRecord, StoreError> {
+        let assignment_id = assignment_id.to_owned();
+        let last_words = last_words.to_owned();
+        let pull_request = pull_request.map(str::to_owned);
+        self.write(|reply| WriteCommand::WritePipelineReport {
+            assignment_id,
+            outcome,
+            last_words,
+            pull_request,
+            reply,
+        })
+    }
+
+    /// The assignment a ticket currently has, if any.
+    pub fn active_pipeline_assignment(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Option<crate::pipeline::AssignmentRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::active_assignment(&connection, ticket_id)
+    }
+
+    /// One ticket, or `None` when it has been removed.
+    pub fn pipeline_ticket(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::pipeline::TicketRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::ticket(&connection, id)
+    }
+
+    /// Binds the session that runs an assignment.
+    pub fn bind_pipeline_assignment_session(
+        &self,
+        assignment_id: &str,
+        session_id: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::bind_assignment_session(&connection, assignment_id, session_id)
+    }
+
+    /// The ticket a thread is currently working under, if any.
+    pub fn live_pipeline_ticket(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: &str,
+        thread_key: &str,
+    ) -> Result<Option<crate::pipeline::TicketRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::live_ticket(&connection, workspace_id, source_id, thread_key)
+    }
+
+    /// Subscribes a ticket to its thread, so later activity wakes the same
+    /// executor instead of needing a new admission.
+    pub fn subscribe_pipeline_thread(
+        &self,
+        workspace_id: WorkspaceId,
+        ticket_id: &str,
+        source_id: &str,
+        thread_key: &str,
+    ) -> Result<(), StoreError> {
+        self.write(|reply| WriteCommand::SubscribePipelineThread {
+            workspace_id,
+            ticket_id: ticket_id.to_owned(),
+            source_id: source_id.to_owned(),
+            thread_key: thread_key.to_owned(),
+            reply,
+        })
+    }
+
+    /// The session the ticket's most recent assignment ran in.
+    pub fn pipeline_ticket_session(&self, ticket_id: &str) -> Result<Option<String>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::last_session_for_ticket(&connection, ticket_id)
+    }
+
+    /// Whether the ticket is waiting on a person's answer.
+    pub fn pipeline_open_attention(&self, ticket_id: &str) -> Result<bool, StoreError> {
+        let connection = self.reader()?;
+        Ok(crate::pipeline::open_attention(&connection, ticket_id)?.is_some())
+    }
+
+    /// The newest report on a ticket, or `None` before any of its executors
+    /// reported anything.
+    pub fn pipeline_report(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Option<crate::pipeline::ReportRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::latest_report(&connection, ticket_id)
+    }
+
+    /// What the pipeline already knows about a thread.
+    ///
+    /// Only the newest ticket on the thread counts. A thread that was stopped and
+    /// then re-admitted by a person has a newer open ticket, and it has to behave
+    /// like a live thread rather than staying dead because of the older one.
+    pub fn pipeline_thread_context(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: &str,
+        thread_key: &str,
+    ) -> Result<ThreadContext, StoreError> {
+        let connection = self.reader()?;
+        let newest =
+            crate::pipeline::tickets_on_thread(&connection, workspace_id, source_id, thread_key)?
+                .into_iter()
+                .next();
+
+        Ok(match newest.map(|ticket| ticket.state) {
+            Some(TicketState::Open) => ThreadContext {
+                has_live_ticket: true,
+                ..ThreadContext::default()
+            },
+            Some(TicketState::Ended) => ThreadContext {
+                has_ended_ticket: true,
+                ..ThreadContext::default()
+            },
+            Some(TicketState::Stopped) => ThreadContext {
+                stopped_by_person: true,
+                ..ThreadContext::default()
+            },
+            None => ThreadContext::default(),
+        })
+    }
+
+    /// The project's tickets, most recently touched first.
+    pub fn list_pipeline_tickets(
+        &self,
+        workspace_id: WorkspaceId,
+        limit: u32,
+    ) -> Result<Vec<crate::pipeline::TicketRecord>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::list_tickets(&connection, workspace_id, limit)
+    }
+
     fn write<T>(
         &self,
         make_command: impl FnOnce(SyncSender<Result<T, StoreError>>) -> WriteCommand,
@@ -3651,6 +3892,64 @@ fn writer_loop(mut connection: Connection, receiver: Receiver<WriteCommand>) {
                     .map_err(StoreError::from);
                 let _ = reply.send(result);
             }
+            WriteCommand::SavePipelineCursor {
+                workspace_id,
+                source_id,
+                cursor,
+                reply,
+            } => {
+                let result =
+                    crate::pipeline::save_cursor(&connection, workspace_id, &source_id, &cursor);
+                let _ = reply.send(result);
+            }
+            WriteCommand::CreatePipelineTicket { new, reply } => {
+                let result = crate::pipeline::create_ticket(&connection, *new);
+                let _ = reply.send(result);
+            }
+            WriteCommand::MovePipelineTicket { id, next, reply } => {
+                let result = crate::pipeline::move_ticket(&connection, &id, next);
+                let _ = reply.send(result);
+            }
+            WriteCommand::CreatePipelineAssignment { new, reply } => {
+                let result = crate::pipeline::create_assignment(&connection, new);
+                let _ = reply.send(result);
+            }
+            WriteCommand::MovePipelineAssignment { id, next, reply } => {
+                let result = crate::pipeline::move_assignment(&connection, &id, next);
+                let _ = reply.send(result);
+            }
+            WriteCommand::SubscribePipelineThread {
+                workspace_id,
+                ticket_id,
+                source_id,
+                thread_key,
+                reply,
+            } => {
+                let result = crate::pipeline::subscribe(
+                    &connection,
+                    workspace_id,
+                    &ticket_id,
+                    &source_id,
+                    &thread_key,
+                );
+                let _ = reply.send(result);
+            }
+            WriteCommand::WritePipelineReport {
+                assignment_id,
+                outcome,
+                last_words,
+                pull_request,
+                reply,
+            } => {
+                let result = crate::pipeline::write_report(
+                    &connection,
+                    &assignment_id,
+                    outcome,
+                    &last_words,
+                    pull_request.as_deref(),
+                );
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown => break,
         }
     }
@@ -4081,7 +4380,13 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(store.schema_version().expect("version"), "0019_pipeline");
+        let applied = store.schema_version().expect("version");
+        let known = crate::migrations::known_versions();
+        assert_eq!(
+            applied.as_str(),
+            known.last().copied().unwrap_or_default(),
+            "the newest recorded version is the last migration in the list"
+        );
     }
 
     #[test]
@@ -5563,5 +5868,149 @@ mod tests {
         let error = Store::restore_from(&corrupt, &target).expect_err("corrupt backup");
         assert!(matches!(error, StoreError::Sqlite(_)));
         assert!(!target.exists());
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    use openbad_pipeline::mandate::{Mandate, MandateStrength};
+    use openbad_pipeline::trigger::ThreadId;
+
+    fn store_with_workspace() -> (Store, WorkspaceId) {
+        let store = Store::open_in_memory().expect("store");
+        let workspace = store
+            .create_workspace_record(crate::types::NewWorkspace::new(
+                "demo",
+                format!("/tmp/{}", Uuid::now_v7()),
+            ))
+            .expect("workspace");
+        (store, workspace)
+    }
+
+    fn ticket(workspace: WorkspaceId, trigger: &str, thread: &str) -> crate::pipeline::NewTicket {
+        crate::pipeline::NewTicket {
+            workspace_id: workspace,
+            source_id: "main".to_owned(),
+            thread: ThreadId(thread.to_owned()),
+            trigger_id: trigger.to_owned(),
+            mandate: Mandate::new(
+                "policy-1",
+                thread,
+                MandateStrength::Explicit,
+                vec!["allowed-person".to_owned()],
+                "alice",
+                "main",
+                "label agent:run",
+            ),
+        }
+    }
+
+    #[test]
+    fn a_read_position_round_trips_through_the_writer() {
+        let (store, workspace) = store_with_workspace();
+        let mut cursor = SourceCursor::default();
+        assert!(cursor.accept("trigger-1", 1_000));
+
+        store
+            .save_pipeline_cursor(workspace, "main", &cursor)
+            .expect("save");
+        let loaded = store.pipeline_cursor(workspace, "main").expect("load");
+
+        assert_eq!(loaded, cursor);
+    }
+
+    #[test]
+    fn a_thread_with_no_ticket_says_so() {
+        let (store, workspace) = store_with_workspace();
+        assert_eq!(
+            store
+                .pipeline_thread_context(workspace, "main", "o/r#1")
+                .expect("context"),
+            ThreadContext::default()
+        );
+    }
+
+    #[test]
+    fn only_the_newest_ticket_decides_the_thread_context() {
+        let (store, workspace) = store_with_workspace();
+        let first = store
+            .create_pipeline_ticket(ticket(workspace, "t-1", "o/r#1"))
+            .expect("first");
+        store
+            .move_pipeline_ticket(&first.id, TicketState::Stopped)
+            .expect("stop");
+        assert!(
+            store
+                .pipeline_thread_context(workspace, "main", "o/r#1")
+                .expect("context")
+                .stopped_by_person
+        );
+
+        let second = store
+            .create_pipeline_ticket(ticket(workspace, "t-2", "o/r#1"))
+            .expect("re-admitted");
+
+        let context = store
+            .pipeline_thread_context(workspace, "main", "o/r#1")
+            .expect("context");
+        assert!(
+            context.has_live_ticket,
+            "a person re-admitting the thread makes it live again"
+        );
+        assert!(!context.stopped_by_person);
+        assert_eq!(
+            store
+                .list_pipeline_tickets(workspace, 10)
+                .expect("tickets")
+                .len(),
+            2
+        );
+        assert_eq!(second.state, TicketState::Open);
+    }
+
+    #[test]
+    fn an_ended_ticket_reads_as_resumable() {
+        let (store, workspace) = store_with_workspace();
+        let ticket = store
+            .create_pipeline_ticket(ticket(workspace, "t-1", "o/r#1"))
+            .expect("ticket");
+        store
+            .move_pipeline_ticket(&ticket.id, TicketState::Ended)
+            .expect("end");
+
+        let context = store
+            .pipeline_thread_context(workspace, "main", "o/r#1")
+            .expect("context");
+
+        assert!(context.has_ended_ticket);
+        assert!(!context.has_live_ticket);
+    }
+
+    #[test]
+    fn assignments_are_created_and_moved_through_the_writer() {
+        let (store, workspace) = store_with_workspace();
+        let ticket = store
+            .create_pipeline_ticket(ticket(workspace, "t-1", "o/r#1"))
+            .expect("ticket");
+        let assignment = store
+            .create_pipeline_assignment(crate::pipeline::NewAssignment {
+                workspace_id: workspace,
+                ticket_id: ticket.id.clone(),
+                executor: "worker-1".to_owned(),
+            })
+            .expect("assignment");
+
+        let ended = store
+            .move_pipeline_assignment(
+                &assignment.id,
+                openbad_pipeline::ticket::AssignmentState::Ended,
+            )
+            .expect("end");
+
+        assert_eq!(
+            ended.state,
+            openbad_pipeline::ticket::AssignmentState::Ended
+        );
     }
 }

@@ -27,6 +27,7 @@ import {
   FileText,
   Folder,
   FolderGit2,
+  Workflow,
   FolderOpen,
   Gauge,
   GitBranch,
@@ -2427,6 +2428,12 @@ export default function App() {
           onSelect: () => openPanel("agents"),
         },
         {
+          label: "Pipeline",
+          checked: panelOpen && panelTab === "pipeline",
+          disabled: activeProject === null,
+          onSelect: () => openPanel("pipeline"),
+        },
+        {
           label: "References",
           checked: panelOpen && panelTab === "repos",
           disabled: activeProject === null,
@@ -2657,6 +2664,13 @@ export default function App() {
                           active={panelOpen && panelTab === "agents"}
                           pulse={(areaCounts?.running_agents ?? 0) > 0}
                           onClick={() => openPanel("agents")}
+                        />
+                        <ProjectAreaButton
+                          icon={<Workflow size={12} />}
+                          label={`Pipeline${countSuffix(areaCounts?.pipeline_needs_person)}`}
+                          active={panelOpen && panelTab === "pipeline"}
+                          pulse={(areaCounts?.pipeline_working ?? 0) > 0}
+                          onClick={() => openPanel("pipeline")}
                         />
                         <ProjectAreaButton
                           icon={<FolderGit2 size={12} />}

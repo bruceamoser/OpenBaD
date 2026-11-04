@@ -1,7 +1,9 @@
 mod clipboard;
 mod diagnostics;
 pub use diagnostics::early_exit_for;
+mod executor;
 mod git;
+mod pipeline;
 mod preview;
 mod process;
 mod services;
@@ -106,6 +108,12 @@ pub struct AppState {
     active_tools: Arc<Mutex<HashMap<SessionId, Vec<String>>>>,
     /// Questions waiting for the human, keyed by request id.
     pending_questions: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<QuestionAnswer>>>>,
+    /// Cancellation flags for tickets whose pipeline executor is running.
+    pipeline_runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Execution slots per project, so concurrent tickets respect `execution.slots`.
+    pipeline_slots: Arc<Mutex<HashMap<WorkspaceId, openbad_pipeline::execution::Slots>>>,
+    /// Projects being watched, keyed by their path, with the flag that stops them.
+    pipeline_watchers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// Puts a question in front of the human and blocks until it is answered, so
@@ -2356,6 +2364,10 @@ pub struct ProjectAreaCounts {
     pub questions_total: u64,
     pub plan_steps: u64,
     pub plan_open_steps: u64,
+    /// Tickets the pipeline is asking a person about.
+    pub pipeline_needs_person: u64,
+    /// Tickets an executor is working on right now.
+    pub pipeline_working: u64,
 }
 
 #[tauri::command]
@@ -2563,6 +2575,7 @@ fn project_area_counts_payload(
                 .count() as u64
         })
         .unwrap_or_default();
+    let (pipeline_needs_person, pipeline_working) = pipeline_area_counts(store, workspace)?;
     Ok(ProjectAreaCounts {
         workspace_files: overview.index.files,
         agents: agents.len() as u64,
@@ -2579,7 +2592,48 @@ fn project_area_counts_payload(
         questions_total: questions.len() as u64,
         plan_steps,
         plan_open_steps,
+        pipeline_needs_person,
+        pipeline_working,
     })
+}
+
+/// How many tickets are asking for a person, and how many are being worked on.
+///
+/// Derived from rows rather than tracked, so the sidebar cannot drift from the
+/// panel it mirrors.
+fn pipeline_area_counts(store: &Store, workspace: WorkspaceId) -> Result<(u64, u64), String> {
+    use openbad_pipeline::stage::{StageInput, stage_of};
+
+    let tickets = store
+        .list_pipeline_tickets(workspace, 500)
+        .map_err(|error| error.to_string())?;
+    let mut needs_person = 0;
+    let mut working = 0;
+    for ticket in tickets {
+        let assignment = store
+            .active_pipeline_assignment(&ticket.id)
+            .map_err(|error| error.to_string())?;
+        let report = store
+            .pipeline_report(&ticket.id)
+            .map_err(|error| error.to_string())?;
+        let attention = store
+            .pipeline_open_attention(&ticket.id)
+            .map_err(|error| error.to_string())?;
+        let stage = stage_of(StageInput {
+            ticket: ticket.state,
+            assignment: assignment.as_ref().map(|record| record.state),
+            report: report.as_ref().map(|record| record.outcome),
+            attention,
+            delivery_failed: false,
+        });
+        if stage.needs_a_person() {
+            needs_person += 1;
+        }
+        if stage == openbad_pipeline::stage::Stage::Working {
+            working += 1;
+        }
+    }
+    Ok((needs_person, working))
 }
 
 #[tauri::command]
@@ -6039,6 +6093,9 @@ pub fn run() {
             session_reads: Arc::new(Mutex::new(HashMap::new())),
             active_tools: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_runs: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_slots: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_watchers: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(NotificationFocus::default())
         .on_window_event(|window, event| {
@@ -6074,6 +6131,17 @@ pub fn run() {
             delete_session,
             workspace_index_status,
             refresh_workspace_index,
+            pipeline::pipeline_status,
+            pipeline::pipeline_tick,
+            pipeline::pipeline_tickets,
+            pipeline::pipeline_config_file,
+            pipeline::pipeline_save_config,
+            pipeline::pipeline_guards,
+            executor::pipeline_launch,
+            executor::pipeline_execute,
+            executor::pipeline_stop,
+            executor::pipeline_watch,
+            executor::pipeline_unwatch,
             workspace_default,
             project_agents,
             cancel_agent,
@@ -6346,7 +6414,14 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0019_pipeline");
+        // Compared against the store rather than a literal: the property is that
+        // the doctor reports the schema the store actually applied, and a literal
+        // here needs editing for every migration without testing anything more.
+        assert_eq!(
+            payload.doctor.schema_version,
+            store.schema_version().expect("version")
+        );
+        assert!(!payload.doctor.schema_version.is_empty());
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

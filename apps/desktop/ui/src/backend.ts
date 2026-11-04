@@ -30,6 +30,13 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentSummary,
   KnowledgeImportReport,
+  PipelineConfigFile,
+  PipelineExecutionReport,
+  PipelineGuards,
+  PipelineLaunchReport,
+  PipelineStatus,
+  PipelineTicketRow,
+  PipelineTickReport,
   ProjectAgent,
   ProjectAreaCounts,
   ProjectFileView,
@@ -1097,6 +1104,8 @@ export async function loadProjectAreaCounts(
     questions_total: mockQuestions.length,
     plan_steps: mockPlan?.steps.length ?? 0,
     plan_open_steps: mockPlan?.steps.filter((step) => step.status !== "done").length ?? 0,
+    pipeline_needs_person: 0,
+    pipeline_working: 0,
   };
 }
 
@@ -2121,4 +2130,94 @@ async function tick(milliseconds: number, runId: string): Promise<void> {
   if (mockCancelledRuns.has(runId)) {
     throw new Error("agent turn was cancelled");
   }
+}
+
+export async function loadPipelineStatus(
+  projectPath: string,
+): Promise<PipelineStatus> {
+  return isTauri
+    ? invoke<PipelineStatus>("pipeline_status", { projectPath })
+    : { configured: false, sources: [], tickets: {} };
+}
+
+export async function loadPipelineTickets(
+  projectPath: string,
+): Promise<PipelineTicketRow[]> {
+  return isTauri
+    ? invoke<PipelineTicketRow[]>("pipeline_tickets", { projectPath })
+    : [];
+}
+
+export async function pipelineTick(
+  projectPath: string,
+): Promise<PipelineTickReport> {
+  if (!isTauri) {
+    return { sources: [], admitted: [], deferred: 0, skipped: "browser preview" };
+  }
+  return invoke<PipelineTickReport>("pipeline_tick", { projectPath });
+}
+
+export async function pipelineWatch(
+  projectPath: string,
+  intervalSeconds?: number,
+): Promise<boolean> {
+  return isTauri
+    ? invoke<boolean>("pipeline_watch", {
+        projectPath,
+        intervalSeconds: intervalSeconds ?? null,
+      })
+    : false;
+}
+
+export async function pipelineUnwatch(projectPath: string): Promise<boolean> {
+  return isTauri
+    ? invoke<boolean>("pipeline_unwatch", { projectPath })
+    : false;
+}
+
+export async function pipelineStop(ticketId: string): Promise<boolean> {
+  return isTauri
+    ? invoke<boolean>("pipeline_stop", { ticketId })
+    : false;
+}
+
+export async function pipelineLaunch(
+  projectPath: string,
+  ticketId: string,
+): Promise<PipelineLaunchReport> {
+  return invoke<PipelineLaunchReport>("pipeline_launch", {
+    projectPath,
+    ticketId,
+  });
+}
+
+export async function pipelineExecute(
+  projectPath: string,
+  ticketId: string,
+): Promise<PipelineExecutionReport> {
+  return invoke<PipelineExecutionReport>("pipeline_execute", {
+    projectPath,
+    ticketId,
+  });
+}
+
+export async function loadPipelineConfig(
+  projectPath: string,
+): Promise<PipelineConfigFile> {
+  return isTauri
+    ? invoke<PipelineConfigFile>("pipeline_config_file", { projectPath })
+    : { path: "", exists: false, text: "" };
+}
+
+export async function savePipelineConfig(
+  projectPath: string,
+  text: string,
+): Promise<void> {
+  await invoke("pipeline_save_config", { projectPath, text });
+}
+
+export async function checkPipelineGuards(
+  repository: string,
+): Promise<PipelineGuards> {
+  return invoke<PipelineGuards>("pipeline_guards", { repository });
 }

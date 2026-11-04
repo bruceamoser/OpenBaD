@@ -80,6 +80,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0019_pipeline",
         include_str!("../migrations/0019_pipeline.sql"),
     ),
+    (
+        "0020_pipeline_cursors",
+        include_str!("../migrations/0020_pipeline_cursors.sql"),
+    ),
 ];
 
 /// Apply every pending embedded migration.
@@ -112,6 +116,15 @@ pub fn apply(connection: &mut Connection) -> Result<(), StoreError> {
     }
 
     Ok(())
+}
+
+/// Every migration this build knows about, oldest first.
+///
+/// Exposed for tests that assert what a store has applied: a version that is not
+/// in this list means the binary and the database disagree about the schema.
+#[must_use]
+pub fn known_versions() -> Vec<&'static str> {
+    MIGRATIONS.iter().map(|(version, _)| *version).collect()
 }
 
 /// The newest applied migration version.
