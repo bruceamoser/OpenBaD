@@ -677,3 +677,24 @@ labels admit, `allowed` authorizes, a disabled source keeps its read position, a
 failing prepare fails the ticket — so the model does not have to guess a schema it
 cannot see. Guard rules moved into `openbad-pipeline::guards`, so the panel and the
 agent get the same answer.
+
+## v0.3.18
+
+**The agent can set the pipeline up itself.** 0.3.17 shipped the pipeline but left
+its configuration as something a person had to write: the document's shape lived in
+code the model cannot read, and the only prose was in an architecture note it is
+never given. Ask it to configure a pipeline in 0.3.17 and it guessed keys until the
+loader complained.
+
+The `pipeline` tool closes that gap. It lives in the plan domain, so the system
+prompt's own domain guidance reaches it, and it carries the knowledge in its
+description: the document's shape, and the four rules that change behaviour —
+labels admit (an empty list admits nothing), `allowed` authorizes a person while
+`known_bots` may only propose, a disabled source keeps its read position, and a
+failing prepare fails the ticket with its output. `show` reads and checks, `write`
+validates through the loader's own parser before saving (with `dry_run` to check
+without saving), and `guards` reports what branch protection actually says, so
+auto-merge is never promised on a guess.
+
+The guard rules moved into `openbad-pipeline::guards`, which means the panel that
+refuses the switch and the agent that checks it compute the same answer.
