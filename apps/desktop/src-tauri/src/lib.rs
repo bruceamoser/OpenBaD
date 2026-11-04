@@ -6346,7 +6346,14 @@ mod tests {
         ensure_defaults(&store).expect("defaults");
 
         let payload = foundation_payload(&store).expect("foundation");
-        assert_eq!(payload.doctor.schema_version, "0019_pipeline");
+        // Compared against the store rather than a literal: the property is that
+        // the doctor reports the schema the store actually applied, and a literal
+        // here needs editing for every migration without testing anything more.
+        assert_eq!(
+            payload.doctor.schema_version,
+            store.schema_version().expect("version")
+        );
+        assert!(!payload.doctor.schema_version.is_empty());
         assert_eq!(payload.doctor.integrity, "ok");
         assert!(payload.audit.valid);
         assert_eq!(payload.providers.len(), 1);

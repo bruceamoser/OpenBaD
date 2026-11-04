@@ -11,6 +11,7 @@
 //! record can be amended.
 
 use openbad_core::WorkspaceId;
+use openbad_pipeline::cursor::SourceCursor;
 use openbad_pipeline::mandate::{Mandate, MandateStrength};
 use openbad_pipeline::ticket::{AssignmentState, ReportOutcome, TicketState};
 use openbad_pipeline::trigger::ThreadId;
@@ -751,6 +752,56 @@ pub fn subscriptions_of(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// A source's read position, or an empty one when it has never polled.
+///
+/// Empty rather than absent, because "never polled" and "polled and found
+/// nothing" both mean "start from the beginning of what the provider will give
+/// us", and a caller should not have to spell that out at every call site.
+pub fn cursor(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    source_id: &str,
+) -> Result<SourceCursor, StoreError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT cursor_json FROM pipeline_cursors
+             WHERE workspace_id = ?1 AND source_id = ?2",
+            params![workspace_id.to_string(), source_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(json) => Ok(serde_json::from_str(&json)?),
+        None => Ok(SourceCursor::default()),
+    }
+}
+
+/// Records a source's read position.
+///
+/// Written after the triggers it accounts for are admitted, never before: a crash
+/// between the two then costs one re-read, which the cursor's id set absorbs.
+/// Advancing first would lose the events the cursor claims to have seen.
+pub fn save_cursor(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    source_id: &str,
+    cursor: &SourceCursor,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO pipeline_cursors (workspace_id, source_id, cursor_json, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(workspace_id, source_id) DO UPDATE
+            SET cursor_json = excluded.cursor_json, updated_at = excluded.updated_at",
+        params![
+            workspace_id.to_string(),
+            source_id,
+            serde_json::to_string(cursor)?,
+            now_millis()
+        ],
+    )?;
+    Ok(())
+}
+
 /// Reads a workspace id from a text column.
 fn parse_workspace(row: &Row<'_>, index: usize) -> rusqlite::Result<WorkspaceId> {
     let text: String = row.get(index)?;
@@ -778,6 +829,7 @@ fn invalid(column: &str, value: &str) -> rusqlite::Error {
 mod tests {
     use super::*;
 
+    use super::cursor as read_cursor;
     use super::ticket as read_ticket;
 
     struct Fixture {
@@ -1157,5 +1209,64 @@ mod tests {
         let read = read_ticket(&fixture.connection, &created.id);
 
         assert!(read.is_err(), "a corrupt state must not read as open");
+    }
+
+    #[test]
+    fn a_source_that_never_polled_has_an_empty_read_position() {
+        let fixture = Fixture::new();
+
+        let loaded = read_cursor(&fixture.connection, fixture.workspace, "main").expect("cursor");
+
+        assert_eq!(loaded, SourceCursor::default());
+        assert_eq!(loaded.since_ms(), 0);
+    }
+
+    #[test]
+    fn a_read_position_survives_a_round_trip() {
+        let fixture = Fixture::new();
+        let mut position = SourceCursor::default();
+        assert!(position.accept("t-1", 1_000));
+        assert!(position.accept("t-2", 2_000));
+
+        save_cursor(&fixture.connection, fixture.workspace, "main", &position).expect("save");
+        let loaded = read_cursor(&fixture.connection, fixture.workspace, "main").expect("load");
+
+        assert_eq!(loaded, position);
+        assert!(
+            loaded.seen("t-1"),
+            "the overlap set is what suppresses a re-read"
+        );
+    }
+
+    #[test]
+    fn a_read_position_is_per_source() {
+        let fixture = Fixture::new();
+        let mut main = SourceCursor::default();
+        main.accept("t-1", 5_000);
+        save_cursor(&fixture.connection, fixture.workspace, "main", &main).expect("save");
+
+        let other = read_cursor(&fixture.connection, fixture.workspace, "second").expect("cursor");
+
+        assert_eq!(other, SourceCursor::default(), "sources read independently");
+    }
+
+    #[test]
+    fn a_cursor_the_code_cannot_read_is_an_error_not_an_empty_position() {
+        let fixture = Fixture::new();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO pipeline_cursors (workspace_id, source_id, cursor_json, updated_at)
+                 VALUES (?1, 'main', 'not json', 1)",
+                [fixture.workspace.to_string()],
+            )
+            .expect("corrupt");
+
+        let loaded = read_cursor(&fixture.connection, fixture.workspace, "main");
+
+        assert!(
+            loaded.is_err(),
+            "an unreadable position must not silently replay everything"
+        );
     }
 }

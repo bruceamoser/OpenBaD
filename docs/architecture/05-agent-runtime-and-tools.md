@@ -1262,6 +1262,13 @@ persisted read position. Three decisions worth knowing:
   triggers were dropped as the bot's own and how many were duplicates, so "the
   agent ignored my issue" is answerable.
 
+  The position is persisted per source, and **written after the triggers it
+  accounts for are admitted**, never before: a crash between the two then costs
+  one re-read, which the id set absorbs, while advancing first would lose the
+  events the cursor claims to have seen. A stored position the code cannot read is
+  an error rather than an empty one, because silently replaying everything is the
+  failure the cursor exists to prevent.
+
 ### Admission
 
 `openbad-pipeline::eval` decides what each trigger may do. It takes the source's
@@ -1291,6 +1298,14 @@ authority. A bot may propose work; it cannot claim a person asked for it.
 Stop is never inferred from text. Only an explicit command withdraws a mandate —
 `Decision::stop` is what the panel's stop button produces — because reading a
 comment as a stop is a guess and withdrawing authority on a guess is unrecoverable.
+
+### Thread context
+
+Eval judges one trigger against what is already on its thread, and only the
+**newest** ticket on that thread decides it: a thread stopped by a person and then
+re-admitted by one has a newer open ticket, and it has to behave like a live thread
+rather than staying dead because of the older one. A thread with no ticket at all
+is neutral, so a new admission is possible.
 
 ### Tickets, mandates, and reports
 
