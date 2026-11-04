@@ -1,8 +1,10 @@
-//! The supervised work pipeline: sources, triggers, and read positions.
+//! The supervised work pipeline: sources, triggers, admission, and tickets.
 //!
-//! ADR-009 splits the pipeline into six primitives. This crate starts with the
-//! first: a source that turns repository activity into immutable triggers, with a
-//! persisted read position so a restart neither replays nor drops events.
+//! ADR-009 splits the pipeline into six primitives. This crate holds the parts
+//! that are pure decisions — a source turns repository activity into immutable
+//! triggers, Eval decides what each trigger is allowed to do, and a ticket is the
+//! durable unit of work an accept creates. Persistence lives in `openbad-store`,
+//! so every rule here is testable without a database.
 //!
 //! Two boundaries are deliberate and easy to get wrong:
 //!
@@ -18,6 +20,7 @@ pub mod error;
 pub mod eval;
 pub mod mandate;
 pub mod source;
+pub mod ticket;
 pub mod trigger;
 
 pub use config::{PipelineConfig, SourceConfig, load_pipeline_config};
@@ -26,4 +29,5 @@ pub use error::SourceError;
 pub use eval::{Decision, DecisionKind, EvalInput, ThreadContext, evaluate};
 pub use mandate::{Mandate, MandateStrength};
 pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome};
+pub use ticket::{AssignmentState, ReportOutcome, TicketState};
 pub use trigger::{Channel, ThreadId, Trigger, TriggerId, TriggerKind};

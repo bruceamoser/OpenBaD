@@ -1220,7 +1220,9 @@ pub struct TurnBudget {
   messages remain in `session_messages` with `surface = 0` for the transcript
   and audit.
 
-## 16. Pipeline sources
+## 16. The supervised pipeline
+
+### Sources
 
 A project opts into the supervised pipeline (ADR-009) with `.openbad/pipeline.yaml`:
 
@@ -1254,6 +1256,75 @@ persisted read position. Three decisions worth knowing:
   a gap costs work that silently never happens. `PollOutcome` reports how many
   triggers were dropped as the bot's own and how many were duplicates, so "the
   agent ignored my issue" is answerable.
+
+### Admission
+
+`openbad-pipeline::eval` decides what each trigger may do. It takes the source's
+policy, what is already on the thread, and the triggers as arguments, and holds no
+state, so the same inputs always give the same decisions and every rule is testable
+without a store. The gate is a first-match-wins rule table, not a model: "why was
+this ignored?" has one answer, and every `Decision` carries its reason — a batch may
+route up to twenty triggers at once, so a decision has to be readable on its own.
+
+| # | Trigger | Decision |
+|---|---------|----------|
+| 1 | The agent's own activity | Ignore |
+| 2 | A thread a person stopped | Ignore |
+| 3 | An issue without an admitting label | Ignore |
+| 4 | A known bot, with a live ticket | Attach as context |
+| 5 | A known bot, with no ticket | Accept, **inferred** mandate |
+| 6 | A person not on the allowed list | Ignore |
+| 7 | A labelled issue from an allowed person | Accept, **explicit** mandate |
+| 8 | Anything else on a live ticket | Attach |
+| 9 | A person's message on an ended ticket | Attach, resume under its mandate |
+| 10 | A message with no ticket and no label | Ignore |
+
+`known_bots` is deliberately separate from `allowed`: allowed means a person whose
+request is explicit, and merging the two would let a bot inherit a person's
+authority. A bot may propose work; it cannot claim a person asked for it.
+
+Stop is never inferred from text. Only an explicit command withdraws a mandate —
+`Decision::stop` is what the panel's stop button produces — because reading a
+comment as a stop is a guess and withdrawing authority on a guess is unrecoverable.
+
+### Tickets, mandates, and reports
+
+A ticket is the durable unit of work an accept creates; migration `0019_pipeline`
+stores it. The state machine is in `openbad-pipeline::ticket` and the rows are in
+`openbad-store::pipeline`, so the rules are testable without a database and the
+store enforces only what has to survive a crash.
+
+Two axes stay independent:
+
+- **Ticket** — `open` → `ended` → `open` again when a person writes, or `stopped`,
+  which moves nowhere. Restarting stopped work is a new admission with a new
+  mandate, not a revival, so a dead end cannot be walked back into.
+- **Assignment** — `pending` → `running` → `ended`. A ticket has several over time
+  and at most one active; an ended assignment does not end its ticket, which is
+  what lets "the executor finished its turn" differ from "this work is over".
+
+A **mandate** is written with its ticket and never updated: policy version, scope,
+strength, the rules that matched, the requester, the source, and how it arrived. A
+wider scope is a new ticket, never an amended mandate — otherwise the record of what
+was authorized stops matching what happened.
+
+A **report** is the ticket's current state as its executor last left it, not a
+stream of events: one per assignment, updated as it works. `progress` is the only
+interim value. `ready` and `blocked` ask for a person; `dropped` and `failed` end
+the ticket from the executor's side; `waiting` is idle by definition.
+
+An **attention** is a question waiting for a person, one per ticket — the executor
+asks, then waits, and a second question would compete for the same attention.
+Answers are recorded once, with who gave them.
+
+The store enforces the invariants the runner depends on, because a crash between
+two writes must not leave a state the runner has to guess about: one ticket per
+accepted trigger, one open ticket per thread, one active assignment per ticket, one
+open question per ticket. Subscriptions are held by the thread, so an ended ticket
+keeps listening and a later message resumes it without a new admission.
+
+A stored state the code cannot read is an error, never a default. A `paused` ticket
+that silently reads as `open` would be delivered work it was never authorized for.
 
 ## 17. Runtime pseudocode
 

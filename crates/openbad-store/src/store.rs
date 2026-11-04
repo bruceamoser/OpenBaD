@@ -4081,10 +4081,7 @@ mod tests {
     #[test]
     fn migrations_are_recorded() {
         let store = Store::open_in_memory().expect("store");
-        assert_eq!(
-            store.schema_version().expect("version"),
-            "0018_session_fts_text_only"
-        );
+        assert_eq!(store.schema_version().expect("version"), "0019_pipeline");
     }
 
     #[test]
