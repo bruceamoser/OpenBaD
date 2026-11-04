@@ -18,6 +18,7 @@ pub mod config;
 pub mod cursor;
 pub mod error;
 pub mod eval;
+pub mod execution;
 pub mod mandate;
 pub mod source;
 pub mod ticket;
@@ -27,6 +28,10 @@ pub use config::{PipelineConfig, SourceConfig, load_pipeline_config};
 pub use cursor::{MAX_REMEMBERED_TRIGGERS, SourceCursor};
 pub use error::SourceError;
 pub use eval::{Decision, DecisionKind, EvalInput, ThreadContext, evaluate};
+pub use execution::{
+    Budget, Candidate, Effects, Limit, Recovery, SlotPriority, Slots, Spent, effects_of,
+    launch_order, recovery_for,
+};
 pub use mandate::{Mandate, MandateStrength};
 pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome};
 pub use ticket::{AssignmentState, ReportOutcome, TicketState};
