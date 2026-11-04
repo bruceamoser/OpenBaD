@@ -731,6 +731,8 @@ export type PipelineStatus = {
   sources: PipelineSource[];
   tickets: Record<string, number>;
   watching: boolean;
+  /** Whether a watcher is running now; `watching` is only the intent. */
+  running: boolean;
 };
 
 export type PipelineTickReport = {

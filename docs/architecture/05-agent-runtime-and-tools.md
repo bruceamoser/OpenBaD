@@ -1451,9 +1451,15 @@ five seconds and a project cannot ask for a poll storm.
 
 Watching is a setting on the project, not a flag in the running process: `watch`
 persists `pipeline.watch.<workspace_id>` and startup calls `resume_watchers`, so a
-project that was watched is watched again after a restart. Nothing is admitted
-until a tick runs, which is why a configured pipeline with open, labelled work can
-still show an empty panel — it has never been watched or checked.
+project that was watched is watched again after a restart. A recorded decision
+always wins. With none recorded the configuration decides — a project that names
+an enabled source has already opted in — because requiring a second click is how a
+correctly configured pipeline sits empty while labelled work waits in it.
+
+`pipeline_status` reports the intent as `watching` and the fact as `running`, so a
+project that could not start its watcher (no model credential, for instance) says
+so instead of looking healthy. Nothing is admitted until a tick runs: a panel with
+no tickets and no `pipeline:tick` has simply never polled.
 
 Every tick emits `pipeline:tick`; the runner emits `pipeline:progress` per step,
 tool call, and tool result. `pipeline_stop` sets the flag the observer polls, so a

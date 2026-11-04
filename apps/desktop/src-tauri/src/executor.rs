@@ -749,33 +749,43 @@ fn watch_key(workspace: WorkspaceId) -> String {
     format!("pipeline.watch.{workspace}")
 }
 
-fn is_watched(store: &Store, workspace: WorkspaceId) -> bool {
-    store
+/// Whether this project should be watched.
+///
+/// A recorded decision always wins. With no decision yet, the answer comes from
+/// the configuration: a project that names an enabled source has already opted
+/// in, and requiring a second click to make that mean anything is how a
+/// correctly configured pipeline sits empty while labelled work waits in it.
+pub(crate) fn wants_watching(store: &Store, workspace: WorkspaceId, root: &Path) -> bool {
+    if let Some(chosen) = store
         .get_setting(&watch_key(workspace))
         .ok()
         .flatten()
         .and_then(|value| value.as_bool())
-        .unwrap_or(false)
+    {
+        return chosen;
+    }
+    enabled_source_cadence(root).is_some()
 }
 
 fn remember_watch(store: &Store, workspace: WorkspaceId, watched: bool) {
     let _ = store.set_setting(watch_key(workspace), serde_json::json!(watched));
 }
 
+/// The fastest cadence any enabled source asks for, if the project has one.
+fn enabled_source_cadence(root: &Path) -> Option<u64> {
+    load_pipeline_config(root).ok().and_then(|config| {
+        config
+            .sources
+            .iter()
+            .filter(|source| source.enabled)
+            .map(|source| source.poll_interval_secs)
+            .min()
+    })
+}
+
 /// How often to tick a project: the fastest enabled source's own cadence.
 fn watcher_interval(root: &Path) -> Duration {
-    let seconds = load_pipeline_config(root)
-        .ok()
-        .and_then(|config| {
-            config
-                .sources
-                .iter()
-                .filter(|source| source.enabled)
-                .map(|source| source.poll_interval_secs)
-                .min()
-        })
-        .unwrap_or(60);
-    Duration::from_secs(seconds.clamp(5, 3_600))
+    Duration::from_secs(enabled_source_cadence(root).unwrap_or(60).clamp(5, 3_600))
 }
 
 /// What a watcher needs to run turns, resolved once per start.
@@ -842,7 +852,8 @@ pub fn start_watcher(
 }
 
 /// Resumes the watchers the last session left on, so a restart does not silently
-/// stop a pipeline the human already asked to run.
+/// stop a pipeline the human already asked to run, and starts the ones a
+/// project's own configuration asks for.
 pub fn resume_watchers(app: &tauri::AppHandle, state: &AppState) {
     let credentials = match WatcherCredentials::from_state(state) {
         Ok(credentials) => credentials,
@@ -868,11 +879,14 @@ pub fn resume_watchers(app: &tauri::AppHandle, state: &AppState) {
 
     for (workspace, path) in projects {
         let root = PathBuf::from(&path);
+        if !openbad_pipeline::config::pipeline_config_path(&root).is_file() {
+            continue;
+        }
         let wanted = match state.store.lock() {
-            Ok(store) => is_watched(&store, workspace),
+            Ok(store) => wants_watching(&store, workspace, &root),
             Err(_) => false,
         };
-        if !wanted || !openbad_pipeline::config::pipeline_config_path(&root).is_file() {
+        if !wanted {
             continue;
         }
         let interval = watcher_interval(&root);
@@ -1740,39 +1754,77 @@ mod tests {
 
     #[test]
     fn watching_is_remembered_on_the_project_and_ticked_at_its_fastest_cadence() {
-        let project = project("true");
+        let stopped = project("true");
         let workspace = {
-            let store = project.store.lock().expect("lock");
+            let store = stopped.store.lock().expect("lock");
             store
-                .pipeline_ticket(&project.ticket.id)
+                .pipeline_ticket(&stopped.ticket.id)
                 .expect("ticket")
                 .expect("ticket")
                 .workspace_id
         };
 
+        let bare = tempfile::tempdir().expect("bare");
         {
-            let store = project.store.lock().expect("lock");
-            assert!(!is_watched(&store, workspace), "off until asked");
+            let store = stopped.store.lock().expect("lock");
+            assert!(
+                !wants_watching(&store, workspace, bare.path()),
+                "off until asked, because nothing is configured yet"
+            );
             remember_watch(&store, workspace, true);
             assert!(
-                is_watched(&store, workspace),
+                wants_watching(&store, workspace, bare.path()),
                 "the decision survives the call"
             );
             remember_watch(&store, workspace, false);
-            assert!(!is_watched(&store, workspace));
+            assert!(!wants_watching(&store, workspace, bare.path()));
+            assert!(
+                !wants_watching(&store, workspace, stopped.root.path()),
+                "a person's stop outranks a configured project too"
+            );
         }
 
         std::fs::write(
-            project.root.path().join(".openbad/pipeline.yaml"),
+            stopped.root.path().join(".openbad/pipeline.yaml"),
             "sources:\n  - id: slow\n    repository: o/r\n    poll_interval_secs: 300\n  - id: fast\n    repository: o/r2\n    poll_interval_secs: 30\n  - id: off\n    repository: o/r3\n    enabled: false\n    poll_interval_secs: 1\n",
         )
         .expect("config");
 
         assert_eq!(
-            watcher_interval(project.root.path()),
+            watcher_interval(stopped.root.path()),
             Duration::from_secs(30),
             "the fastest enabled source decides, and a disabled one is not polled"
         );
+
+        let fresh = project("true");
+        let fresh_workspace = {
+            let store = fresh.store.lock().expect("lock");
+            store
+                .pipeline_ticket(&fresh.ticket.id)
+                .expect("ticket")
+                .expect("ticket")
+                .workspace_id
+        };
+        {
+            let store = fresh.store.lock().expect("lock");
+            assert!(
+                wants_watching(&store, fresh_workspace, fresh.root.path()),
+                "a project that names an enabled source has opted in already"
+            );
+        }
+
+        std::fs::write(
+            fresh.root.path().join(".openbad/pipeline.yaml"),
+            "sources:\n  - id: off\n    repository: o/r3\n    enabled: false\n",
+        )
+        .expect("config");
+        {
+            let store = fresh.store.lock().expect("lock");
+            assert!(
+                !wants_watching(&store, fresh_workspace, fresh.root.path()),
+                "a project whose only source is off has nothing to poll"
+            );
+        }
     }
 
     #[test]

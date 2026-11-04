@@ -84,6 +84,7 @@ export default function PipelinePanel({
   const [status, setStatus] = useState<PipelineStatus | null>(null);
   const [tickets, setTickets] = useState<PipelineTicketRow[]>([]);
   const [watching, setWatching] = useState(false);
+  const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -110,6 +111,7 @@ export default function PipelinePanel({
       setStatus(nextStatus);
       setTickets(nextTickets);
       setWatching(nextStatus.watching);
+      setRunning(nextStatus.running);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -135,6 +137,12 @@ export default function PipelinePanel({
     () => tickets.filter((ticket) => ticket.needs_a_person).length,
     [tickets],
   );
+
+  const fastestPoll = useMemo(() => {
+    const enabled = (status?.sources ?? []).filter((source) => source.enabled);
+    if (enabled.length === 0) return null;
+    return Math.min(...enabled.map((source) => source.poll_interval_secs));
+  }, [status]);
 
   const run = async (label: string, action: () => Promise<void>) => {
     setBusy(label);
@@ -162,13 +170,14 @@ export default function PipelinePanel({
 
   const toggleWatch = () =>
     run("watch", async () => {
-      if (watching) {
+      if (running) {
         await pipelineUnwatch(workspacePath);
         setWatching(false);
       } else {
         await pipelineWatch(workspacePath);
         setWatching(true);
       }
+      await refresh();
     });
 
   const prepareAndRun = (ticket: PipelineTicketRow) =>
@@ -228,7 +237,7 @@ export default function PipelinePanel({
         <p className="text-[10px] uppercase tracking-[0.16em] text-obd-subtle">
           {tickets.length} ticket{tickets.length === 1 ? "" : "s"}
           {needsPerson > 0 ? ` · ${needsPerson} need you` : ""}
-          {watching ? " · watching" : ""}
+          {running ? " · watching" : watching ? " · not running" : ""}
         </p>
         <div className="flex items-center gap-1">
           <button
@@ -249,7 +258,7 @@ export default function PipelinePanel({
             disabled={busy !== null || !status?.configured}
             className="rounded-md px-1.5 py-1 text-[10px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-50"
           >
-            {watching ? "Stop watching" : "Watch"}
+            {running ? "Stop watching" : "Watch"}
           </button>
           <button
             type="button"
@@ -336,8 +345,23 @@ execution:
         {tickets.length === 0 && status?.configured && (
           <div className="rounded-lg border border-dashed border-obd-line p-3 text-[11px] leading-5 text-obd-subtle">
             <p className="mb-1 font-medium text-obd-body">No tickets yet</p>
-            A labelled issue or a comment that admits work becomes a ticket the
-            next time the sources are polled.
+            A labelled issue or a comment that admits work becomes a ticket when
+            the sources are next polled — a configured project polls on its own
+            within {fastestPoll ?? 60}s.{" "}
+            {running ? (
+              <>Watching, so it happens without you.</>
+            ) : watching ? (
+              <>
+                Watching is on but the watcher is not running; check the app log
+                for why, then press Watch.
+              </>
+            ) : (
+              <>
+                Nothing has polled yet: press{" "}
+                <span className="text-obd-body">Check now</span> for one pass, or{" "}
+                <span className="text-obd-body">Watch</span> to keep polling.
+              </>
+            )}
           </div>
         )}
 

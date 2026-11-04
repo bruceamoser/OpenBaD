@@ -402,8 +402,12 @@ pub struct PipelineStatus {
     pub sources: Vec<SourceStatus>,
     /// Tickets by state, so a stage can be shown without loading the tickets.
     pub tickets: HashMap<String, usize>,
-    /// Whether this project asked to be watched, which survives a restart.
+    /// Whether this project should be watched: a person's recorded choice, or —
+    /// with none recorded — the configuration's own enabled sources.
     pub watching: bool,
+    /// Whether a watcher is actually running right now. `watching` is the intent;
+    /// this is the fact, and they differ when a watcher could not be started.
+    pub running: bool,
 }
 
 /// One configured source, as the panel shows it.
@@ -441,16 +445,17 @@ pub fn pipeline_status(
     let workspace = crate::project_workspace(&store, &project_path)?;
     let root = PathBuf::from(&project_path);
     let config = load_pipeline_config(&root).map_err(|error| error.to_string())?;
+    let running = state
+        .pipeline_watchers
+        .lock()
+        .map(|watchers| watchers.contains_key(&project_path))
+        .unwrap_or(false);
     Ok(describe(
         &config,
         pipeline_config_path(&root).is_file(),
         ticket_counts(&store, workspace)?,
-        store
-            .get_setting(&format!("pipeline.watch.{workspace}"))
-            .ok()
-            .flatten()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
+        crate::executor::wants_watching(&store, workspace, &root),
+        running,
     ))
 }
 
@@ -461,12 +466,14 @@ fn describe(
     configured: bool,
     tickets: HashMap<String, usize>,
     watching: bool,
+    running: bool,
 ) -> PipelineStatus {
     PipelineStatus {
         configured,
         sources: config.sources.iter().map(SourceStatus::from).collect(),
         tickets,
         watching,
+        running,
     }
 }
 
@@ -1063,6 +1070,7 @@ mod tests {
             pipeline_config_path(project.path()).is_file(),
             HashMap::from([("open".to_owned(), 2usize)]),
             true,
+            false,
         );
 
         assert_eq!(
@@ -1080,5 +1088,9 @@ mod tests {
         );
         assert_eq!(status.tickets.get("open"), Some(&2));
         assert!(status.configured);
+        assert!(
+            !status.running,
+            "intent and a live watcher are reported separately"
+        );
     }
 }

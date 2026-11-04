@@ -2137,7 +2137,7 @@ export async function loadPipelineStatus(
 ): Promise<PipelineStatus> {
   return isTauri
     ? invoke<PipelineStatus>("pipeline_status", { projectPath })
-    : { configured: false, sources: [], tickets: {}, watching: false };
+    : { configured: false, sources: [], tickets: {}, watching: false, running: false };
 }
 
 export async function loadPipelineTickets(

@@ -707,12 +707,18 @@ the dark theme the configuration was light grey on white: present, selectable, a
 impossible to read. It now uses the same inset field as the rest of the app's forms,
 and the report detail got the same treatment. No behaviour changed.
 
-**Watching survives a restart.** Watch used to live only in the running process, so
-a project that had been watched went quiet the moment the app closed — nothing
-polled, no ticket was ever admitted, and the panel looked empty even though the
-configuration named sources with open, labelled work waiting behind them. Watching
-is now a setting on the project (`pipeline.watch.<workspace_id>`), restored for
-every project when the app starts, and the watcher polls at the fastest cadence its
-enabled sources ask for — clamped to 5–3600 seconds — instead of a fixed interval.
-Tickets appearing in the panel is therefore a consequence of a tick: until a project
-is watched or checked once, a correctly configured pipeline is empty by design.
+**Watching survives a restart, and a configured project polls on its own.** Watch
+used to live only in the running process, so a project that had been watched went
+quiet the moment the app closed — nothing polled, no ticket was ever admitted, and
+the panel looked empty even though the configuration named sources with open,
+labelled work waiting behind them. Watching is now a setting on the project
+(`pipeline.watch.<workspace_id>`), restored for every project when the app starts.
+A recorded choice always wins; with none recorded the configuration decides, since
+a project that names an enabled source has already opted in.
+
+The watcher polls at the fastest cadence its enabled sources ask for — clamped to
+5–3600 seconds — instead of a fixed interval. `pipeline_status` now reports the
+intent (`watching`) and the fact (`running`) separately, so a project whose watcher
+could not start says so rather than looking healthy, and the empty state names the
+step that is missing. Tickets appearing in the panel is a consequence of a tick:
+until a project polls once, a correctly configured pipeline is empty by design.
