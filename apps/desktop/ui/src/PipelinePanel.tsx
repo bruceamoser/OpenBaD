@@ -355,7 +355,7 @@ execution:
               </button>
             </div>
             {configPath !== "" && (
-              <p className="mb-1.5 truncate text-[10px] text-obd-faint" title={configPath}>
+              <p className="mb-1.5 truncate text-[10px] text-obd-subtle" title={configPath}>
                 {configPath}
               </p>
             )}
@@ -364,7 +364,7 @@ execution:
               onChange={(event) => setConfigText(event.target.value)}
               spellCheck={false}
               rows={12}
-              className="w-full rounded-md border border-obd-line bg-obd-canvas p-2 font-mono text-[10px] leading-5 text-obd-body outline-none focus:border-obd-accent"
+              className="min-h-[280px] w-full resize-y rounded-md border border-obd-line bg-obd-inset p-2.5 font-mono text-[11px] leading-5 text-obd-text outline-none focus:border-obd-accent/40"
             />
             <div className="mt-2 flex items-center gap-2">
               <button
@@ -479,7 +479,7 @@ execution:
                         )}
                         {ticket.last_words !== null &&
                           ticket.last_words.trim() !== "" && (
-                            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[10px] text-obd-muted">
+                            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] text-obd-body">
                               {ticket.last_words}
                             </pre>
                           )}
