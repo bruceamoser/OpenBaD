@@ -179,6 +179,26 @@ pub enum ToolError {
     Failed(String),
 }
 
+impl ToolError {
+    /// Whether the model is expected to read this and correct itself, rather
+    /// than the harness having broken.
+    ///
+    /// A refusal, a bad argument, or a timeout is part of a working
+    /// conversation: the model gets the reason and tries again. An I/O or
+    /// database failure is not, and should not be presented to a human as if
+    /// the model could fix it.
+    #[must_use]
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            Self::OutsideRoot(_)
+                | Self::ApprovalRequired(_)
+                | Self::InvalidArgument(_)
+                | Self::Timeout(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSearchHit {
     pub path: String,
@@ -1336,8 +1356,35 @@ impl ToolContext {
         {
             Ok(resolved)
         } else {
-            Err(ToolError::OutsideRoot(path.display().to_string()))
+            Err(ToolError::OutsideRoot(self.outside_root_detail(path)))
         }
+    }
+
+    /// The refusal, plus what the model needs to recover on the next step: the
+    /// root it is actually confined to, and a same-named file it can use if one
+    /// exists.
+    ///
+    /// The model cannot see the root from a path alone, so a refusal that only
+    /// echoes the path leaves it guessing — a session in one project asked for
+    /// a file in a sibling project and had nothing to correct with.
+    fn outside_root_detail(&self, path: &Path) -> String {
+        let root = self.workspace.root();
+        let requested = path.display();
+        let suggestion = path
+            .file_name()
+            .and_then(|name| find_named_entry(root, name))
+            .map(|found| {
+                let relative = found.strip_prefix(root).unwrap_or(&found);
+                format!(
+                    " A file with that name exists in this workspace: {}. Use that, or a workspace-relative path.",
+                    relative.display()
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "{requested} (this session is confined to {}){suggestion}",
+            root.display()
+        )
     }
 
     pub fn set_turn(&self, turn: u32) {
@@ -2577,6 +2624,44 @@ const SCRATCH_ROOTS: &[&str] = &["/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/"
 
 /// Whether a path lives in scratch space, judged both before and after
 /// canonicalization so `/tmp` and a symlinked `$TMPDIR` are both recognised.
+/// Looks for an entry named `name` under `root`, breadth first, giving up
+/// quickly. Used only to make a refusal actionable, so a miss is cheap and a
+/// false answer would be worse than none: the first match wins, and only a
+/// real file or directory counts.
+fn find_named_entry(root: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
+    const MAX_DEPTH: usize = 6;
+    const MAX_VISITED: usize = 4_000;
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0_usize)]);
+    let mut visited = 0_usize;
+    while let Some((directory, depth)) = queue.pop_front() {
+        if depth > MAX_DEPTH || visited > MAX_VISITED {
+            return None;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            visited += 1;
+            if visited > MAX_VISITED {
+                return None;
+            }
+            let entry_name = entry.file_name();
+            let path = entry.path();
+            if entry_name == name {
+                return Some(path);
+            }
+            let skip = entry_name.to_string_lossy();
+            if skip.starts_with('.') || skip == "target" || skip == "node_modules" {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+    None
+}
+
 fn is_scratch(path: &Path) -> bool {
     let text = format!("{}/", path.to_string_lossy());
     if SCRATCH_ROOTS.iter().any(|root| text.starts_with(root)) {
@@ -21208,6 +21293,53 @@ invariants:
             .await
             .expect("command runs");
         assert!(!ten_days_old.exists(), "a one day window removes it");
+    }
+
+    #[tokio::test]
+    async fn an_outside_refusal_names_the_root_and_offers_a_same_named_file() {
+        let workspace = tempdir().expect("workspace");
+        fs::write(workspace.path().join("AGENTS.md"), "project rules").expect("agents");
+        // A sibling project, exactly the shape of the live failure: a real file
+        // with the same name, one directory over.
+        let sibling = tempdir().expect("sibling");
+        let outside = sibling.path().join("AGENTS.md");
+        fs::write(&outside, "another project's rules").expect("outside");
+        let mut context = context(workspace.path());
+        context.scratch_access = false;
+
+        let refused = ReadFileTool
+            .execute(json!({"path": outside.to_string_lossy()}), &context)
+            .await
+            .expect_err("outside the workspace");
+        let message = refused.to_string();
+
+        assert!(message.contains("outside the workspace"), "{message}");
+        // The model cannot infer the root from a path, so the refusal says it.
+        assert!(
+            message.contains(&workspace.path().display().to_string()),
+            "the refusal names the workspace root: {message}"
+        );
+        // And points at the file it probably meant.
+        assert!(message.contains("AGENTS.md"), "{message}");
+        assert!(
+            message.contains("exists in this workspace"),
+            "the refusal offers the local candidate: {message}"
+        );
+        assert!(
+            !message.contains("another project's rules"),
+            "no content leaks"
+        );
+    }
+
+    #[test]
+    fn only_the_failures_a_model_can_fix_are_marked_recoverable() {
+        assert!(ToolError::OutsideRoot("x".to_owned()).is_recoverable());
+        assert!(ToolError::ApprovalRequired("x".to_owned()).is_recoverable());
+        assert!(ToolError::InvalidArgument("x".to_owned()).is_recoverable());
+        assert!(ToolError::Timeout(30).is_recoverable());
+        // A harness fault is not the model's to repair.
+        assert!(!ToolError::Failed("sqlite".to_owned()).is_recoverable());
+        assert!(!ToolError::Io(std::io::Error::other("disk")).is_recoverable());
     }
 
     #[tokio::test]

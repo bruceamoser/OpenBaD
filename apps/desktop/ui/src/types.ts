@@ -77,6 +77,8 @@ export type ToolCallView = {
   durationMs?: number;
   result?: string;
   isError?: boolean;
+  /** True when the model is expected to read the error and correct itself. */
+  recoverable?: boolean;
 };
 
 export type TodoItemView = {

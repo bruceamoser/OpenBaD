@@ -365,6 +365,13 @@ Rules:
 | `read_spill` | read | safe | Targeted read of a spilled artifact |
 | `request_fs_access` | read | safe | Ask the human for read or write access to an absolute path outside the workspace |
 
+A refusal names the workspace root and, when a file with the same name exists
+inside it, points at that candidate — the model cannot infer the root from a
+path, and a refusal that only echoes the path leaves it guessing. Failures a
+model can act on (refusal, bad argument, timeout) are reported as recoverable, so
+the UI shows them as an ordinary retry rather than a failure; I/O and database
+faults stay failures.
+
 Filesystem access outside the workspace is never inferred. When a read or
 write is denied with `outside the workspace`, the assistant calls
 `request_fs_access` with the absolute path, whether it needs write access, and

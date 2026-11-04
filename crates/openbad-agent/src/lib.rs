@@ -986,7 +986,13 @@ impl<T: HttpTransport> Agent<T> {
                         Err(error) => {
                             let content =
                                 redact_secrets(&format!("error: {error}"), &self.redactions);
-                            observer.on_tool_result(step, call, &content, true, &Value::Null);
+                            observer.on_tool_result(
+                                step,
+                                call,
+                                &content,
+                                true,
+                                &json!({"recoverable": error.is_recoverable()}),
+                            );
                             content
                         }
                     }
@@ -1004,7 +1010,8 @@ impl<T: HttpTransport> Agent<T> {
                     &format!("error: invalid arguments for {name}: {error}"),
                     &self.redactions,
                 );
-                observer.on_tool_result(step, call, &content, true, &Value::Null);
+                // Unreadable arguments are the model's to fix, not a harness fault.
+                observer.on_tool_result(step, call, &content, true, &json!({"recoverable": true}));
                 content
             }
         };

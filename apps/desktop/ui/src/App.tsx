@@ -428,6 +428,9 @@ function applyAgentEvent(entry: ChatEntry, event: AgentEvent): ChatEntry {
           status: "settled",
           result: event.content,
           isError: event.is_error,
+          recoverable:
+            (event.metadata as { recoverable?: boolean } | undefined)?.recoverable ===
+            true,
         };
       }
       return { ...entry, status: `${event.name} finished`, toolCalls };
@@ -3649,7 +3652,11 @@ function TransferDialog({
 }
 
 function ToolCallCard({ tool }: { tool: ToolCallView }) {
-  const [open, setOpen] = useState(tool.isError === true);
+  // A refusal or a bad argument is part of a working conversation: the model
+  // reads it and corrects itself on the next step. Painting it as a failure
+  // made routine self-correction look like the app breaking.
+  const expected = tool.isError === true && tool.recoverable === true;
+  const [open, setOpen] = useState(tool.isError === true && !expected);
   const label =
     tool.status === "queued"
       ? "Queued"
@@ -3657,15 +3664,18 @@ function ToolCallCard({ tool }: { tool: ToolCallView }) {
         ? "Running…"
         : tool.status === "interrupted"
           ? "Interrupted"
-          : tool.isError === true
-            ? "Failed"
-            : "Done";
+          : expected
+            ? "Retry"
+            : tool.isError === true
+              ? "Failed"
+              : "Done";
   const tone =
-    tool.isError === true
+    tool.isError === true && !expected
       ? "border-obd-danger/30 bg-obd-danger/[0.04]"
       : "border-obd-line bg-obd-inset";
-  const chip =
-    tool.isError === true
+  const chip = expected
+    ? "text-obd-subtle"
+    : tool.isError === true
       ? "text-obd-danger"
       : tool.status === "running"
         ? "text-obd-accent"
@@ -3704,7 +3714,7 @@ function ToolCallCard({ tool }: { tool: ToolCallView }) {
               <p className="text-[9px] uppercase tracking-[0.14em] text-obd-faint">Result</p>
               <pre
                 className={`mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded p-2 font-mono text-[10px] leading-4 ${
-                  tool.isError === true
+                  tool.isError === true && !expected
                     ? "bg-obd-danger/30 text-obd-danger"
                     : "bg-obd-inset text-obd-muted"
                 }`}
