@@ -3220,6 +3220,7 @@ dependencies = [
  "blake3",
  "directories",
  "openbad-core",
+ "openbad-pipeline",
  "rusqlite",
  "serde",
  "serde_json",

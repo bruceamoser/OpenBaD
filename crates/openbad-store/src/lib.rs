@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod error;
 pub mod migrations;
+pub mod pipeline;
 pub mod projections;
 pub mod store;
 pub mod transfer;

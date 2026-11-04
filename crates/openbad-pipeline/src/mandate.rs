@@ -22,6 +22,16 @@ pub enum MandateStrength {
     Inferred,
 }
 
+impl MandateStrength {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mandate {
     /// The policy version the decision was made under. A later policy change is
