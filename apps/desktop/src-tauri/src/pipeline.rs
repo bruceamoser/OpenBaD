@@ -522,21 +522,13 @@ pub fn pipeline_save_config(project_path: String, text: String) -> Result<(), St
 }
 
 /// Whether a repository's branch protection is real enough to allow auto-merge.
-#[derive(Debug, Clone, Serialize)]
-pub struct PipelineGuards {
-    pub branch: String,
-    pub protected: bool,
-    /// The specific settings that are absent, named so a person can fix them.
-    pub missing: Vec<String>,
-}
-
-/// Reads the branch protection rule and names what is missing.
 ///
-/// The refusal is the feature: ADR-009 makes branch protection the only thing
-/// between a large unreviewed change and `main`, so a surface must never accept a
-/// promise that it is on.
+/// The rules live in `openbad-pipeline` so the panel and an agent asked to
+/// configure the project get the same answer.
 #[tauri::command]
-pub async fn pipeline_guards(repository: String) -> Result<PipelineGuards, String> {
+pub async fn pipeline_guards(
+    repository: String,
+) -> Result<openbad_pipeline::guards::Guards, String> {
     let api = GhCli;
     let repo: serde_json::Value = api
         .get(&format!("/repos/{repository}"))
@@ -552,51 +544,10 @@ pub async fn pipeline_guards(repository: String) -> Result<PipelineGuards, Strin
         .get(&format!("/repos/{repository}/branches/{branch}/protection"))
         .await
         .ok();
-    Ok(guards_from(&branch, protection.as_ref()))
-}
-
-/// The guard rules, kept separate from the call that fetches them.
-fn guards_from(branch: &str, protection: Option<&serde_json::Value>) -> PipelineGuards {
-    let mut missing = Vec::new();
-    let reviews = protection.and_then(|value| value.get("required_pull_request_reviews"));
-    let approvals = reviews
-        .and_then(|value| value.get("required_approving_review_count"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    if approvals < 1 {
-        missing.push("required approving reviews (at least 1)".to_owned());
-    }
-    let dismiss_stale = reviews
-        .and_then(|value| value.get("dismiss_stale_reviews"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    if !dismiss_stale {
-        missing.push("dismiss stale approvals when new commits arrive".to_owned());
-    }
-    let checks = protection
-        .and_then(|value| value.get("required_status_checks"))
-        .and_then(|value| {
-            value
-                .get("checks")
-                .and_then(|checks| checks.as_array())
-                .map(|checks| !checks.is_empty())
-                .or_else(|| {
-                    value
-                        .get("contexts")
-                        .and_then(|contexts| contexts.as_array())
-                        .map(|contexts| !contexts.is_empty())
-                })
-        })
-        .unwrap_or(false);
-    if !checks {
-        missing.push("required status checks".to_owned());
-    }
-
-    PipelineGuards {
-        branch: branch.to_owned(),
-        protected: protection.is_some(),
-        missing,
-    }
+    Ok(openbad_pipeline::guards::guards_from(
+        &branch,
+        protection.as_ref(),
+    ))
 }
 
 /// Lists the project's tickets with the stage derived from their rows.
@@ -1082,51 +1033,6 @@ mod tests {
                 .len(),
             1,
             "the healthy source still admitted its issue"
-        );
-    }
-
-    #[test]
-    fn guards_name_each_missing_setting_instead_of_refusing_generically() {
-        let unprotected = guards_from("main", None);
-        let partial = guards_from(
-            "main",
-            Some(&serde_json::json!({
-                "required_pull_request_reviews": {
-                    "required_approving_review_count": 1,
-                    "dismiss_stale_reviews": false
-                },
-                "required_status_checks": { "contexts": ["ci"] }
-            })),
-        );
-        let complete = guards_from(
-            "main",
-            Some(&serde_json::json!({
-                "required_pull_request_reviews": {
-                    "required_approving_review_count": 1,
-                    "dismiss_stale_reviews": true
-                },
-                "required_status_checks": { "checks": [{ "context": "ci" }] }
-            })),
-        );
-
-        assert_eq!(
-            (
-                unprotected.protected,
-                unprotected.missing.len(),
-                partial.missing.clone(),
-                complete.protected,
-                complete.missing.clone(),
-                complete.branch.clone(),
-            ),
-            (
-                false,
-                3,
-                vec!["dismiss stale approvals when new commits arrive".to_owned()],
-                true,
-                Vec::<String>::new(),
-                "main".to_owned(),
-            ),
-            "each absent setting is named, and only a real rule passes"
         );
     }
 

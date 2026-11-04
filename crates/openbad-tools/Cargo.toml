@@ -11,6 +11,7 @@ openbad-core = { path = "../openbad-core" }
 openbad-governance = { path = "../openbad-governance" }
 openbad-vault = { path = "../openbad-vault" }
 openbad-workspace = { path = "../openbad-workspace" }
+openbad-pipeline = { path = "../openbad-pipeline" }
 async-trait = "0.1"
 base64 = "0.22"
 blake3 = "1"

@@ -1591,6 +1591,7 @@ impl ToolRegistry {
         registry.register(GitBlameTool);
         registry.register(GitStashTool);
         registry.register(GitWorktreeTool);
+        registry.register(PipelineTool);
         registry.register(RepoHealthTool);
         registry.register(GitCommitContextTool);
         registry.register(GithubTool);
@@ -2542,7 +2543,7 @@ fn tool_domain(name: &str) -> &'static str {
         }
         "plan_read" | "plan_update_step" | "plan_verify" | "plan_write" | "todo_read"
         | "todo_write" | "create_goal" | "get_goal" | "update_goal" | "run_task"
-        | "list_recipes" | "list_gates" | "run_gate" | "run_recipe" => "plan",
+        | "list_recipes" | "list_gates" | "run_gate" | "run_recipe" | "pipeline" => "plan",
         "adr_list" | "adr_read" | "adr_write" | "assert_project" | "canon" | "check_invariants"
         | "ledger" | "yaml_query" => "governance",
         "context_map" | "context_report" | "context_rules" => "context",
@@ -10403,6 +10404,202 @@ impl Tool for GitStashTool {
         };
         run_tool_shell(context, command).await
     }
+}
+
+/// The project's supervised work pipeline, in the terms an agent needs to set it
+/// up: what is configured, what would be valid, and what branch protection
+/// actually says.
+///
+/// Writes go through the same parser the app's loader uses, so a document that
+/// saves here cannot be one the pipeline refuses to run later.
+struct PipelineTool;
+
+#[async_trait]
+impl Tool for PipelineTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "pipeline",
+            "Read, validate, or write this project's supervised work pipeline (.openbad/pipeline.yaml), and check the branch protection that gates auto-merge. The document is YAML: `sources` is a list of `{id, repository: \"owner/repo\", enabled, labels, allowed, bot_logins, known_bots, poll_interval_secs}`; `execution` is `{slots, budget: {steps, tokens}, prepare, execution_root}`. Rules worth knowing before you write one: a trigger needs one of `labels` to enter at all (an empty list admits nothing); `allowed` lists the GitHub logins authorized to originate work, and anyone else is ignored and recorded rather than silently dropped; `bot_logins` are the agent's own accounts and are dropped; a disabled source keeps its read position; `prepare` runs inside the new worktree before the executor's turn and its failure fails the ticket with the output; executors work in their own worktree under `execution_root` on branch `worker/<ticket>` and open pull requests rather than pushing to a protected branch. Start with action=show, validate a change with action=write plus dry_run=true, then write. Auto-merge must stay off unless action=guards reports required reviews, stale-approval dismissal, and required checks are all present; never promise it on anything else.",
+            RiskLevel::Execute,
+        )
+        .with_schema(json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["show", "write", "guards"]},
+                "config": {"type": "string", "description": "The whole YAML document. Required for write."},
+                "repository": {"type": "string", "description": "owner/repo for guards; defaults to the first configured source."},
+                "dry_run": {"type": "boolean", "description": "For write: validate without saving."}
+            },
+            "additionalProperties": false
+        }))
+    }
+
+    async fn execute(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let action = optional_string(&arguments, "action").unwrap_or_else(|| "show".to_owned());
+        let root = context.workspace.root().to_path_buf();
+        let path = openbad_pipeline::config::pipeline_config_path(&root);
+        match action.as_str() {
+            "show" => Ok(show_pipeline(&path)),
+            "write" => write_pipeline(&arguments, context, &path),
+            "guards" => guards_for(&arguments, &path).await,
+            other => Err(ToolError::InvalidArgument(format!(
+                "unknown action: {other}; use show, write, or guards"
+            ))),
+        }
+    }
+}
+
+fn describe_pipeline(config: &openbad_pipeline::config::PipelineConfig) -> String {
+    if config.sources.is_empty() {
+        return "No sources: this pipeline would poll nothing.".to_owned();
+    }
+    let mut lines = Vec::new();
+    for source in &config.sources {
+        lines.push(format!(
+            "- {} -> {} ({}), labels: {}, allowed: {}",
+            source.id,
+            source.repository,
+            if source.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            if source.labels.is_empty() {
+                "none, admits nothing".to_owned()
+            } else {
+                source.labels.join(", ")
+            },
+            if source.allowed.is_empty() {
+                "nobody".to_owned()
+            } else {
+                source.allowed.join(", ")
+            },
+        ));
+    }
+    lines.push(format!(
+        "Execution: {} slot(s), budget {} steps / {} tokens{}{}",
+        config.execution.slots,
+        config.execution.budget.steps,
+        config.execution.budget.tokens,
+        config
+            .execution
+            .prepare
+            .as_ref()
+            .map(|prepare| format!(", prepare: {prepare:?}"))
+            .unwrap_or_default(),
+        config
+            .execution
+            .execution_root
+            .as_ref()
+            .map(|root| format!(", execution root: {root}"))
+            .unwrap_or_default(),
+    ));
+    lines.join("\n")
+}
+
+fn show_pipeline(path: &Path) -> ToolResult {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => {
+            return ToolResult::ok(format!(
+                "{} does not exist, so this project runs no pipeline. Write one with action=write and a `config` document containing at least one source.",
+                path.display()
+            ))
+            .with_metadata(json!({"configured": false}));
+        }
+    };
+    match openbad_pipeline::config::parse_pipeline_config(&text) {
+        Ok(config) => ToolResult::ok(format!("{}\n\n{}", describe_pipeline(&config), text))
+            .with_metadata(json!({"configured": true, "valid": true})),
+        Err(error) => ToolResult::error(format!(
+            "{} is not valid, so the pipeline will refuse to run: {error}\n\n{text}",
+            path.display()
+        ))
+        .with_metadata(json!({"configured": true, "valid": false, "error": error})),
+    }
+}
+
+fn write_pipeline(
+    arguments: &Value,
+    context: &ToolContext,
+    path: &Path,
+) -> Result<ToolResult, ToolError> {
+    if !context.allow_writes {
+        return Err(ToolError::ApprovalRequired("pipeline".to_owned()));
+    }
+    let text = string_arg(arguments, "config")?;
+    let config = openbad_pipeline::config::parse_pipeline_config(&text)
+        .map_err(ToolError::InvalidArgument)?;
+    if optional_bool(arguments, "dry_run").unwrap_or(false) {
+        return Ok(
+            ToolResult::ok(format!("Valid:\n{}", describe_pipeline(&config)))
+                .with_metadata(json!({"valid": true, "written": false})),
+        );
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, &text)?;
+    Ok(ToolResult::ok(format!(
+        "Wrote {}\n\n{}",
+        path.display(),
+        describe_pipeline(&config)
+    ))
+    .with_metadata(json!({"valid": true, "written": true, "path": path.display().to_string()})))
+}
+
+async fn guards_for(arguments: &Value, path: &Path) -> Result<ToolResult, ToolError> {
+    use openbad_pipeline::source::{GhCli, GitHubApi};
+
+    let repository = match optional_string(arguments, "repository") {
+        Some(repository) => repository,
+        None => {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            openbad_pipeline::config::parse_pipeline_config(&text)
+                .map_err(ToolError::InvalidArgument)?
+                .sources
+                .first()
+                .map(|source| source.repository.clone())
+                .ok_or_else(|| {
+                    ToolError::InvalidArgument(
+                        "no repository given and no configured source to take one from".to_owned(),
+                    )
+                })?
+        }
+    };
+
+    let api = GhCli;
+    let repo: Value = api
+        .get(&format!("/repos/{repository}"))
+        .await
+        .map_err(|error| {
+            ToolError::InvalidArgument(format!("cannot read {repository}: {error}"))
+        })?;
+    let branch = repo
+        .get("default_branch")
+        .and_then(Value::as_str)
+        .unwrap_or("main")
+        .to_owned();
+    let protection = api
+        .get(&format!("/repos/{repository}/branches/{branch}/protection"))
+        .await
+        .ok();
+    let guards = openbad_pipeline::guards::guards_from(&branch, protection.as_ref());
+
+    let content = if guards.satisfied() {
+        format!("{}/{branch} is protected as ADR-009 requires.", repository)
+    } else {
+        format!(
+            "Auto-merge must stay off: {}/{branch} is missing {}",
+            repository,
+            guards.missing.join("; ")
+        )
+    };
+    Ok(ToolResult::ok(content).with_metadata(json!(guards)))
 }
 
 struct GitWorktreeTool;
@@ -21952,5 +22149,93 @@ invariants:
         let (raw, count) = redact_vault_secret(&format!("wrapped={wrapped}"), long_secret);
         assert_eq!(count, 1);
         assert!(!raw.contains(&wrapped));
+    }
+
+    #[tokio::test]
+    async fn the_pipeline_tool_refuses_a_configuration_the_loader_would_refuse() {
+        let directory = tempdir().expect("workspace");
+        let mut workspace = context(directory.path());
+        workspace.allow_writes = true;
+        let path = directory.path().join(".openbad").join("pipeline.yaml");
+
+        let refused = PipelineTool
+            .execute(
+                json!({
+                    "action": "write",
+                    "config": "sources:\n  - id: main\n    repository: not-a-repo\n"
+                }),
+                &workspace,
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a repository without owner/repo must not be written"
+        );
+        assert!(!path.exists(), "nothing was written");
+
+        let valid = PipelineTool
+            .execute(
+                json!({
+                    "action": "write",
+                    "config": "sources:\n  - id: main\n    repository: o/r\n    labels: [\"agent:run\"]\n    allowed: [\"alice\"]\nexecution:\n  prepare: pnpm install\n"
+                }),
+                &workspace,
+            )
+            .await
+            .expect("valid config is written");
+        assert_eq!(valid.metadata["written"], json!(true));
+        assert!(path.is_file());
+
+        let shown = PipelineTool
+            .execute(json!({"action": "show"}), &workspace)
+            .await
+            .expect("show");
+        assert_eq!(
+            (
+                shown.metadata["configured"].clone(),
+                shown.metadata["valid"].clone(),
+                shown.content.contains("main -> o/r"),
+                shown.content.contains("prepare: \"pnpm install\""),
+            ),
+            (json!(true), json!(true), true, true),
+            "the summary names the source and the prepare command"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pipeline_tool_validates_without_writing_and_requires_agreement_to_write() {
+        let directory = tempdir().expect("workspace");
+        let reading = context(directory.path());
+        let config = json!({
+            "action": "write",
+            "dry_run": true,
+            "config": "sources:\n  - id: main\n    repository: o/r\n    labels: [\"agent:run\"]\n"
+        });
+
+        assert!(
+            matches!(
+                PipelineTool.execute(config.clone(), &reading).await,
+                Err(ToolError::ApprovalRequired(_))
+            ),
+            "writing a project's pipeline needs write access"
+        );
+
+        let mut writing = context(directory.path());
+        writing.allow_writes = true;
+        let checked = PipelineTool
+            .execute(config, &writing)
+            .await
+            .expect("dry run");
+        assert_eq!(
+            (
+                checked.metadata["valid"].clone(),
+                checked.metadata["written"].clone()
+            ),
+            (json!(true), json!(false))
+        );
+        assert!(
+            !directory.path().join(".openbad/pipeline.yaml").exists(),
+            "a dry run writes nothing"
+        );
     }
 }
