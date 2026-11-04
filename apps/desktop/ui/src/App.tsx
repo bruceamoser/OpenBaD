@@ -2885,7 +2885,7 @@ export default function App() {
               data-testid="chat-scroll"
               className="chat-scroll h-full overflow-y-auto outline-none"
             >
-            <div className="mx-auto w-full max-w-3xl space-y-6 px-5 py-6">
+            <div className="chat-column space-y-6 px-5 py-6">
               {entries.length === 0 && (
                 <div className="pt-16">
                   <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-obd-accent/20 bg-obd-accent/10 text-obd-accent">
