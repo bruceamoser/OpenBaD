@@ -646,3 +646,25 @@ were squeezed into about 400px. They now share one `.chat-column` that grows wit
 the pane and stops at 1280px — wide enough to fill the space, narrow enough to
 stay readable. Sharing the rule also fixed a 7px misalignment: only the transcript
 reserves a scrollbar gutter, so the composer sat right of the text above it.
+
+## v0.3.17
+
+**The supervised work pipeline (ADR-009) runs end to end.** A project opts in with
+`.openbad/pipeline.yaml`; a watcher polls its sources, judges each trigger against
+its thread, and admits what the rules allow as a ticket with a mandate. A ticket is
+checked out into its own worktree on `worker/<ticket>`, prepared inside it, and run
+by the app's own agent in a `worker-<ticket>` session it keeps across assignments —
+with full access inside that worktree and nothing beyond it, since the workspace
+the tools can see is the worktree.
+
+What a person gets: a Pipeline panel listing tickets needs-a-person first, with the
+stage derived from rows rather than inferred from prose; check now, watch, stop, and
+prepare & run per row; a setup surface that edits the real file and refuses to save
+what the loader would refuse to run; and a branch-protection check that names each
+missing guard instead of accepting a promise. A finished turn asks `gh` for the pull
+request its branch opened and subscribes the thread, so a review comment wakes the
+same executor.
+
+Not in this release: auto-merge (the guard check exists, the merge action does not),
+the main-area ticket screen with the diff, attention questions, and per-project
+provider settings for the runner.
