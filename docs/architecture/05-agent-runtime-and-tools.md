@@ -1417,8 +1417,29 @@ instead of being read past.
   `recovery_for` already knows how to relaunch, so the ticket is never left
   `running` with nothing running.
 
-The turn itself — the session, the streaming, the stop path — is the next slice and
-is what turns a pending assignment into work.
+### Turn
+
+`pipeline_execute` runs the turn a launch prepared, through a `TurnRunner` seam
+that keeps the protocol testable without a model:
+
+- **The assignment moves `pending` → `running` → `ended`**, and the report's
+  outcome decides the last two steps through `effects_of`, not through code here.
+  `ready` asks for a person and leaves the ticket open for its next turn; `failed`
+  ends it with the reason on the record.
+- **The budget is the project's**, in steps and tokens, `0` meaning no limit. A
+  turn that reaches it is reported with the numbers — "stopped after 40 steps; the
+  ticket allows 40" — because "budget exceeded" leaves a person guessing.
+- **The prompt carries the mandate and its limits.** `ticket_prompt` states full
+  access inside the worktree, the two things a mandate does not buy (destructive
+  commands outside it, pushes to a protected branch), and that nobody is watching:
+  a blocked executor reports rather than asking.
+- **The real runner** builds the app's own agent rooted at the worktree with
+  `FullAccess`, so the workspace boundary is what refuses the rest rather than an
+  approval prompt nobody would answer.
+
+Two limits worth naming: nothing schedules the turn yet (the same cadence decision
+the tick is waiting on), and the runner uses the default model rather than the
+project's provider settings.
 
 ## 17. Runtime pseudocode
 

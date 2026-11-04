@@ -6079,6 +6079,7 @@ pub fn run() {
             pipeline::pipeline_status,
             pipeline::pipeline_tick,
             executor::pipeline_launch,
+            executor::pipeline_execute,
             workspace_default,
             project_agents,
             cancel_agent,

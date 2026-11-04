@@ -52,8 +52,13 @@ overflow. See the 2026-10-27 compaction entry for details.
 - **Launch.** `pipeline_launch` checks a ticket out into its own worktree on its
   own branch under the project's execution root, runs a bounded prepare command
   there, and records the assignment. A broken prepare ends the ticket with the
-  output in its report; a good one leaves it pending, ready for its turn. The turn
-  itself — session, streaming, stop — is still to come.
+  output in its report; a good one leaves it pending, ready for its turn.
+- **Turn.** `pipeline_execute` runs that turn through a `TurnRunner` seam: the
+  assignment moves `pending` → `running` → `ended`, the report's outcome decides
+  the states via `effects_of`, and the project's step and token budget is checked
+  with the numbers in the reason. The prompt carries the mandate, where the
+  worktree and branch are, and the two things a mandate does not buy. The real
+  runner is the app's own agent rooted at the worktree with `FullAccess`.
 
 ## 2026-10-27
 

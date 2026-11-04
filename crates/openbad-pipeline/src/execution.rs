@@ -107,6 +107,63 @@ pub fn launch_plan(
     }
 }
 
+/// What a ticket's executor is told, in the terms the ADR uses.
+///
+/// The instructions carry the two things a mandate does *not* buy, so the
+/// executor reads them as part of the job rather than discovering them as a
+/// refusal: destructive commands outside the worktree stay refused, and the
+/// branch is pushed for review rather than into a protected branch.
+#[must_use]
+pub fn ticket_prompt(plan: &LaunchPlan, mandate: &crate::mandate::Mandate) -> String {
+    let thread = plan
+        .variables
+        .get(&Variable::Thread)
+        .cloned()
+        .unwrap_or_default();
+    let repository = plan
+        .variables
+        .get(&Variable::Repository)
+        .cloned()
+        .unwrap_or_default();
+
+    format!(
+        "You are the executor for ticket {ticket} on {repository}, working on thread {thread}.\n\
+         \n\
+         Mandate: {strength:?} authority, granted by {requester} via {received_via} under policy \
+         version {policy}. Scope: {scope}. Matched rules: {rules}.\n\
+         \n\
+         Your worktree is {worktree}, on branch {branch}. Work only there. You have full access \
+         inside it and are not asked to approve each step: that is what the mandate buys.\n\
+         \n\
+         Two things are still refused, deliberately:\n\
+         - Destructive commands outside the worktree, and writes outside it, are not authorized \
+         by any mandate. Use the worktree or scratch space.\n\
+         - Never push to a protected branch. Push {branch} and open a pull request for review.\n\
+         \n\
+         Read the thread with `gh` for the request, do the work, verify it, and then finish with a \
+         report: what changed, what you checked, and what remains risky. Do not ask a person a \
+         question — nobody is watching this turn; if you cannot proceed, say so in the report and \
+         the ticket waits for someone.",
+        ticket = plan
+            .variables
+            .get(&Variable::Ticket)
+            .cloned()
+            .unwrap_or_default(),
+        strength = mandate.strength,
+        requester = mandate.requester,
+        received_via = mandate.received_via,
+        policy = mandate.policy_version,
+        scope = mandate.scope,
+        rules = if mandate.matched_rules.is_empty() {
+            "none recorded".to_owned()
+        } else {
+            mandate.matched_rules.join(", ")
+        },
+        worktree = plan.directory.display(),
+        branch = plan.branch,
+    )
+}
+
 /// A ticket id from the store is already a uuid, but it becomes a path and a
 /// branch here, so anything that could leave the execution root is neutralized
 /// before it is used.
@@ -665,6 +722,41 @@ mod tests {
                 "{name} looks like a credential"
             );
         }
+    }
+
+    #[test]
+    fn the_prompt_states_the_mandate_and_the_two_things_it_does_not_buy() {
+        let plan = launch_plan(
+            Path::new("/exec"),
+            Path::new("/repo"),
+            "t-1",
+            "main",
+            "issue:7",
+            "o/r",
+            "mandate-9",
+        );
+        let mandate = crate::mandate::Mandate::new(
+            "policy-3",
+            "issue:7",
+            crate::mandate::MandateStrength::Explicit,
+            vec!["label agent:run".to_owned()],
+            "alice",
+            "main",
+            "label agent:run",
+        );
+
+        let prompt = ticket_prompt(&plan, &mandate);
+
+        assert!(
+            prompt.contains("/exec/t-1")
+                && prompt.contains("worker/t-1")
+                && prompt.contains("alice")
+                && prompt.contains("policy-3")
+                && prompt.contains("Never push to a protected branch")
+                && prompt.contains("not asked to approve each step")
+                && prompt.contains("Do not ask a person"),
+            "the executor is told where it works and what its mandate does not buy:\n{prompt}"
+        );
     }
 
     #[test]
