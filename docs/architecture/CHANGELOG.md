@@ -589,3 +589,21 @@ serves it. It is unmeasured — one session with it on is the way to know.
 `discover_tools` and the MCP-only `tool_search` are now one `tool_search`
 covering both catalogues; an unconfigured MCP reads as an empty list instead of
 failing.
+
+## v0.3.15
+
+**Recoverable is now a property, not a guess.** Tool errors carry whether the
+model can act on them: a refusal, a bad argument, a timeout, or a read-before-write
+gate is recoverable and renders as a collapsed neutral "Retry"; I/O and database
+faults stay red failures. Before this every tool error was a red auto-expanded
+block, so routine self-correction looked like the application breaking.
+
+A path refusal now names the workspace root and, when an entry with the same file
+name exists inside the workspace, points at it — the model cannot infer the root
+from a path. The read-before-write gate became `ToolError::Stale` and says what to
+do: read the file, then retry.
+
+`edit_file` and every other tool also accept the argument names models are
+trained on — `file_path`, `old_string`, `new_string`, `search`, `replace` — rewritten
+once at dispatch from each tool's own schema, so `lsp`'s genuine `file_path` is
+left alone.
