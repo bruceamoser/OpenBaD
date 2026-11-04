@@ -709,8 +709,13 @@ export type PipelineTicketRow = {
   stage: PipelineStage;
   needs_a_person: boolean;
   summary: string | null;
+  last_words: string | null;
+  outcome: string | null;
   pull_request: string | null;
   updated_at: number;
+  requester: string;
+  policy_version: string;
+  rules: string[];
 };
 
 export type PipelineSource = {

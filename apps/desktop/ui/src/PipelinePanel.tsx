@@ -88,6 +88,7 @@ export default function PipelinePanel({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tick, setTick] = useState<PipelineTickReport | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [configText, setConfigText] = useState("");
   const [configPath, setConfigPath] = useState("");
@@ -446,6 +447,43 @@ execution:
                       <p className="mt-1.5 line-clamp-2 text-[11px] leading-5 text-obd-muted">
                         {ticket.summary}
                       </p>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpanded(expanded === ticket.id ? null : ticket.id)
+                      }
+                      className="mt-1.5 text-[10px] text-obd-subtle hover:text-obd-body"
+                    >
+                      {expanded === ticket.id ? "Hide detail" : "Why this exists"}
+                    </button>
+
+                    {expanded === ticket.id && (
+                      <div className="mt-1.5 space-y-1 rounded-md bg-obd-inset p-2 text-[10px] leading-5 text-obd-subtle">
+                        <p>
+                          <span className="text-obd-body">Asked by</span>{" "}
+                          {ticket.requester} · policy {ticket.policy_version}
+                        </p>
+                        {ticket.rules.length > 0 && (
+                          <p>
+                            <span className="text-obd-body">Matched</span>{" "}
+                            {ticket.rules.join(", ")}
+                          </p>
+                        )}
+                        {ticket.outcome !== null && (
+                          <p>
+                            <span className="text-obd-body">Report</span>{" "}
+                            {ticket.outcome}
+                          </p>
+                        )}
+                        {ticket.last_words !== null &&
+                          ticket.last_words.trim() !== "" && (
+                            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[10px] text-obd-muted">
+                              {ticket.last_words}
+                            </pre>
+                          )}
+                      </div>
                     )}
 
                     <div className="mt-2 flex items-center gap-2">

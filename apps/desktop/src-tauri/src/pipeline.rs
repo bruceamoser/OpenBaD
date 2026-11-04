@@ -471,8 +471,16 @@ pub struct PipelineTicketRow {
     pub needs_a_person: bool,
     /// The last report's first line, which is what a row can show.
     pub summary: Option<String>,
+    /// The executor's own words, which the row expands to show.
+    pub last_words: Option<String>,
+    pub outcome: Option<&'static str>,
     pub pull_request: Option<String>,
     pub updated_at: i64,
+    /// Why this ticket exists: who asked, under which policy, and which rules
+    /// matched.
+    pub requester: String,
+    pub policy_version: String,
+    pub rules: Vec<String>,
 }
 
 /// A project's pipeline configuration as the setup surface edits it.
@@ -645,8 +653,15 @@ pub fn pipeline_tickets(
                     .take(160)
                     .collect()
             }),
-            pull_request: report.and_then(|record| record.pull_request),
+            last_words: report.as_ref().map(|record| record.last_words.clone()),
+            outcome: report.as_ref().map(|record| record.outcome.as_str()),
+            pull_request: report
+                .as_ref()
+                .and_then(|record| record.pull_request.clone()),
             updated_at: ticket.updated_at,
+            requester: ticket.mandate.requester,
+            policy_version: ticket.mandate.policy_version,
+            rules: ticket.mandate.matched_rules,
         });
     }
     Ok(rows)
