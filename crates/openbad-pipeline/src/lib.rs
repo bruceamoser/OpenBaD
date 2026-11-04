@@ -15,11 +15,15 @@
 pub mod config;
 pub mod cursor;
 pub mod error;
+pub mod eval;
+pub mod mandate;
 pub mod source;
 pub mod trigger;
 
 pub use config::{PipelineConfig, SourceConfig, load_pipeline_config};
 pub use cursor::{MAX_REMEMBERED_TRIGGERS, SourceCursor};
 pub use error::SourceError;
+pub use eval::{Decision, DecisionKind, EvalInput, ThreadContext, evaluate};
+pub use mandate::{Mandate, MandateStrength};
 pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome};
 pub use trigger::{Channel, ThreadId, Trigger, TriggerId, TriggerKind};

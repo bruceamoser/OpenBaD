@@ -1232,6 +1232,7 @@ sources:
     labels: ["agent:run"]        # an issue must carry one to be admitted
     allowed: ["bruceamoser"]     # who may originate work; enforced by Eval
     bot_logins: ["openbad-bot"]  # the agent's own account, dropped on sight
+    known_bots: ["sweeper-bot"]  # bots that may propose work, never request it
     poll_interval_secs: 120
 ```
 
