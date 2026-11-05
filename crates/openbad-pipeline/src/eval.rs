@@ -117,6 +117,12 @@ pub struct ThreadContext {
     pub has_ended_ticket: bool,
     /// A person stopped this thread's work. Nothing reaches it.
     pub stopped_by_person: bool,
+    /// When the ticket on this thread last finished a turn.
+    ///
+    /// An executor that shares the person's identity cannot be told apart by
+    /// name, so time is the evidence: a message written before the ticket's own
+    /// last turn ended was either written by it or already delivered to it.
+    pub own_spoke_at_ms: Option<i64>,
 }
 
 /// Everything one evaluation needs.
@@ -223,7 +229,21 @@ fn judge(input: &EvalInput<'_>, trigger: &Trigger) -> Decision {
         return Decision::accept(trigger, "allowed-person", mandate);
     }
 
-    // 7. Anything else on a thread with a live ticket is delivered to it.
+    // 7. The pipeline's own output is not new input. An executor that comments on
+    //    its own thread under the person's identity would otherwise resume itself
+    //    forever; a message older than its last finished turn cannot be a reply
+    //    to work it has not done yet.
+    if let Some(spoke_at) = input.thread.own_spoke_at_ms {
+        if trigger.at_ms <= spoke_at {
+            return Decision::ignore(
+                trigger,
+                "own-output",
+                "written before this thread's ticket last finished a turn",
+            );
+        }
+    }
+
+    // 8. Anything else on a thread with a live ticket is delivered to it.
     if input.thread.has_live_ticket {
         return Decision::attach(
             trigger,
@@ -232,7 +252,7 @@ fn judge(input: &EvalInput<'_>, trigger: &Trigger) -> Decision {
         );
     }
 
-    // 8. A person's message on an ended, unstopped ticket resumes it under the
+    // 9. A person's message on an ended, unstopped ticket resumes it under the
     //    same mandate — no new admission, which is what keeps the authority the
     //    work started with.
     if input.thread.has_ended_ticket {
@@ -243,7 +263,7 @@ fn judge(input: &EvalInput<'_>, trigger: &Trigger) -> Decision {
         );
     }
 
-    // 9. A message on a thread with no ticket and no admitting label is not work.
+    // 10. A message on a thread with no ticket and no admitting label is not work.
     Decision::ignore(
         trigger,
         "no-ticket",
@@ -428,11 +448,54 @@ mod tests {
     }
 
     #[test]
+    fn a_tickets_own_comment_does_not_resume_it() {
+        let thread = ThreadContext {
+            has_ended_ticket: true,
+            own_spoke_at_ms: Some(1_000),
+            ..ThreadContext::default()
+        };
+
+        // The executor signs in as the person, so authorship proves nothing and
+        // only time does: this was written during the turn it would resume.
+        let mut own = comment("alice");
+        own.at_ms = 900;
+        let decision = judge_one(thread, &own);
+        assert_eq!(decision.kind, DecisionKind::Ignore);
+        assert_eq!(decision.matched_rules, ["own-output"]);
+
+        // A reply written after the turn ended is a person talking to the ticket.
+        let mut reply = comment("alice");
+        reply.at_ms = 1_001;
+        let decision = judge_one(thread, &reply);
+        assert_eq!(decision.kind, DecisionKind::Attach);
+        assert_eq!(decision.matched_rules, ["resume"]);
+    }
+
+    #[test]
+    fn a_message_during_a_live_turn_still_reaches_it() {
+        let thread = ThreadContext {
+            has_live_ticket: true,
+            own_spoke_at_ms: Some(1_000),
+            ..ThreadContext::default()
+        };
+        let mut during = comment("alice");
+        during.at_ms = 1_001;
+        let decision = judge_one(thread, &during);
+        assert_eq!(
+            decision.kind,
+            DecisionKind::Attach,
+            "a message newer than the last finished turn is not the pipeline's own"
+        );
+        assert_eq!(decision.matched_rules, ["live-ticket"]);
+    }
+
+    #[test]
     fn a_stopped_thread_receives_nothing_from_anyone() {
         let thread = ThreadContext {
             has_live_ticket: true,
             has_ended_ticket: true,
             stopped_by_person: true,
+            ..ThreadContext::default()
         };
         for trigger in [issue("alice", &["agent:run"]), comment("alice")] {
             let decision = judge_one(thread, &trigger);

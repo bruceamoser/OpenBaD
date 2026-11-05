@@ -723,13 +723,36 @@ could not start says so rather than looking healthy, and the empty state names t
 step that is missing. Tickets appearing in the panel is a consequence of a tick:
 until a project polls once, a correctly configured pipeline is empty by design.
 
-**`gh` is found even when the app was not started from a shell.** A desktop app
-inherits the session's `PATH`, not a login shell's, so a per-user install under
-`~/.local/bin` is invisible to it. Every poll then failed to launch `gh`, no source
-reported anything but an error, and the pipeline admitted nothing while looking
-idle — the same empty panel for a completely different reason. The Git CLI lookup
-now checks `PATH` first, then the directories installers actually use
-(`~/.local/bin`, `/usr/local/bin`, Homebrew on both Linux and macOS,
-`~/.nix-profile/bin`, `~/.asdf/shims`), and `OPENBAD_GH` names the binary outright.
-Failing that, the source error says `gh` could not be found instead of reporting a
-bare spawn failure.
+**`gh` is resolved rather than assumed.** A desktop app inherits the session's
+`PATH`, which is not always the login shell's: a per-user install under
+`~/.local/bin` is missing whenever the session manager, not a shell, started the
+app. That makes a bare `Command::new("gh")` a silent failure — a spawn error the
+caller discards, indistinguishable from "there is nothing there". The lookup now
+checks `PATH` first, then the directories installers use (`~/.local/bin`,
+`/usr/local/bin`, Homebrew on both Linux and macOS, `~/.nix-profile/bin`,
+`~/.asdf/shims`), and `OPENBAD_GH` names the binary outright. The app on this
+machine does have `~/.local/bin` on its `PATH`, so nothing was broken by it here;
+the lookup removes a way for it to break silently somewhere else.
+
+## v0.3.20
+
+**A delivered ticket is no longer undone by its own next round.** Two defects made
+the first real run unreadable: every ticket showed `failed`, although all eight had
+committed work and reported `ready` minutes earlier.
+
+The first is that `prepare` ran again on a worktree that already existed. `uv venv`
+refuses to overwrite the virtualenv the previous round created, so the second
+assignment died in seconds with `A virtual environment already exists at: .venv` —
+and because that report is the newest, the ticket's stage became `person/failed`
+over a delivery that had succeeded. Prepare now runs once per worktree, recorded as
+`pipeline.prepared.<branch>`; a worktree that was already prepared keeps what the
+first prepare made, and a ticket keeps one worktree for its whole life.
+
+The second is a self-resume loop. The executor signs in as the person it works for,
+so `known_bots` cannot filter its comments and rule 7 delivered its own report
+comment back to it as new input. Ticket #7 therefore ran three full rounds — 33, 53
+and 30 minutes — and would have continued indefinitely; only the prepare failure
+stopped it. Admission now drops a message written before the ticket's last finished
+turn, which is output the pipeline already produced or input it already received. A
+reply written after that turn ends still resumes the ticket, and a message arriving
+mid-turn still wakes the live executor.

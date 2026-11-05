@@ -50,7 +50,11 @@ pub struct GhCli;
 /// install under `~/.local/bin` is invisible to it — every poll then fails to
 /// launch and the pipeline admits nothing while looking idle. `OPENBAD_GH` names
 /// the binary outright; otherwise PATH, then the directories installers use.
-fn gh_binary() -> Option<&'static Path> {
+///
+/// Public because polling is not the only thing that shells out to it: anything
+/// else that asks GitHub has the same problem and must ask the same question.
+#[must_use]
+pub fn gh_binary() -> Option<&'static Path> {
     static BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
     BINARY
         .get_or_init(|| {

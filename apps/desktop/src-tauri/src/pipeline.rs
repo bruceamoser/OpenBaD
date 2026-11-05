@@ -307,9 +307,23 @@ impl Supervisor {
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        store
+        let mut context = store
             .pipeline_thread_context(self.workspace_id, &source.id, thread_key)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        // Only a thread that has a ticket can have spoken: asking for the
+        // newest ticket's last turn is what turns "a person replied" into a fact
+        // rather than a guess about who the comment's author is.
+        if context.has_live_ticket || context.has_ended_ticket || context.stopped_by_person {
+            let ticket = store
+                .pipeline_ticket_on_thread(self.workspace_id, &source.id, thread_key)
+                .map_err(|error| error.to_string())?;
+            if let Some(ticket) = ticket {
+                context.own_spoke_at_ms = store
+                    .pipeline_spoke_at(&ticket.id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(context)
     }
 
     /// Gives the live ticket on this thread a pending assignment, so the

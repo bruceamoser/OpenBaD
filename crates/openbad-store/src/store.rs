@@ -2466,6 +2466,27 @@ impl Store {
         })
     }
 
+    /// The newest ticket on a thread, if the thread has one.
+    pub fn pipeline_ticket_on_thread(
+        &self,
+        workspace_id: WorkspaceId,
+        source_id: &str,
+        thread_key: &str,
+    ) -> Result<Option<crate::pipeline::TicketRecord>, StoreError> {
+        let connection = self.reader()?;
+        Ok(
+            crate::pipeline::tickets_on_thread(&connection, workspace_id, source_id, thread_key)?
+                .into_iter()
+                .next(),
+        )
+    }
+
+    /// When this ticket's own work last ended, or `None` if it never ran.
+    pub fn pipeline_spoke_at(&self, ticket_id: &str) -> Result<Option<i64>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::spoke_at(&connection, ticket_id)
+    }
+
     /// The project's tickets, most recently touched first.
     pub fn list_pipeline_tickets(
         &self,

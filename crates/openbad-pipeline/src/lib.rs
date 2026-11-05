@@ -35,6 +35,6 @@ pub use execution::{
     launch_order, recovery_for,
 };
 pub use mandate::{Mandate, MandateStrength};
-pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome};
+pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome, gh_binary};
 pub use ticket::{AssignmentState, ReportOutcome, TicketState};
 pub use trigger::{Channel, ThreadId, Trigger, TriggerId, TriggerKind};

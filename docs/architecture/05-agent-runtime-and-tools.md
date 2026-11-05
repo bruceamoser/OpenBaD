@@ -1288,13 +1288,22 @@ route up to twenty triggers at once, so a decision has to be readable on its own
 | 5 | A known bot, with no ticket | Accept, **inferred** mandate |
 | 6 | A person not on the allowed list | Ignore |
 | 7 | A labelled issue from an allowed person | Accept, **explicit** mandate |
-| 8 | Anything else on a live ticket | Attach |
-| 9 | A person's message on an ended ticket | Attach, resume under its mandate |
-| 10 | A message with no ticket and no label | Ignore |
+| 8 | A message older than the ticket's last finished turn | Ignore as own output |
+| 9 | Anything else on a live ticket | Attach |
+| 10 | A person's message on an ended ticket | Attach, resume under its mandate |
+| 11 | A message with no ticket and no label | Ignore |
 
 `known_bots` is deliberately separate from `allowed`: allowed means a person whose
 request is explicit, and merging the two would let a bot inherit a person's
 authority. A bot may propose work; it cannot claim a person asked for it.
+
+Rule 8 exists because `known_bots` cannot filter an executor that signs in as the
+person it works for: every comment it writes looks like that person talking. Time
+is the evidence instead. Anything written before the ticket's last turn ended was
+either written by that turn or already delivered to it, so it is not new input —
+otherwise the pipeline resumes itself from its own output, forever. A message newer
+than that is a reply and is handled normally, including waking a live turn, whose
+`ended_at` has not moved yet.
 
 Stop is never inferred from text. Only an explicit command withdraws a mandate —
 `Decision::stop` is what the panel's stop button produces — because reading a
@@ -1414,6 +1423,11 @@ instead of being read past.
   variables and `PREPARE_TIMEOUT` (ten minutes). Its output goes to `prepare.log`
   in the worktree and its tail to the report. A failure ends the ticket with those
   words; nothing retries by itself.
+- **Prepare runs once per worktree**, recorded as `pipeline.prepared.<branch>`. A
+  ticket keeps one worktree for its whole life, so a second round reuses the
+  environment the first one built. Re-running a setup command that is not
+  idempotent — `uv venv`, an install — fails on work already done, and that failure
+  would end a ticket whose earlier round had already delivered.
 - **A prepared ticket stops at a pending assignment.** That is the state
   `recovery_for` already knows how to relaunch, so the ticket is never left
   `running` with nothing running.
@@ -1461,10 +1475,11 @@ project that could not start its watcher (no model credential, for instance) say
 so instead of looking healthy. Nothing is admitted until a tick runs: a panel with
 no tickets and no `pipeline:tick` has simply never polled.
 
-Polling runs `gh api`, and a desktop app inherits the session's `PATH` rather than
-a login shell's — so `gh` under `~/.local/bin` is invisible to it, and every poll
-fails to launch. The lookup therefore checks `PATH` first and then the directories
-installers use, and `OPENBAD_GH` overrides it outright.
+Polling runs `gh api`, and PR detection runs `gh pr list`. Both resolve the binary
+through `openbad_pipeline::gh_binary` rather than assuming `gh` is on `PATH`: a
+desktop app inherits the session's `PATH`, which may omit a per-user install, and a
+spawn that fails is silent at both sites. The lookup checks `PATH` first and then
+the directories installers use, and `OPENBAD_GH` overrides it outright.
 
 Every tick emits `pipeline:tick`; the runner emits `pipeline:progress` per step,
 tool call, and tool result. `pipeline_stop` sets the flag the observer polls, so a

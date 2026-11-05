@@ -142,8 +142,18 @@ fn launch(
             .map_err(|error| error.to_string())?
     };
 
-    let prepared = ensure_worktree(&project_root, &plan)
-        .and_then(|()| run_prepare(config.execution.prepare.as_deref(), &plan));
+    let prepared = ensure_worktree(&project_root, &plan).and_then(|()| {
+        if already_prepared(store, &plan.branch) {
+            // A worktree keeps what its first prepare made. Re-running a setup
+            // command that is not idempotent — a virtualenv, an install — fails
+            // on work already done, which would turn a delivered ticket into a
+            // failed one and hide its report behind an infrastructure error.
+            return Ok(String::new());
+        }
+        let output = run_prepare(config.execution.prepare.as_deref(), &plan)?;
+        remember_prepared(store, &plan.branch);
+        Ok(output)
+    });
 
     match prepared {
         Ok(output) => Ok(report(&ticket, &plan, &assignment.id, None, output)),
@@ -220,6 +230,30 @@ fn execution_root(execution: &ExecutionConfig, project_root: &Path) -> PathBuf {
                 .join(".openbad-executors")
                 .join(name)
         }
+    }
+}
+
+/// Whether this worktree has already been prepared.
+///
+/// Keyed by the ticket's branch, which is what the worktree is: a ticket keeps
+/// one worktree for its whole life, so a second round of work reuses the
+/// environment the first one built instead of rebuilding it.
+fn prepare_key(branch: &str) -> String {
+    format!("pipeline.prepared.{branch}")
+}
+
+fn already_prepared(store: &Arc<Mutex<Store>>, branch: &str) -> bool {
+    store
+        .lock()
+        .ok()
+        .and_then(|store| store.get_setting(&prepare_key(branch)).ok().flatten())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn remember_prepared(store: &Arc<Mutex<Store>>, branch: &str) {
+    if let Ok(store) = store.lock() {
+        let _ = store.set_setting(prepare_key(branch), serde_json::json!(true));
     }
 }
 
@@ -675,9 +709,22 @@ pub async fn execute<R: TurnRunner>(
 ///
 /// Asked of `gh` rather than of the model: the executor may describe its work
 /// however it likes, but the branch is the fact that decides whether review can
-/// reach it.
+/// reach it. `gh` is resolved rather than assumed — a desktop app's PATH does not
+/// have the per-user install the person's shell does, and a spawn that fails here
+/// is silent: the work is pushed, the pull request is open, and the panel says
+/// there is none.
 fn detect_pull_request(worktree: &Path, branch: &str) -> Option<String> {
-    let output = Command::new("gh")
+    let binary = match openbad_pipeline::gh_binary() {
+        Some(binary) => binary,
+        None => {
+            crate::diagnostics::record(
+                "WARN",
+                "cannot find gh: no pull request can be detected for this ticket",
+            );
+            return None;
+        }
+    };
+    let output = Command::new(binary)
         .current_dir(worktree)
         .args([
             "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url",
@@ -1825,6 +1872,33 @@ mod tests {
                 "a project whose only source is off has nothing to poll"
             );
         }
+    }
+
+    #[test]
+    fn prepare_runs_once_per_worktree_so_a_second_round_survives_its_own_output() {
+        // Not idempotent on purpose: this is `uv venv`, which is what a second
+        // round met when it rebuilt a virtualenv the first round had created.
+        let project = project("mkdir .venv");
+        let first = project.launch().expect("the first round prepares");
+        assert_eq!(first.failure, None);
+
+        project
+            .store
+            .lock()
+            .expect("lock")
+            .move_pipeline_assignment(&first.assignment_id, AssignmentState::Ended)
+            .expect("end the first round");
+
+        let second = project.launch().expect("the second round launches");
+        assert_eq!(
+            second.failure, None,
+            "a worktree keeps what its first prepare made; repeating it fails on work already done"
+        );
+        assert_eq!(
+            second.directory, first.directory,
+            "and it is the same worktree, which is why re-preparing is not a fresh start"
+        );
+        assert_eq!(second.prepare_output, "", "nothing was prepared twice");
     }
 
     #[test]

@@ -479,6 +479,19 @@ pub fn active_assignment(
         .optional()?)
 }
 
+/// When this ticket's own work last ended, or `None` if it never ran.
+///
+/// The evidence that separates the pipeline's own output from new input: an
+/// executor that signs in as the person it works for cannot be filtered by name,
+/// so anything written before its last turn ended was already part of that turn.
+/// Only `ended_at` counts — a pending or running assignment has not spoken yet,
+/// and a message arriving mid-turn is the live ticket's to deliver.
+pub fn spoke_at(connection: &Connection, ticket_id: &str) -> Result<Option<i64>, StoreError> {
+    let mut statement = connection
+        .prepare("SELECT MAX(ended_at) FROM pipeline_assignments WHERE ticket_id = ?1")?;
+    Ok(statement.query_row(params![ticket_id], |row| row.get(0))?)
+}
+
 /// A ticket's assignments, newest first.
 pub fn list_assignments(
     connection: &Connection,
