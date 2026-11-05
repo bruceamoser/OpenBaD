@@ -128,6 +128,11 @@ pub enum ReportOutcome {
     Failed,
     /// There was nothing to do, or the work is no longer wanted.
     Dropped,
+    /// The pull request this ticket opened was merged.
+    ///
+    /// Distinct from `ready` because the difference is the whole point of the
+    /// pipeline: `ready` asks a person to merge, `merged` says nobody had to.
+    Merged,
 }
 
 impl ReportOutcome {
@@ -140,6 +145,7 @@ impl ReportOutcome {
             Self::Blocked => "blocked",
             Self::Failed => "failed",
             Self::Dropped => "dropped",
+            Self::Merged => "merged",
         }
     }
 
@@ -178,7 +184,7 @@ impl ReportOutcome {
     /// waits for a person to unblock, and `waiting` is idle by definition.
     #[must_use]
     pub const fn ends_ticket(self) -> bool {
-        matches!(self, Self::Dropped | Self::Failed)
+        matches!(self, Self::Dropped | Self::Failed | Self::Merged)
     }
 }
 

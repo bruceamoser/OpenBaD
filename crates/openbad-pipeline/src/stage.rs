@@ -119,6 +119,7 @@ pub fn stage_of(input: StageInput) -> Stage {
         Some(ReportOutcome::Failed) => Stage::PersonFailed,
         // `progress` is the only interim value: an executor with a live report is
         // working, whatever else the rows say.
+        Some(ReportOutcome::Merged) => Stage::Ended,
         Some(ReportOutcome::Progress) => Stage::Working,
         Some(ReportOutcome::Waiting | ReportOutcome::Dropped) => Stage::Idle,
         None => match input.assignment {

@@ -789,3 +789,22 @@ silent. Starting one writes the account it acts as and its polling cadence —
 tick that admitted, deferred, or errored is written down, where before only
 failures were.
 
+## v0.3.23
+
+**The pipeline finishes the loop instead of handing it back.** Every ticket used
+to stop at `person/review`: an agent did the work, opened a pull request, and then
+waited for a human to review and merge — which is the half of ADR-009 that had not
+been built, and the reason "supervised" looked like "manual".
+
+`execution.review: agent` adds a second pass after a `ready` report: a fresh agent
+with none of the executor's history reads the branch diff, runs the tests, and must
+answer `APPROVE:` or `REJECT:` on its first line. A reviewer that moves the branch
+is rejected, because a reviewer that changes what it reviews has not reviewed it,
+and anything that is not a plain approval — silence, prose, "LGTM" — merges
+nothing. `execution.merge: auto` then squash-merges an approved pull request, after
+re-checking with GitHub that it is still mergeable with no failing checks.
+
+Both are off by default: a project that wants a person at the merge is unchanged,
+and on a protected branch GitHub still refuses a self-approval, which is reported
+rather than bypassed.
+

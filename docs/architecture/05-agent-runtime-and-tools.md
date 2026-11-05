@@ -1477,6 +1477,34 @@ that keeps the protocol testable without a model:
 The runner uses the default model rather than the project's provider settings; a
 project-level provider choice is a follow-up.
 
+### Review and merge
+
+A turn that opens a pull request used to end the pipeline's part: the ticket waited
+at `person/review` and a person merged. That is one half of a loop, and
+`execution.review` / `execution.merge` supply the other.
+
+`review: agent` runs **one more pass** after a `ready` report: a fresh agent with
+none of the turn's history reads `git diff <base>...HEAD`, runs the project's
+tests, and must answer `APPROVE:` or `REJECT:` on its first line. The empty
+history is the point — the executor's context is full of the reasons its own work
+is right, and a reviewer that inherits it agrees.
+
+Three things keep that pass honest:
+
+- **A reviewer may not change the branch.** The commit is compared before and
+  after; a moved head is treated as a rejection, because a reviewer that edits
+  what it reviews has not reviewed it.
+- **Anything but a plain approval is a rejection** — silence, prose, or a
+  confident "looks good" merge nothing.
+- **`merge: auto` re-checks with GitHub** before merging: the pull request must be
+  `MERGEABLE` with no failing checks. On a protected branch a required review by a
+  distinct actor still refuses a self-approval, and that refusal is reported
+  instead of worked around.
+
+Neither key is on by default. A project that wants a person at the merge is
+unaffected, and the ADR's reviewing agent — a GitHub App whose approval is a
+distinct actor — remains the intended arrangement where one is installed.
+
 ### Watching
 
 `pipeline_watch` starts one watcher per project: it ticks on an interval, launches

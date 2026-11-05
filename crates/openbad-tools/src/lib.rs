@@ -10437,7 +10437,7 @@ impl Tool for PipelineTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "pipeline",
-            "Read, validate, or write this project's supervised work pipeline (.openbad/pipeline.yaml), and check the branch protection that gates auto-merge. The document is YAML: `sources` is a list of `{id, repository: \"owner/repo\", enabled, labels, allowed, bot_logins, known_bots, poll_interval_secs}`; `execution` is `{slots, budget: {steps, tokens}, prepare, execution_root}`; a top-level `github` is `{user}` and names the account every pipeline action acts as. Rules worth knowing before you write one: a trigger needs one of `labels` to enter at all (an empty list admits nothing); `allowed` lists the GitHub logins authorized to originate work, and anyone else is ignored and recorded rather than silently dropped; `bot_logins` are the agent's own accounts and are dropped; `github.user` pins the account polling, pull requests, and the executor's own `gh` and `git` run as, read from that account's saved credential — never `gh auth switch`, so a person signed in as someone else for other work is not disturbed; a disabled source keeps its read position; `prepare` runs inside the new worktree before the executor's turn and its failure fails the ticket with the output; executors work in their own worktree under `execution_root` on branch `worker/<ticket>` and open pull requests rather than pushing to a protected branch. Start with action=show, validate a change with action=write plus dry_run=true, then write. Auto-merge must stay off unless action=guards reports required reviews, stale-approval dismissal, and required checks are all present; never promise it on anything else.",
+            "Read, validate, or write this project's supervised work pipeline (.openbad/pipeline.yaml), and check the branch protection that gates auto-merge. The document is YAML: `sources` is a list of `{id, repository: \"owner/repo\", enabled, labels, allowed, bot_logins, known_bots, poll_interval_secs}`; `execution` is `{slots, budget: {steps, tokens}, prepare, execution_root, review, merge}` — `review: agent` makes a fresh reviewer read the branch and run the tests, and `merge: auto` lets an approved pull request be squash-merged when GitHub reports it clean; a top-level `github` is `{user}` and names the account every pipeline action acts as. Rules worth knowing before you write one: a trigger needs one of `labels` to enter at all (an empty list admits nothing); `allowed` lists the GitHub logins authorized to originate work, and anyone else is ignored and recorded rather than silently dropped; `bot_logins` are the agent's own accounts and are dropped; `github.user` pins the account polling, pull requests, and the executor's own `gh` and `git` run as, read from that account's saved credential — never `gh auth switch`, so a person signed in as someone else for other work is not disturbed; a disabled source keeps its read position; `prepare` runs inside the new worktree before the executor's turn and its failure fails the ticket with the output; executors work in their own worktree under `execution_root` on branch `worker/<ticket>` and open pull requests rather than pushing to a protected branch; without `review`/`merge` a ticket stops at the pull request and waits for a person. Start with action=show, validate a change with action=write plus dry_run=true, then write. Auto-merge must stay off unless action=guards reports required reviews, stale-approval dismissal, and required checks are all present; never promise it on anything else.",
             RiskLevel::Execute,
         )
         .with_schema(json!({
@@ -10502,6 +10502,17 @@ fn describe_pipeline(config: &openbad_pipeline::config::PipelineConfig) -> Strin
         Some(user) => format!("GitHub: acts as {user} for every pipeline task"),
         None => "GitHub: acts as whichever account `gh` has active".to_owned(),
     });
+    lines.push(format!(
+        "Loop: {}; {}",
+        match config.execution.review {
+            openbad_pipeline::config::ReviewPolicy::Agent => "a reviewing agent reads the branch",
+            openbad_pipeline::config::ReviewPolicy::None => "nobody reviews inside the pipeline",
+        },
+        match config.execution.merge {
+            openbad_pipeline::config::MergePolicy::Auto => "an approved pull request is merged",
+            openbad_pipeline::config::MergePolicy::None => "a person merges",
+        }
+    ));
     lines.push(format!(
         "Execution: {} slot(s), budget {} steps / {} tokens{}{}",
         config.execution.slots,

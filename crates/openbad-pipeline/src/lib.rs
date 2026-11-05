@@ -22,6 +22,7 @@ pub mod execution;
 pub mod github;
 pub mod guards;
 pub mod mandate;
+pub mod review;
 pub mod source;
 pub mod stage;
 pub mod ticket;
@@ -37,6 +38,7 @@ pub use execution::{
 };
 pub use github::GitHubIdentity;
 pub use mandate::{Mandate, MandateStrength};
+pub use review::{Verdict, parse_verdict, review_prompt};
 pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome, gh_binary};
 pub use ticket::{AssignmentState, ReportOutcome, TicketState};
 pub use trigger::{Channel, ThreadId, Trigger, TriggerId, TriggerKind};

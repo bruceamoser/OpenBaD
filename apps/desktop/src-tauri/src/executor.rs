@@ -409,6 +409,21 @@ pub trait TurnRunner: Send + Sync {
         history: &[ChatMessage],
         cancel: &Arc<AtomicBool>,
     ) -> Result<TurnResult, String>;
+
+    /// Reads the branch as a reviewer and answers, without changing it.
+    ///
+    /// Separate from [`TurnRunner::run`] because it is a different job with a
+    /// different prompt and no history: the reviewer has to arrive at a verdict,
+    /// not continue the work. A runner that cannot review says so, and the ticket
+    /// stays waiting for a person rather than merging unreviewed.
+    async fn review(
+        &self,
+        _worktree: &Path,
+        _prompt: &str,
+        _cancel: &Arc<AtomicBool>,
+    ) -> Result<String, String> {
+        Err("this runner cannot review".to_owned())
+    }
 }
 
 /// What a running turn shares with the rest of the app.
@@ -653,6 +668,35 @@ pub async fn execute<R: TurnRunner>(
         None
     };
 
+    // The half of the loop that used to leave a person holding it: a fresh
+    // context reads the branch, and — when the project asked for it — an approved
+    // pull request is merged. Both are opt-in, so a project that wants a person
+    // to review is unaffected.
+    let mut outcome = outcome;
+    let mut last_words = last_words;
+    if let Some(pull_request) = &pull_request {
+        let reviewed = review_then_merge(
+            &plan.directory,
+            &plan.branch,
+            &base_branch(&plan.directory),
+            &ticket.thread.0,
+            pull_request,
+            &config.execution,
+            options.github.as_ref(),
+            runner,
+            &options.cancel,
+        )
+        .await;
+        match reviewed {
+            ReviewOutcome::Merged { words } => {
+                outcome = ReportOutcome::Merged;
+                last_words = words;
+            }
+            ReviewOutcome::Kept { words } => last_words = words,
+            ReviewOutcome::Skipped => {}
+        }
+    }
+
     {
         let store = lock(store)?;
         let record = store
@@ -709,6 +753,183 @@ pub async fn execute<R: TurnRunner>(
         steps,
         tokens,
         failure,
+    })
+}
+
+/// What happened when the pipeline tried to close its own loop.
+enum ReviewOutcome {
+    /// A reviewer approved and the pull request is merged.
+    Merged { words: String },
+    /// The ticket keeps its report, with the reviewer's words attached.
+    Kept { words: String },
+    /// The project asked for neither a review nor a merge.
+    Skipped,
+}
+
+/// The branch the work is judged against.
+///
+/// The ticket's branch was cut from the project's checkout, so its upstream's
+/// default is the honest base; `main` is the fallback for a checkout with no
+/// remote, which is also what `git worktree add` starts from.
+fn base_branch(worktree: &Path) -> String {
+    git(worktree, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .ok()
+        .map(|name| name.trim().trim_start_matches("origin/").to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "main".to_owned())
+}
+
+/// Reviews the branch, then merges it when the project asked for both.
+///
+/// The order matters and so does what each step refuses: a review that cannot run
+/// leaves the ticket waiting for a person, never merged, and a merge is attempted
+/// only after a reviewer approved and GitHub reports the pull request clean. An
+/// error in either is written into the report rather than swallowed, because a
+/// pipeline whose loops fail quietly is worse than one that stops.
+#[allow(clippy::too_many_arguments)]
+async fn review_then_merge<R: TurnRunner>(
+    worktree: &Path,
+    branch: &str,
+    base: &str,
+    thread: &str,
+    pull_request: &str,
+    execution: &openbad_pipeline::config::ExecutionConfig,
+    identity: Option<&openbad_pipeline::GitHubIdentity>,
+    runner: &R,
+    cancel: &Arc<AtomicBool>,
+) -> ReviewOutcome {
+    use openbad_pipeline::config::{MergePolicy, ReviewPolicy};
+
+    if matches!(execution.review, ReviewPolicy::None) {
+        return ReviewOutcome::Skipped;
+    }
+
+    let prompt = openbad_pipeline::review_prompt(thread, branch, base, None);
+    let head_before = git(worktree, &["rev-parse", "HEAD"]).ok();
+
+    let answer = match runner.review(worktree, &prompt, cancel).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            return ReviewOutcome::Kept {
+                words: format!(
+                    "Review did not run: {error}. The pull request is waiting for a person."
+                ),
+            };
+        }
+    };
+
+    // A reviewer that moved the branch has changed what it was asked to judge.
+    let head_after = git(worktree, &["rev-parse", "HEAD"]).ok();
+    let verdict = if head_before.is_some() && head_before != head_after {
+        openbad_pipeline::Verdict {
+            approved: false,
+            reason: "the reviewer changed the branch it was reviewing".to_owned(),
+        }
+    } else {
+        openbad_pipeline::parse_verdict(&answer)
+    };
+
+    if !verdict.approved {
+        return ReviewOutcome::Kept {
+            words: format!("Review rejected: {}\n\n{answer}", verdict.reason),
+        };
+    }
+    if !matches!(execution.merge, MergePolicy::Auto) {
+        return ReviewOutcome::Kept {
+            words: format!("Review approved: {}\n\n{answer}", verdict.reason),
+        };
+    }
+
+    match merge_pull_request(worktree, pull_request, identity) {
+        Ok(words) => ReviewOutcome::Merged {
+            words: format!(
+                "Review approved: {}\nMerged {pull_request}. {words}",
+                verdict.reason
+            ),
+        },
+        Err(error) => ReviewOutcome::Kept {
+            words: format!("Review approved: {}\nMerge failed: {error}", verdict.reason),
+        },
+    }
+}
+
+/// Squash-merges a pull request the pipeline opened, as the project's account.
+///
+/// GitHub still decides: a protected branch with required reviews refuses a
+/// self-review, and that refusal is reported rather than worked around.
+fn merge_pull_request(
+    worktree: &Path,
+    pull_request: &str,
+    identity: Option<&openbad_pipeline::GitHubIdentity>,
+) -> Result<String, String> {
+    let binary = openbad_pipeline::gh_binary()
+        .ok_or_else(|| "cannot find gh, so the pull request cannot be merged".to_owned())?;
+
+    let mut state = Command::new(binary);
+    state.current_dir(worktree).args([
+        "pr",
+        "view",
+        pull_request,
+        "--json",
+        "mergeable,mergeStateStatus,statusCheckRollup",
+    ]);
+    openbad_pipeline::github::apply(identity, &mut state);
+    let output = state
+        .output()
+        .map_err(|error| format!("cannot run gh pr view: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let view: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("gh pr view returned an unreadable answer: {error}"))?;
+    let mergeable = view
+        .get("mergeable")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let state_text = view
+        .get("mergeStateStatus")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let failed = view
+        .get("statusCheckRollup")
+        .and_then(|value| value.as_array())
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|check| {
+                    let conclusion = check
+                        .get("conclusion")
+                        .or_else(|| check.get("state"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_ascii_uppercase();
+                    !matches!(conclusion.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED" | "")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if mergeable != "MERGEABLE" || failed > 0 {
+        return Err(format!(
+            "GitHub reports {mergeable}/{state_text} with {failed} check(s) not passing"
+        ));
+    }
+
+    let mut merge = Command::new(binary);
+    merge
+        .current_dir(worktree)
+        .args(["pr", "merge", pull_request, "--squash", "--delete-branch"]);
+    openbad_pipeline::github::apply(identity, &mut merge);
+    let output = merge
+        .output()
+        .map_err(|error| format!("cannot run gh pr merge: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let said = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok(if said.is_empty() {
+        format!("{state_text} before merging")
+    } else {
+        said
     })
 }
 
@@ -1405,6 +1626,65 @@ impl TurnRunner for AgentTurn {
             tokens: run.usage.input_tokens + run.usage.output_tokens,
         })
     }
+
+    /// One pass, no history, verdict first line.
+    ///
+    /// The empty history is the point: the executor's context is full of the
+    /// reasons its own work is correct, and a reviewer that inherits it agrees.
+    async fn review(
+        &self,
+        worktree: &Path,
+        prompt: &str,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<String, String> {
+        let client = openbad_llm::DeepSeekClient::new(
+            openbad_llm::ReqwestTransport::new(),
+            self.api_key.clone(),
+        )
+        .with_model(self.model.clone())
+        .with_base_url(self.base_url.clone())
+        .with_user_id(self.user_id.clone());
+        let agent = openbad_agent::default_agent(
+            client,
+            Arc::new(openbad_workspace::WorkspaceService::new(
+                worktree.to_path_buf(),
+            )),
+            openbad_agent::AgentConfig {
+                // Commands are needed to run the tests the review depends on.
+                policy: openbad_governance::ToolPolicy::FullAccess,
+                stream: false,
+                command_env: self
+                    .github
+                    .as_ref()
+                    .map(openbad_pipeline::GitHubIdentity::variables)
+                    .unwrap_or_default(),
+                ..openbad_agent::AgentConfig::default()
+            },
+        )
+        .with_redactions({
+            let mut redactions = vec![self.api_key.clone()];
+            if let Some(github) = &self.github {
+                redactions.push(github.token().to_owned());
+            }
+            redactions
+        });
+        let observer = PipelineObserver {
+            app: self.app.clone(),
+            ticket: self.ticket.clone(),
+            cancel: Arc::clone(cancel),
+        };
+        let run = agent
+            .run_with_observer(vec![ChatMessage::user(prompt)], &observer)
+            .await
+            .map_err(|error| {
+                if cancel.load(Ordering::SeqCst) {
+                    "stopped by a person".to_owned()
+                } else {
+                    error.to_string().replace(&self.api_key, "[redacted]")
+                }
+            })?;
+        Ok(run.text)
+    }
 }
 
 #[cfg(test)]
@@ -1592,6 +1872,7 @@ mod tests {
     struct FakeTurn {
         result: Result<TurnResult, String>,
         seen: Mutex<Vec<String>>,
+        review: Option<String>,
     }
 
     impl FakeTurn {
@@ -1599,7 +1880,13 @@ mod tests {
             Self {
                 result,
                 seen: Mutex::new(Vec::new()),
+                review: None,
             }
+        }
+
+        fn reviewing(mut self, answer: &str) -> Self {
+            self.review = Some(answer.to_owned());
+            self
         }
 
         fn prompts(&self) -> Vec<String> {
@@ -1622,6 +1909,18 @@ mod tests {
                     .push(prompt.content.clone().unwrap_or_default());
             }
             self.result.clone()
+        }
+
+        async fn review(
+            &self,
+            _worktree: &Path,
+            prompt: &str,
+            _cancel: &Arc<AtomicBool>,
+        ) -> Result<String, String> {
+            self.seen.lock().expect("prompts").push(prompt.to_owned());
+            self.review
+                .clone()
+                .ok_or_else(|| "this runner cannot review".to_owned())
         }
     }
 
@@ -1975,6 +2274,157 @@ mod tests {
                 !wants_watching(&store, fresh_workspace, fresh.root.path()),
                 "a project whose only source is off has nothing to poll"
             );
+        }
+    }
+
+    fn review_and_merge_config(
+        review: openbad_pipeline::config::ReviewPolicy,
+        merge: openbad_pipeline::config::MergePolicy,
+    ) -> openbad_pipeline::config::ExecutionConfig {
+        openbad_pipeline::config::ExecutionConfig {
+            review,
+            merge,
+            ..openbad_pipeline::config::ExecutionConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_review_leaves_the_pull_request_for_a_person() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let runner = FakeTurn::new(turn("done", 1, 1))
+            .reviewing("REJECT: the index is rebuilt on every read");
+        let outcome = review_then_merge(
+            worktree.path(),
+            "worker/t",
+            "main",
+            "owner/repo#4",
+            "https://github.com/owner/repo/pull/4",
+            &review_and_merge_config(
+                openbad_pipeline::config::ReviewPolicy::Agent,
+                openbad_pipeline::config::MergePolicy::Auto,
+            ),
+            None,
+            &runner,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+
+        match outcome {
+            ReviewOutcome::Kept { words } => {
+                assert!(
+                    words.contains("Review rejected"),
+                    "the reviewer's reason belongs in the report: {words}"
+                );
+            }
+            _ => panic!("a rejection must never merge"),
+        }
+        assert!(
+            runner
+                .prompts()
+                .iter()
+                .any(|prompt| prompt.contains("Do not edit, commit, push, or merge")),
+            "the reviewer is asked to judge, not to change"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_that_asked_for_no_review_keeps_its_old_loop() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let runner = FakeTurn::new(turn("done", 1, 1)).reviewing("APPROVE: fine");
+        let outcome = review_then_merge(
+            worktree.path(),
+            "worker/t",
+            "main",
+            "owner/repo#4",
+            "https://github.com/owner/repo/pull/4",
+            &review_and_merge_config(
+                openbad_pipeline::config::ReviewPolicy::None,
+                openbad_pipeline::config::MergePolicy::Auto,
+            ),
+            None,
+            &runner,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+
+        assert!(matches!(outcome, ReviewOutcome::Skipped));
+        assert!(
+            runner.prompts().is_empty(),
+            "no review is run when the project did not ask for one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_that_changes_the_branch_is_rejected() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        git(worktree.path(), &["init", "-q"]).expect("init");
+        std::fs::write(worktree.path().join("a.txt"), "one").expect("file");
+        git(worktree.path(), &["add", "."]).expect("add");
+        git(
+            worktree.path(),
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "one",
+            ],
+        )
+        .expect("commit");
+
+        // The reviewer says approve, but leaves new work behind while saying it.
+        struct EditingReviewer {
+            worktree: std::path::PathBuf,
+        }
+        #[async_trait::async_trait]
+        impl TurnRunner for EditingReviewer {
+            async fn run(
+                &self,
+                _worktree: &Path,
+                _history: &[ChatMessage],
+                _cancel: &Arc<AtomicBool>,
+            ) -> Result<TurnResult, String> {
+                unreachable!("only the review runs here")
+            }
+
+            async fn review(
+                &self,
+                _worktree: &Path,
+                _prompt: &str,
+                _cancel: &Arc<AtomicBool>,
+            ) -> Result<String, String> {
+                std::fs::write(self.worktree.join("a.txt"), "two").expect("write");
+                git(&self.worktree, &["commit", "-qam", "sneaky"]).expect("commit");
+                Ok("APPROVE: looks fine".to_owned())
+            }
+        }
+
+        let outcome = review_then_merge(
+            worktree.path(),
+            "worker/t",
+            "main",
+            "owner/repo#4",
+            "https://github.com/owner/repo/pull/4",
+            &review_and_merge_config(
+                openbad_pipeline::config::ReviewPolicy::Agent,
+                openbad_pipeline::config::MergePolicy::None,
+            ),
+            None,
+            &EditingReviewer {
+                worktree: worktree.path().to_path_buf(),
+            },
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+
+        match outcome {
+            ReviewOutcome::Kept { words } => assert!(
+                words.contains("changed the branch"),
+                "a review that edits what it reviews is not a review: {words}"
+            ),
+            _ => panic!("a moved head must not be treated as approval"),
         }
     }
 

@@ -69,6 +69,41 @@ pub struct ExecutionConfig {
     /// nothing has been done to.
     #[serde(default)]
     pub prepare: Option<String>,
+    /// What happens to a pull request the executor opened.
+    #[serde(default)]
+    pub review: ReviewPolicy,
+    /// Whether an approved pull request is merged without a person.
+    #[serde(default)]
+    pub merge: MergePolicy,
+}
+
+/// Who reviews a pull request the executor opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPolicy {
+    /// Nobody in the pipeline: the ticket waits at `person/review`.
+    #[default]
+    None,
+    /// A second agent pass reads the branch, runs its tests, and answers approve
+    /// or reject. It is not a second opinion from the same model for its own
+    /// sake — it is a fresh context that has not spent the turn convincing itself
+    /// the work is finished.
+    Agent,
+}
+
+/// Whether the pipeline merges what it reviewed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergePolicy {
+    /// A person merges.
+    #[default]
+    None,
+    /// The pipeline merges a pull request whose review approved and whose checks
+    /// are green. On a protected branch GitHub's own rules still apply, and a
+    /// required review by a distinct actor cannot be satisfied by an account
+    /// reviewing its own work — the merge then fails visibly rather than quietly
+    /// bypassing the protection.
+    Auto,
 }
 
 /// A ticket's budget, in the project's own terms.
@@ -90,6 +125,8 @@ impl Default for ExecutionConfig {
             budget: BudgetConfig::default(),
             execution_root: None,
             prepare: None,
+            review: ReviewPolicy::None,
+            merge: MergePolicy::None,
         }
     }
 }
