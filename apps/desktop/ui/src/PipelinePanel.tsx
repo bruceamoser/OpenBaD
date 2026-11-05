@@ -16,6 +16,8 @@ import {
   loadPipelineTickets,
   pipelineExecute,
   pipelineLaunch,
+  pipelineMergeTicket,
+  openExternal,
   pipelineStop,
   pipelineTick,
   pipelineUnwatch,
@@ -514,14 +516,36 @@ execution:
 
                     <div className="mt-2 flex items-center gap-2">
                       {ticket.pull_request !== null && (
-                        <a
-                          href={ticket.pull_request}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void run(`open:${ticket.id}`, async () => {
+                              await openExternal(ticket.pull_request as string);
+                            })
+                          }
                           className="inline-flex items-center gap-1 text-[10px] text-obd-info hover:underline"
                         >
                           Pull request <ArrowUpRight size={11} />
-                        </a>
+                        </button>
+                      )}
+                      {ticket.pull_request !== null && ticket.stage !== "working" && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void run(`merge:${ticket.id}`, async () => {
+                              const said = await pipelineMergeTicket(
+                                workspacePath,
+                                ticket.id,
+                              );
+                              setNotice(said === "" ? "Merged" : said);
+                              await refresh();
+                            })
+                          }
+                          disabled={busy !== null}
+                          className="rounded-md px-1.5 py-1 text-[10px] text-obd-subtle hover:bg-obd-raised hover:text-obd-body disabled:opacity-50"
+                        >
+                          {busy === `merge:${ticket.id}` ? "Merging…" : "Merge"}
+                        </button>
                       )}
                       <div className="ml-auto flex items-center gap-1">
                         {ticket.stage === "working" ? (

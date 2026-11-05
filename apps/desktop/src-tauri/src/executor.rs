@@ -853,10 +853,163 @@ async fn review_then_merge<R: TurnRunner>(
     }
 }
 
+/// Merges a ticket's pull request because a person asked for it.
+///
+/// The same gates as the automatic path: GitHub decides whether the pull request
+/// may merge at all, and its refusal is returned rather than forced with
+/// administrator rights. What differs is only who decided.
+#[tauri::command]
+pub async fn pipeline_merge_ticket(
+    state: State<'_, AppState>,
+    project_path: String,
+    ticket_id: String,
+) -> Result<String, String> {
+    let (pull_request, assignment_id) = {
+        let store = lock(&state.store)?;
+        let report = store
+            .pipeline_report(&ticket_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("ticket {ticket_id} has no report"))?;
+        let pull_request = store
+            .pipeline_last_pull_request(&ticket_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "ticket {ticket_id} never opened a pull request, so there is nothing to merge"
+                )
+            })?;
+        (pull_request, report.assignment_id)
+    };
+
+    let config =
+        load_pipeline_config(Path::new(&project_path)).map_err(|error| error.to_string())?;
+    let root = execution_root(&config.execution, Path::new(&project_path));
+    let (ticket, workspace) = {
+        let store = lock(&state.store)?;
+        let workspace = crate::project_workspace(&store, &project_path)?;
+        let ticket = store
+            .pipeline_ticket(&ticket_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("no ticket {ticket_id}"))?;
+        (ticket, workspace)
+    };
+    let _ = workspace;
+    let plan = launch_plan(
+        &root,
+        Path::new(&project_path),
+        &ticket.id,
+        &ticket.source_id,
+        &ticket.thread.0,
+        &config
+            .sources
+            .iter()
+            .find(|source| source.id == ticket.source_id)
+            .map(|source| source.repository.clone())
+            .unwrap_or_default(),
+        &ticket.mandate_id,
+    );
+    let identity = {
+        let store = lock(&state.store)?;
+        crate::pipeline::github_identity(&store, &project_path)?
+    };
+    let merged = merge_pull_request(&plan.directory, &pull_request, identity.as_ref())?;
+
+    let store = lock(&state.store)?;
+    store
+        .write_pipeline_report(
+            &assignment_id,
+            ReportOutcome::Merged,
+            &format!("Merged {pull_request} because a person asked. {merged}"),
+            Some(&pull_request),
+        )
+        .map_err(|error| error.to_string())?;
+    store
+        .move_pipeline_ticket(&ticket_id, TicketState::Ended)
+        .map_err(|error| error.to_string())?;
+    Ok(merged)
+}
+
+/// Opens a link in the person's own browser.
+///
+/// A webview cannot navigate to the web platform's pages, so a bare `target=_blank`
+/// anchor silently does nothing — which reads as a dead control. Only http(s) is
+/// accepted: a link from a report is still a link from a model's text.
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err(format!(
+            "refusing to open {trimmed}: only http(s) links open"
+        ));
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(trimmed);
+        command
+    } else if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", trimmed]);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(trimmed);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("cannot open {trimmed}: {error}"))
+}
+
+/// Brings a pull request's branch up to date with its base, and waits for it.
+///
+/// Bounded on purpose: the point is to remove a mechanical chore, not to spin. If
+/// it is still not ready after a few minutes the merge reports why, and a person
+/// or the executor decides.
+fn update_branch(
+    binary: &Path,
+    worktree: &Path,
+    pull_request: &str,
+    identity: Option<&openbad_pipeline::GitHubIdentity>,
+) -> Result<(), String> {
+    let mut command = Command::new(binary);
+    command
+        .current_dir(worktree)
+        .args(["pr", "update-branch", pull_request]);
+    openbad_pipeline::github::apply(identity, &mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("cannot run gh pr update-branch: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(240);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(10));
+        let Ok((_, state, _)) = pull_request_state(binary, worktree, pull_request, identity) else {
+            continue;
+        };
+        if state == "CLEAN" || state == "UNSTABLE" {
+            return Ok(());
+        }
+        if state == "DIRTY" {
+            return Err("the branch still conflicts after being updated".to_owned());
+        }
+    }
+    Err("the branch did not come up to date in time".to_owned())
+}
+
 /// Squash-merges a pull request the pipeline opened, as the project's account.
 ///
 /// GitHub still decides: a protected branch with required reviews refuses a
-/// self-review, and that refusal is reported rather than worked around.
+/// self-review, and that refusal is reported rather than worked around. A branch
+/// that is only behind is brought up to date first — that is a mechanical chore,
+/// not a decision — while a conflicting branch is handed back to the executor,
+/// whose job it is to rebase its own work.
 fn merge_pull_request(
     worktree: &Path,
     pull_request: &str,
@@ -865,16 +1018,67 @@ fn merge_pull_request(
     let binary = openbad_pipeline::gh_binary()
         .ok_or_else(|| "cannot find gh, so the pull request cannot be merged".to_owned())?;
 
-    let mut state = Command::new(binary);
-    state.current_dir(worktree).args([
+    for attempt in 0..2 {
+        let (mergeable, state_text, failing) =
+            pull_request_state(binary, worktree, pull_request, identity)?;
+        if mergeable == "CONFLICTING" {
+            return Err(format!(
+                "the branch conflicts with the base ({state_text}); the executor has to rebase it \
+                 before this can merge"
+            ));
+        }
+        if mergeable == "MERGEABLE" && failing == 0 && state_text == "BEHIND" && attempt == 0 {
+            update_branch(binary, worktree, pull_request, identity)?;
+            continue;
+        }
+        if mergeable != "MERGEABLE" || failing > 0 {
+            return Err(format!(
+                "GitHub reports {mergeable}/{state_text} with {failing} check(s) not passing"
+            ));
+        }
+
+        let mut merge = Command::new(binary);
+        merge.current_dir(worktree).args([
+            "pr",
+            "merge",
+            pull_request,
+            "--squash",
+            "--delete-branch",
+        ]);
+        openbad_pipeline::github::apply(identity, &mut merge);
+        let output = merge
+            .output()
+            .map_err(|error| format!("cannot run gh pr merge: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        let said = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        return Ok(if said.is_empty() {
+            format!("{state_text} before merging")
+        } else {
+            said
+        });
+    }
+    Err("the pull request did not become mergeable".to_owned())
+}
+
+/// What GitHub says about the pull request right now.
+fn pull_request_state(
+    binary: &Path,
+    worktree: &Path,
+    pull_request: &str,
+    identity: Option<&openbad_pipeline::GitHubIdentity>,
+) -> Result<(String, String, usize), String> {
+    let mut view = Command::new(binary);
+    view.current_dir(worktree).args([
         "pr",
         "view",
         pull_request,
         "--json",
         "mergeable,mergeStateStatus,statusCheckRollup",
     ]);
-    openbad_pipeline::github::apply(identity, &mut state);
-    let output = state
+    openbad_pipeline::github::apply(identity, &mut view);
+    let output = view
         .output()
         .map_err(|error| format!("cannot run gh pr view: {error}"))?;
     if !output.status.success() {
@@ -885,12 +1089,14 @@ fn merge_pull_request(
     let mergeable = view
         .get("mergeable")
         .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let state_text = view
+        .unwrap_or_default()
+        .to_owned();
+    let state = view
         .get("mergeStateStatus")
         .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let failed = view
+        .unwrap_or_default()
+        .to_owned();
+    let failing = view
         .get("statusCheckRollup")
         .and_then(|value| value.as_array())
         .map(|checks| {
@@ -908,29 +1114,7 @@ fn merge_pull_request(
                 .count()
         })
         .unwrap_or(0);
-    if mergeable != "MERGEABLE" || failed > 0 {
-        return Err(format!(
-            "GitHub reports {mergeable}/{state_text} with {failed} check(s) not passing"
-        ));
-    }
-
-    let mut merge = Command::new(binary);
-    merge
-        .current_dir(worktree)
-        .args(["pr", "merge", pull_request, "--squash", "--delete-branch"]);
-    openbad_pipeline::github::apply(identity, &mut merge);
-    let output = merge
-        .output()
-        .map_err(|error| format!("cannot run gh pr merge: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    let said = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok(if said.is_empty() {
-        format!("{state_text} before merging")
-    } else {
-        said
-    })
+    Ok((mergeable, state, failing))
 }
 
 /// The pull request this ticket's branch has open, if it has one.

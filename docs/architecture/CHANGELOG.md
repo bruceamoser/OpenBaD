@@ -822,3 +822,19 @@ An `Attach` for an ended ticket now reopens it and creates the pending assignmen
 the scheduler runs. A stopped ticket still defers, because only a person restarts a
 stop.
 
+## v0.3.25
+
+**A pull request link opens, a ticket can be merged from the panel, and a stale
+branch is brought up to date by the pipeline rather than by a person.** The link
+was a plain anchor with `target=_blank`, which a webview cannot navigate to, so it
+did nothing — a dead control that looked like a broken app. It now goes through the
+OS browser, http(s) only. Beside it, **Merge** asks GitHub to merge the ticket's
+pull request with the same gates as the automatic path.
+
+Rebasing joins the executor's instructions: before it reports, it fetches the base,
+rebases, resolves its own conflicts, re-runs the tests and pushes — a branch that
+cannot merge is an unfinished ticket. The merge side does the mechanical part
+without a model: a branch that is merely behind is passed to `gh pr update-branch`
+and re-checked, while a conflicting one is reported back to the executor, whose job
+the rebase is.
+

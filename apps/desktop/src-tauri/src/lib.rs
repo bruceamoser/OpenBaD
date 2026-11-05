@@ -6146,6 +6146,8 @@ pub fn run() {
             pipeline::pipeline_guards,
             executor::pipeline_launch,
             executor::pipeline_execute,
+            executor::pipeline_merge_ticket,
+            executor::open_external,
             executor::pipeline_stop,
             executor::pipeline_watch,
             executor::pipeline_unwatch,

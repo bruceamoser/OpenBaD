@@ -140,6 +140,10 @@ pub fn ticket_prompt(plan: &LaunchPlan, mandate: &crate::mandate::Mandate) -> St
          by any mandate. Use the worktree or scratch space.\n\
          - Never push to a protected branch. Push {branch} and open a pull request for review.\n\
          \n\
+         Before you report, put the branch on top of the current base: `git fetch origin`, then \
+         rebase onto it, resolve any conflicts yourself, re-run the tests, and push. Conflicts are \
+         your work, not a person's — a branch that cannot merge is an unfinished ticket.\n\
+         \n\
          Read the thread with `gh` for the request, do the work, verify it, and then finish with a \
          report: what changed, what you checked, and what remains risky. Do not ask a person a \
          question — nobody is watching this turn; if you cannot proceed, say so in the report and \

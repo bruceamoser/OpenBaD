@@ -2147,6 +2147,21 @@ export async function loadPipelineStatus(
       };
 }
 
+export async function openExternal(url: string): Promise<void> {
+  if (isTauri) {
+    return invoke<void>("open_external", { url });
+  }
+  window.open(url, "_blank", "noreferrer");
+}
+
+export async function pipelineMergeTicket(
+  projectPath: string,
+  ticketId: string,
+): Promise<string> {
+  if (!isTauri) throw new Error("Merging needs the desktop app");
+  return invoke<string>("pipeline_merge_ticket", { projectPath, ticketId });
+}
+
 export async function loadPipelineTickets(
   projectPath: string,
 ): Promise<PipelineTicketRow[]> {
