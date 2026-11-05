@@ -641,6 +641,7 @@ pub fn pipeline_tickets(
 
     let mut rows = Vec::with_capacity(tickets.len());
     for ticket in tickets {
+        let ticket_id = ticket.id.clone();
         let assignment = store
             .active_pipeline_assignment(&ticket.id)
             .map_err(|error| error.to_string())?;
@@ -680,7 +681,12 @@ pub fn pipeline_tickets(
             outcome: report.as_ref().map(|record| record.outcome.as_str()),
             pull_request: report
                 .as_ref()
-                .and_then(|record| record.pull_request.clone()),
+                .and_then(|record| record.pull_request.clone())
+                .or_else(|| {
+                    // A later attempt that failed before reaching the branch did
+                    // not withdraw the pull request an earlier one opened.
+                    store.pipeline_last_pull_request(&ticket_id).ok().flatten()
+                }),
             updated_at: ticket.updated_at,
             requester: ticket.mandate.requester,
             policy_version: ticket.mandate.policy_version,

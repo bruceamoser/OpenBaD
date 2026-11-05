@@ -479,6 +479,26 @@ pub fn active_assignment(
         .optional()?)
 }
 
+/// The pull request this ticket last recorded, if it ever opened one.
+///
+/// Asked separately from the newest report because a later attempt can fail
+/// without one: the pull request is a fact about the ticket's branch, not about
+/// whichever attempt happened to be last, and losing it hides reviewable work
+/// behind an infrastructure error.
+pub fn last_pull_request(
+    connection: &Connection,
+    ticket_id: &str,
+) -> Result<Option<String>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT pull_request FROM pipeline_reports
+         WHERE ticket_id = ?1 AND pull_request IS NOT NULL
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )?;
+    Ok(statement
+        .query_row(params![ticket_id], |row| row.get(0))
+        .optional()?)
+}
+
 /// When this ticket's own work last ended, or `None` if it never ran.
 ///
 /// The evidence that separates the pipeline's own output from new input: an

@@ -2481,6 +2481,15 @@ impl Store {
         )
     }
 
+    /// The pull request this ticket last recorded, if it ever opened one.
+    pub fn pipeline_last_pull_request(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.reader()?;
+        crate::pipeline::last_pull_request(&connection, ticket_id)
+    }
+
     /// When this ticket's own work last ended, or `None` if it never ran.
     pub fn pipeline_spoke_at(&self, ticket_id: &str) -> Result<Option<i64>, StoreError> {
         let connection = self.reader()?;

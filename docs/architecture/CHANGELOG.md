@@ -773,3 +773,19 @@ The token is never serialized, is redacted from tool output and reports, and
 errors name the account rather than the secret. A project that names no account
 behaves as before, and `pipeline_status` reports which account a project acts as
 so "why did this comment come from that user" has a visible answer.
+
+## v0.3.22
+
+**The panel and the log say what the pipeline is doing.** Eight tickets read
+`ended` with no pull request beside them, although eight pull requests were open:
+the row took its link from the newest report, and the newest report was a failed
+attempt that never reached the branch. A pull request is a fact about the ticket,
+not about whichever attempt ran last, so the row now falls back to the last one the
+ticket recorded.
+
+The watcher also says what it is doing at the two moments that were previously
+silent. Starting one writes the account it acts as and its polling cadence —
+"is it running, and as whom?" is the first question a quiet pipeline raises — and a
+tick that admitted, deferred, or errored is written down, where before only
+failures were.
+

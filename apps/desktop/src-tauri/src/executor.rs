@@ -901,6 +901,10 @@ pub fn start_watcher(
         watchers.insert(project_path.clone(), Arc::clone(&cancel));
     }
 
+    let watcher_path = Path::new(&project_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| project_path.clone());
     let watcher = Arc::new(Watcher {
         app: handles.app,
         store: handles.store,
@@ -911,6 +915,22 @@ pub fn start_watcher(
         user_id: credentials.user_id,
         github,
     });
+    // Said out loud once, at the moment it starts: which account the pipeline
+    // acts as, and how often it polls. "Is it running, and as whom?" is the first
+    // question a quiet pipeline raises, and a log that only records failures
+    // cannot answer it.
+    let acting_as = match &watcher.github {
+        Some(identity) => format!("as {}", identity.user()),
+        None => "as whichever account gh has active".to_owned(),
+    };
+    crate::diagnostics::record(
+        "INFO",
+        &format!(
+            "pipeline watching {} {acting_as}, polling every {}s",
+            watcher_path,
+            interval.as_secs()
+        ),
+    );
     tauri::async_runtime::spawn(async move {
         watcher.watch(project_path, cancel, interval).await;
     });
@@ -1106,6 +1126,20 @@ impl Watcher {
             .await
         {
             Ok(report) => {
+                // A quiet tick is the normal case and stays out of the log. A
+                // tick that admitted, deferred, or failed is written down, so
+                // "has anything happened?" has an answer older than the panel.
+                if !report.is_quiet() {
+                    crate::diagnostics::record(
+                        "INFO",
+                        &format!(
+                            "pipeline tick: {} tickets created, {} deferred, {} sources polled",
+                            report.tickets_created(),
+                            report.deferred,
+                            report.sources.len()
+                        ),
+                    );
+                }
                 let _ = self.app.emit(
                     "pipeline:tick",
                     serde_json::json!({ "project": project_path, "report": report }),
