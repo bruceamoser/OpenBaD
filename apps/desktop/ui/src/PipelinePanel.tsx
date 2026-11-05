@@ -238,6 +238,7 @@ export default function PipelinePanel({
           {tickets.length} ticket{tickets.length === 1 ? "" : "s"}
           {needsPerson > 0 ? ` · ${needsPerson} need you` : ""}
           {running ? " · watching" : watching ? " · not running" : ""}
+          {status?.github_user ? ` · as ${status.github_user}` : ""}
         </p>
         <div className="flex items-center gap-1">
           <button

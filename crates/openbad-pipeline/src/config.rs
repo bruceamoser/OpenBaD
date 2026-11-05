@@ -23,6 +23,25 @@ pub struct PipelineConfig {
     /// How much work the project lets run.
     #[serde(default)]
     pub execution: ExecutionConfig,
+    /// The GitHub account every pipeline action acts as.
+    ///
+    /// Absent means "whatever `gh` is authenticated as", which is the previous
+    /// behaviour and is fine for a machine with one account. A named account is
+    /// pinned per process instead of being made active, so a person working under
+    /// another account at the same time cannot be flipped by either side.
+    #[serde(default)]
+    pub github: GitHubConfig,
+}
+
+/// Which GitHub account the pipeline acts as.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubConfig {
+    /// A login that already has a credential in `gh`'s account store. The
+    /// pipeline reads that credential; it never runs `gh auth login` or `switch`,
+    /// so this can name an account that is not the active one.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// Concurrency and cost limits for one project's executors.

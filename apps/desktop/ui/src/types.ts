@@ -733,6 +733,8 @@ export type PipelineStatus = {
   watching: boolean;
   /** Whether a watcher is running now; `watching` is only the intent. */
   running: boolean;
+  /** The account every pipeline action acts as; null means the active `gh` one. */
+  github_user: string | null;
 };
 
 export type PipelineTickReport = {

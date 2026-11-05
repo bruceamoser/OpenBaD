@@ -42,7 +42,26 @@ impl<T: GitHubApi + Sync> GitHubApi for &T {
 }
 
 /// Runs `gh api`, which is how this project already reaches GitHub.
-pub struct GhCli;
+///
+/// It carries the project's GitHub identity, so polling reads as the account the
+/// pipeline acts as rather than as whatever the shared `gh` configuration has
+/// active at the moment it runs.
+#[derive(Default)]
+pub struct GhCli {
+    identity: Option<crate::github::GitHubIdentity>,
+}
+
+impl GhCli {
+    #[must_use]
+    pub fn new(identity: Option<crate::github::GitHubIdentity>) -> Self {
+        Self { identity }
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> Option<&crate::github::GitHubIdentity> {
+        self.identity.as_ref()
+    }
+}
 
 /// Where `gh` is, remembering the answer for the life of the process.
 ///
@@ -115,8 +134,15 @@ impl GitHubApi for GhCli {
                 "cannot find gh: install the GitHub CLI or set OPENBAD_GH to its path".to_owned(),
             )
         })?;
-        let output = tokio::process::Command::new(binary)
-            .args(["api", "--method", "GET", path])
+        let mut command = tokio::process::Command::new(binary);
+        command.args(["api", "--method", "GET", path]);
+        if let Some(identity) = &self.identity {
+            command.env_remove("GITHUB_TOKEN");
+            for (name, value) in identity.variables() {
+                command.env(name, value);
+            }
+        }
+        let output = command
             .output()
             .await
             .map_err(|error| SourceError::Api(format!("cannot run gh: {error}")))?;

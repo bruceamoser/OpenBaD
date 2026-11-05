@@ -1210,6 +1210,12 @@ pub struct ToolContext {
     read_paths: Mutex<HashSet<PathBuf>>,
     /// Reads that survive across turns, with the stamp each file had.
     session_reads: SessionReads,
+    /// Environment every command this session starts inherits.
+    ///
+    /// The host owns it: a pipeline executor runs as the GitHub account its
+    /// project names, and that has to reach the `gh` and `git` a tool shells out
+    /// to — in memory, per session, rather than by changing a global.
+    pub command_env: Vec<(String, String)>,
     /// Where a blocking question goes. `None` (CLI, tests) keeps the queued
     /// `.openbad/questions.json` fallback.
     questions: Option<QuestionPrompt>,
@@ -1237,6 +1243,7 @@ impl Clone for ToolContext {
             mcp: self.mcp.clone(),
             terminal: self.terminal.clone(),
             workflow: self.workflow.clone(),
+            command_env: self.command_env.clone(),
             vault: self.vault.clone(),
             turn: AtomicU32::new(self.turn.load(Ordering::SeqCst)),
             read_paths: Mutex::new(
@@ -1275,11 +1282,19 @@ impl ToolContext {
             terminal: None,
             workflow: None,
             vault: None,
+            command_env: Vec::new(),
             turn: AtomicU32::new(0),
             read_paths: Mutex::new(HashSet::new()),
             session_reads: new_session_reads(),
             questions: None,
             outside_grants: Vec::new(),
+        }
+    }
+
+    /// Applies the session environment to a command before it runs.
+    pub fn apply_command_env(&self, command: &mut std::process::Command) {
+        for (name, value) in &self.command_env {
+            command.env(name, value);
         }
     }
 
@@ -5274,6 +5289,7 @@ impl Tool for VaultExecTool {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        context.apply_command_env(&mut process);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -5545,6 +5561,7 @@ impl Tool for RunCommandTool {
             .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        context.apply_command_env(&mut process);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -9052,6 +9069,7 @@ impl Tool for JobStartTool {
             .stdout(stdout)
             .stderr(stderr)
             .stdin(std::process::Stdio::null());
+        context.apply_command_env(&mut process);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -10419,7 +10437,7 @@ impl Tool for PipelineTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "pipeline",
-            "Read, validate, or write this project's supervised work pipeline (.openbad/pipeline.yaml), and check the branch protection that gates auto-merge. The document is YAML: `sources` is a list of `{id, repository: \"owner/repo\", enabled, labels, allowed, bot_logins, known_bots, poll_interval_secs}`; `execution` is `{slots, budget: {steps, tokens}, prepare, execution_root}`. Rules worth knowing before you write one: a trigger needs one of `labels` to enter at all (an empty list admits nothing); `allowed` lists the GitHub logins authorized to originate work, and anyone else is ignored and recorded rather than silently dropped; `bot_logins` are the agent's own accounts and are dropped; a disabled source keeps its read position; `prepare` runs inside the new worktree before the executor's turn and its failure fails the ticket with the output; executors work in their own worktree under `execution_root` on branch `worker/<ticket>` and open pull requests rather than pushing to a protected branch. Start with action=show, validate a change with action=write plus dry_run=true, then write. Auto-merge must stay off unless action=guards reports required reviews, stale-approval dismissal, and required checks are all present; never promise it on anything else.",
+            "Read, validate, or write this project's supervised work pipeline (.openbad/pipeline.yaml), and check the branch protection that gates auto-merge. The document is YAML: `sources` is a list of `{id, repository: \"owner/repo\", enabled, labels, allowed, bot_logins, known_bots, poll_interval_secs}`; `execution` is `{slots, budget: {steps, tokens}, prepare, execution_root}`; a top-level `github` is `{user}` and names the account every pipeline action acts as. Rules worth knowing before you write one: a trigger needs one of `labels` to enter at all (an empty list admits nothing); `allowed` lists the GitHub logins authorized to originate work, and anyone else is ignored and recorded rather than silently dropped; `bot_logins` are the agent's own accounts and are dropped; `github.user` pins the account polling, pull requests, and the executor's own `gh` and `git` run as, read from that account's saved credential — never `gh auth switch`, so a person signed in as someone else for other work is not disturbed; a disabled source keeps its read position; `prepare` runs inside the new worktree before the executor's turn and its failure fails the ticket with the output; executors work in their own worktree under `execution_root` on branch `worker/<ticket>` and open pull requests rather than pushing to a protected branch. Start with action=show, validate a change with action=write plus dry_run=true, then write. Auto-merge must stay off unless action=guards reports required reviews, stale-approval dismissal, and required checks are all present; never promise it on anything else.",
             RiskLevel::Execute,
         )
         .with_schema(json!({
@@ -10480,6 +10498,10 @@ fn describe_pipeline(config: &openbad_pipeline::config::PipelineConfig) -> Strin
             },
         ));
     }
+    lines.push(match config.github.user.as_deref() {
+        Some(user) => format!("GitHub: acts as {user} for every pipeline task"),
+        None => "GitHub: acts as whichever account `gh` has active".to_owned(),
+    });
     lines.push(format!(
         "Execution: {} slot(s), budget {} steps / {} tokens{}{}",
         config.execution.slots,
@@ -10555,24 +10577,31 @@ fn write_pipeline(
 async fn guards_for(arguments: &Value, path: &Path) -> Result<ToolResult, ToolError> {
     use openbad_pipeline::source::{GhCli, GitHubApi};
 
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let configured = openbad_pipeline::config::parse_pipeline_config(&text)
+        .map_err(ToolError::InvalidArgument)?;
     let repository = match optional_string(arguments, "repository") {
         Some(repository) => repository,
-        None => {
-            let text = std::fs::read_to_string(path).unwrap_or_default();
-            openbad_pipeline::config::parse_pipeline_config(&text)
-                .map_err(ToolError::InvalidArgument)?
-                .sources
-                .first()
-                .map(|source| source.repository.clone())
-                .ok_or_else(|| {
-                    ToolError::InvalidArgument(
-                        "no repository given and no configured source to take one from".to_owned(),
-                    )
-                })?
-        }
+        None => configured
+            .sources
+            .first()
+            .map(|source| source.repository.clone())
+            .ok_or_else(|| {
+                ToolError::InvalidArgument(
+                    "no repository given and no configured source to take one from".to_owned(),
+                )
+            })?,
     };
 
-    let api = GhCli;
+    // The same account the pipeline itself acts as, so the answer here describes
+    // what the pipeline will see rather than what the active account can see.
+    let identity = openbad_pipeline::github::cached(
+        openbad_pipeline::gh_binary(),
+        configured.github.user.as_deref(),
+        &openbad_pipeline::github::default_config_root(),
+    )
+    .map_err(|error| ToolError::InvalidArgument(error.to_string()))?;
+    let api = GhCli::new(identity);
     let repo: Value = api
         .get(&format!("/repos/{repository}"))
         .await
@@ -15558,10 +15587,12 @@ impl Tool for GitStatusTool {
         _arguments: Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let output = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        command
             .current_dir(context.workspace.root())
-            .args(["status", "--short", "--branch"])
-            .output()?;
+            .args(["status", "--short", "--branch"]);
+        context.apply_command_env(&mut command);
+        let output = command.output()?;
         let mut content = String::from_utf8_lossy(&output.stdout).into_owned();
         content.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(
@@ -15599,6 +15630,7 @@ impl Tool for GitDiffTool {
     ) -> Result<ToolResult, ToolError> {
         let mut command = std::process::Command::new("git");
         command.current_dir(context.workspace.root()).arg("diff");
+        context.apply_command_env(&mut command);
         if optional_bool(&arguments, "staged").unwrap_or(false) {
             command.arg("--staged");
         }
@@ -17639,6 +17671,34 @@ command_classes: ["read-only"]
             .execute(json!({"command": "ls src"}), &context)
             .await
             .expect("read-only command");
+    }
+
+    #[tokio::test]
+    async fn a_command_runs_with_the_sessions_environment() {
+        let directory = tempdir().expect("tempdir");
+        let mut context = context(directory.path());
+        context.allow_commands = true;
+        context.command_env = vec![
+            ("GH_TOKEN".to_owned(), "session-token".to_owned()),
+            (
+                "OPENBAD_TEST_MARKER".to_owned(),
+                "set-by-the-session".to_owned(),
+            ),
+        ];
+
+        let result = RunCommandTool
+            .execute(
+                json!({"command": "printf '%s|%s' \"$GH_TOKEN\" \"$OPENBAD_TEST_MARKER\""}),
+                &context,
+            )
+            .await
+            .expect("command");
+
+        assert!(
+            result.content.contains("session-token|set-by-the-session"),
+            "a pinned credential has to reach the commands a turn runs: {}",
+            result.content
+        );
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod error;
 pub mod eval;
 pub mod execution;
+pub mod github;
 pub mod guards;
 pub mod mandate;
 pub mod source;
@@ -34,6 +35,7 @@ pub use execution::{
     Budget, Candidate, Effects, Limit, Recovery, SlotPriority, Slots, Spent, effects_of,
     launch_order, recovery_for,
 };
+pub use github::GitHubIdentity;
 pub use mandate::{Mandate, MandateStrength};
 pub use source::{GhCli, GitHubApi, GitHubSource, PollOutcome, gh_binary};
 pub use ticket::{AssignmentState, ReportOutcome, TicketState};

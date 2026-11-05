@@ -11,10 +11,11 @@
 //! first would drop a message that nobody would ever learn about.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use openbad_core::WorkspaceId;
+use openbad_pipeline::GitHubIdentity;
 use openbad_pipeline::config::{
     PipelineConfig, SourceConfig, load_pipeline_config, pipeline_config_path,
 };
@@ -422,6 +423,9 @@ pub struct PipelineStatus {
     /// Whether a watcher is actually running right now. `watching` is the intent;
     /// this is the fact, and they differ when a watcher could not be started.
     pub running: bool,
+    /// The GitHub account every pipeline action acts as, when the project names
+    /// one. Absent means the account `gh` has active.
+    pub github_user: Option<String>,
 }
 
 /// One configured source, as the panel shows it.
@@ -470,6 +474,7 @@ pub fn pipeline_status(
         ticket_counts(&store, workspace)?,
         crate::executor::wants_watching(&store, workspace, &root),
         running,
+        config.github.user.clone(),
     ))
 }
 
@@ -481,6 +486,7 @@ fn describe(
     tickets: HashMap<String, usize>,
     watching: bool,
     running: bool,
+    github_user: Option<String>,
 ) -> PipelineStatus {
     PipelineStatus {
         configured,
@@ -488,6 +494,7 @@ fn describe(
         tickets,
         watching,
         running,
+        github_user,
     }
 }
 
@@ -552,15 +559,49 @@ pub fn pipeline_save_config(project_path: String, text: String) -> Result<(), St
     std::fs::write(&path, text).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+/// The GitHub account this project's pipeline acts as, resolved once per call.
+///
+/// `None` means the project named none and `gh`'s own active account is used. The
+/// credential is read from the account store and handed to each command, never
+/// made active, so a person signed in under another account for other work is
+/// unaffected in both directions.
+pub(crate) fn github_identity(
+    store: &Store,
+    project_path: &str,
+) -> Result<Option<GitHubIdentity>, String> {
+    let config =
+        load_pipeline_config(Path::new(project_path)).map_err(|error| error.to_string())?;
+    let data_dir = store
+        .database_path()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    openbad_pipeline::github::cached(
+        openbad_pipeline::gh_binary(),
+        config.github.user.as_deref(),
+        &data_dir,
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Whether a repository's branch protection is real enough to allow auto-merge.
 ///
 /// The rules live in `openbad-pipeline` so the panel and an agent asked to
 /// configure the project get the same answer.
 #[tauri::command]
 pub async fn pipeline_guards(
+    state: State<'_, AppState>,
+    project_path: String,
     repository: String,
 ) -> Result<openbad_pipeline::guards::Guards, String> {
-    let api = GhCli;
+    let identity = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        github_identity(&store, &project_path)?
+    };
+    let api = GhCli::new(identity);
     let repo: serde_json::Value = api
         .get(&format!("/repos/{repository}"))
         .await
@@ -671,8 +712,15 @@ pub async fn pipeline_tick(
         crate::project_workspace(&store, &project_path)?
     };
 
+    let identity = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        github_identity(&store, &project_path)?
+    };
     let supervisor = Supervisor::new(Arc::clone(&state.store), workspace, project_path.as_str());
-    let report = supervisor.tick(&GhCli).await?;
+    let report = supervisor.tick(&GhCli::new(identity)).await?;
     // A quiet tick is the normal case and stays out of the log; anything a person
     // would want to explain later is written down.
     if !report.is_quiet() {
@@ -1085,6 +1133,7 @@ mod tests {
             HashMap::from([("open".to_owned(), 2usize)]),
             true,
             false,
+            Some("bruceamoser".to_owned()),
         );
 
         assert_eq!(

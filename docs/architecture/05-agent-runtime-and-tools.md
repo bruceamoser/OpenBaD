@@ -1432,6 +1432,28 @@ instead of being read past.
   `recovery_for` already knows how to relaunch, so the ticket is never left
   `running` with nothing running.
 
+### One GitHub account, pinned per process
+
+`github.user` names the account every pipeline action acts as: polling, guard
+checks, pull-request detection, and the executor's own `gh` and `git`. It exists
+because the alternative is `gh auth switch`, which mutates one global setting — a
+person signed in as their work account for other projects and their personal
+account here would have each side flipping the other, and whichever ran last would
+decide who a commit was attributed to.
+
+The identity is resolved by reading that account's saved credential
+(`gh auth token --user`, with `GH_TOKEN`/`GITHUB_TOKEN`/`GH_CONFIG_DIR`/`GH_HOST`
+cleared first so the lookup cannot return whatever is active). Each command then
+gets `GH_TOKEN` in its own environment plus an isolated, token-free `GH_CONFIG_DIR`,
+so nothing falls back to the shared configuration, and `GITHUB_TOKEN` is removed so
+no two sources of truth disagree. `gh`'s `git-credential` helper reads `GH_TOKEN`,
+so pushes and pull-request creation made by the executor's tools use the same
+account without touching any git config.
+
+The token never leaves the process as text: it is not serializable, it is redacted
+from tool output, and errors name the account rather than the secret. A project
+that names no account keeps the previous behaviour — whatever `gh` has active.
+
 ### Turn
 
 `pipeline_execute` runs the turn a launch prepared, through a `TurnRunner` seam

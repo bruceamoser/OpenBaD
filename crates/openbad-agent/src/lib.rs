@@ -254,6 +254,11 @@ pub struct AgentConfig {
     /// Where `ask_question` blocks for a human answer. `None` keeps the queued
     /// file fallback used by the CLI and tests.
     pub questions: Option<QuestionPrompt>,
+    /// Environment every command this turn's tools start inherits, in memory and
+    /// for this turn only. A pipeline executor runs as the GitHub account its
+    /// project names, and that has to reach the `gh` and `git` its tools shell
+    /// out to without changing anything global.
+    pub command_env: Vec<(String, String)>,
 }
 
 impl Default for AgentConfig {
@@ -280,6 +285,7 @@ impl Default for AgentConfig {
             compact_max_tokens: 16_384,
             session_reads: None,
             questions: None,
+            command_env: Vec::new(),
         }
     }
 }
@@ -1116,6 +1122,7 @@ impl<T: HttpTransport> Agent<T> {
             context.workflow = Some(Arc::new(RegistryWorkflowEngine::new(Arc::clone(
                 &self.tools,
             ))));
+            context.command_env = self.config.command_env.clone();
             context.set_outside_grants(self.outside_grants.clone());
             let context = context.with_session_reads(
                 self.config

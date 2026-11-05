@@ -419,6 +419,8 @@ pub struct ExecutionOptions {
     pub cancel: Arc<AtomicBool>,
     /// Shared per project, so two tickets cannot run when the project allows one.
     pub slots: Arc<Mutex<HashMap<WorkspaceId, Slots>>>,
+    /// The GitHub account this project's pipeline acts as, if it names one.
+    pub github: Option<openbad_pipeline::GitHubIdentity>,
 }
 
 /// What an execution did with its ticket.
@@ -445,7 +447,7 @@ pub async fn pipeline_execute(
     project_path: String,
     ticket_id: String,
 ) -> Result<ExecutionReport, String> {
-    let turn = AgentTurn::resolve(&app, &state, &ticket_id)?;
+    let turn = AgentTurn::resolve(&app, &state, &ticket_id, &project_path)?;
     let options = {
         let mut runs = state
             .pipeline_runs
@@ -453,9 +455,14 @@ pub async fn pipeline_execute(
             .map_err(|error| format!("pipeline runs lock poisoned: {error}"))?;
         let cancel = Arc::new(AtomicBool::new(false));
         runs.insert(ticket_id.clone(), Arc::clone(&cancel));
+        let github = {
+            let store = lock(&state.store)?;
+            crate::pipeline::github_identity(&store, &project_path)?
+        };
         ExecutionOptions {
             cancel,
             slots: Arc::clone(&state.pipeline_slots),
+            github,
         }
     };
 
@@ -641,7 +648,7 @@ pub async fn execute<R: TurnRunner>(
     // A ticket that opened a pull request subscribes to its thread, so review
     // activity wakes this executor instead of needing a new admission.
     let pull_request = if outcome == ReportOutcome::Ready {
-        detect_pull_request(&plan.directory, &plan.branch)
+        detect_pull_request(&plan.directory, &plan.branch, options.github.as_ref())
     } else {
         None
     };
@@ -713,7 +720,11 @@ pub async fn execute<R: TurnRunner>(
 /// have the per-user install the person's shell does, and a spawn that fails here
 /// is silent: the work is pushed, the pull request is open, and the panel says
 /// there is none.
-fn detect_pull_request(worktree: &Path, branch: &str) -> Option<String> {
+fn detect_pull_request(
+    worktree: &Path,
+    branch: &str,
+    identity: Option<&openbad_pipeline::GitHubIdentity>,
+) -> Option<String> {
     let binary = match openbad_pipeline::gh_binary() {
         Some(binary) => binary,
         None => {
@@ -724,13 +735,12 @@ fn detect_pull_request(worktree: &Path, branch: &str) -> Option<String> {
             return None;
         }
     };
-    let output = Command::new(binary)
-        .current_dir(worktree)
-        .args([
-            "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url",
-        ])
-        .output()
-        .ok()?;
+    let mut command = Command::new(binary);
+    command.current_dir(worktree).args([
+        "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url",
+    ]);
+    openbad_pipeline::github::apply(identity, &mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -860,20 +870,28 @@ impl WatcherCredentials {
     }
 }
 
+/// The app-wide handles a watcher needs, gathered so starting one takes a single
+/// argument rather than five that always travel together.
+#[derive(Clone)]
+pub struct WatcherHandles {
+    pub app: tauri::AppHandle,
+    pub store: Arc<Mutex<Store>>,
+    pub runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub slots: Arc<Mutex<HashMap<WorkspaceId, Slots>>>,
+    pub watchers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
 /// Starts one watcher, unless this project already has one.
 pub fn start_watcher(
-    app: tauri::AppHandle,
-    store: Arc<Mutex<Store>>,
-    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    slots: Arc<Mutex<HashMap<WorkspaceId, Slots>>>,
-    watchers: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    handles: WatcherHandles,
     project_path: String,
     interval: Duration,
     credentials: WatcherCredentials,
+    github: Option<openbad_pipeline::GitHubIdentity>,
 ) -> bool {
     let cancel = Arc::new(AtomicBool::new(false));
     {
-        let mut watchers = match watchers.lock() {
+        let mut watchers = match handles.watchers.lock() {
             Ok(watchers) => watchers,
             Err(_) => return false,
         };
@@ -884,13 +902,14 @@ pub fn start_watcher(
     }
 
     let watcher = Arc::new(Watcher {
-        app,
-        store,
-        runs,
-        slots,
+        app: handles.app,
+        store: handles.store,
+        runs: handles.runs,
+        slots: handles.slots,
         api_key: credentials.api_key,
         base_url: credentials.base_url,
         user_id: credentials.user_id,
+        github,
     });
     tauri::async_runtime::spawn(async move {
         watcher.watch(project_path, cancel, interval).await;
@@ -937,15 +956,27 @@ pub fn resume_watchers(app: &tauri::AppHandle, state: &AppState) {
             continue;
         }
         let interval = watcher_interval(&root);
+        let github = match state.store.lock() {
+            Ok(store) => crate::pipeline::github_identity(&store, &path).unwrap_or_else(|error| {
+                // Polling without a named account still works; polling as the
+                // wrong one would push and comment as the wrong person.
+                crate::diagnostics::record("WARN", &format!("pipeline github identity: {error}"));
+                None
+            }),
+            Err(_) => None,
+        };
         start_watcher(
-            app.clone(),
-            Arc::clone(&state.store),
-            Arc::clone(&state.pipeline_runs),
-            Arc::clone(&state.pipeline_slots),
-            Arc::clone(&state.pipeline_watchers),
+            WatcherHandles {
+                app: app.clone(),
+                store: Arc::clone(&state.store),
+                runs: Arc::clone(&state.pipeline_runs),
+                slots: Arc::clone(&state.pipeline_slots),
+                watchers: Arc::clone(&state.pipeline_watchers),
+            },
             path,
             interval,
             credentials.clone(),
+            github,
         );
     }
 }
@@ -960,6 +991,9 @@ pub struct Watcher {
     api_key: String,
     base_url: String,
     user_id: String,
+    /// Resolved when the watcher starts: polling, pull-request detection, and the
+    /// executor's own `gh` and `git` all act as this account.
+    github: Option<openbad_pipeline::GitHubIdentity>,
 }
 
 /// Starts watching a project. Idempotent: watching twice is still one watcher.
@@ -985,15 +1019,22 @@ pub fn pipeline_watch(
         .map(|seconds| Duration::from_secs(seconds.clamp(5, 3_600)))
         .unwrap_or_else(|| watcher_interval(&root));
 
+    let github = {
+        let store = lock(&state.store)?;
+        crate::pipeline::github_identity(&store, &project_path)?
+    };
     let started = start_watcher(
-        app,
-        Arc::clone(&state.store),
-        Arc::clone(&state.pipeline_runs),
-        Arc::clone(&state.pipeline_slots),
-        Arc::clone(&state.pipeline_watchers),
+        WatcherHandles {
+            app,
+            store: Arc::clone(&state.store),
+            runs: Arc::clone(&state.pipeline_runs),
+            slots: Arc::clone(&state.pipeline_slots),
+            watchers: Arc::clone(&state.pipeline_watchers),
+        },
         project_path.clone(),
         interval,
         credentials,
+        github,
     );
     if started {
         let store = lock(&state.store)?;
@@ -1060,7 +1101,10 @@ impl Watcher {
             workspace,
             PathBuf::from(project_path),
         );
-        match supervisor.tick(&openbad_pipeline::source::GhCli).await {
+        match supervisor
+            .tick(&openbad_pipeline::source::GhCli::new(self.github.clone()))
+            .await
+        {
             Ok(report) => {
                 let _ = self.app.emit(
                     "pipeline:tick",
@@ -1132,10 +1176,12 @@ impl Watcher {
                     base_url: self.base_url.clone(),
                     user_id: self.user_id.clone(),
                     max_steps: 0,
+                    github: self.github.clone(),
                 };
                 let options = ExecutionOptions {
                     cancel,
                     slots: Arc::clone(&self.slots),
+                    github: self.github.clone(),
                 };
                 let project = project_path.to_owned();
                 let id = ticket.id.clone();
@@ -1177,10 +1223,18 @@ pub struct AgentTurn {
     base_url: String,
     user_id: String,
     max_steps: u32,
+    /// The account the turn's `gh` and `git` act as, handed to every command it
+    /// runs. Absent means the machine's own `gh` configuration.
+    github: Option<openbad_pipeline::GitHubIdentity>,
 }
 
 impl AgentTurn {
-    fn resolve(app: &tauri::AppHandle, state: &AppState, ticket: &str) -> Result<Self, String> {
+    fn resolve(
+        app: &tauri::AppHandle,
+        state: &AppState,
+        ticket: &str,
+        project_path: &str,
+    ) -> Result<Self, String> {
         let api_key = crate::resolve_api_key(state)?;
         let user_id = {
             let store = lock(&state.store)?;
@@ -1188,9 +1242,14 @@ impl AgentTurn {
         };
         let base_url = std::env::var("OPENBAD_DEEPSEEK_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com".to_owned());
+        let github = {
+            let store = lock(&state.store)?;
+            crate::pipeline::github_identity(&store, project_path)?
+        };
         Ok(Self {
             app: app.clone(),
             ticket: ticket.to_owned(),
+            github,
             api_key,
             model: openbad_llm::FLASH_MODEL.to_owned(),
             base_url,
@@ -1276,10 +1335,21 @@ impl TurnRunner for AgentTurn {
                 policy: openbad_governance::ToolPolicy::FullAccess,
                 max_steps: self.max_steps,
                 stream: false,
+                command_env: self
+                    .github
+                    .as_ref()
+                    .map(openbad_pipeline::GitHubIdentity::variables)
+                    .unwrap_or_default(),
                 ..openbad_agent::AgentConfig::default()
             },
         )
-        .with_redactions(vec![self.api_key.clone()]);
+        .with_redactions({
+            let mut redactions = vec![self.api_key.clone()];
+            if let Some(github) = &self.github {
+                redactions.push(github.token().to_owned());
+            }
+            redactions
+        });
         let observer = PipelineObserver {
             app: self.app.clone(),
             ticket: self.ticket.clone(),

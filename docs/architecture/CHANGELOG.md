@@ -756,3 +756,20 @@ stopped it. Admission now drops a message written before the ticket's last finis
 turn, which is output the pipeline already produced or input it already received. A
 reply written after that turn ends still resumes the ticket, and a message arriving
 mid-turn still wakes the live executor.
+
+## v0.3.21
+
+**The pipeline acts as the account it names, without switching anyone's login.**
+`gh auth switch` mutates one global setting, so a person signed in as their work
+account for other projects and their personal account here would have each side
+flip the other — and whichever ran last decided who a commit or a comment was
+attributed to. `github.user` in `.openbad/pipeline.yaml` now pins an account:
+polling, guard checks, pull-request detection, and the executor's own `gh` and
+`git` all read that account's saved credential and carry it per process, in an
+isolated token-free config directory. Nothing global changes, so the other
+workflow is untouched in both directions.
+
+The token is never serialized, is redacted from tool output and reports, and
+errors name the account rather than the secret. A project that names no account
+behaves as before, and `pipeline_status` reports which account a project acts as
+so "why did this comment come from that user" has a visible answer.
