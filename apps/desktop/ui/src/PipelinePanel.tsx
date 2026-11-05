@@ -17,6 +17,7 @@ import {
   pipelineExecute,
   pipelineLaunch,
   pipelineMergeTicket,
+  loadPipelinePullRequests,
   openExternal,
   pipelineStop,
   pipelineTick,
@@ -26,6 +27,7 @@ import {
 } from "./backend";
 import type {
   PipelineGuards,
+  PipelinePullRequest,
   PipelineStatus,
   PipelineTicketRow,
   PipelineTickReport,
@@ -85,6 +87,7 @@ export default function PipelinePanel({
 }: PipelinePanelProps) {
   const [status, setStatus] = useState<PipelineStatus | null>(null);
   const [tickets, setTickets] = useState<PipelineTicketRow[]>([]);
+  const [pullRequests, setPullRequests] = useState<PipelinePullRequest[]>([]);
   const [watching, setWatching] = useState(false);
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -105,13 +108,15 @@ export default function PipelinePanel({
       return;
     }
     try {
-      const [nextStatus, nextTickets] = await Promise.all([
+      const [nextStatus, nextTickets, nextPullRequests] = await Promise.all([
         loadPipelineStatus(workspacePath),
         loadPipelineTickets(workspacePath),
+        loadPipelinePullRequests(workspacePath).catch(() => []),
       ]);
       if (stopped.current) return;
       setStatus(nextStatus);
       setTickets(nextTickets);
+      setPullRequests(nextPullRequests);
       setWatching(nextStatus.watching);
       setRunning(nextStatus.running);
       setError(null);
@@ -139,6 +144,28 @@ export default function PipelinePanel({
     () => tickets.filter((ticket) => ticket.needs_a_person).length,
     [tickets],
   );
+
+  /**
+   * What GitHub says about this ticket's pull request.
+   *
+   * The report only knows that a pull request was opened; whether it is open,
+   * conflicting, or already merged lives on the other side. Without this the row
+   * cannot answer "did my work land?".
+   */
+  const pullRequestFor = (url: string | null): PipelinePullRequest | null => {
+    if (url === null) return null;
+    return pullRequests.find((row) => row.url === url) ?? null;
+  };
+
+  const describePullRequest = (url: string | null): string => {
+    const found = pullRequestFor(url);
+    if (found === null) return "pull request";
+    if (found.state === "MERGED") return `PR #${found.number} · merged`;
+    if (found.state === "CLOSED") return `PR #${found.number} · closed`;
+    if (found.merge_state === "DIRTY") return `PR #${found.number} · conflicts`;
+    if (found.merge_state === "BEHIND") return `PR #${found.number} · behind`;
+    return `PR #${found.number} · open`;
+  };
 
   const fastestPoll = useMemo(() => {
     const enabled = (status?.sources ?? []).filter((source) => source.enabled);
@@ -471,10 +498,16 @@ execution:
                       </span>
                     </div>
 
-                    {ticket.summary !== null && (
-                      <p className="mt-1.5 line-clamp-2 text-[11px] leading-5 text-obd-muted">
-                        {ticket.summary}
+                    {pullRequestFor(ticket.pull_request)?.state === "MERGED" ? (
+                      <p className="mt-1.5 text-[11px] leading-5 text-obd-info">
+                        Merged into main — this ticket is finished.
                       </p>
+                    ) : (
+                      ticket.summary !== null && (
+                        <p className="mt-1.5 line-clamp-2 text-[11px] leading-5 text-obd-muted">
+                          {ticket.summary}
+                        </p>
+                      )
                     )}
 
                     <button
@@ -525,10 +558,13 @@ execution:
                           }
                           className="inline-flex items-center gap-1 text-[10px] text-obd-info hover:underline"
                         >
-                          Pull request <ArrowUpRight size={11} />
+                          {describePullRequest(ticket.pull_request)}{" "}
+                          <ArrowUpRight size={11} />
                         </button>
                       )}
-                      {ticket.pull_request !== null && ticket.stage !== "working" && (
+                      {ticket.pull_request !== null &&
+                        ticket.stage !== "working" &&
+                        pullRequestFor(ticket.pull_request)?.state !== "MERGED" && (
                         <button
                           type="button"
                           onClick={() =>

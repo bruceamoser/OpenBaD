@@ -12,6 +12,7 @@ import type {
   Foundation,
   FileCheckpointSummary,
   GitCommandResult,
+  PipelinePullRequest,
   GitCommit,
   GitRepoStatus,
   GitRepoSummary,
@@ -2145,6 +2146,14 @@ export async function loadPipelineStatus(
         running: false,
         github_user: null,
       };
+}
+
+export async function loadPipelinePullRequests(
+  projectPath: string,
+): Promise<PipelinePullRequest[]> {
+  return isTauri
+    ? invoke<PipelinePullRequest[]>("pipeline_pull_requests", { projectPath })
+    : [];
 }
 
 export async function openExternal(url: string): Promise<void> {

@@ -718,6 +718,15 @@ export type PipelineTicketRow = {
   rules: string[];
 };
 
+export type PipelinePullRequest = {
+  number: number;
+  url: string;
+  /** OPEN, MERGED or CLOSED, as GitHub reports it now. */
+  state: string;
+  /** CLEAN, BEHIND, DIRTY… empty when GitHub did not say. */
+  merge_state: string;
+};
+
 export type PipelineSource = {
   id: string;
   repository: string;

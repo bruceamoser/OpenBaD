@@ -142,6 +142,18 @@ fn launch(
             .map_err(|error| error.to_string())?
     };
 
+    // A worktree the ticket has already worked in was prepared for it before the
+    // flag existed; treating that as unprepared re-runs a setup command that is
+    // not idempotent and fails the ticket on work it had already done.
+    let worked_before = plan.directory.join(".git").exists()
+        && store
+            .lock()
+            .ok()
+            .and_then(|store| store.pipeline_report(&ticket.id).ok().flatten())
+            .is_some();
+    if worked_before {
+        remember_prepared(store, &plan.branch);
+    }
     let prepared = ensure_worktree(&project_root, &plan).and_then(|()| {
         if already_prepared(store, &plan.branch) {
             // A worktree keeps what its first prepare made. Re-running a setup

@@ -6141,6 +6141,7 @@ pub fn run() {
             pipeline::pipeline_status,
             pipeline::pipeline_tick,
             pipeline::pipeline_tickets,
+            pipeline::pipeline_pull_requests,
             pipeline::pipeline_config_file,
             pipeline::pipeline_save_config,
             pipeline::pipeline_guards,

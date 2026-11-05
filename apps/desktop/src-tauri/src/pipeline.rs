@@ -603,6 +603,118 @@ pub(crate) fn github_identity(
     .map_err(|error| error.to_string())
 }
 
+/// What GitHub says about the project's pull requests right now.
+///
+/// The stored report says a pull request was opened; only GitHub knows whether it
+/// is still open, conflicting, or merged. One `gh pr list` answers for all of them,
+/// cached briefly so a panel that refreshes every few seconds does not shell out
+/// every few seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct PullRequestRow {
+    pub number: u64,
+    pub url: String,
+    /// `OPEN`, `MERGED` or `CLOSED`.
+    pub state: String,
+    /// `CLEAN`, `BEHIND`, `DIRTY`… empty when GitHub did not say.
+    pub merge_state: String,
+}
+
+/// Pull request state, keyed by project, with the moment it was fetched.
+type PullRequestCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<PullRequestRow>)>>;
+
+fn pull_request_cache() -> &'static PullRequestCache {
+    static CACHE: std::sync::OnceLock<PullRequestCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Lists the project's pull requests, at most every fifteen seconds.
+#[tauri::command]
+pub async fn pipeline_pull_requests(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<Vec<PullRequestRow>, String> {
+    if let Ok(cache) = pull_request_cache().lock() {
+        if let Some((at, rows)) = cache.get(&project_path) {
+            if at.elapsed() < std::time::Duration::from_secs(15) {
+                return Ok(rows.clone());
+            }
+        }
+    }
+
+    let config =
+        load_pipeline_config(Path::new(&project_path)).map_err(|error| error.to_string())?;
+    let Some(repository) = config
+        .sources
+        .iter()
+        .map(|source| source.repository.clone())
+        .next()
+    else {
+        return Ok(Vec::new());
+    };
+    let identity = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        github_identity(&store, &project_path)?
+    };
+    let binary = match openbad_pipeline::gh_binary() {
+        Some(binary) => binary,
+        None => return Ok(Vec::new()),
+    };
+    let mut command = std::process::Command::new(binary);
+    command.args([
+        "pr",
+        "list",
+        "--repo",
+        &repository,
+        "--state",
+        "all",
+        "--limit",
+        "200",
+        "--json",
+        "number,url,state,mergeStateStatus",
+    ]);
+    openbad_pipeline::github::apply(identity.as_ref(), &mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("cannot run gh pr list: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("gh pr list returned an unreadable answer: {error}"))?;
+    let rows: Vec<PullRequestRow> = value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    Some(PullRequestRow {
+                        number: item.get("number")?.as_u64()?,
+                        url: item.get("url")?.as_str()?.to_owned(),
+                        state: item
+                            .get("state")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                        merge_state: item
+                            .get("mergeStateStatus")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Ok(mut cache) = pull_request_cache().lock() {
+        cache.insert(project_path, (std::time::Instant::now(), rows.clone()));
+    }
+    Ok(rows)
+}
+
 /// Whether a repository's branch protection is real enough to allow auto-merge.
 ///
 /// The rules live in `openbad-pipeline` so the panel and an agent asked to

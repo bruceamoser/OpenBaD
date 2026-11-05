@@ -838,3 +838,19 @@ without a model: a branch that is merely behind is passed to `gh pr update-branc
 and re-checked, while a conflicting one is reported back to the executor, whose job
 the rebase is.
 
+## v0.3.26
+
+**The ticket row says whether the work landed.** Eight rows all read `prepare
+exited with exit status: 2` while five of their pull requests were merged: the row
+showed the newest report and nothing consulted GitHub, so the answer to "did my
+work land?" was not on the screen at all.
+
+Each row now carries GitHub's own view of its pull request — `PR #12 · merged`,
+`· open`, `· conflicts`, `· behind` — from one `gh pr list` per project, cached for
+fifteen seconds. A merged row says so instead of repeating a stale failure, and the
+Merge button disappears once there is nothing to merge.
+
+The stale failure itself stops recurring: a worktree the ticket has already worked
+in counts as prepared, because its prepare ran before the flag existed and
+re-running a non-idempotent setup command failed the ticket on work already done.
+
