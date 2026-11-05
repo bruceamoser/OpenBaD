@@ -854,3 +854,18 @@ The stale failure itself stops recurring: a worktree the ticket has already work
 in counts as prepared, because its prepare ran before the flag existed and
 re-running a non-idempotent setup command failed the ticket on work already done.
 
+## v0.3.27
+
+**A conflict is now worked, not reported.** When the merge found the branch
+conflicting it stopped and said so, which put a mechanical problem in front of a
+person. It now runs one more turn that tells the executor the branch conflicts,
+has it rebase, resolve, re-run the tests and push, and then reviews and merges the
+result — bounded to one extra turn so a branch that cannot be reconciled cannot
+spin. A reviewer still has to approve the rebased work; resolving conflicts is not
+a way around review.
+
+**Resolved tickets leave the board.** Merged work stayed in the `ended` group, so
+`ended` meant both "you have work here" and "this is done" — which is why a screen
+of merged work read as stuck. Tickets whose pull request merged drop off the list,
+and the header carries the count (`2 tickets · 6 merged`).
+

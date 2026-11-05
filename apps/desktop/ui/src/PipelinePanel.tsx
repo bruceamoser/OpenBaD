@@ -167,6 +167,21 @@ export default function PipelinePanel({
     return `PR #${found.number} · open`;
   };
 
+  /**
+   * Tickets whose pull request merged are finished and drop off the board.
+   *
+   * Leaving them on the list made "ended" mean both "you have work here" and
+   * "this is done", which is why a screen full of merged work looked stuck.
+   */
+  const openTickets = useMemo(
+    () =>
+      tickets.filter(
+        (ticket) => pullRequestFor(ticket.pull_request)?.state !== "MERGED",
+      ),
+    [tickets, pullRequests],
+  );
+  const mergedCount = tickets.length - openTickets.length;
+
   const fastestPoll = useMemo(() => {
     const enabled = (status?.sources ?? []).filter((source) => source.enabled);
     if (enabled.length === 0) return null;
@@ -264,8 +279,9 @@ export default function PipelinePanel({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center justify-between border-b border-obd-line px-3 py-2">
         <p className="text-[10px] uppercase tracking-[0.16em] text-obd-subtle">
-          {tickets.length} ticket{tickets.length === 1 ? "" : "s"}
+          {openTickets.length} ticket{openTickets.length === 1 ? "" : "s"}
           {needsPerson > 0 ? ` · ${needsPerson} need you` : ""}
+          {mergedCount > 0 ? ` · ${mergedCount} merged` : ""}
           {running ? " · watching" : watching ? " · not running" : ""}
           {status?.github_user ? ` · as ${status.github_user}` : ""}
         </p>
@@ -372,7 +388,7 @@ execution:
           </div>
         )}
 
-        {tickets.length === 0 && status?.configured && (
+        {openTickets.length === 0 && status?.configured && (
           <div className="rounded-lg border border-dashed border-obd-line p-3 text-[11px] leading-5 text-obd-subtle">
             <p className="mb-1 font-medium text-obd-body">No tickets yet</p>
             A labelled issue or a comment that admits work becomes a ticket when
@@ -463,7 +479,7 @@ execution:
         )}
 
         {groups.map((group) => {
-          const rows = tickets.filter((ticket) =>
+          const rows = openTickets.filter((ticket) =>
             group.stages.includes(ticket.stage),
           );
           if (rows.length === 0) return null;

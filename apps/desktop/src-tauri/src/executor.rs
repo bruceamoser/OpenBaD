@@ -706,6 +706,44 @@ pub async fn execute<R: TurnRunner>(
             }
             ReviewOutcome::Kept { words } => last_words = words,
             ReviewOutcome::Skipped => {}
+            // A conflict is work, not a verdict. The executor rebases its own
+            // branch, and the loop then reviews and merges the result — once, so
+            // a branch that cannot be reconciled cannot spin.
+            ReviewOutcome::Rebase { words } => {
+                let mut retry = history.clone();
+                retry.push(ChatMessage::user(format!(
+                    "The pull request for this ticket conflicts with its base, so it cannot merge. \
+                     Rebase {branch} onto the current base, resolve every conflict yourself, re-run \
+                     the tests, and push. Do not ask a person.\n\n{words}",
+                    branch = plan.branch
+                )));
+                last_words = match runner.run(&plan.directory, &retry, &options.cancel).await {
+                    Ok(run) => run.text,
+                    Err(error) => format!("{words}\nThe rebase turn failed: {error}"),
+                };
+                let again = review_then_merge(
+                    &plan.directory,
+                    &plan.branch,
+                    &base_branch(&plan.directory),
+                    &ticket.thread.0,
+                    pull_request,
+                    &config.execution,
+                    options.github.as_ref(),
+                    runner,
+                    &options.cancel,
+                )
+                .await;
+                match again {
+                    ReviewOutcome::Merged { words } => {
+                        outcome = ReportOutcome::Merged;
+                        last_words = words;
+                    }
+                    ReviewOutcome::Kept { words } | ReviewOutcome::Rebase { words } => {
+                        last_words = words
+                    }
+                    ReviewOutcome::Skipped => {}
+                }
+            }
         }
     }
 
@@ -774,6 +812,8 @@ enum ReviewOutcome {
     Merged { words: String },
     /// The ticket keeps its report, with the reviewer's words attached.
     Kept { words: String },
+    /// The branch cannot merge until it is rebased, which is the executor's job.
+    Rebase { words: String },
     /// The project asked for neither a review nor a merge.
     Skipped,
 }
@@ -853,6 +893,12 @@ async fn review_then_merge<R: TurnRunner>(
     }
 
     match merge_pull_request(worktree, pull_request, identity) {
+        Err(error) if error.contains("conflicts with the base") => ReviewOutcome::Rebase {
+            words: format!(
+                "Review approved: {}\nThe branch conflicts with its base: {error}",
+                verdict.reason
+            ),
+        },
         Ok(words) => ReviewOutcome::Merged {
             words: format!(
                 "Review approved: {}\nMerged {pull_request}. {words}",
