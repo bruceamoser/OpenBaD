@@ -808,3 +808,17 @@ Both are off by default: a project that wants a person at the merge is unchanged
 and on a protected branch GitHub still refuses a self-approval, which is reported
 rather than bypassed.
 
+## v0.3.24
+
+**A comment on an ended ticket resumes it, which it never actually did.** Eval
+returns `Attach` for a message on an ended thread — "resumes the ended ticket under
+its existing mandate" — but the host's wake only looked for a *live* ticket, so the
+delivery found nothing and the trigger was reported as **deferred**. Worse, a
+deferred trigger holds the source's read position on itself, so every later tick
+re-found the same comment and deferred it again: the pipeline stopped dead and
+looked idle while it was in fact stuck.
+
+An `Attach` for an ended ticket now reopens it and creates the pending assignment
+the scheduler runs. A stopped ticket still defers, because only a person restarts a
+stop.
+

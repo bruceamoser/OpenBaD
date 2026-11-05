@@ -338,11 +338,30 @@ impl Supervisor {
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let Some(ticket) = store
+        // A message on a thread whose ticket ended resumes it under the mandate
+        // it already had: that is what makes a review comment able to reopen the
+        // work instead of needing a new admission. A stopped ticket is not
+        // resumed by anyone but a person, so it stays deferred.
+        let ticket = match store
             .live_pipeline_ticket(self.workspace_id, &source.id, &trigger.thread.0)
             .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
+        {
+            Some(ticket) => ticket,
+            None => match store
+                .pipeline_ticket_on_thread(self.workspace_id, &source.id, &trigger.thread.0)
+                .map_err(|error| error.to_string())?
+            {
+                Some(ticket) if ticket.state == openbad_pipeline::ticket::TicketState::Ended => {
+                    store
+                        .move_pipeline_ticket(
+                            &ticket.id,
+                            openbad_pipeline::ticket::TicketState::Open,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    ticket
+                }
+                _ => return Ok(None),
+            },
         };
         if store
             .active_pipeline_assignment(&ticket.id)
@@ -1000,6 +1019,76 @@ mod tests {
             assignment.state,
             openbad_pipeline::ticket::AssignmentState::Pending,
             "the wake is a pending assignment the scheduler runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_on_an_ended_ticket_resumes_it() {
+        let project = project_with_source();
+        let (supervisor, store, workspace) = supervisor(&project);
+        let first = FakeGitHub::new(vec![
+            ("/repos/o/r/issues/comments", serde_json::json!([])),
+            ("/repos/o/r/pulls", serde_json::json!([])),
+            (
+                "/repos/o/r/issues",
+                serde_json::json!([issue(1, &["agent:run"], "alice", "2026-11-04T12:00:00Z")]),
+            ),
+        ]);
+        supervisor.tick(&first).await.expect("admit");
+        let ticket = store
+            .lock()
+            .expect("lock")
+            .list_pipeline_tickets(workspace, 10)
+            .expect("tickets")
+            .remove(0);
+        {
+            let store = store.lock().expect("lock");
+            store
+                .move_pipeline_ticket(&ticket.id, openbad_pipeline::ticket::TicketState::Ended)
+                .expect("end the ticket");
+        }
+
+        let comment = FakeGitHub::new(vec![(
+            "/repos/o/r/issues/comments",
+            serde_json::json!([{
+                "id": 9,
+                "body": "main moved, please rebase",
+                "created_at": "2026-11-04T14:00:00Z",
+                "updated_at": "2026-11-04T14:00:00Z",
+                "user": { "login": "alice" },
+                "issue_url": "https://api.github.com/repos/o/r/issues/1",
+                "html_url": "https://github.com/o/r/issues/1#issuecomment-9"
+            }]),
+        )]);
+        let report = supervisor.tick(&comment).await.expect("resume");
+
+        assert_eq!(
+            report.deferred, 0,
+            "an ended ticket resumes; only a person's stop defers"
+        );
+        assert_eq!(report.admitted[0].decision.kind, DecisionKind::Attach);
+        assert!(
+            report.sources[0].advanced,
+            "a resumed message is delivered, not left holding the read position"
+        );
+        let store = store.lock().expect("lock");
+        assert_eq!(
+            store
+                .pipeline_ticket(&ticket.id)
+                .expect("ticket")
+                .expect("ticket")
+                .state,
+            openbad_pipeline::ticket::TicketState::Open,
+            "the ticket is open again under the mandate it already had"
+        );
+        assert_eq!(
+            store
+                .active_pipeline_assignment(&ticket.id)
+                .expect("assignment")
+                .expect("assignment")
+                .state,
+            openbad_pipeline::ticket::AssignmentState::Pending,
+            "and it has a pending assignment the scheduler runs"
         );
     }
 
