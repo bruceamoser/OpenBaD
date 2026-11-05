@@ -1265,6 +1265,24 @@ fn finish_session(store: &Store, session: SessionId, turn: u32, text: &str) {
 /// Persisted rather than remembered in the process: an unattended pipeline that
 /// forgets it was running as soon as the window closes is not unattended. The
 /// setting is the human's decision; the watcher is what carries it out.
+/// How many times the pipeline has tried to finish this ticket on its own.
+fn retry_key(ticket_id: &str) -> String {
+    format!("pipeline.retry.{ticket_id}")
+}
+
+/// When it last tried.
+fn retry_at_key(ticket_id: &str) -> String {
+    format!("pipeline.retry_at.{ticket_id}")
+}
+
+/// Wall-clock milliseconds, which is what the store's own timestamps use.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 fn watch_key(workspace: WorkspaceId) -> String {
     format!("pipeline.watch.{workspace}")
 }
@@ -1614,6 +1632,12 @@ impl Watcher {
             }
         }
 
+        // A ticket that reported ready but whose pull request has not merged is
+        // unfinished work the pipeline owns: it is picked up again here, so a
+        // conflict, a stale branch, or a red check does not need a person to
+        // notice it before anything happens.
+        self.resume_unfinished(workspace).await;
+
         let ready = match self.store.lock() {
             Ok(store) => match store.list_pipeline_tickets(workspace, 500) {
                 Ok(tickets) => tickets,
@@ -1638,6 +1662,112 @@ impl Watcher {
                 continue;
             }
             self.advance(project_path, &ticket).await;
+        }
+    }
+
+    /// Reopens ended tickets whose work is not finished.
+    ///
+    /// "Ready" means a reviewable result exists, not that it landed. If the pull
+    /// request behind it is still open — conflicting, behind, or failing a check —
+    /// the ticket has work left, so it gets a fresh assignment the scheduler runs.
+    ///
+    /// Two bounds keep that from becoming a spin: at most one attempt per ticket
+    /// every ten minutes, and at most five attempts in all. A branch nobody can
+    /// reconcile then stops asking and waits for a person, which is the honest
+    /// end of an unattended loop.
+    async fn resume_unfinished(&self, workspace: WorkspaceId) {
+        const COOLDOWN: Duration = Duration::from_secs(600);
+        const ATTEMPTS: u32 = 5;
+
+        let candidates = {
+            let Ok(store) = self.store.lock() else { return };
+            let Ok(tickets) = store.list_pipeline_tickets(workspace, 500) else {
+                return;
+            };
+            let mut due = Vec::new();
+            for ticket in tickets {
+                if ticket.state != TicketState::Ended {
+                    continue;
+                }
+                let Ok(Some(report)) = store.pipeline_report(&ticket.id) else {
+                    continue;
+                };
+                if report.outcome != ReportOutcome::Ready {
+                    continue;
+                }
+                let Ok(Some(pull_request)) = store.pipeline_last_pull_request(&ticket.id) else {
+                    continue;
+                };
+                let attempts = store
+                    .get_setting(&retry_key(&ticket.id))
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                if attempts >= u64::from(ATTEMPTS) {
+                    continue;
+                }
+                let last = store
+                    .get_setting(&retry_at_key(&ticket.id))
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.as_i64());
+                if let Some(last) = last {
+                    let waited = now_millis().saturating_sub(last);
+                    if waited >= 0 && waited < COOLDOWN.as_millis() as i64 {
+                        continue;
+                    }
+                }
+                due.push((ticket.id, pull_request, attempts));
+            }
+            due
+        };
+
+        for (ticket_id, pull_request, attempts) in candidates {
+            if !self.pull_request_open(&pull_request) {
+                continue;
+            }
+            if let Ok(store) = self.store.lock() {
+                crate::diagnostics::record(
+                    "INFO",
+                    &format!(
+                        "pipeline resuming {ticket_id}: {pull_request} has not merged (attempt {})",
+                        attempts + 1
+                    ),
+                );
+                let _ = store.set_setting(retry_key(&ticket_id), serde_json::json!(attempts + 1));
+                let _ =
+                    store.set_setting(retry_at_key(&ticket_id), serde_json::json!(now_millis()));
+                if store
+                    .move_pipeline_ticket(&ticket_id, TicketState::Open)
+                    .is_err()
+                {
+                    continue;
+                }
+                let _ = store.create_pipeline_assignment(NewAssignment {
+                    workspace_id: workspace,
+                    ticket_id: ticket_id.clone(),
+                    executor: format!("worker-{ticket_id}"),
+                });
+            }
+        }
+    }
+
+    /// Whether GitHub still has this pull request open.
+    fn pull_request_open(&self, pull_request: &str) -> bool {
+        let Some(binary) = openbad_pipeline::gh_binary() else {
+            return false;
+        };
+        let mut command = Command::new(binary);
+        command.args(["pr", "view", pull_request, "--json", "state"]);
+        openbad_pipeline::github::apply(self.github.as_ref(), &mut command);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
+                value.get("state").and_then(|state| state.as_str()) == Some("OPEN")
+            }
+            _ => false,
         }
     }
 

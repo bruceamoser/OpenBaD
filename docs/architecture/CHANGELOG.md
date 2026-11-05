@@ -869,3 +869,17 @@ a way around review.
 of merged work read as stuck. Tickets whose pull request merged drop off the list,
 and the header carries the count (`2 tickets · 6 merged`).
 
+## v0.3.28
+
+**The pipeline picks up work it left unfinished.** Everything that closes the loop
+— the review, the merge, the rebase — ran inside a turn, and a ticket whose turn
+had ended never got another one unless somebody commented. So a pull request that
+conflicted just sat there: the pipeline was idle, the board said `conflicts`, and
+nothing connected the two.
+
+The watcher now looks for that case on every tick: a ticket whose report is `ready`
+and whose pull request is still open gets a fresh assignment, the executor rebases
+and resolves, the reviewer reads the result, and the merge runs. Bounded twice over
+— one attempt per ticket every ten minutes, five attempts in all — so an
+unreconcilable branch stops asking instead of burning turns, and says so.
+
