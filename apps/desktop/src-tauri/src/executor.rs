@@ -1689,12 +1689,11 @@ impl Watcher {
                 if ticket.state != TicketState::Ended {
                     continue;
                 }
-                let Ok(Some(report)) = store.pipeline_report(&ticket.id) else {
-                    continue;
-                };
-                if report.outcome != ReportOutcome::Ready {
-                    continue;
-                }
+                // The pull request is the fact. Asking the newest report first was
+                // wrong: a later attempt can fail (a prepare that could not run)
+                // while the pull request an earlier one opened is still open, and
+                // gating on that report meant such a ticket was never picked up
+                // again.
                 let Ok(Some(pull_request)) = store.pipeline_last_pull_request(&ticket.id) else {
                     continue;
                 };

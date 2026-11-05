@@ -883,3 +883,11 @@ and resolves, the reviewer reads the result, and the merge runs. Bounded twice o
 — one attempt per ticket every ten minutes, five attempts in all — so an
 unreconcilable branch stops asking instead of burning turns, and says so.
 
+## v0.3.29
+
+**The pickup asked the wrong question, so it never fired.** v0.3.28 looked for a
+ticket whose *newest* report was `ready`; for the two tickets that needed it the
+newest report was a failed prepare from a retry that never ran, so they were
+skipped on every tick and the log said nothing. The pull request is the fact: a
+ticket with an open pull request has unfinished work whatever the last report says.
+
