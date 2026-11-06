@@ -9,6 +9,8 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import { listen } from "@tauri-apps/api/event";
+
 import {
   checkPipelineGuards,
   loadPipelineConfig,
@@ -88,6 +90,19 @@ export default function PipelinePanel({
   const [status, setStatus] = useState<PipelineStatus | null>(null);
   const [tickets, setTickets] = useState<PipelineTicketRow[]>([]);
   const [pullRequests, setPullRequests] = useState<PipelinePullRequest[]>([]);
+  /**
+   * What the running ticket is doing right now.
+   *
+   * The panel used to show only what had already happened, which is why a
+   * working pipeline and a stopped one looked the same. The host emits a step and
+   * a tool call as they happen; this is the only place they surface.
+   */
+  const [live, setLive] = useState<{
+    ticket: string;
+    step: number;
+    doing: string;
+    at: number;
+  } | null>(null);
   const [watching, setWatching] = useState(false);
   const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -132,6 +147,43 @@ export default function PipelinePanel({
       stopped.current = true;
     };
   }, [refresh, revision]);
+
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let cancelled = false;
+    void listen<{
+      ticket?: string;
+      kind?: string;
+      step?: number;
+      tool?: string;
+      arguments?: string;
+    }>("pipeline:progress", (event) => {
+      const payload = event.payload ?? {};
+      if (payload.ticket === undefined) return;
+      const doing =
+        payload.kind === "tool_call" && payload.tool
+          ? `${payload.tool} ${(payload.arguments ?? "").slice(0, 120)}`
+          : payload.kind === "step"
+            ? "thinking"
+            : payload.kind ?? "working";
+      setLive({
+        ticket: payload.ticket,
+        step: payload.step ?? 0,
+        doing,
+        at: Date.now(),
+      });
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+      } else {
+        stop = unlisten;
+      }
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -335,6 +387,27 @@ export default function PipelinePanel({
           {notice}
         </p>
       )}
+
+      {/* What is happening now: the question a quiet screen cannot answer. */}
+      <div className="border-b border-obd-line px-3 py-2">
+        {live !== null && Date.now() - live.at < 120_000 ? (
+          <p className="text-[11px] leading-5 text-obd-body">
+            <span className="text-obd-info">Working</span> on{" "}
+            {live.ticket.slice(-6)} · step {live.step} ·{" "}
+            <span className="text-obd-muted">{live.doing}</span>
+          </p>
+        ) : openTickets.length === 0 ? (
+          <p className="text-[11px] leading-5 text-obd-subtle">
+            Nothing to do: every ticket is merged. Work arrives from a labelled
+            issue in {status?.sources[0]?.repository ?? "the configured repository"}.
+          </p>
+        ) : (
+          <p className="text-[11px] leading-5 text-obd-subtle">
+            {openTickets.length} ticket{openTickets.length === 1 ? "" : "s"} waiting,
+            nothing running.
+          </p>
+        )}
+      </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-2.5">
         {status !== null && !status.configured && (

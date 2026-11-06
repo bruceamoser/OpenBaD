@@ -891,3 +891,20 @@ newest report was a failed prepare from a retry that never ran, so they were
 skipped on every tick and the log said nothing. The pull request is the fact: a
 ticket with an open pull request has unfinished work whatever the last report says.
 
+## v0.3.30
+
+**You can see it working.** The panel showed only what had already happened, so a
+pipeline in the middle of a turn and a pipeline that had stopped looked identical —
+the host was already emitting a step and a tool call as they happened, and nothing
+listened. The panel now subscribes to those events and says what is going on:
+
+- **Working on <ticket> · step N · `tool …`** while a turn runs.
+- **"Nothing to do: every ticket is merged. Work arrives from a labelled issue in
+  owner/repo."** when the queue is empty — an idle pipeline is a healthy pipeline,
+  and that was the state being mistaken for a broken one.
+- **"N tickets waiting, nothing running."** when tickets are open but no turn is.
+
+The executor is also told to open its pull request with `Closes #<issue>` and to
+report rather than push when the suite will not go green after resolving a
+conflict — two things that had been leaving work for a person to tidy up.
+

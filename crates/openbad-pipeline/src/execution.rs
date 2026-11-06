@@ -142,7 +142,12 @@ pub fn ticket_prompt(plan: &LaunchPlan, mandate: &crate::mandate::Mandate) -> St
          \n\
          Before you report, put the branch on top of the current base: `git fetch origin`, then \
          rebase onto it, resolve any conflicts yourself, re-run the tests, and push. Conflicts are \
-         your work, not a person's — a branch that cannot merge is an unfinished ticket.\n\
+         your work, not a person's — a branch that cannot merge is an unfinished ticket. If the suite \
+         will not go green after your resolution, do not push it and say so in the report.\n\
+         \n\
+         Open the pull request body with `Closes #<the issue number from the thread above>` so a \
+         merge closes the issue that asked for the work; `Refs #` leaves it open and a person has \
+         to tidy up.\n\
          \n\
          Read the thread with `gh` for the request, do the work, verify it, and then finish with a \
          report: what changed, what you checked, and what remains risky. Do not ask a person a \
