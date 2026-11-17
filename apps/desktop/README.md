@@ -26,6 +26,16 @@ apps/desktop/
 
 ## Run
 
+`web_search` needs a local SearXNG instance and `web_fetch` prefers a local Jina
+Reader. Start both from the repository root:
+
+```bash
+docker compose up -d
+```
+
+See [Local Web Services](../../docs/web-services.md) for ports, environment
+variables, and troubleshooting.
+
 ```bash
 cd apps/desktop
 pnpm --dir ui install

@@ -1,0 +1,39 @@
+# Local web services behind the agent's web tools.
+#
+#   docker compose up -d      start (SearXNG on :8080, Jina Reader on :3000)
+#   docker compose ps         health
+#   docker compose down       stop
+#
+# Both ports bind to loopback only. Point the tools elsewhere with
+# OPENBAD_SEARXNG_URL / OPENBAD_JINA_READER_URL. See docs/web-services.md.
+
+name: openbad-web-services
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8080/
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  jina-reader:
+    image: ghcr.io/jina-ai/reader:oss
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:8081" # the image serves HTTP/1.1 on 8081
+    # Headless Chrome needs more than Docker's 64 MiB /dev/shm default.
+    shm_size: "1gb"
+
+volumes:
+  searxng-cache:

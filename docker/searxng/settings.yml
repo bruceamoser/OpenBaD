@@ -1,0 +1,24 @@
+# SearXNG configuration for the local OpenBaD instance.
+#
+# `web_search` needs the JSON output format; SearXNG enables only HTML by
+# default, and its limiter blocks programmatic clients. Both are changed here.
+# docker-compose.yml binds the instance to 127.0.0.1. `secret_key` is a
+# loopback-only placeholder because SearXNG refuses to start on its own
+# development default; replace it (or pass SEARXNG_SECRET) before exposing the
+# instance beyond this machine.
+
+use_default_settings: true
+
+general:
+  instance_name: "OpenBaD"
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "openbad-local-loopback-only"
+  limiter: false
+  image_proxy: false

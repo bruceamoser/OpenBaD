@@ -5,6 +5,7 @@
 | [Architecture](architecture/README.md) | Vision, system design, data model, harness, memory, security |
 | [Plans](plans/README.md) | Implementation phases and cache benchmarks |
 | [ADRs](adr/README.md) | Accepted architecture decisions |
+| [Local Web Services](web-services.md) | SearXNG and Jina Reader provisioning, overrides, and troubleshooting |
 | [Archive](https://github.com/bruceamoser/OpenBaD/tree/main/archive/openbad-v0) | The original OpenBaD v0 concept and Python implementation |
 
 ## Start here

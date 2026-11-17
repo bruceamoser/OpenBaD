@@ -1,6 +1,8 @@
 //! Tool registry, schemas, and built-in coding tools.
 #![recursion_limit = "256"]
 
+pub mod web_services;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -58,6 +60,9 @@ use openbad_vault::Vault;
 use openbad_workspace::WorkspaceService;
 use serde_json::{Value, json};
 use wait_timeout::ChildExt;
+use web_services::{
+    SEARXNG, is_local, jina_reader_base, jina_reader_url, probe_tcp, transport_cause,
+};
 use zeroize::Zeroizing;
 
 /// A model-facing tool definition.
@@ -7264,30 +7269,6 @@ fn html_title(html: &str) -> Option<String> {
         .filter(|title| !title.is_empty())
 }
 
-fn jina_reader_base() -> Option<String> {
-    let configured = std::env::var("OPENBAD_JINA_READER_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned());
-    let configured = configured.trim().trim_end_matches('/').to_owned();
-    if configured.is_empty()
-        || matches!(
-            configured.to_ascii_lowercase().as_str(),
-            "off" | "none" | "disabled" | "direct"
-        )
-    {
-        None
-    } else {
-        Some(configured)
-    }
-}
-
-fn jina_reader_url(base: &str, target: &str) -> String {
-    if base.contains("{url}") {
-        base.replace("{url}", target)
-    } else {
-        format!("{base}/{target}")
-    }
-}
-
 fn parse_jina_response(raw: &str) -> (Option<String>, Option<String>, String) {
     let mut title = None;
     let mut source = None;
@@ -7572,7 +7553,7 @@ impl Tool for WebSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "web_search",
-            "Search the web through the local SearXNG instance and return ranked results with titles, URLs, and snippets. Requires Full access.",
+            "Search the web through SearXNG and return ranked results with titles, URLs, and snippets. SearXNG runs locally by default (OPENBAD_SEARXNG_URL, default http://127.0.0.1:8080). Requires Full access.",
             RiskLevel::Read,
         )
         .with_timeout(30)
@@ -7610,22 +7591,45 @@ impl Tool for WebSearchTool {
         let max_results = optional_usize(&arguments, "max_results")
             .unwrap_or(8)
             .clamp(1, 20);
-        let base = std::env::var("OPENBAD_SEARXNG_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned());
-        let endpoint = format!("{}/search", base.trim_end_matches('/'));
-        let endpoint_url = reqwest::Url::parse(&endpoint)
-            .map_err(|error| ToolError::InvalidArgument(format!("invalid SearXNG URL: {error}")))?;
+        let Some(base) = SEARXNG.base_url() else {
+            return Err(ToolError::Failed(format!(
+                "web_search: {} is switched off. Set {} to its base URL (default {}) or unset it.",
+                SEARXNG.name, SEARXNG.env_var, SEARXNG.default_url
+            )));
+        };
+        let endpoint = format!("{base}/search");
+        let endpoint_url = reqwest::Url::parse(&endpoint).map_err(|error| {
+            ToolError::InvalidArgument(format!(
+                "invalid {} URL from {}: {error}",
+                SEARXNG.name, SEARXNG.env_var
+            ))
+        })?;
         let host = endpoint_url.host_str().unwrap_or_default().to_owned();
         if let Some(policy) = load_policy(context)? {
             if let Some(reason) = policy.network_denied(&host) {
                 return Err(ToolError::ApprovalRequired(reason));
             }
         }
+        if is_local(&endpoint_url) {
+            let (reachable, detail) = probe_tcp(&base);
+            if !reachable {
+                return Err(ToolError::Failed(format!(
+                    "web_search: {}",
+                    SEARXNG.unreachable(&base, &detail)
+                )));
+            }
+        }
+        let timeout = Duration::from_secs(15);
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(timeout)
             .user_agent("OpenBaD/0.1 (+https://github.com/bruceamoser/OpenBaD)")
             .build()
-            .map_err(|error| ToolError::Failed(error.to_string()))?;
+            .map_err(|error| {
+                ToolError::Failed(format!(
+                    "web_search: could not build an HTTP client for {}: {error}",
+                    SEARXNG.name
+                ))
+            })?;
         let mut request = client.get(endpoint_url).query(&[
             ("q", query.as_str()),
             ("format", "json"),
@@ -7643,14 +7647,22 @@ impl Tool for WebSearchTool {
         if let Some(time_range) = optional_string(&arguments, "time_range") {
             request = request.query(&[("time_range", time_range)]);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| ToolError::Failed(format!("web_search: {error}")))?;
+        let response = request.send().await.map_err(|error| {
+            ToolError::Failed(format!(
+                "web_search: {}",
+                SEARXNG.unreachable(&endpoint, &transport_cause(&error, timeout))
+            ))
+        })?;
         if !response.status().is_success() {
+            let status = response.status();
+            let hint = if status == reqwest::StatusCode::FORBIDDEN {
+                " SearXNG answers the JSON API only when `json` is listed under `search.formats` in its settings.yml."
+            } else {
+                ""
+            };
             return Err(ToolError::Failed(format!(
-                "web_search returned HTTP {}",
-                response.status()
+                "web_search: {} at {endpoint} returned HTTP {status}.{hint}",
+                SEARXNG.name
             )));
         }
         if response
@@ -7661,12 +7673,18 @@ impl Tool for WebSearchTool {
                 "search response is larger than 2 MiB".to_owned(),
             ));
         }
-        let body = response
-            .text()
-            .await
-            .map_err(|error| ToolError::Failed(format!("web_search body: {error}")))?;
-        let payload: Value = serde_json::from_str(&body)
-            .map_err(|error| ToolError::Failed(format!("web_search JSON: {error}")))?;
+        let body = response.text().await.map_err(|error| {
+            ToolError::Failed(format!(
+                "web_search: could not read the {} response body: {error}",
+                SEARXNG.name
+            ))
+        })?;
+        let payload: Value = serde_json::from_str(&body).map_err(|error| {
+            ToolError::Failed(format!(
+                "web_search: {} at {endpoint} returned a non-JSON body ({error}). Enable the `json` format under `search.formats` in SearXNG settings.yml; see docs/web-services.md.",
+                SEARXNG.name
+            ))
+        })?;
         let results = payload
             .get("results")
             .and_then(Value::as_array)
@@ -17855,6 +17873,107 @@ validators:
             .await
             .expect_err("network policy");
         assert!(denied.to_string().contains("network_hosts"));
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: the test that holds this guard is the only reader of the
+            // variable it sets and restores it before another one can run.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: restores the value observed in `set`.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn web_search_reports_results_and_names_the_service_when_it_is_down() {
+        let directory = tempdir().expect("tempdir");
+        let mut tool_context = context(directory.path());
+        tool_context.allow_commands = true;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            // The preflight probe connects and closes without sending a
+            // request, so keep accepting until a real request arrives.
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buffer = [0_u8; 4096];
+                let Ok(read) = std::io::Read::read(&mut stream, &mut buffer) else {
+                    continue;
+                };
+                if read == 0 {
+                    continue;
+                }
+                let body = r#"{"results":[{"title":"OpenBaD","url":"https://example.com/openbad","content":"A cache-first harness.","engine":"duckduckgo"}],"answers":["42"]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                break;
+            }
+        });
+        let base = format!("http://{address}");
+        {
+            let _env = EnvGuard::set("OPENBAD_SEARXNG_URL", &base);
+            let result = WebSearchTool
+                .execute(json!({"query": "openbad", "max_results": 4}), &tool_context)
+                .await
+                .expect("search");
+            assert!(result.content.contains("OpenBaD"), "{}", result.content);
+            assert!(
+                result.content.contains("https://example.com/openbad"),
+                "{}",
+                result.content
+            );
+            assert!(
+                result.content.contains("[duckduckgo]"),
+                "{}",
+                result.content
+            );
+            assert!(result.content.contains("Answers: 42"), "{}", result.content);
+            assert_eq!(result.metadata["via"], "searxng");
+        }
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("closed");
+        let closed_address = closed.local_addr().expect("addr");
+        drop(closed);
+        let closed_base = format!("http://{closed_address}");
+        let error = {
+            let _env = EnvGuard::set("OPENBAD_SEARXNG_URL", &closed_base);
+            WebSearchTool
+                .execute(json!({"query": "openbad"}), &tool_context)
+                .await
+                .expect_err("unreachable")
+        };
+        let message = error.to_string();
+        assert!(message.contains("SearXNG"), "{message}");
+        assert!(message.contains(&closed_base), "{message}");
+        assert!(message.contains("OPENBAD_SEARXNG_URL"), "{message}");
+        assert!(
+            message.contains("docker compose up -d searxng"),
+            "{message}"
+        );
+        assert!(!message.contains("error sending request"), "{message}");
     }
 
     #[tokio::test]

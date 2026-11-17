@@ -908,3 +908,32 @@ The executor is also told to open its pull request with `Closes #<issue>` and to
 report rather than push when the suite will not go green after resolving a
 conflict — two things that had been leaving work for a person to tidy up.
 
+
+## v0.3.31
+
+**`web_search` tells you what is wrong, and the services it needs are now part of
+the repository.** The tool hard-depended on a local SearXNG instance that nothing
+provisioned: the only declaration was a `docker run` someone had typed by hand, so
+the dependency was discoverable only by reading the tool's source, and a missing
+instance surfaced as `web_search: error sending request for url (...)` after the
+15-second timeout — a message that names neither the service nor the fix.
+
+The services are declarative now. A root `docker-compose.yml` starts SearXNG on
+`127.0.0.1:8080` and Jina Reader on `127.0.0.1:3000`, both loopback-only and
+restarting unless stopped, and `docker/searxng/settings.yml` enables the `json`
+output format the tool needs and turns the limiter off. `docs/web-services.md` is
+the runbook: start, verify, override the endpoints, migrate the two hand-created
+containers that preceded the compose file, and read the failure table.
+
+The failures are actionable. A loopback endpoint is TCP-probed before the request,
+so a stopped instance fails in milliseconds, and connect, timeout, HTTP, and
+non-JSON outcomes all name the service, the endpoint, the environment variable,
+and the compose command. A 403 or a non-JSON body points at `search.formats`; a
+deliberate `OPENBAD_SEARXNG_URL=off` says the tool is switched off instead of
+pretending the network failed. Remote endpoints skip the probe so an egress proxy
+stays usable.
+
+SearXNG is still a hard requirement — there is no fallback search backend — but
+that is now stated plainly instead of being implied by a stack trace. The probe
+lives in `openbad_tools::web_services`, and the desktop services panel reports the
+same two endpoints through it.

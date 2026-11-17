@@ -485,6 +485,7 @@ Implemented:
 | `plugin_list` / `plugin_describe` | read | Discover installed and bundled plugins and their actions |
 | `plugin_call` / `plugin_test` | command | Run a plugin action or its declared test command with JSON stdin/stdout and evidence |
 | `write_plugin` / `plugin_install_builtin` | write | Scaffold a plugin or install the bundled AsciiDoc plugin |
+| `web_search` | read | Search through loopback SearXNG; ranked titles, URLs, and snippets |
 | `web_fetch` | read | Fetch http(s) docs, extract readable text, cache by hash, respect `network_hosts` |
 | `present_artifact` | read | Open a web page, image, Markdown, diff, or file beside chat |
 | `read_project_manifest` | read | Read `.openbad/project.yaml`: purpose, scope map, commands, invariants |
@@ -701,6 +702,20 @@ compares workspace or reference files; `file_citation` emits
 under `.openbad/web-cache` by BLAKE3 hash with URL, title, content type, and
 fetch time. `prefer_cache` reuses a recent fetch instead of hitting the network.
 
+`web_search` queries a local SearXNG instance and returns ranked titles, URLs,
+and snippets. SearXNG is a hard dependency, not a suggestion: the base URL comes
+from `OPENBAD_SEARXNG_URL` (default `http://127.0.0.1:8080`), the instance must
+enable the `json` format under `search.formats`, and there is no fallback
+backend. A loopback endpoint is probed with a short TCP connect before the
+request, so a stopped instance fails in milliseconds with an error that names
+the service, the URL, the environment variable, and the compose command instead
+of a raw transport error or a 15-second timeout. Remote endpoints skip the
+probe so an egress proxy stays usable. `web_fetch` prefers a local Jina Reader
+(`OPENBAD_JINA_READER_URL`, default `http://127.0.0.1:3000`) and falls back to
+direct HTTP when the reader is off or unreachable. Both services are provisioned
+by the repository-root `docker-compose.yml`; see
+[Local Web Services](../web-services.md) for the runbook.
+
 `run_command` accepts `parse` to extract structured diagnostics for Rust,
 pytest, ESLint, and TypeScript; diagnostics are summarized in the result and
 returned in metadata. Long-running commands can use the `job_*` tools, which
@@ -762,9 +777,6 @@ Planned:
 | --- | --- | --- |
 | `search_knowledge` | read | Collection filter, vector/hybrid retrieval |
 | `search_workspace` | read | Extended hybrid code search |
-| `web_search` | network | DeepSeek Search API; returns URLs + snippets |
-| `web_search` | network | DeepSeek Search API; returns URLs + snippets |
-| `web_fetch` | network | DeepSeek Fetch API; returns Markdown + citation |
 | `vision_analyze` | network | `deepseek-flash` vision + Files API |
 | `complete_inline` | network | DeepSeek FIM (beta, 4K, non-thinking) |
 | `complete_with_prefix` | network | DeepSeek chat prefix completion (beta) |

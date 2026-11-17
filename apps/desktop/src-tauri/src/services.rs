@@ -1,7 +1,7 @@
-use std::net::{TcpStream, ToSocketAddrs};
 use std::process::Command;
 use std::time::Duration;
 
+use openbad_tools::web_services::{JINA_READER, SEARXNG, probe_tcp};
 use serde::Serialize;
 
 /// A version banner should be immediate; anything slower is a hung binary.
@@ -35,23 +35,23 @@ struct Definition {
 const DEFINITIONS: &[Definition] = &[
     Definition {
         id: "searxng",
-        name: "SearXNG",
+        name: SEARXNG.name,
         description: "Local metasearch used by the web_search tool.",
         kind: "http",
-        env_var: Some("OPENBAD_SEARXNG_URL"),
-        default_url: Some("http://127.0.0.1:8080"),
+        env_var: Some(SEARXNG.env_var),
+        default_url: Some(SEARXNG.default_url),
         binary: None,
-        install_hint: "Run a SearXNG instance locally on port 8080, or set OPENBAD_SEARXNG_URL to its base URL.",
+        install_hint: "Start the local web services with `docker compose up -d searxng` from the repository root, or set OPENBAD_SEARXNG_URL to its base URL.",
     },
     Definition {
         id: "jina-reader",
-        name: "Jina Reader",
+        name: JINA_READER.name,
         description: "Readable markdown extraction used by web_fetch.",
         kind: "http",
-        env_var: Some("OPENBAD_JINA_READER_URL"),
-        default_url: Some("http://127.0.0.1:3000"),
+        env_var: Some(JINA_READER.env_var),
+        default_url: Some(JINA_READER.default_url),
         binary: None,
-        install_hint: "Run a local Jina Reader (or r.jina.ai-compatible endpoint) on port 3000, or set OPENBAD_JINA_READER_URL.",
+        install_hint: "Start the local web services with `docker compose up -d jina-reader` from the repository root, or set OPENBAD_JINA_READER_URL.",
     },
     Definition {
         id: "jupyter",
@@ -104,26 +104,6 @@ fn configured_url(definition: &Definition) -> Option<String> {
         .or_else(|| definition.default_url.map(str::to_owned))
 }
 
-fn tcp_probe(url: &str) -> (bool, String) {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return (false, "invalid URL".to_owned());
-    };
-    let Some(host) = parsed.host_str() else {
-        return (false, "URL has no host".to_owned());
-    };
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let Ok(mut addresses) = (host, port).to_socket_addrs() else {
-        return (false, format!("could not resolve {host}:{port}"));
-    };
-    let Some(address) = addresses.next() else {
-        return (false, format!("could not resolve {host}:{port}"));
-    };
-    match TcpStream::connect_timeout(&address, Duration::from_millis(800)) {
-        Ok(_) => (true, format!("TCP {host}:{port} is reachable")),
-        Err(error) => (false, format!("TCP {host}:{port}: {error}")),
-    }
-}
-
 fn binary_probe(binary: &str) -> (bool, String) {
     let mut command = Command::new(binary);
     command.arg("--version");
@@ -155,7 +135,7 @@ fn collect_status() -> Vec<ServiceStatus> {
                 binary_probe(definition.binary.unwrap_or_default())
             } else {
                 configured_url(definition)
-                    .map(|url| tcp_probe(&url))
+                    .map(|url| probe_tcp(&url))
                     .unwrap_or_else(|| (false, "no URL configured".to_owned()))
             };
             ServiceStatus {

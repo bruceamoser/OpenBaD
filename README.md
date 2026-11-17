@@ -208,6 +208,15 @@ embeds. Provider keys use the `SecretStore` abstraction; the platform keychain
 backend is available behind the `keyring` feature and is never written to the
 repository or the SQLite database.
 
+`web_search` needs the local SearXNG instance and `web_fetch` prefers the local
+Jina Reader. Start both with Docker Compose from the repository root; see
+[Local Web Services](docs/web-services.md) for ports, overrides, and
+troubleshooting:
+
+```bash
+docker compose up -d
+```
+
 ---
 
 ## License
